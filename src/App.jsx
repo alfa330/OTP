@@ -20288,12 +20288,6 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
                 }
             };
 
-            const handleKeyPress = (e) => {
-                if (e.key === 'Enter' && !isLoading) {
-                    handleLogin();
-                }
-            };
-
             const handleLogout = () => {
                 setShowLogoutConfirm(true);
             };
@@ -21325,44 +21319,53 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
                         </span>
                       </h1>
                 
-                      <input
-                        type="text"
-                        placeholder="Логин"
-                        value={login}
-                        onChange={(e) => setLogin(e.target.value)}
-                        onKeyPress={handleKeyPress}
-                        className="w-full p-3 mb-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
-                        disabled={isLoading}
-                      />
-                
-                      <input
-                        type="password"
-                        placeholder="Пароль"
-                        value={password}
-                        onChange={(e) => setPassword(e.target.value)}
-                        onKeyPress={handleKeyPress}
-                        className="w-full p-3 mb-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
-                        disabled={isLoading}
-                      />
-                
-                      {/* Контейнер под сообщение всегда занимает место */}
-                      <div className="min-h-[2rem] flex items-center justify-center mb-4">
-                        {errorMessage && (
-                          <p className="text-red-500 text-center p-2 border border-red-500 rounded-lg bg-red-50 animate-fade-in-out">
-                            {errorMessage}
-                          </p>
-                        )}
-                      </div>
-                
-                      <button
-                        onClick={handleLogin}
-                        className={`w-full bg-indigo-600 text-white p-3 rounded-lg hover:bg-indigo-700 transition-all duration-200 ${
-                          isLoading ? "cursor-not-allowed opacity-50" : ""
-                        }`}
-                        disabled={isLoading}
+                      <form
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          if (!isLoading) {
+                            handleLogin();
+                          }
+                        }}
                       >
-                        {isLoading ? "Вход..." : "Войти"}
-                      </button>
+                        <input
+                          type="text"
+                          placeholder="Логин"
+                          value={login}
+                          onChange={(e) => setLogin(e.target.value)}
+                          className="w-full p-3 mb-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                          disabled={isLoading}
+                          autoComplete="username"
+                        />
+                  
+                        <input
+                          type="password"
+                          placeholder="Пароль"
+                          value={password}
+                          onChange={(e) => setPassword(e.target.value)}
+                          className="w-full p-3 mb-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                          disabled={isLoading}
+                          autoComplete="current-password"
+                        />
+                  
+                        {/* Контейнер под сообщение всегда занимает место */}
+                        <div className="min-h-[2rem] flex items-center justify-center mb-4">
+                          {errorMessage && (
+                            <p className="text-red-500 text-center p-2 border border-red-500 rounded-lg bg-red-50 animate-fade-in-out">
+                              {errorMessage}
+                            </p>
+                          )}
+                        </div>
+                  
+                        <button
+                          type="submit"
+                          className={`w-full bg-indigo-600 text-white p-3 rounded-lg hover:bg-indigo-700 transition-all duration-200 ${
+                            isLoading ? "cursor-not-allowed opacity-50" : ""
+                          }`}
+                          disabled={isLoading}
+                        >
+                          {isLoading ? "Вход..." : "Войти"}
+                        </button>
+                      </form>
                 
                       <div className="mt-4 text-center">
                         <button
