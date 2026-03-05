@@ -6493,7 +6493,7 @@ const withAccessTokenHeader = (headers = {}) => {
 
                 let cancelled = false;
                 const now = new Date();
-                const liveStart = todayDateStr(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1));
+                const liveStart = todayDateStr(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 7));
                 const liveEnd = todayDateStr(new Date(now.getFullYear(), now.getMonth(), now.getDate() + 90));
 
                 const loadMyLiveSchedules = async () => {
