@@ -5607,7 +5607,10 @@ def get_shift_swap_journal():
 def get_operators_with_schedules():
     """
     Получить всех операторов с их сменами и выходными днями.
-    Query params: start_date, end_date (optional, format: YYYY-MM-DD)
+    Query params:
+      - start_date, end_date (optional, format: YYYY-MM-DD)
+      - anchor_date (optional, format: YYYY-MM-DD; fallback for default range)
+      - view_mode (optional: day/week/month; fallback for default range)
     """
     try:
         user = request.headers.get('X-User-Id')
@@ -5625,12 +5628,55 @@ def get_operators_with_schedules():
         if role not in ['admin', 'sv']:
             return jsonify({"error": "Forbidden"}), 403
         
-        start_date = request.args.get('start_date')
-        end_date = request.args.get('end_date')
+        start_date = (request.args.get('start_date') or '').strip()
+        end_date = (request.args.get('end_date') or '').strip()
+
+        if start_date and not end_date:
+            end_date = start_date
+        elif end_date and not start_date:
+            start_date = end_date
+
+        if not start_date and not end_date:
+            anchor_date_raw = (request.args.get('anchor_date') or '').strip()
+            view_mode = (request.args.get('view_mode') or 'month').strip().lower()
+            if view_mode not in {'day', 'week', 'month'}:
+                view_mode = 'month'
+
+            if anchor_date_raw:
+                anchor_date = datetime.strptime(anchor_date_raw, '%Y-%m-%d').date()
+            else:
+                anchor_date = datetime.now().date()
+
+            if view_mode == 'day':
+                range_start_obj = anchor_date
+                range_end_obj = anchor_date
+            elif view_mode == 'week':
+                # Понедельник - начало недели
+                week_day = anchor_date.isoweekday()  # 1..7
+                range_start_obj = anchor_date - timedelta(days=week_day - 1)
+                range_end_obj = range_start_obj + timedelta(days=6)
+            else:
+                range_start_obj = anchor_date.replace(day=1)
+                next_month = (range_start_obj.replace(day=28) + timedelta(days=4)).replace(day=1)
+                range_end_obj = next_month - timedelta(days=1)
+
+            start_date = range_start_obj.strftime('%Y-%m-%d')
+            end_date = range_end_obj.strftime('%Y-%m-%d')
+        else:
+            start_date_obj = datetime.strptime(start_date, '%Y-%m-%d').date()
+            end_date_obj = datetime.strptime(end_date, '%Y-%m-%d').date()
+            if end_date_obj < start_date_obj:
+                return jsonify({"error": "end_date must be >= start_date"}), 400
         
         operators = db.get_operators_with_shifts(start_date, end_date)
         
-        return jsonify({"operators": operators}), 200
+        return jsonify({
+            "operators": operators,
+            "range": {
+                "start_date": start_date,
+                "end_date": end_date
+            }
+        }), 200
     
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
