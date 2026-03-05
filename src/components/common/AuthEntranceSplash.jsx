@@ -150,10 +150,24 @@ const buildDustParticles = () =>
         blur: Math.random() * 2
     }));
 
-function AuthEntranceSplash({ open, onClose }) {
+const FEMALE_GENDER_VALUES = new Set(['female', 'woman', 'girl', 'f', 'женский', 'жен', 'ж']);
+
+const extractDisplayName = (fullName) => {
+    const normalizedName = String(fullName || '').trim();
+    if (!normalizedName) return '';
+    const parts = normalizedName.split(/\s+/).filter(Boolean);
+    return parts[1] || '';
+};
+
+function AuthEntranceSplash({ open, onClose, user }) {
     const [isClosing, setIsClosing] = useState(false);
     const closeTimerRef = useRef(null);
     const particles = useMemo(() => buildDustParticles(), []);
+    const normalizedGender = String(user?.gender || '').trim().toLowerCase();
+    const isFemaleUser = FEMALE_GENDER_VALUES.has(normalizedGender);
+    const displayName = useMemo(() => extractDisplayName(user?.name), [user?.name]);
+    const headingNameSuffix = isFemaleUser && displayName ? `, ${displayName}` : '';
+    const subtitleText = 'С днём весны и красоты';
 
     useEffect(() => {
         if (!open) return;
@@ -223,8 +237,8 @@ function AuthEntranceSplash({ open, onClose }) {
             />
 
             <div className="march8-splash__caption">
-                <h1>С <em>8</em> Марта</h1>
-                <p>С днём весны и красоты</p>
+                <h1>С <em>8</em> Марта{headingNameSuffix}</h1>
+                <p>{subtitleText}</p>
                 <div className="march8-splash__rule" />
             </div>
 

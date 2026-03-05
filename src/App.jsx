@@ -25295,6 +25295,7 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
                     <AuthEntranceSplash
                         open={showAuthEntranceSplash}
                         onClose={() => setShowAuthEntranceSplash(false)}
+                        user={user}
                     />
                     <ToastContainer toasts={toasts} removeToast={removeToast} setToasts={setToasts} />
                 </div>
