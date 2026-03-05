@@ -7,6 +7,7 @@ import ToastContainer from './components/common/ToastContainer';
 import SalaryCalculationResult from './components/salary/SalaryCalculationResult';
 import TasksView from './components/tasks/TasksView';
 import FaIcon from './components/common/FaIcon';
+import AuthEntranceSplash from './components/common/AuthEntranceSplash';
 
 const CHUNK_RELOAD_STORAGE_KEY = 'otp_chunk_reload_attempted';
 
@@ -16834,6 +16835,7 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
 
             const [user, setUser] = useState(null);
             const [isAuthInitializing, setIsAuthInitializing] = useState(true);
+            const [showAuthEntranceSplash, setShowAuthEntranceSplash] = useState(false);
             const [login, setLogin] = useState('');
             const [password, setPassword] = useState('');
             const [toasts, setToasts] = useState([]);
@@ -18426,6 +18428,15 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
                     localStorage.setItem('user', JSON.stringify(user));
                 }
             }, [user]);
+
+            useEffect(() => {
+                if (isAuthInitializing) return;
+                if (user) {
+                    setShowAuthEntranceSplash(true);
+                } else {
+                    setShowAuthEntranceSplash(false);
+                }
+            }, [isAuthInitializing, user?.id]);
             
             // Persist and restore view (after user is loaded to ensure role-based access)
             useEffect(() => {
@@ -20302,6 +20313,7 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
                     setSensitiveQrImage('');
                     setSensitiveQrExpiresAt('');
                     setSensitiveQrError('');
+                    setShowAuthEntranceSplash(false);
                     setUser(null);
                     setSvList([]);
                     setSvData(null);
@@ -25280,6 +25292,10 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
                         </div>
                     )}
 
+                    <AuthEntranceSplash
+                        open={showAuthEntranceSplash}
+                        onClose={() => setShowAuthEntranceSplash(false)}
+                    />
                     <ToastContainer toasts={toasts} removeToast={removeToast} setToasts={setToasts} />
                 </div>
             );
