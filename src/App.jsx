@@ -5482,7 +5482,7 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
             }
 
         function ShiftPlannerViewWithCalendar({ initialOperators, user }) {
-            const plannerOperatorIdKey = (value) => String(value ?? '');
+            const plannerOperatorIdKey = useCallback((value) => String(value ?? ''), []);
             function clonePlannerOperator(op, overrides = {}) {
                 const next = { ...(op || {}), ...overrides };
                 return {
@@ -5691,6 +5691,8 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
             const [myNowTick, setMyNowTick] = useState(0);
             const dragState = useRef(null);
             const breakReminderNotifiedRef = useRef(new Map());
+            const plannerLoadedMonthKeysRef = useRef(new Set());
+            const plannerLoadingMonthKeysRef = useRef(new Set());
             const editTimelineScrollRef = useRef(null);
             const editTimelineStatusNodeMapRef = useRef(new Map());
             const editJournalScrollRef = useRef(null);
@@ -5849,35 +5851,6 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
                     isBlacklist: !!(found.isBlacklist ?? found.is_blacklist)
                 } : null;
             };
-            const plannerServerDateRange = useMemo(() => {
-                const baseDate = (currentDate instanceof Date && !Number.isNaN(currentDate.getTime()))
-                    ? new Date(currentDate.getFullYear(), currentDate.getMonth(), currentDate.getDate())
-                    : new Date();
-
-                if (viewMode === 'week') {
-                    const start = weekStart(baseDate);
-                    const end = addDays(start, 6);
-                    return {
-                        startDate: todayDateStr(start),
-                        endDate: todayDateStr(end)
-                    };
-                }
-
-                if (viewMode === 'month') {
-                    const start = startOfMonth(baseDate);
-                    const end = endOfMonth(baseDate);
-                    return {
-                        startDate: todayDateStr(start),
-                        endDate: todayDateStr(end)
-                    };
-                }
-
-                const day = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate());
-                return {
-                    startDate: todayDateStr(day),
-                    endDate: todayDateStr(day)
-                };
-            }, [currentDate, viewMode]);
             const paginatePlannerDates = useCallback((direction = 1) => {
                 const step = Number(direction) >= 0 ? 1 : -1;
                 setCurrentDate(prevDate => {
@@ -5894,6 +5867,155 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
                     return new Date(base.getFullYear(), base.getMonth(), base.getDate() + step);
                 });
             }, [viewMode]);
+            const plannerMonthKeyFromDate = useCallback((rawDate) => {
+                const dateObj = (rawDate instanceof Date && !Number.isNaN(rawDate.getTime())) ? rawDate : new Date();
+                return `${dateObj.getFullYear()}-${String(dateObj.getMonth() + 1).padStart(2, '0')}`;
+            }, []);
+            const plannerPreloadMonthKeys = useMemo(() => {
+                const baseDate = (currentDate instanceof Date && !Number.isNaN(currentDate.getTime()))
+                    ? currentDate
+                    : new Date();
+                const monthAnchor = new Date(baseDate.getFullYear(), baseDate.getMonth(), 1);
+                return [-1, 0, 1].map(offset => (
+                    plannerMonthKeyFromDate(new Date(monthAnchor.getFullYear(), monthAnchor.getMonth() + offset, 1))
+                ));
+            }, [currentDate, plannerMonthKeyFromDate]);
+            const plannerPreloadMonthKeysKey = useMemo(
+                () => plannerPreloadMonthKeys.join('|'),
+                [plannerPreloadMonthKeys]
+            );
+            const plannerParseMonthKey = useCallback((monthKey) => {
+                const raw = String(monthKey || '').trim();
+                if (!/^\d{4}-\d{2}$/.test(raw)) return null;
+                const [yearRaw, monthRaw] = raw.split('-');
+                const year = Number(yearRaw);
+                const month = Number(monthRaw);
+                if (!Number.isFinite(year) || !Number.isFinite(month) || month < 1 || month > 12) return null;
+                return { year, month };
+            }, []);
+            const plannerMonthBoundsByKey = useCallback((monthKey) => {
+                const parsed = plannerParseMonthKey(monthKey);
+                if (!parsed) return null;
+                const start = new Date(parsed.year, parsed.month - 1, 1);
+                const end = new Date(parsed.year, parsed.month, 0);
+                return { start, end };
+            }, [plannerParseMonthKey]);
+            const plannerStatusPeriodMergeKey = useCallback((period, idx = 0) => {
+                const id = period?.id;
+                if (id !== undefined && id !== null && String(id).trim() !== '') {
+                    return `id:${String(id)}`;
+                }
+                const statusCode = String(period?.statusCode || period?.status_code || '');
+                const startDate = String(period?.startDate || period?.start_date || '');
+                const endDate = String(period?.endDate || period?.end_date || '');
+                return `fallback:${statusCode}:${startDate}:${endDate}:${idx}`;
+            }, []);
+            const mergePlannerOperatorsFromServer = useCallback((serverOperators = []) => {
+                const serverMap = new Map((serverOperators || []).map(op => [plannerOperatorIdKey(op?.id), op]));
+                setOperators(prevOps => {
+                    const base = mergePlannerOperators(
+                        (normalizedInitialOperators && normalizedInitialOperators.length) ? normalizedInitialOperators : serverOperators,
+                        prevOps
+                    );
+                    const merged = base.map(op => {
+                        const serverOp = serverMap.get(plannerOperatorIdKey(op?.id));
+                        if (!serverOp) return op;
+
+                        const mergedShifts = {
+                            ...(op?.shifts || {}),
+                            ...(serverOp?.shifts || {})
+                        };
+                        const mergedDaysOff = Array.from(new Set([
+                            ...(Array.isArray(op?.daysOff) ? op.daysOff : []),
+                            ...(Array.isArray(serverOp?.daysOff) ? serverOp.daysOff : [])
+                        ])).sort((a, b) => String(a).localeCompare(String(b)));
+                        const mergedStatusDays = {
+                            ...(op?.scheduleStatusDays || {}),
+                            ...(serverOp?.scheduleStatusDays || {})
+                        };
+                        const periodMap = new Map();
+                        (Array.isArray(op?.scheduleStatusPeriods) ? op.scheduleStatusPeriods : []).forEach((period, idx) => {
+                            periodMap.set(plannerStatusPeriodMergeKey(period, idx), period);
+                        });
+                        (Array.isArray(serverOp?.scheduleStatusPeriods) ? serverOp.scheduleStatusPeriods : []).forEach((period, idx) => {
+                            periodMap.set(plannerStatusPeriodMergeKey(period, idx), period);
+                        });
+                        const mergedPeriods = Array.from(periodMap.values()).sort((a, b) => (
+                            String(a?.startDate || a?.start_date || '').localeCompare(String(b?.startDate || b?.start_date || ''))
+                        ));
+
+                        return clonePlannerOperator({
+                            ...op,
+                            ...serverOp,
+                            shifts: mergedShifts,
+                            daysOff: mergedDaysOff,
+                            scheduleStatusPeriods: mergedPeriods,
+                            scheduleStatusDays: mergedStatusDays
+                        });
+                    });
+                    const seen = new Set(merged.map(op => plannerOperatorIdKey(op?.id)));
+                    (serverOperators || []).forEach(serverOp => {
+                        if (!seen.has(plannerOperatorIdKey(serverOp?.id))) {
+                            merged.push(clonePlannerOperator(serverOp));
+                        }
+                    });
+                    return merged;
+                });
+            }, [normalizedInitialOperators, plannerOperatorIdKey, plannerStatusPeriodMergeKey]);
+            const fetchPlannerSchedulesByMonths = useCallback(async (monthKeys = [], { force = false, signal } = {}) => {
+                if (!user?.id || user?.role === 'operator') return null;
+                const uniqueMonthKeys = Array.from(new Set(
+                    (Array.isArray(monthKeys) ? monthKeys : [])
+                        .map(key => String(key || '').trim())
+                        .filter(Boolean)
+                ));
+                if (uniqueMonthKeys.length === 0) return null;
+
+                const targetMonthKeys = force
+                    ? uniqueMonthKeys
+                    : uniqueMonthKeys.filter(key => !plannerLoadedMonthKeysRef.current.has(key));
+                const monthKeysToFetch = targetMonthKeys.filter(key => !plannerLoadingMonthKeysRef.current.has(key));
+                if (monthKeysToFetch.length === 0) return null;
+
+                const bounds = monthKeysToFetch
+                    .map(monthKey => plannerMonthBoundsByKey(monthKey))
+                    .filter(Boolean);
+                if (bounds.length === 0) return null;
+
+                monthKeysToFetch.forEach(key => plannerLoadingMonthKeysRef.current.add(key));
+                setIsLoading(true);
+                try {
+                    const startDateObj = bounds.reduce((minDate, bound) => (bound.start < minDate ? bound.start : minDate), bounds[0].start);
+                    const endDateObj = bounds.reduce((maxDate, bound) => (bound.end > maxDate ? bound.end : maxDate), bounds[0].end);
+                    const requestStart = addDays(startDateObj, -1);
+                    const requestEnd = addDays(endDateObj, 1);
+
+                    const qs = new URLSearchParams({
+                        start_date: todayDateStr(requestStart),
+                        end_date: todayDateStr(requestEnd)
+                    });
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/operators?${qs.toString()}`, {
+                        credentials: 'include',
+                        headers: withAccessTokenHeader(),
+                        signal
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(data?.error || `HTTP ${response.status}`);
+                    }
+                    if (signal?.aborted) return null;
+
+                    const serverOperators = Array.isArray(data?.operators) ? data.operators : [];
+                    mergePlannerOperatorsFromServer(serverOperators);
+                    monthKeysToFetch.forEach(key => plannerLoadedMonthKeysRef.current.add(key));
+                    return data;
+                } finally {
+                    monthKeysToFetch.forEach(key => plannerLoadingMonthKeysRef.current.delete(key));
+                    if (plannerLoadingMonthKeysRef.current.size === 0) {
+                        setIsLoading(false);
+                    }
+                }
+            }, [user?.id, user?.role, plannerMonthBoundsByKey, mergePlannerOperatorsFromServer]);
 
             // Восстановление выбранной даты/фильтров/режима после перезагрузки
             useEffect(() => {
@@ -5984,73 +6106,32 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
                 return () => clearInterval(timer);
             }, [user?.role]);
 
+            useEffect(() => {
+                if (!user?.id) return;
+                if (user?.role === 'operator') return;
+                plannerLoadedMonthKeysRef.current = new Set();
+                plannerLoadingMonthKeysRef.current = new Set();
+            }, [user?.id, user?.role]);
+
             // Синхронизация метаданных операторов из parent (`users`) без потери графиков
             useEffect(() => {
                 setOperators(prevOps => mergePlannerOperators(normalizedInitialOperators, prevOps));
             }, [normalizedInitialOperators]);
 
-            // Загрузка данных с сервера (с повторами при смене user и когда parent-дата пришла позже)
+            // Загрузка данных с сервера по месяцам с кешем:
+            // текущий месяц + соседние, чтобы не делать запрос на каждый клик по дате.
             useEffect(() => {
                 if (!user) return;
                 if (user?.role === 'operator') return;
-                const rangeStart = plannerServerDateRange?.startDate;
-                const rangeEnd = plannerServerDateRange?.endDate;
-                if (!rangeStart || !rangeEnd) return;
-                let cancelled = false;
-                const loadSchedules = async () => {
-                    try {
-                        setIsLoading(true);
-                        const qs = new URLSearchParams({
-                            start_date: rangeStart,
-                            end_date: rangeEnd
-                        });
-                        const response = await fetch(`${API_BASE_URL}/api/work_schedules/operators?${qs.toString()}`, {
-                            credentials: 'include',
-                            headers: withAccessTokenHeader()
-                        });
-
-                        if (response.ok) {
-                            const data = await response.json();
-                            if (cancelled) return;
-                            const serverOperators = Array.isArray(data?.operators) ? data.operators : [];
-                            const serverMap = new Map(serverOperators.map(op => [plannerOperatorIdKey(op?.id), op]));
-
-                            setOperators(prevOps => {
-                                const base = mergePlannerOperators(
-                                    (normalizedInitialOperators && normalizedInitialOperators.length) ? normalizedInitialOperators : serverOperators,
-                                    prevOps
-                                );
-                                const merged = base.map(op => {
-                                    const serverOp = serverMap.get(plannerOperatorIdKey(op?.id));
-                                    if (!serverOp) return op;
-                                    return clonePlannerOperator({
-                                        ...serverOp,
-                                        ...op,
-                                        shifts: serverOp.shifts || {},
-                                        daysOff: serverOp.daysOff || [],
-                                        scheduleStatusPeriods: serverOp.scheduleStatusPeriods || [],
-                                        scheduleStatusDays: serverOp.scheduleStatusDays || {}
-                                    });
-                                });
-                                const seen = new Set(merged.map(op => plannerOperatorIdKey(op?.id)));
-                                serverOperators.forEach(serverOp => {
-                                    if (!seen.has(plannerOperatorIdKey(serverOp?.id))) merged.push(clonePlannerOperator(serverOp));
-                                });
-                                return merged;
-                            });
-                        } else {
-                            console.error('Error loading schedules:', response.status, response.statusText);
-                        }
-                    } catch (error) {
-                        console.error('Error loading schedules:', error);
-                    } finally {
-                        if (!cancelled) setIsLoading(false);
-                    }
-                };
-
-                loadSchedules();
-                return () => { cancelled = true; };
-            }, [user, normalizedInitialOperators, plannerServerDateRange?.startDate, plannerServerDateRange?.endDate]);
+                const abortController = new AbortController();
+                fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, {
+                    signal: abortController.signal
+                }).catch(error => {
+                    if (error?.name === 'AbortError') return;
+                    console.error('Error loading schedules:', error);
+                });
+                return () => abortController.abort();
+            }, [user?.id, user?.role, plannerPreloadMonthKeysKey, fetchPlannerSchedulesByMonths]);
 
             useEffect(() => {
                 if (!user) return;
@@ -7103,46 +7184,7 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
             };
 
             const reloadPlannerSchedulesFromServer = async () => {
-                const rangeStart = plannerServerDateRange?.startDate;
-                const rangeEnd = plannerServerDateRange?.endDate;
-                const qs = new URLSearchParams();
-                if (rangeStart) qs.set('start_date', rangeStart);
-                if (rangeEnd) qs.set('end_date', rangeEnd);
-                const query = qs.toString();
-                const response = await fetch(`${API_BASE_URL}/api/work_schedules/operators${query ? `?${query}` : ''}`, {
-                    credentials: 'include',
-                    headers: withAccessTokenHeader()
-                });
-                const data = await response.json().catch(() => ({}));
-                if (!response.ok) {
-                    throw new Error(data?.error || `HTTP ${response.status}`);
-                }
-                const serverOperators = Array.isArray(data?.operators) ? data.operators : [];
-                const serverMap = new Map(serverOperators.map(op => [plannerOperatorIdKey(op?.id), op]));
-                setOperators(prevOps => {
-                    const base = mergePlannerOperators(
-                        (normalizedInitialOperators && normalizedInitialOperators.length) ? normalizedInitialOperators : serverOperators,
-                        prevOps
-                    );
-                    const merged = base.map(op => {
-                        const serverOp = serverMap.get(plannerOperatorIdKey(op?.id));
-                        if (!serverOp) return op;
-                        return clonePlannerOperator({
-                            ...serverOp,
-                            ...op,
-                            shifts: serverOp.shifts || {},
-                            daysOff: serverOp.daysOff || [],
-                            scheduleStatusPeriods: serverOp.scheduleStatusPeriods || [],
-                            scheduleStatusDays: serverOp.scheduleStatusDays || {}
-                        });
-                    });
-                    const seen = new Set(merged.map(op => plannerOperatorIdKey(op?.id)));
-                    serverOperators.forEach(serverOp => {
-                        if (!seen.has(plannerOperatorIdKey(serverOp?.id))) merged.push(clonePlannerOperator(serverOp));
-                    });
-                    return merged;
-                });
-                return data;
+                return fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
             };
 
             const loadPlannerBreakRulesFromServer = async ({ silent = false } = {}) => {
