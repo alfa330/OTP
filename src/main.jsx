@@ -1,4 +1,5 @@
-﻿import React from 'react';
+﻿import './staleBundleRecovery';
+import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App, { ErrorBoundary } from './App';
 import './styles.css';
@@ -21,3 +22,4 @@ try {
     </div>
   `;
 }
+

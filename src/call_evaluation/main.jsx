@@ -1,4 +1,5 @@
-﻿import React, { useState, useEffect, useRef, useCallback } from 'react';
+﻿import '../staleBundleRecovery';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createPortal } from 'react-dom';
 import './styles.css';
@@ -1309,3 +1310,4 @@ if (isEmbedded) {
     if (nextState.user || nextState.initialSelection) writeEmbedState(nextState);
     renderApp(nextState);
 }
+
