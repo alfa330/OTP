@@ -5482,6 +5482,7 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
             }
 
         function ShiftPlannerViewWithCalendar({ initialOperators, user }) {
+            const plannerOperatorIdKey = (value) => String(value ?? '');
             function clonePlannerOperator(op, overrides = {}) {
                 const next = { ...(op || {}), ...overrides };
                 return {
@@ -5495,10 +5496,21 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
                 };
             }
 
+            function stripPlannerSchedulePayload(op) {
+                const base = { ...(op || {}) };
+                return {
+                    ...base,
+                    shifts: {},
+                    daysOff: [],
+                    scheduleStatusPeriods: [],
+                    scheduleStatusDays: {}
+                };
+            }
+
             function mergePlannerOperators(baseOps = [], existingOps = []) {
-                const existingMap = new Map((existingOps || []).map(op => [op.id, op]));
+                const existingMap = new Map((existingOps || []).map(op => [plannerOperatorIdKey(op?.id), op]));
                 const merged = (baseOps || []).map(base => {
-                    const existing = existingMap.get(base.id);
+                    const existing = existingMap.get(plannerOperatorIdKey(base?.id));
                     if (!existing) return clonePlannerOperator(base);
                     return clonePlannerOperator({
                         ...base,
@@ -5509,13 +5521,17 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
                     });
                 });
 
-                const seen = new Set(merged.map(op => op.id));
+                const seen = new Set(merged.map(op => plannerOperatorIdKey(op?.id)));
                 (existingOps || []).forEach(op => {
-                    if (!seen.has(op.id)) merged.push(clonePlannerOperator(op));
+                    if (!seen.has(plannerOperatorIdKey(op?.id))) merged.push(clonePlannerOperator(op));
                 });
                 return merged;
             }
 
+            const normalizedInitialOperators = useMemo(
+                () => (Array.isArray(initialOperators) ? initialOperators.map(stripPlannerSchedulePayload) : []),
+                [initialOperators]
+            );
             const [viewMode, setViewMode] = useState('day');
             const [currentDate, setCurrentDate] = useState(() => new Date());
             const [selectedSupervisors, setSelectedSupervisors] = useState([]);
@@ -5523,7 +5539,7 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
             const [selectedDirections, setSelectedDirections] = useState([]);
             const [breakDirectionGroups, setBreakDirectionGroups] = useState([]);
             const [breakGroupDraftDirections, setBreakGroupDraftDirections] = useState([]);
-            const [operators, setOperators] = useState(() => mergePlannerOperators(initialOperators || [], []));
+            const [operators, setOperators] = useState(() => mergePlannerOperators(normalizedInitialOperators, []));
 
             const [modalState, setModalState] = useState({
                 open: false,
@@ -5970,8 +5986,8 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
 
             // Синхронизация метаданных операторов из parent (`users`) без потери графиков
             useEffect(() => {
-                setOperators(prevOps => mergePlannerOperators(initialOperators || [], prevOps));
-            }, [initialOperators]);
+                setOperators(prevOps => mergePlannerOperators(normalizedInitialOperators, prevOps));
+            }, [normalizedInitialOperators]);
 
             // Загрузка данных с сервера (с повторами при смене user и когда parent-дата пришла позже)
             useEffect(() => {
@@ -5997,15 +6013,15 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
                             const data = await response.json();
                             if (cancelled) return;
                             const serverOperators = Array.isArray(data?.operators) ? data.operators : [];
-                            const serverMap = new Map(serverOperators.map(op => [op.id, op]));
+                            const serverMap = new Map(serverOperators.map(op => [plannerOperatorIdKey(op?.id), op]));
 
                             setOperators(prevOps => {
                                 const base = mergePlannerOperators(
-                                    (initialOperators && initialOperators.length) ? initialOperators : serverOperators,
+                                    (normalizedInitialOperators && normalizedInitialOperators.length) ? normalizedInitialOperators : serverOperators,
                                     prevOps
                                 );
                                 const merged = base.map(op => {
-                                    const serverOp = serverMap.get(op.id);
+                                    const serverOp = serverMap.get(plannerOperatorIdKey(op?.id));
                                     if (!serverOp) return op;
                                     return clonePlannerOperator({
                                         ...serverOp,
@@ -6016,9 +6032,9 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
                                         scheduleStatusDays: serverOp.scheduleStatusDays || {}
                                     });
                                 });
-                                const seen = new Set(merged.map(op => op.id));
+                                const seen = new Set(merged.map(op => plannerOperatorIdKey(op?.id)));
                                 serverOperators.forEach(serverOp => {
-                                    if (!seen.has(serverOp.id)) merged.push(clonePlannerOperator(serverOp));
+                                    if (!seen.has(plannerOperatorIdKey(serverOp?.id))) merged.push(clonePlannerOperator(serverOp));
                                 });
                                 return merged;
                             });
@@ -6034,7 +6050,7 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
 
                 loadSchedules();
                 return () => { cancelled = true; };
-            }, [user, initialOperators, plannerServerDateRange?.startDate, plannerServerDateRange?.endDate]);
+            }, [user, normalizedInitialOperators, plannerServerDateRange?.startDate, plannerServerDateRange?.endDate]);
 
             useEffect(() => {
                 if (!user) return;
@@ -7102,14 +7118,14 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
                     throw new Error(data?.error || `HTTP ${response.status}`);
                 }
                 const serverOperators = Array.isArray(data?.operators) ? data.operators : [];
-                const serverMap = new Map(serverOperators.map(op => [op.id, op]));
+                const serverMap = new Map(serverOperators.map(op => [plannerOperatorIdKey(op?.id), op]));
                 setOperators(prevOps => {
                     const base = mergePlannerOperators(
-                        (initialOperators && initialOperators.length) ? initialOperators : serverOperators,
+                        (normalizedInitialOperators && normalizedInitialOperators.length) ? normalizedInitialOperators : serverOperators,
                         prevOps
                     );
                     const merged = base.map(op => {
-                        const serverOp = serverMap.get(op.id);
+                        const serverOp = serverMap.get(plannerOperatorIdKey(op?.id));
                         if (!serverOp) return op;
                         return clonePlannerOperator({
                             ...serverOp,
@@ -7120,9 +7136,9 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
                             scheduleStatusDays: serverOp.scheduleStatusDays || {}
                         });
                     });
-                    const seen = new Set(merged.map(op => op.id));
+                    const seen = new Set(merged.map(op => plannerOperatorIdKey(op?.id)));
                     serverOperators.forEach(serverOp => {
-                        if (!seen.has(serverOp.id)) merged.push(clonePlannerOperator(serverOp));
+                        if (!seen.has(plannerOperatorIdKey(serverOp?.id))) merged.push(clonePlannerOperator(serverOp));
                     });
                     return merged;
                 });
