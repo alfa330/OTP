@@ -16821,6 +16821,317 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
         };
 
         // Main App
+        const MARCH_8_SPLASH_HTML = `
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>8 Марта</title>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;1,300;1,400&family=Playfair+Display:ital@1&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%;
+    height: 100%;
+  }
+  body {
+    background: #0d0408;
+    overflow: hidden;
+    font-family: 'Cormorant Garamond', serif;
+  }
+  #splash {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: radial-gradient(ellipse at 50% 60%, #1a0510 0%, #0d0408 70%);
+    cursor: pointer;
+  }
+  .petal-bg {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+  }
+  .fp {
+    position: absolute;
+    border-radius: 50% 0 50% 0;
+    opacity: 0;
+    animation: floatPetal linear infinite;
+  }
+  @keyframes floatPetal {
+    0%   { transform: translateY(110vh) rotate(0deg); opacity: 0; }
+    5%   { opacity: 0.35; }
+    90%  { opacity: 0.25; }
+    100% { transform: translateY(-10vh) rotate(720deg); opacity: 0; }
+  }
+  #center-svg {
+    position: relative;
+    z-index: 10;
+    width: min(90vw, 640px);
+    height: min(90vh, 640px);
+  }
+  .text-wrap {
+    position: absolute;
+    bottom: 12%;
+    left: 50%;
+    transform: translateX(-50%);
+    text-align: center;
+    z-index: 20;
+    opacity: 0;
+    animation: fadeUp 1.4s cubic-bezier(.16,1,.3,1) 2.8s forwards;
+  }
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateX(-50%) translateY(28px); }
+    to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+  }
+  .text-wrap h1 {
+    font-family: 'Playfair Display', serif;
+    font-style: italic;
+    font-weight: 400;
+    font-size: clamp(2.2rem, 6vw, 4.2rem);
+    color: #f5c8d8;
+    letter-spacing: 0.08em;
+    line-height: 1;
+    text-shadow: 0 0 60px rgba(220,100,140,0.5);
+  }
+  .text-wrap p {
+    margin-top: 10px;
+    font-size: clamp(0.9rem, 2.2vw, 1.15rem);
+    color: #c9849a;
+    letter-spacing: 0.25em;
+    font-weight: 300;
+    text-transform: uppercase;
+  }
+  .hint {
+    position: absolute;
+    bottom: 4%;
+    left: 50%;
+    transform: translateX(-50%);
+    color: rgba(200,130,155,0.4);
+    font-size: 0.78rem;
+    letter-spacing: 0.3em;
+    text-transform: uppercase;
+    z-index: 20;
+    opacity: 0;
+    animation: blink 2s ease 4.5s infinite;
+  }
+  @keyframes blink {
+    0%,100% { opacity: 0; }
+    50% { opacity: 1; }
+  }
+  .shimmer-line {
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    bottom: calc(12% - 18px);
+    width: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, #c8849a, #f5c8d8, #c8849a, transparent);
+    z-index: 21;
+    animation: expandLine 1s cubic-bezier(.16,1,.3,1) 3.6s forwards;
+  }
+  @keyframes expandLine {
+    to { width: 260px; }
+  }
+</style>
+</head>
+<body>
+<div id="splash">
+  <div class="petal-bg" id="petals"></div>
+  <svg id="center-svg" viewBox="0 0 640 640" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <radialGradient id="glowCenter" cx="50%" cy="50%" r="50%">
+        <stop offset="0%" stop-color="#c8405a" stop-opacity="0.18"></stop>
+        <stop offset="100%" stop-color="#c8405a" stop-opacity="0"></stop>
+      </radialGradient>
+      <radialGradient id="petalGrad1" cx="30%" cy="25%" r="70%">
+        <stop offset="0%" stop-color="#ffccd8"></stop>
+        <stop offset="60%" stop-color="#e8758e"></stop>
+        <stop offset="100%" stop-color="#a83054"></stop>
+      </radialGradient>
+      <radialGradient id="petalGrad2" cx="30%" cy="25%" r="70%">
+        <stop offset="0%" stop-color="#ffd6e0"></stop>
+        <stop offset="60%" stop-color="#f0a0b8"></stop>
+        <stop offset="100%" stop-color="#c04070"></stop>
+      </radialGradient>
+      <radialGradient id="petalGrad3" cx="30%" cy="25%" r="70%">
+        <stop offset="0%" stop-color="#ffe4ec"></stop>
+        <stop offset="60%" stop-color="#f4b8cc"></stop>
+        <stop offset="100%" stop-color="#d06080"></stop>
+      </radialGradient>
+      <radialGradient id="leafGrad" cx="50%" cy="0%" r="100%">
+        <stop offset="0%" stop-color="#3a7a3a"></stop>
+        <stop offset="100%" stop-color="#1a3a1a"></stop>
+      </radialGradient>
+      <radialGradient id="centerDot" cx="50%" cy="40%" r="60%">
+        <stop offset="0%" stop-color="#fff0b0"></stop>
+        <stop offset="100%" stop-color="#d4a030"></stop>
+      </radialGradient>
+      <filter id="softGlow" x="-40%" y="-40%" width="180%" height="180%">
+        <feGaussianBlur stdDeviation="8" result="blur"></feGaussianBlur>
+        <feMerge><feMergeNode in="blur"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge>
+      </filter>
+      <filter id="petalGlow" x="-20%" y="-20%" width="140%" height="140%">
+        <feGaussianBlur stdDeviation="3" result="blur"></feGaussianBlur>
+        <feMerge><feMergeNode in="blur"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge>
+      </filter>
+    </defs>
+    <ellipse cx="320" cy="330" rx="200" ry="180" fill="url(#glowCenter)" opacity="0">
+      <animate attributeName="opacity" values="0;1;0.7" dur="2s" begin="0.3s" fill="freeze"></animate>
+    </ellipse>
+    <path d="M320 580 Q310 500 308 440 Q305 380 315 340" stroke="#2d5a2d" stroke-width="6" stroke-linecap="round" fill="none" opacity="0">
+      <animate attributeName="opacity" values="0;1" dur="0.4s" begin="0.1s" fill="freeze"></animate>
+      <animate attributeName="stroke-dasharray" values="0 300;300 0" dur="1.2s" begin="0.1s" fill="freeze"></animate>
+    </path>
+    <g opacity="0" transform-origin="308 450">
+      <animateTransform attributeName="transform" type="rotate" values="-30 308 450;0 308 450" dur="0.8s" begin="0.9s" fill="freeze" calcMode="spline" keySplines="0.16 1 0.3 1"></animateTransform>
+      <animate attributeName="opacity" values="0;1" dur="0.5s" begin="0.9s" fill="freeze"></animate>
+      <path d="M308 450 Q265 420 250 390 Q275 400 308 450Z" fill="url(#leafGrad)" filter="url(#softGlow)"></path>
+      <path d="M308 450 Q275 415 262 390" stroke="#4a9a4a" stroke-width="1" fill="none" opacity="0.6"></path>
+    </g>
+    <g opacity="0" transform-origin="312 480">
+      <animateTransform attributeName="transform" type="rotate" values="25 312 480;0 312 480" dur="0.8s" begin="1.1s" fill="freeze" calcMode="spline" keySplines="0.16 1 0.3 1"></animateTransform>
+      <animate attributeName="opacity" values="0;1" dur="0.5s" begin="1.1s" fill="freeze"></animate>
+      <path d="M312 480 Q360 455 378 425 Q350 432 312 480Z" fill="url(#leafGrad)" filter="url(#softGlow)"></path>
+      <path d="M312 480 Q348 450 370 428" stroke="#4a9a4a" stroke-width="1" fill="none" opacity="0.6"></path>
+    </g>
+    <g filter="url(#petalGlow)">
+      <g transform-origin="320 310" opacity="0">
+        <animateTransform attributeName="transform" type="scale" values="0.3;1" dur="0.7s" begin="1.4s" fill="freeze" calcMode="spline" keySplines="0.16 1 0.3 1"></animateTransform>
+        <animate attributeName="opacity" values="0;1" dur="0.5s" begin="1.4s" fill="freeze"></animate>
+        <path d="M320 310 Q280 270 275 230 Q295 250 320 260 Q345 250 365 230 Q360 270 320 310Z" fill="url(#petalGrad1)"></path>
+      </g>
+      <g transform-origin="320 310" opacity="0">
+        <animateTransform attributeName="transform" type="rotate" values="-72 320 310;0 320 310" dur="0.7s" begin="1.55s" fill="freeze" calcMode="spline" keySplines="0.16 1 0.3 1"></animateTransform>
+        <animate attributeName="opacity" values="0;1" dur="0.5s" begin="1.55s" fill="freeze"></animate>
+        <path d="M320 310 Q375 285 400 250 Q395 278 378 300 Q360 320 320 310Z" fill="url(#petalGrad1)"></path>
+      </g>
+      <g transform-origin="320 310" opacity="0">
+        <animateTransform attributeName="transform" type="rotate" values="-144 320 310;0 320 310" dur="0.7s" begin="1.7s" fill="freeze" calcMode="spline" keySplines="0.16 1 0.3 1"></animateTransform>
+        <animate attributeName="opacity" values="0;1" dur="0.5s" begin="1.7s" fill="freeze"></animate>
+        <path d="M320 310 Q365 355 368 395 Q345 375 330 355 Q310 340 320 310Z" fill="url(#petalGrad1)"></path>
+      </g>
+      <g transform-origin="320 310" opacity="0">
+        <animateTransform attributeName="transform" type="rotate" values="-216 320 310;0 320 310" dur="0.7s" begin="1.85s" fill="freeze" calcMode="spline" keySplines="0.16 1 0.3 1"></animateTransform>
+        <animate attributeName="opacity" values="0;1" dur="0.5s" begin="1.85s" fill="freeze"></animate>
+        <path d="M320 310 Q275 352 270 392 Q295 372 310 352 Q330 337 320 310Z" fill="url(#petalGrad1)"></path>
+      </g>
+      <g transform-origin="320 310" opacity="0">
+        <animateTransform attributeName="transform" type="rotate" values="-288 320 310;0 320 310" dur="0.7s" begin="2.0s" fill="freeze" calcMode="spline" keySplines="0.16 1 0.3 1"></animateTransform>
+        <animate attributeName="opacity" values="0;1" dur="0.5s" begin="2.0s" fill="freeze"></animate>
+        <path d="M320 310 Q265 285 240 250 Q245 278 262 300 Q280 320 320 310Z" fill="url(#petalGrad1)"></path>
+      </g>
+    </g>
+    <g filter="url(#petalGlow)">
+      <g transform="rotate(36 320 310)" opacity="0">
+        <animate attributeName="opacity" values="0;1" dur="0.5s" begin="2.1s" fill="freeze"></animate>
+        <animateTransform attributeName="transform" type="rotate" additive="sum" values="0 320 310;36 320 310" dur="0.6s" begin="2.1s" fill="freeze" calcMode="spline" keySplines="0.16 1 0.3 1"></animateTransform>
+        <path d="M320 310 Q288 278 285 248 Q302 262 320 268 Q338 262 355 248 Q352 278 320 310Z" fill="url(#petalGrad2)" opacity="0.92"></path>
+      </g>
+      <g transform="rotate(108 320 310)" opacity="0">
+        <animate attributeName="opacity" values="0;1" dur="0.5s" begin="2.2s" fill="freeze"></animate>
+        <path d="M320 310 Q360 288 378 260 Q370 282 356 298 Q342 312 320 310Z" fill="url(#petalGrad2)" opacity="0.92"></path>
+      </g>
+      <g transform="rotate(180 320 310)" opacity="0">
+        <animate attributeName="opacity" values="0;1" dur="0.5s" begin="2.3s" fill="freeze"></animate>
+        <path d="M320 310 Q350 345 348 378 Q334 360 324 346 Q312 334 320 310Z" fill="url(#petalGrad2)" opacity="0.92"></path>
+      </g>
+      <g transform="rotate(252 320 310)" opacity="0">
+        <animate attributeName="opacity" values="0;1" dur="0.5s" begin="2.4s" fill="freeze"></animate>
+        <path d="M320 310 Q283 345 280 376 Q296 360 308 346 Q322 333 320 310Z" fill="url(#petalGrad2)" opacity="0.92"></path>
+      </g>
+      <g transform="rotate(324 320 310)" opacity="0">
+        <animate attributeName="opacity" values="0;1" dur="0.5s" begin="2.5s" fill="freeze"></animate>
+        <path d="M320 310 Q280 290 264 262 Q270 282 284 298 Q300 312 320 310Z" fill="url(#petalGrad2)" opacity="0.92"></path>
+      </g>
+    </g>
+    <g opacity="0">
+      <animate attributeName="opacity" values="0;1" dur="0.6s" begin="2.5s" fill="freeze"></animate>
+      <circle cx="320" cy="300" r="34" fill="url(#petalGrad3)"></circle>
+      <path d="M320 300 Q304 278 306 262 Q314 274 320 280 Q326 274 334 262 Q336 278 320 300Z" fill="#f0c0cc" opacity="0.7"></path>
+    </g>
+    <circle cx="320" cy="302" r="18" fill="url(#centerDot)" opacity="0">
+      <animate attributeName="opacity" values="0;1" dur="0.5s" begin="2.6s" fill="freeze"></animate>
+    </circle>
+    <circle cx="320" cy="302" r="10" fill="#fff8d0" opacity="0">
+      <animate attributeName="opacity" values="0;1" dur="0.5s" begin="2.7s" fill="freeze"></animate>
+    </circle>
+    <g opacity="0">
+      <animate attributeName="opacity" values="0;1" dur="0.4s" begin="2.8s" fill="freeze"></animate>
+      <path d="M248 200 L251 193 L254 200 L261 203 L254 206 L251 213 L248 206 L241 203Z" fill="#ffeedd" opacity="0.9">
+        <animateTransform attributeName="transform" type="scale" values="0;1.2;1" dur="0.5s" begin="2.8s" fill="freeze" additive="sum" calcMode="spline" keySplines="0.16 1 0.3 1 ; 0.16 1 0.3 1"></animateTransform>
+        <animate attributeName="opacity" values="0;1;0.7;1" dur="3s" begin="3s" repeatCount="indefinite"></animate>
+      </path>
+      <path d="M398 185 L401 180 L404 185 L409 188 L404 191 L401 196 L398 191 L393 188Z" fill="#ffeedd" opacity="0.8">
+        <animate attributeName="opacity" values="0.8;0.3;0.8" dur="2.4s" begin="3.2s" repeatCount="indefinite"></animate>
+      </path>
+      <path d="M230 310 L232 306 L234 310 L238 312 L234 314 L232 318 L230 314 L226 312Z" fill="#ffccdd" opacity="0.7">
+        <animate attributeName="opacity" values="0.7;0.2;0.7" dur="2s" begin="3.4s" repeatCount="indefinite"></animate>
+      </path>
+      <path d="M408 340 L410 336 L412 340 L416 342 L412 344 L410 348 L408 344 L404 342Z" fill="#ffddee" opacity="0.6">
+        <animate attributeName="opacity" values="0.6;0.15;0.6" dur="2.8s" begin="3.1s" repeatCount="indefinite"></animate>
+      </path>
+    </g>
+    <g opacity="0">
+      <animate attributeName="opacity" values="0;0.6" dur="1.5s" begin="1.5s" fill="freeze"></animate>
+      <circle cx="180" cy="180" r="4" fill="#e8a0b8" opacity="0.5">
+        <animate attributeName="cy" values="180;160;180" dur="4s" repeatCount="indefinite" calcMode="spline" keySplines="0.4 0 0.6 1;0.4 0 0.6 1"></animate>
+      </circle>
+      <circle cx="460" cy="210" r="3" fill="#f0c0cc" opacity="0.4">
+        <animate attributeName="cy" values="210;190;210" dur="5s" repeatCount="indefinite" calcMode="spline" keySplines="0.4 0 0.6 1;0.4 0 0.6 1"></animate>
+      </circle>
+      <circle cx="150" cy="380" r="5" fill="#d08098" opacity="0.3">
+        <animate attributeName="cy" values="380;360;380" dur="3.5s" repeatCount="indefinite" calcMode="spline" keySplines="0.4 0 0.6 1;0.4 0 0.6 1"></animate>
+      </circle>
+      <circle cx="490" cy="400" r="3" fill="#f5c8d8" opacity="0.4">
+        <animate attributeName="cy" values="400;380;400" dur="4.5s" repeatCount="indefinite" calcMode="spline" keySplines="0.4 0 0.6 1;0.4 0 0.6 1"></animate>
+      </circle>
+      <circle cx="200" cy="500" r="2.5" fill="#e090aa" opacity="0.3">
+        <animate attributeName="cy" values="500;485;500" dur="3.8s" repeatCount="indefinite"></animate>
+      </circle>
+      <circle cx="430" cy="520" r="3.5" fill="#ffb8cc" opacity="0.35">
+        <animate attributeName="cy" values="520;504;520" dur="4.2s" repeatCount="indefinite"></animate>
+      </circle>
+    </g>
+    <animateTransform attributeName="transform" type="scale" values="1;1.018;1" dur="4s" begin="3s" repeatCount="indefinite" additive="sum" calcMode="spline" keySplines="0.4 0 0.6 1;0.4 0 0.6 1" style="transform-origin:320px 310px"></animateTransform>
+  </svg>
+  <div class="text-wrap">
+    <h1>С 8 Марта</h1>
+    <p>С Днём Весны и Красоты</p>
+  </div>
+  <div class="shimmer-line"></div>
+  <div class="hint">нажмите, чтобы продолжить</div>
+</div>
+<script>
+  (function () {
+    var petal = document.getElementById('petals');
+    if (!petal) return;
+    var colors = ['#e87090', '#f0a0b8', '#ffccdd', '#d05070', '#f5b8c8', '#c84060', '#ffd0e0'];
+    var sizes  = [8, 12, 6, 10, 14, 7];
+
+    for (var i = 0; i < 22; i++) {
+      var el = document.createElement('div');
+      el.className = 'fp';
+      var s = sizes[Math.floor(Math.random() * sizes.length)];
+      var c = colors[Math.floor(Math.random() * colors.length)];
+      el.style.left = (Math.random() * 100) + '%';
+      el.style.width = s + 'px';
+      el.style.height = (s * 0.7) + 'px';
+      el.style.background = c;
+      el.style.animationDuration = (6 + Math.random() * 8) + 's';
+      el.style.animationDelay = (Math.random() * 10) + 's';
+      el.style.filter = 'blur(' + (Math.random() * 1.5) + 'px)';
+      el.style.transform = 'rotate(' + (Math.random() * 360) + 'deg)';
+      petal.appendChild(el);
+    }
+  })();
+</script>
+</body>
+</html>
+`;
+
         const App = () => {
             const currentMonth = new Date().toISOString().slice(0, 7);
             const getStoredValue = (key, fallback) => {
@@ -16834,6 +17145,8 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
 
             const [user, setUser] = useState(null);
             const [isAuthInitializing, setIsAuthInitializing] = useState(true);
+            const [showMarchSplash, setShowMarchSplash] = useState(false);
+            const [isMarchSplashClosing, setIsMarchSplashClosing] = useState(false);
             const [login, setLogin] = useState('');
             const [password, setPassword] = useState('');
             const [toasts, setToasts] = useState([]);
@@ -16947,6 +17260,8 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
             const qrStreamRef = useRef(null);
             const qrScanTimerRef = useRef(null);
             const callEvaluationFrameRef = useRef(null);
+            const previousSplashUserIdRef = useRef('');
+            const marchSplashCloseTimerRef = useRef(null);
             // Images and state for gallery modal
             const devLetterImages = [
                 {
@@ -18418,6 +18733,35 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
 
                 restoreSession();
                 return () => { cancelled = true; };
+            }, []);
+
+            useEffect(() => {
+                const currentUserId = user?.id ? String(user.id) : '';
+                if (!currentUserId) {
+                    previousSplashUserIdRef.current = '';
+                    setShowMarchSplash(false);
+                    setIsMarchSplashClosing(false);
+                    if (marchSplashCloseTimerRef.current) {
+                        window.clearTimeout(marchSplashCloseTimerRef.current);
+                        marchSplashCloseTimerRef.current = null;
+                    }
+                    return;
+                }
+
+                if (previousSplashUserIdRef.current !== currentUserId) {
+                    setShowMarchSplash(true);
+                    setIsMarchSplashClosing(false);
+                }
+
+                previousSplashUserIdRef.current = currentUserId;
+            }, [user?.id]);
+
+            useEffect(() => {
+                return () => {
+                    if (marchSplashCloseTimerRef.current) {
+                        window.clearTimeout(marchSplashCloseTimerRef.current);
+                    }
+                };
             }, []);
             
             // Save user to localStorage when it changes
@@ -20275,6 +20619,19 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
                 }
             };
 
+            const closeMarchSplash = useCallback(() => {
+                if (!showMarchSplash || isMarchSplashClosing) return;
+                setIsMarchSplashClosing(true);
+                if (marchSplashCloseTimerRef.current) {
+                    window.clearTimeout(marchSplashCloseTimerRef.current);
+                }
+                marchSplashCloseTimerRef.current = window.setTimeout(() => {
+                    setShowMarchSplash(false);
+                    setIsMarchSplashClosing(false);
+                    marchSplashCloseTimerRef.current = null;
+                }, 1200);
+            }, [showMarchSplash, isMarchSplashClosing]);
+
             const handleKeyPress = (e) => {
                 if (e.key === 'Enter' && !isLoading) {
                     handleLogin();
@@ -21414,6 +21771,7 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
             const isCallEvaluationView = view === 'call_evaluation' && (user.role === 'admin' || user.role === 'sv');
 
             return (
+                <>
                 <div className="flex h-screen overflow-hidden">
                     {/* Гамбургер кнопка для мобильных */}
                     <button 
@@ -25282,6 +25640,29 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
 
                     <ToastContainer toasts={toasts} removeToast={removeToast} setToasts={setToasts} />
                 </div>
+                {showMarchSplash && (
+                    <div
+                        className={`march8-auth-overlay ${isMarchSplashClosing ? 'is-closing' : ''}`}
+                        role="button"
+                        tabIndex={0}
+                        aria-label="Закрыть праздничную заставку"
+                        onClick={closeMarchSplash}
+                        onKeyDown={(event) => {
+                            if (event.key === 'Enter' || event.key === ' ') {
+                                event.preventDefault();
+                                closeMarchSplash();
+                            }
+                        }}
+                    >
+                        <iframe
+                            title="Праздничная заставка 8 марта"
+                            className="march8-auth-frame"
+                            srcDoc={MARCH_8_SPLASH_HTML}
+                            sandbox="allow-scripts"
+                        />
+                    </div>
+                )}
+                </>
             );
         };
 
