@@ -117,6 +117,18 @@ const withAccessTokenHeader = (headers = {}) => {
     return nextHeaders;
 };
 
+const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'auto' }) => (
+    <img
+        src={src}
+        alt={alt}
+        className={className}
+        loading={loading}
+        decoding="async"
+        fetchPriority={fetchPriority}
+        referrerPolicy="no-referrer"
+    />
+);
+
 
         tailwind.config = {
             theme: {
@@ -16524,7 +16536,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                 <div className="flex items-center gap-2.5">
                                 <div className="w-8 h-8 rounded-full overflow-hidden border border-slate-200 bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-white text-xs font-bold shrink-0">
                                     {row.avatar_url ? (
-                                        <img src={row.avatar_url} alt={row.user_name || 'avatar'} className="h-full w-full object-cover" />
+                                        <AvatarImage src={row.avatar_url} alt={row.user_name || 'avatar'} className="h-full w-full object-cover" />
                                     ) : (
                                         (row.user_name || 'U').charAt(0).toUpperCase()
                                     )}
@@ -19283,7 +19295,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     return status;
                 };
                 const isPeriodStatusValue = (v) => PERIOD_STATUSES.has(String(v || '').trim());
-                const syncUserAvatar = async (targetUserId, avatarFile, avatarRemove) => {
+                const syncUserAvatar = async (targetUserId, avatarFile, avatarOriginalFile, avatarRemove) => {
                     if (!targetUserId || (!avatarFile && !avatarRemove)) {
                         return null;
                     }
@@ -19295,6 +19307,9 @@ const withAccessTokenHeader = (headers = {}) => {
                         const formData = new FormData();
                         formData.append('target_user_id', String(targetUserId));
                         formData.append('avatar', avatarFile, avatarFile.name || 'avatar.webp');
+                        if (avatarOriginalFile) {
+                            formData.append('avatar_original', avatarOriginalFile, avatarOriginalFile.name || 'avatar-original');
+                        }
                         const response = await axios.post(
                             `${API_BASE_URL}/api/user/avatar`,
                             formData,
@@ -19400,7 +19415,12 @@ const withAccessTokenHeader = (headers = {}) => {
                             let avatarWarning = '';
                             if (data?.id && (editedUser?.avatar_file || editedUser?.avatar_remove)) {
                                 try {
-                                    await syncUserAvatar(data.id, editedUser?.avatar_file || null, !!editedUser?.avatar_remove);
+                                    await syncUserAvatar(
+                                        data.id,
+                                        editedUser?.avatar_file || null,
+                                        editedUser?.avatar_original_file || null,
+                                        !!editedUser?.avatar_remove
+                                    );
                                 } catch (avatarErr) {
                                     avatarWarning = avatarErr?.response?.data?.error || avatarErr?.message || 'Ошибка загрузки аватара';
                                 }
@@ -19544,7 +19564,12 @@ const withAccessTokenHeader = (headers = {}) => {
                     }
                     if (editedUser?.avatar_file || editedUser?.avatar_remove) {
                         try {
-                            await syncUserAvatar(editedUser.id, editedUser?.avatar_file || null, !!editedUser?.avatar_remove);
+                            await syncUserAvatar(
+                                editedUser.id,
+                                editedUser?.avatar_file || null,
+                                editedUser?.avatar_original_file || null,
+                                !!editedUser?.avatar_remove
+                            );
                         } catch (avatarErr) {
                             showToast(`Профиль обновлен, но аватар не сохранён: ${avatarErr?.response?.data?.error || avatarErr?.message || 'ошибка'}`, 'error');
                         }
@@ -21528,7 +21553,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                     >
                                         <span className="sidebar-avatar border border-white/40 bg-blue-500 flex items-center justify-center text-xs font-semibold text-white shrink-0">
                                             {user?.avatar_url ? (
-                                                <img src={user.avatar_url} alt={user?.name || 'avatar'} className="h-full w-full object-cover" />
+                                                <AvatarImage src={user.avatar_url} alt={user?.name || 'avatar'} className="h-full w-full object-cover" />
                                             ) : (
                                                 (user?.name || 'U').charAt(0).toUpperCase()
                                             )}
@@ -21927,7 +21952,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 <div className="flex items-center gap-3 min-w-0">
                                                     <div className="h-9 w-9 rounded-full overflow-hidden border border-slate-200 bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-xs font-semibold text-white shrink-0">
                                                         {sv.avatar_url ? (
-                                                            <img src={sv.avatar_url} alt={sv.name || 'avatar'} className="h-full w-full object-cover" />
+                                                            <AvatarImage src={sv.avatar_url} alt={sv.name || 'avatar'} className="h-full w-full object-cover" />
                                                         ) : (
                                                             (sv.name || 'U').charAt(0).toUpperCase()
                                                         )}
@@ -22278,7 +22303,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                 <div className="flex items-center gap-3 min-w-0">
                                                                     <div className="h-9 w-9 rounded-full overflow-hidden border border-slate-200 bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-xs font-semibold text-white shrink-0">
                                                                         {op.avatar_url ? (
-                                                                            <img src={op.avatar_url} alt={op.name || 'avatar'} className="h-full w-full object-cover" />
+                                                                            <AvatarImage src={op.avatar_url} alt={op.name || 'avatar'} className="h-full w-full object-cover" />
                                                                         ) : (
                                                                             (op.name || 'U').charAt(0).toUpperCase()
                                                                         )}
@@ -22619,7 +22644,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             <div className="flex items-center gap-3 min-w-0">
                                                                 <div className="h-9 w-9 rounded-full overflow-hidden border border-slate-200 bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-xs font-semibold text-white shrink-0">
                                                                     {u.avatar_url ? (
-                                                                        <img src={u.avatar_url} alt={u.name || 'avatar'} className="h-full w-full object-cover" />
+                                                                        <AvatarImage src={u.avatar_url} alt={u.name || 'avatar'} className="h-full w-full object-cover" />
                                                                     ) : (
                                                                         (u.name || 'U').charAt(0).toUpperCase()
                                                                     )}
@@ -23147,7 +23172,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                 <div className="flex items-center gap-3 min-w-0">
                                                                     <div className="h-9 w-9 rounded-full overflow-hidden border border-slate-200 bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-xs font-semibold text-white shrink-0">
                                                                         {op.avatar_url ? (
-                                                                            <img src={op.avatar_url} alt={op.name || 'avatar'} className="h-full w-full object-cover" />
+                                                                            <AvatarImage src={op.avatar_url} alt={op.name || 'avatar'} className="h-full w-full object-cover" />
                                                                         ) : (
                                                                             (op.name || 'U').charAt(0).toUpperCase()
                                                                         )}
@@ -23417,7 +23442,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             <div className="flex items-center gap-3 min-w-0">
                                                                 <div className="h-9 w-9 rounded-full overflow-hidden border border-slate-200 bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-xs font-semibold text-white shrink-0">
                                                                     {op.avatar_url ? (
-                                                                        <img src={op.avatar_url} alt={op.name || 'avatar'} className="h-full w-full object-cover" />
+                                                                        <AvatarImage src={op.avatar_url} alt={op.name || 'avatar'} className="h-full w-full object-cover" />
                                                                     ) : (
                                                                         (op.name || 'U').charAt(0).toUpperCase()
                                                                     )}
@@ -23517,7 +23542,13 @@ const withAccessTokenHeader = (headers = {}) => {
                                         <div className="flex flex-col sm:flex-row items-center gap-4 pb-4 sm:pb-6 border-b border-gray-200">
                                           <div className="w-20 h-20 sm:w-24 sm:h-24 rounded-full bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-white text-3xl sm:text-4xl font-bold shadow-lg overflow-hidden">
                                             {profileData.avatar_url ? (
-                                                <img src={profileData.avatar_url} alt={profileData.name || 'avatar'} className="w-full h-full object-cover" />
+                                                <AvatarImage
+                                                    src={profileData.avatar_url}
+                                                    alt={profileData.name || 'avatar'}
+                                                    className="w-full h-full object-cover"
+                                                    loading="eager"
+                                                    fetchPriority="high"
+                                                />
                                             ) : (
                                                 (profileData.name || 'U').charAt(0).toUpperCase()
                                             )}
