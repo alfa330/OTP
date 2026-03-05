@@ -10013,10 +10013,10 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-3 sticky top-0 z-10 bg-white/95 backdrop-blur pb-2 border-b border-slate-200">
                                                     <div className="min-w-0">
                                                         <div className="text-base font-semibold text-slate-900">Новый запрос на замену</div>
-                                                        <div className="text-xs text-slate-500">Выберите даты и время интервала, затем оператора совместимого направления без пересечений (СМЗ и Основа взаимозаменяемы)</div>
+                                                        <div className="text-xs text-slate-500">Укажите интервал и выберите кандидата без пересечений.</div>
                                                     </div>
                                                     <div className="flex items-center justify-between sm:justify-end gap-2">
-                                                        <div className="text-xs text-slate-500">
+                                                        <div className="text-[11px] text-slate-400">
                                                             Доступных дат со сменами: <span className="font-semibold tabular-nums">{mySwapSourceShiftDays.length}</span>
                                                         </div>
                                                         <button
@@ -10420,9 +10420,9 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         </div>
                                                     )}
                                                 </div>
-                                                <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-2.5 sm:p-3">
+                                                <div className="mt-3 rounded-lg border border-slate-200 bg-white p-2.5 sm:p-3">
                                                     <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-                                                        <div className="text-xs font-semibold text-slate-700 uppercase tracking-wide">
+                                                        <div className="text-xs font-semibold text-slate-800">
                                                             Кандидаты на замену
                                                         </div>
                                                         <div className="text-xs text-slate-500">
@@ -10430,11 +10430,11 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                 ? `Выбран: ${selectedSwapCandidate?.name || '1 кандидат'}`
                                                                 : (String(swapCandidatesSearch || '').trim()
                                                                     ? `Найдено: ${swapCandidatesFiltered.length} из ${swapCandidates.length}`
-                                                                    : 'По приоритету совпадения границ интервала')}
+                                                                    : 'Сортировка по стыку интервала')}
                                                         </div>
                                                     </div>
                                                     <label className="text-sm block mb-2">
-                                                        <div className="text-xs text-slate-600 mb-1">Поиск среди кандидатов</div>
+                                                        <div className="text-xs text-slate-600 mb-1">Поиск</div>
                                                         <input
                                                             type="text"
                                                             value={swapCandidatesSearch}
@@ -10474,17 +10474,17 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                         key={`swap-candidate-card-${item?.id}`}
                                                                         className={`rounded-lg border p-2.5 ${
                                                                             isSelected
-                                                                                ? 'border-blue-400 bg-blue-50'
-                                                                                : 'border-slate-200 bg-white'
+                                                                                ? 'border-blue-400 bg-blue-50/40'
+                                                                                : 'border-slate-200 bg-slate-50/40'
                                                                         }`}
                                                                     >
                                                                         <div className="flex flex-wrap items-start justify-between gap-2">
                                                                             <div className="min-w-0">
-                                                                                <div className="text-sm font-medium text-slate-900">
+                                                                                <div className="text-sm font-semibold text-slate-900">
                                                                                     {idx + 1}. {item?.name || 'Оператор'}
                                                                                 </div>
                                                                                 <div className="text-xs text-slate-500">
-                                                                                    {item?.supervisorName ? `Супервайзер: ${item.supervisorName}` : 'Без супервайзера'}
+                                                                                    {item?.supervisorName ? item.supervisorName : 'Без супервайзера'}
                                                                                 </div>
                                                                             </div>
                                                                             <button
@@ -10503,47 +10503,74 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                             </button>
                                                                         </div>
                                                                         <div className="mt-1.5 flex flex-wrap gap-1.5">
-                                                                            {hasPriority ? (
+                                                                            {hasPriority && (
                                                                                 <span className="px-2 py-0.5 rounded-md text-[11px] border border-emerald-200 bg-emerald-50 text-emerald-700">
-                                                                                    Приоритетный
-                                                                                </span>
-                                                                            ) : (
-                                                                                <span className="px-2 py-0.5 rounded-md text-[11px] border border-slate-200 bg-slate-100 text-slate-600">
-                                                                                    Обычный
+                                                                                    Приоритет
                                                                                 </span>
                                                                             )}
                                                                             {matchStart && (
                                                                                 <span className="px-2 py-0.5 rounded-md text-[11px] border border-blue-200 bg-blue-50 text-blue-700">
-                                                                                    Конец интервала = старт смены
+                                                                                    Стык: старт
                                                                                 </span>
                                                                             )}
                                                                             {matchEnd && (
                                                                                 <span className="px-2 py-0.5 rounded-md text-[11px] border border-indigo-200 bg-indigo-50 text-indigo-700">
-                                                                                    Начало интервала = конец смены
+                                                                                    Стык: конец
                                                                                 </span>
                                                                             )}
                                                                         </div>
-                                                                        {dayShifts.length > 0 && (
-                                                                            <div className="mt-1.5 text-xs text-slate-600">
-                                                                                Смены на дату: {dayShifts.map(seg => {
-                                                                                    const s = String(seg?.start || '');
-                                                                                    const e = String(seg?.end || '');
-                                                                                    const crossing = (typeof seg?.continuesNextDay === 'boolean')
-                                                                                        ? !!seg?.continuesNextDay
-                                                                                        : (timeToMinutes(e) <= timeToMinutes(s) && e !== '00:00');
-                                                                                    return `${s} — ${e}${crossing ? ' (+1)' : ''}`;
-                                                                                }).join(', ')}
+                                                                        <div className="mt-2 rounded-md border border-slate-200 bg-white p-2">
+                                                                            <div className="text-[11px] font-semibold text-slate-700 mb-1">
+                                                                                Смены кандидата
                                                                             </div>
-                                                                        )}
-                                                                        {nextDayShifts.length > 0 && (
-                                                                            <div className="mt-1 text-xs text-indigo-700">
-                                                                                Таймлайн след. дня{nextDayDate ? ` (${formatDateRuShort(nextDayDate)})` : ''}: {nextDayShifts.map(seg => {
-                                                                                    const s = String(seg?.start || '');
-                                                                                    const e = String(seg?.end || '');
-                                                                                    return `${s} — ${e}`;
-                                                                                }).join(', ')}
+                                                                            <div className="space-y-1.5">
+                                                                                <div className="flex flex-wrap items-center gap-1.5">
+                                                                                    <span className="text-[11px] text-slate-500">
+                                                                                        {swapForm.swapDate ? formatDateRuShort(swapForm.swapDate) : 'Дата'}
+                                                                                    </span>
+                                                                                    {dayShifts.length === 0 ? (
+                                                                                        <span className="px-2 py-0.5 rounded border border-slate-200 bg-slate-50 text-[11px] text-slate-500">
+                                                                                            Нет смен
+                                                                                        </span>
+                                                                                    ) : (
+                                                                                        dayShifts.map((seg, segIdx) => {
+                                                                                            const s = String(seg?.start || '');
+                                                                                            const e = String(seg?.end || '');
+                                                                                            const crossing = (typeof seg?.continuesNextDay === 'boolean')
+                                                                                                ? !!seg?.continuesNextDay
+                                                                                                : (timeToMinutes(e) <= timeToMinutes(s) && e !== '00:00');
+                                                                                            return (
+                                                                                                <span
+                                                                                                    key={`swap-candidate-day-${itemId}-${segIdx}`}
+                                                                                                    className="px-2 py-0.5 rounded border border-blue-200 bg-blue-100 text-[11px] font-semibold text-blue-900 tabular-nums"
+                                                                                                >
+                                                                                                    {s} — {e}{crossing ? ' (+1)' : ''}
+                                                                                                </span>
+                                                                                            );
+                                                                                        })
+                                                                                    )}
+                                                                                </div>
+                                                                                {nextDayShifts.length > 0 && (
+                                                                                    <div className="flex flex-wrap items-center gap-1.5">
+                                                                                        <span className="text-[11px] text-slate-500">
+                                                                                            {nextDayDate ? formatDateRuShort(nextDayDate) : 'След. день'}
+                                                                                        </span>
+                                                                                        {nextDayShifts.map((seg, segIdx) => {
+                                                                                            const s = String(seg?.start || '');
+                                                                                            const e = String(seg?.end || '');
+                                                                                            return (
+                                                                                                <span
+                                                                                                    key={`swap-candidate-next-${itemId}-${segIdx}`}
+                                                                                                    className="px-2 py-0.5 rounded border border-violet-200 bg-violet-100 text-[11px] font-semibold text-violet-900 tabular-nums"
+                                                                                                >
+                                                                                                    {s} — {e}
+                                                                                                </span>
+                                                                                            );
+                                                                                        })}
+                                                                                    </div>
+                                                                                )}
                                                                             </div>
-                                                                        )}
+                                                                        </div>
                                                                     </div>
                                                                 );
                                                             })}
