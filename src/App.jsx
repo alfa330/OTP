@@ -17837,7 +17837,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 window.TrainingModal = TrainingModal;
             }
 
-            const TrainingsView = ({ user, operators }) => {  // operators - список операторов (все для админа, свои для св)
+            const TrainingsView = useMemo(() => {
+                const TrainingsViewComponent = ({ user, operators, showToast, apiBaseUrl }) => {  // operators - список операторов (все для админа, свои для св)
                 // Preserve selected month across remounts — read/write from localStorage
                 const [month, setMonth] = useState(() => {
                     try {
@@ -17896,8 +17897,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                 useEffect(() => {
                     // Получаем тренинги только если операторы загружены
-                    if (!operatorsLoaded) return;
-                    axios.get(`${API_BASE_URL}/api/trainings?month=${month}`, {
+                    if (!operatorsLoaded || !user?.apiKey || !user?.id) return;
+                    axios.get(`${apiBaseUrl}/api/trainings?month=${month}`, {
                         headers: {
                             'X-API-Key': user.apiKey,
                             'X-User-Id': user.id
@@ -17910,7 +17911,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         });
                         setTrainings(grouped);
                     });
-                }, [month, operatorsLoaded]);
+                }, [month, operatorsLoaded, user?.apiKey, user?.id, apiBaseUrl]);
 
                 useEffect(() => {
                     // Группируем операторов по SV (supervisor)
@@ -17949,7 +17950,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 };
 
                 const handleDelete = (trainingId) => {
-                    axios.delete(`${API_BASE_URL}/api/trainings/${trainingId}`, {
+                    axios.delete(`${apiBaseUrl}/api/trainings/${trainingId}`, {
                         headers: {
                             'X-API-Key': user.apiKey,
                             'X-User-Id': user.id
@@ -17957,7 +17958,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     })
                         .then(() => {
                             // Обновляем только тренинги
-                            axios.get(`${API_BASE_URL}/api/trainings?month=${month}`, {
+                            axios.get(`${apiBaseUrl}/api/trainings?month=${month}`, {
                                 headers: {
                                     'X-API-Key': user.apiKey,
                                     'X-User-Id': user.id
@@ -17985,7 +17986,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                 const handleSave = (data) => {
                     const updateTrainings = () => {
-                        axios.get(`${API_BASE_URL}/api/trainings?month=${month}`, {
+                        axios.get(`${apiBaseUrl}/api/trainings?month=${month}`, {
                             headers: {
                                 'X-API-Key': user.apiKey,
                                 'X-User-Id': user.id
@@ -18006,7 +18007,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             });
                     };
                     if (editingTraining) {
-                        axios.put(`${API_BASE_URL}/api/trainings/${editingTraining.id}`, data, {
+                        axios.put(`${apiBaseUrl}/api/trainings/${editingTraining.id}`, data, {
                             headers: {
                                 'X-API-Key': user.apiKey,
                                 'X-User-Id': user.id
@@ -18021,7 +18022,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 showToast('Ошибка при обновлении тренинга','error');
                             });
                     } else {
-                        axios.post(`${API_BASE_URL}/api/trainings`, { ...data, operator_id: currentOperator }, {
+                        axios.post(`${apiBaseUrl}/api/trainings`, { ...data, operator_id: currentOperator }, {
                             headers: {
                                 'X-API-Key': user.apiKey,
                                 'X-User-Id': user.id
@@ -18538,7 +18539,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         )}
                     </div>
                 );
-            };
+                };
+
+                return TrainingsViewComponent;
+            }, []);
             
             // Restore active JWT session on mount
             useEffect(() => {
@@ -23153,7 +23157,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 </div>
                                 )}
                                 {( view === "contests" && (<ContestsApp user={user} operators={users} directions={directions} />))}
-                                {( view === "trainings" && (<TrainingsView user={user} operators={users} />))}
+                                {( view === "trainings" && (<TrainingsView user={user} operators={users} showToast={showToast} apiBaseUrl={API_BASE_URL} />))}
                                 {( view === "tasks" && (<TasksView user={user} showToast={showToast} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} />))}
                                 {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
                                 {( view === "call_division" && (<AdminCallsUploadView user={user}/>))}
@@ -23888,7 +23892,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     )}
                                 </div>
                                 )} 
-                                {( view === "trainings" && (<TrainingsView user={user} operators={users} />))}
+                                {( view === "trainings" && (<TrainingsView user={user} operators={users} showToast={showToast} apiBaseUrl={API_BASE_URL} />))}
                                 {( view === "contests" && (<ContestsApp user={user} operators={users} directions={directions} />))}
                                 {( view === "tasks" && (<TasksView user={user} showToast={showToast} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} />))}
                                 {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
@@ -24060,7 +24064,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     )}
                                   </div>
                                 )} 
-                                {( view === "trainings" && (<TrainingsView user={user} operators={users} />))}
+                                {( view === "trainings" && (<TrainingsView user={user} operators={users} showToast={showToast} apiBaseUrl={API_BASE_URL} />))}
                                 {(view === 'hours' || view === 'evaluation') && (
                                   <div className="mb-6">
                                     <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
