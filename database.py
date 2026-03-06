@@ -3051,6 +3051,53 @@ class Database:
             
             return updated
 
+    def promote_operator_to_supervisor(self, user_id, changed_by=None):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id, name, role, supervisor_id
+                FROM users
+                WHERE id = %s
+                FOR UPDATE
+            """, (user_id,))
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError("User not found")
+
+            target_id, target_name, current_role, current_supervisor_id = row
+            role_value = str(current_role or '').lower()
+
+            if role_value == 'sv':
+                raise ValueError("User is already a supervisor")
+            if role_value != 'operator':
+                raise ValueError("Only operators can be promoted to supervisor")
+
+            cursor.execute("""
+                UPDATE users
+                SET role = 'sv',
+                    supervisor_id = NULL
+                WHERE id = %s
+                RETURNING id, name
+            """, (target_id,))
+            updated = cursor.fetchone()
+            if not updated:
+                raise ValueError("Failed to promote user")
+
+            cursor.execute("""
+                INSERT INTO user_history (user_id, changed_by, field_changed, old_value, new_value)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (target_id, changed_by, 'role', role_value, 'sv'))
+
+            if current_supervisor_id is not None:
+                cursor.execute("""
+                    INSERT INTO user_history (user_id, changed_by, field_changed, old_value, new_value)
+                    VALUES (%s, %s, %s, %s, %s)
+                """, (target_id, changed_by, 'supervisor_id', str(current_supervisor_id), None))
+
+            return {
+                "id": int(updated[0]),
+                "name": updated[1] or target_name
+            }
+
     def get_user_avatar_storage(self, user_id):
         with self._get_cursor() as cursor:
             cursor.execute("""
