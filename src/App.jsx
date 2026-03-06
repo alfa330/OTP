@@ -7905,6 +7905,77 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const modalBreaksForEditor = Array.isArray(modalBreakEditorContext?.breaksLocal)
                 ? modalBreakEditorContext.breaksLocal
                 : [];
+            const modalBreakConflictState = useMemo(() => {
+                const conflictIndexes = new Set();
+                const reasonByIndex = new Map();
+                let overlapsWithDirection = 0;
+                let overlapsInsideShift = 0;
+
+                const putReason = (idx, reason) => {
+                    if (!Number.isInteger(idx) || !reason) return;
+                    const prev = reasonByIndex.get(idx);
+                    reasonByIndex.set(idx, prev ? `${prev}; ${reason}` : reason);
+                };
+
+                const breaksNormalized = (Array.isArray(modalBreaksForEditor) ? modalBreaksForEditor : [])
+                    .map((b, idx) => ({
+                        idx,
+                        start: Number(b?.start),
+                        end: Number(b?.end)
+                    }))
+                    .filter(b => Number.isFinite(b.start) && Number.isFinite(b.end) && b.end > b.start);
+
+                if (breaksNormalized.length === 0) {
+                    return {
+                        hasConflict: false,
+                        conflictIndexes,
+                        reasonByIndex,
+                        overlapsWithDirection,
+                        overlapsInsideShift
+                    };
+                }
+
+                const op = operators.find(o => o.id === modalState?.opId);
+                const occupiedByDirection = (modalState?.opId && modalState?.date && op)
+                    ? buildOccupiedIntervalsForDate(
+                        operators,
+                        modalState.date,
+                        modalState.opId,
+                        op?.direction,
+                        getBreakConflictDirectionScopeKey
+                    )
+                    : [];
+
+                breaksNormalized.forEach(b => {
+                    const hasDirectionOverlap = (occupiedByDirection || []).some(occ => intervalsOverlap(b, occ));
+                    if (hasDirectionOverlap) {
+                        conflictIndexes.add(b.idx);
+                        overlapsWithDirection += 1;
+                        putReason(b.idx, 'пересечение с перерывами этого направления');
+                    }
+                });
+
+                for (let i = 0; i < breaksNormalized.length; i++) {
+                    for (let j = i + 1; j < breaksNormalized.length; j++) {
+                        const a = breaksNormalized[i];
+                        const b = breaksNormalized[j];
+                        if (!intervalsOverlap(a, b)) continue;
+                        conflictIndexes.add(a.idx);
+                        conflictIndexes.add(b.idx);
+                        overlapsInsideShift += 1;
+                        putReason(a.idx, 'пересечение с другим перерывом этой смены');
+                        putReason(b.idx, 'пересечение с другим перерывом этой смены');
+                    }
+                }
+
+                return {
+                    hasConflict: conflictIndexes.size > 0,
+                    conflictIndexes,
+                    reasonByIndex,
+                    overlapsWithDirection,
+                    overlapsInsideShift
+                };
+            }, [modalBreaksForEditor, operators, modalState?.opId, modalState?.date, getBreakConflictDirectionScopeKey]);
 
             const modalBulkTargets = Array.isArray(modalState?.multipleTargets) ? modalState.multipleTargets : [];
             const modalBulkCount = modalBulkTargets.length > 0
@@ -12322,11 +12393,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             const bEnd = b.end - segStartMin;
                             const leftPercent = (bStart / segDur) * 100;
                             const widthPercent = ((bEnd - bStart) / segDur) * 100;
+                            const hasConflict = modalBreakConflictState.conflictIndexes.has(i);
+                            const conflictReason = modalBreakConflictState.reasonByIndex.get(i);
                             return (
                                 <div key={i}
-                                className="absolute top-1/2 transform -translate-y-1/2 h-4 rounded bg-amber-300 border border-amber-500 cursor-grab"
+                                className={`absolute top-1/2 transform -translate-y-1/2 h-4 rounded cursor-grab ${hasConflict ? 'bg-rose-300 border border-rose-600' : 'bg-amber-300 border border-amber-500'}`}
                                 style={{ left: `calc(${leftPercent}% + 16px)`, width: `calc(${widthPercent}% - 0px)` }}
                                 draggable
+                                title={hasConflict ? `${getBreakTimelineTitle(b)} • Конфликт: ${conflictReason || 'есть пересечение'}` : getBreakTimelineTitle(b)}
                                 onDragStart={(e) => {
                                     dragState.current = { index: i, segStartMin, segEndMin, segDur };
                                 }}
@@ -12355,7 +12429,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                         <div className="mt-2 flex gap-2 flex-wrap">
                         {modalBreaksForEditor.map((b, i) => (
-                            <div key={i} className="flex items-center gap-2">
+                            <div key={i} className={`flex items-center gap-2 ${modalBreakConflictState.conflictIndexes.has(i) ? 'px-2 py-1 rounded-md border border-rose-200 bg-rose-50' : ''}`}>
                             <input type="time" step="300" value={minutesToTime(b.start % 1440)} onChange={(e) => {
                                 const raw = timeToMinutes(e.target.value); const val = Math.round(raw/5)*5;
                                 setModalState(m => {
@@ -12377,6 +12451,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     return { ...m, breaks: nb };
                                 });
                             }} className="p-1 border rounded text-sm" />
+                            {modalBreakConflictState.conflictIndexes.has(i) && (
+                                <span className="text-[11px] text-rose-700">
+                                    Пересечение
+                                </span>
+                            )}
                             </div>
                         ))}
 
@@ -12392,6 +12471,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 </button>
                             );
                         })()}
+                        {modalBreakConflictState.hasConflict && (
+                            <div className="w-full mt-1 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-[11px] text-rose-800">
+                                <div className="font-semibold">Есть пересечения перерывов</div>
+                                <div>
+                                    {modalBreakConflictState.overlapsInsideShift > 0 ? `Внутри смены: ${modalBreakConflictState.overlapsInsideShift}. ` : ''}
+                                    {modalBreakConflictState.overlapsWithDirection > 0 ? `С перерывами направления: ${modalBreakConflictState.overlapsWithDirection}.` : ''}
+                                </div>
+                            </div>
+                        )}
                         </div>
                     </div>
                     </div>
