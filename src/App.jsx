@@ -9285,6 +9285,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const mins = Math.max(0, Math.round(Number(minutesValue) || 0));
                 return `${mins} мин`;
             };
+            const getBreakTimelineTitle = (breakPart) => {
+                const start = Number(breakPart?.start);
+                const end = Number(breakPart?.end);
+                if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return 'Перерыв';
+                return `Перерыв • ${formatBreakMinuteWithDay(start)} — ${formatBreakMinuteWithDay(end)} • ${formatMinutesOnly(end - start)}`;
+            };
             const breakReminderCandidates = useMemo(() => {
                 const result = [];
                 const reminderSource = myLiveScheduleData || myScheduleData;
@@ -9775,6 +9781,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                                 left: `${((b.start - p.start) / Math.max(1, p.end - p.start)) * 100}%`,
                                                                                                 width: `${((b.end - b.start) / Math.max(1, p.end - p.start)) * 100}%`
                                                                                             }}
+                                                                                            title={getBreakTimelineTitle(b)}
                                                                                         />
                                                                                     ))}
                                                                                 </div>
@@ -11643,7 +11650,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                             width: `${((b.end - b.start) / minutesInDay) * 100}%`,
                                                                                             background: "linear-gradient(90deg,#fde68a,#f59e0b)"
                                                                                         }}
-                                                                                        title={`Перерыв • ${minutesToTime(b.start)} — ${minutesToTime(b.end)}`}
+                                                                                        title={getBreakTimelineTitle(b)}
                                                                                     />
                                                                                 ))}
                                                                             </React.Fragment>
@@ -11772,6 +11779,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 color: "#5c3a00",
                                                                 fontWeight: 600,
                                                                 }}
+                                                                title={getBreakTimelineTitle(b)}
                                                             />
                                                             ))}
                                                         </div>
@@ -12725,7 +12733,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 left: `${computeLeftPercent(b.start)}%`,
                                                                 width: `${((b.end - b.start) / minutesInDay) * 100}%`
                                                             }}
-                                                            title={`Перерыв • ${minutesToTime(b.start)} — ${minutesToTime(b.end)}`}
+                                                            title={getBreakTimelineTitle(b)}
                                                         />
                                                     ))}
                                                     {previewLateBars.map((late, lateIdx) => (
@@ -13738,7 +13746,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                                             left: `${computeLeftPercent(b.start)}%`,
                                                                                                             width: `${((b.end - b.start) / minutesInDay) * 100}%`
                                                                                                         }}
-                                                                                                        title={`Перерыв • ${minutesToTime(b.start)} — ${minutesToTime(b.end)}`}
+                                                                                                        title={getBreakTimelineTitle(b)}
                                                                                                     />
                                                                                                 ))}
                                                                                                 {shiftLateBars.map((late, lateIdx) => (
