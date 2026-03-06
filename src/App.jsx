@@ -7901,6 +7901,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                 return { seg, segStartMin, segEndMin, segDur, breaksLocal };
             };
+            const modalBreakEditorContext = getModalBreakEditorContext();
+            const modalBreaksForEditor = Array.isArray(modalBreakEditorContext?.breaksLocal)
+                ? modalBreakEditorContext.breaksLocal
+                : [];
 
             const modalBulkTargets = Array.isArray(modalState?.multipleTargets) ? modalState.multipleTargets : [];
             const modalBulkCount = modalBulkTargets.length > 0
@@ -12310,7 +12314,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             <div className="h-3 bg-slate-200 mx-2 rounded w-full" />
                         </div>
                         {(() => {
-                            const ctx = getModalBreakEditorContext();
+                            const ctx = modalBreakEditorContext;
                             if (!ctx) return null;
                             const { segStartMin, segEndMin, segDur, breaksLocal } = ctx;
                             return breaksLocal.map((b, i) => {
@@ -12350,23 +12354,35 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         </div>
 
                         <div className="mt-2 flex gap-2 flex-wrap">
-                        {(modalState.breaks && modalState.breaks.length ? modalState.breaks : []).map((b, i) => (
+                        {modalBreaksForEditor.map((b, i) => (
                             <div key={i} className="flex items-center gap-2">
                             <input type="time" step="300" value={minutesToTime(b.start % 1440)} onChange={(e) => {
                                 const raw = timeToMinutes(e.target.value); const val = Math.round(raw/5)*5;
-                                setModalState(m => { const nb = (m.breaks ?? []).map(x => ({ ...x })); nb[i] = { start: val + Math.floor((b.start/1440))*1440, end: val + Math.floor((b.end/1440))*1440 + (b.end - b.start) }; return { ...m, breaks: nb }; });
+                                setModalState(m => {
+                                    const source = (m.breaks && m.breaks.length) ? m.breaks : modalBreaksForEditor;
+                                    const nb = source.map(x => ({ ...x }));
+                                    if (!nb[i]) return m;
+                                    nb[i] = { start: val + Math.floor((b.start/1440))*1440, end: val + Math.floor((b.end/1440))*1440 + (b.end - b.start) };
+                                    return { ...m, breaks: nb };
+                                });
                             }} className="p-1 border rounded text-sm" />
                             <span className="text-xs">—</span>
                             <input type="time" step="300" value={minutesToTime(b.end % 1440)} onChange={(e) => {
                                 const val = timeToMinutes(e.target.value);
-                                setModalState(m => { const nb = (m.breaks ?? []).map(x => ({ ...x })); nb[i] = { start: nb[i].start, end: val + Math.floor((b.end/1440))*1440 }; return { ...m, breaks: nb }; });
+                                setModalState(m => {
+                                    const source = (m.breaks && m.breaks.length) ? m.breaks : modalBreaksForEditor;
+                                    const nb = source.map(x => ({ ...x }));
+                                    if (!nb[i]) return m;
+                                    nb[i] = { start: nb[i].start, end: val + Math.floor((b.end/1440))*1440 };
+                                    return { ...m, breaks: nb };
+                                });
                             }} className="p-1 border rounded text-sm" />
                             </div>
                         ))}
 
-                        {(!modalState.breaks || modalState.breaks.length === 0) && (() => {
-                            const ctx = getModalBreakEditorContext();
-                            if (!ctx) return null;
+                        {(modalBreaksForEditor.length === 0) && (() => {
+                            const ctx = modalBreakEditorContext;
+                            if (!ctx || !Array.isArray(ctx.breaksLocal)) return null;
                             return (
                                 <button
                                     className="px-2 py-1 rounded bg-sky-600 text-white text-sm"
