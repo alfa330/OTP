@@ -17897,12 +17897,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                 useEffect(() => {
                     // Получаем тренинги только если операторы загружены
-                    if (!operatorsLoaded || !user?.apiKey || !user?.id) return;
+                    if (!operatorsLoaded || !user?.id) return;
                     axios.get(`${apiBaseUrl}/api/trainings?month=${month}`, {
-                        headers: {
-                            'X-API-Key': user.apiKey,
-                            'X-User-Id': user.id
-                        }
+                        headers: withAccessTokenHeader({ 'X-User-Id': user.id })
                     }).then(res => {
                         const grouped = {};
                         (res.data.trainings || []).forEach(t => {
@@ -17911,7 +17908,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         });
                         setTrainings(grouped);
                     });
-                }, [month, operatorsLoaded, user?.apiKey, user?.id, apiBaseUrl]);
+                }, [month, operatorsLoaded, user?.id, apiBaseUrl]);
 
                 useEffect(() => {
                     // Группируем операторов по SV (supervisor)
@@ -17951,18 +17948,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                 const handleDelete = (trainingId) => {
                     axios.delete(`${apiBaseUrl}/api/trainings/${trainingId}`, {
-                        headers: {
-                            'X-API-Key': user.apiKey,
-                            'X-User-Id': user.id
-                        }
+                        headers: withAccessTokenHeader({ 'X-User-Id': user.id })
                     })
                         .then(() => {
                             // Обновляем только тренинги
                             axios.get(`${apiBaseUrl}/api/trainings?month=${month}`, {
-                                headers: {
-                                    'X-API-Key': user.apiKey,
-                                    'X-User-Id': user.id
-                                }
+                                headers: withAccessTokenHeader({ 'X-User-Id': user.id })
                             })
                                 .then(res => {
                                     const grouped = {};
@@ -17987,10 +17978,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const handleSave = (data) => {
                     const updateTrainings = () => {
                         axios.get(`${apiBaseUrl}/api/trainings?month=${month}`, {
-                            headers: {
-                                'X-API-Key': user.apiKey,
-                                'X-User-Id': user.id
-                            }
+                            headers: withAccessTokenHeader({ 'X-User-Id': user.id })
                         })
                             .then(res => {
                                 const grouped = {};
@@ -18008,10 +17996,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     };
                     if (editingTraining) {
                         axios.put(`${apiBaseUrl}/api/trainings/${editingTraining.id}`, data, {
-                            headers: {
-                                'X-API-Key': user.apiKey,
-                                'X-User-Id': user.id
-                            }
+                            headers: withAccessTokenHeader({ 'X-User-Id': user.id })
                         })
                             .then(() => {
                                 updateTrainings();
@@ -18023,10 +18008,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             });
                     } else {
                         axios.post(`${apiBaseUrl}/api/trainings`, { ...data, operator_id: currentOperator }, {
-                            headers: {
-                                'X-API-Key': user.apiKey,
-                                'X-User-Id': user.id
-                            }
+                            headers: withAccessTokenHeader({ 'X-User-Id': user.id })
                         })
                             .then(() => {
                                 updateTrainings();
