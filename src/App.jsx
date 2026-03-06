@@ -17183,6 +17183,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 rate: ''
             });
             const [isBulkManageUsersSaving, setIsBulkManageUsersSaving] = useState(false);
+            const [promotingUserId, setPromotingUserId] = useState(null);
             const [showSidebarAccountDropdown, setShowSidebarAccountDropdown] = useState(false);
             const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
             const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -20413,6 +20414,61 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setLoadingHistoryId(null);
                 }
             };
+
+            const promoteUserToSupervisor = useCallback(async (targetUser) => {
+                const targetUserId = Number(targetUser?.id);
+                if (!Number.isFinite(targetUserId)) {
+                    showToast('Некорректный сотрудник', 'error');
+                    return;
+                }
+
+                if (!user || user.role !== 'admin') {
+                    showToast('Только администратор может повышать сотрудников', 'error');
+                    return;
+                }
+
+                const targetUserName = String(targetUser?.name || `#${targetUserId}`).trim();
+                const confirmed = window.confirm(`Повысить "${targetUserName}" до супервайзера?`);
+                if (!confirmed) return;
+
+                setPromotingUserId(targetUserId);
+                try {
+                    const response = await axios.post(
+                        `${API_BASE_URL}/api/admin/promote_to_supervisor`,
+                        { user_id: targetUserId },
+                        {
+                            headers: withAccessTokenHeader({
+                                'X-API-Key': user.apiKey,
+                                'X-User-Id': user.id
+                            })
+                        }
+                    );
+                    const data = response?.data || {};
+                    if (data.status !== 'success') {
+                        showToast(data.error || 'Не удалось повысить сотрудника', 'error');
+                        return;
+                    }
+
+                    showToast(`"${targetUserName}" повышен до супервайзера`, 'success');
+                    await fetchUsers();
+                    try {
+                        const svResponse = await axios.get(`${API_BASE_URL}/api/admin/sv_list`, {
+                            headers: withAccessTokenHeader({ 'X-API-Key': user.apiKey })
+                        });
+                        const svDataPayload = svResponse?.data || {};
+                        if (svDataPayload.status === 'success' && isMounted.current) {
+                            setSvList(svDataPayload.sv_list || []);
+                        }
+                    } catch (svErr) {
+                        console.error('Refresh SV list after promote error:', svErr);
+                    }
+                } catch (err) {
+                    console.error('Promote user to supervisor error:', err);
+                    showToast(err.response?.data?.error || 'Не удалось повысить сотрудника', 'error');
+                } finally {
+                    if (isMounted.current) setPromotingUserId(null);
+                }
+            }, [API_BASE_URL, fetchUsers, showToast, user]);
             
             const handleLogin = async () => {
                 if (!login.trim() || !password.trim()) {
@@ -22987,7 +23043,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             </button>
 
                                                             {openMenuId === u.id && (
-                                                                <div className="absolute right-0 mt-2 w-40 bg-white border rounded-lg shadow-lg z-50">
+                                                                <div className="absolute right-0 mt-2 w-52 bg-white border rounded-lg shadow-lg z-50">
                                                                 <button
                                                                     onClick={() => {
                                                                     setUserToEdit(u);
@@ -22997,6 +23053,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     className="block w-full text-left px-4 py-2 hover:bg-gray-100"
                                                                 >
                                                                     <FaIcon className="fas fa-edit mr-2"></FaIcon>Править
+                                                                </button>
+                                                                <button
+                                                                    onClick={() => {
+                                                                    setOpenMenuId(null);
+                                                                    promoteUserToSupervisor(u);
+                                                                    }}
+                                                                    disabled={promotingUserId === Number(u.id)}
+                                                                    className="block w-full text-left px-4 py-2 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
+                                                                >
+                                                                    {promotingUserId === Number(u.id) ? (
+                                                                    <>
+                                                                        <FaIcon className="fas fa-spinner fa-spin mr-2"></FaIcon>
+                                                                        Повышение...
+                                                                    </>
+                                                                    ) : (
+                                                                    <>
+                                                                        <FaIcon className="fas fa-user-shield mr-2"></FaIcon>
+                                                                        В супервайзеры
+                                                                    </>
+                                                                    )}
                                                                 </button>
                                                                 <button
                                                                     onClick={() => {

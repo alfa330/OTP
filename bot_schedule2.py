@@ -2001,6 +2001,52 @@ def admin_bulk_update_users():
     except Exception as e:
         logging.error(f"Error bulk updating users: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+@app.route('/api/admin/promote_to_supervisor', methods=['POST'])
+@require_api_key
+def admin_promote_to_supervisor():
+    try:
+        data = request.get_json() or {}
+        user_id_raw = data.get('user_id')
+        if user_id_raw in [None, '']:
+            return jsonify({"error": "Missing user_id"}), 400
+
+        try:
+            target_user_id = int(user_id_raw)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid user_id"}), 400
+
+        requester_id_raw = request.headers.get('X-User-Id')
+        if requester_id_raw in [None, '']:
+            return jsonify({"error": "Missing X-User-Id header"}), 400
+
+        try:
+            requester_id = int(requester_id_raw)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid X-User-Id header"}), 400
+
+        requester = db.get_user(id=requester_id)
+        if not requester or requester[3] != 'admin':
+            return jsonify({"error": "Only admins can promote users"}), 403
+
+        promoted_user = db.promote_operator_to_supervisor(target_user_id, changed_by=requester_id)
+        return jsonify({
+            "status": "success",
+            "message": "User promoted to supervisor",
+            "user": promoted_user
+        }), 200
+    except ValueError as e:
+        error_message = str(e)
+        if error_message == "User not found":
+            return jsonify({"error": error_message}), 404
+        if error_message in ("User is already a supervisor", "Only operators can be promoted to supervisor"):
+            return jsonify({"error": error_message}), 400
+        return jsonify({"error": error_message}), 400
+    except Exception as e:
+        if 'unique_name_role' in str(e):
+            return jsonify({"error": "Cannot promote user: a supervisor with this name already exists"}), 409
+        logging.error(f"Error promoting user to supervisor: {e}", exc_info=True)
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
     
 @app.route('/api/user/history', methods=['GET'])
 @require_api_key
