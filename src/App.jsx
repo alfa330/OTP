@@ -17237,9 +17237,30 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         return { label: normalized || 'Не указан', className: 'border border-gray-400 text-gray-700 bg-gray-50' };
                 }
             };
-            const renderEmployeeStatusBadge = (status) => {
+            const isEmployeeBlacklistDismissal = (employee) => {
+                if (!employee || typeof employee !== 'object') return false;
+                const statusKey = getEmployeeStatusFilterKey(employee.status);
+                if (statusKey !== 'fired') return false;
+                return !!(
+                    employee.status_period_is_blacklist ??
+                    employee.statusPeriodIsBlacklist ??
+                    employee.is_blacklist ??
+                    employee.isBlacklist
+                );
+            };
+            const renderEmployeeStatusBadge = (status, employee = null) => {
                 const meta = getEmployeeStatusBadgeMeta(status);
-                return <span className={`${meta.className} px-2 py-1 rounded text-sm whitespace-nowrap`}>{meta.label}</span>;
+                const isBlacklistDismissal = isEmployeeBlacklistDismissal(employee);
+                return (
+                    <span className="inline-flex items-center gap-1">
+                        <span className={`${meta.className} px-2 py-1 rounded text-sm whitespace-nowrap`}>{meta.label}</span>
+                        {isBlacklistDismissal && (
+                            <span className="px-2 py-1 rounded text-xs font-semibold border border-gray-700 text-gray-700 bg-gray-100 whitespace-nowrap">
+                                ЧС
+                            </span>
+                        )}
+                    </span>
+                );
             };
             //SORTING
             const [sortField, setSortField] = useState('name'); // primary sort field
@@ -22934,7 +22955,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         </td>
                                                         <td className="px-6 py-4">{u.direction || "-"}</td>
                                                         <td className="px-6 py-4">
-                                                            {renderEmployeeStatusBadge(u.status)}
+                                                            {renderEmployeeStatusBadge(u.status, u)}
                                                         </td>
                                                         <td className="px-6 py-4">
                                                             {u.hire_date
@@ -23462,7 +23483,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             </td>
 
                                                             <td className="px-6 py-4 text-left">
-                                                            {renderEmployeeStatusBadge(op.status)}
+                                                            {renderEmployeeStatusBadge(op.status, op)}
                                                             </td>
 
                                                             <td className="px-6 py-4 text-left">

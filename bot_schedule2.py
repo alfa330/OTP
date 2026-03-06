@@ -3344,6 +3344,12 @@ def get_sv_data():
                 avatar_url = op.get("avatar_url")
                 avatar_bucket = op.get("avatar_bucket")
                 avatar_blob_path = op.get("avatar_blob_path")
+                status_period_status_code = op.get("status_period_status_code")
+                status_period_start_date = op.get("status_period_start_date")
+                status_period_end_date = op.get("status_period_end_date")
+                status_period_dismissal_reason = op.get("status_period_dismissal_reason")
+                status_period_is_blacklist = op.get("status_period_is_blacklist")
+                status_period_comment = op.get("status_period_comment")
             else:
                 operator_id = op[0] if len(op) > 0 else None
                 operator_name = op[1] if len(op) > 1 else None
@@ -3358,6 +3364,12 @@ def get_sv_data():
                 avatar_url = None
                 avatar_bucket = op[11] if len(op) > 11 else None
                 avatar_blob_path = op[12] if len(op) > 12 else None
+                status_period_status_code = None
+                status_period_start_date = None
+                status_period_end_date = None
+                status_period_dismissal_reason = ""
+                status_period_is_blacklist = False
+                status_period_comment = ""
 
             # skip invalid rows
             if not operator_id:
@@ -3400,7 +3412,13 @@ def get_sv_data():
                 "status": status,
                 "rate": rate_val,
                 "gender": gender,
-                "avatar_url": avatar_url or _build_avatar_signed_url(avatar_bucket, avatar_blob_path)
+                "avatar_url": avatar_url or _build_avatar_signed_url(avatar_bucket, avatar_blob_path),
+                "status_period_status_code": status_period_status_code,
+                "status_period_start_date": status_period_start_date,
+                "status_period_end_date": status_period_end_date,
+                "status_period_dismissal_reason": status_period_dismissal_reason or "",
+                "status_period_is_blacklist": bool(status_period_is_blacklist),
+                "status_period_comment": status_period_comment or ""
             })
 
         return jsonify(response_data), 200
