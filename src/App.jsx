@@ -7908,13 +7908,28 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const modalBreakConflictState = useMemo(() => {
                 const conflictIndexes = new Set();
                 const reasonByIndex = new Map();
+                const detailsByIndex = new Map();
                 let overlapsWithDirection = 0;
                 let overlapsInsideShift = 0;
+                const formatMinuteForConflict = (minuteValue) => {
+                    const val = Number(minuteValue);
+                    if (!Number.isFinite(val)) return '—';
+                    const dayOffset = Math.floor(val / 1440);
+                    const base = minutesToTime(val % 1440);
+                    return dayOffset > 0 ? `${base} (+${dayOffset})` : base;
+                };
 
                 const putReason = (idx, reason) => {
                     if (!Number.isInteger(idx) || !reason) return;
                     const prev = reasonByIndex.get(idx);
                     reasonByIndex.set(idx, prev ? `${prev}; ${reason}` : reason);
+                };
+                const putDetail = (idx, detail) => {
+                    if (!Number.isInteger(idx) || !detail || !detail.key) return;
+                    const current = detailsByIndex.get(idx) || [];
+                    if (!current.some(item => item.key === detail.key)) {
+                        detailsByIndex.set(idx, [...current, detail]);
+                    }
                 };
 
                 const breaksNormalized = (Array.isArray(modalBreaksForEditor) ? modalBreaksForEditor : [])
@@ -7930,28 +7945,62 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         hasConflict: false,
                         conflictIndexes,
                         reasonByIndex,
+                        detailsByIndex,
                         overlapsWithDirection,
-                        overlapsInsideShift
+                        overlapsInsideShift,
+                        conflictsForDisplay: []
                     };
                 }
 
                 const op = operators.find(o => o.id === modalState?.opId);
-                const occupiedByDirection = (modalState?.opId && modalState?.date && op)
-                    ? buildOccupiedIntervalsForDate(
-                        operators,
-                        modalState.date,
-                        modalState.opId,
-                        op?.direction,
-                        getBreakConflictDirectionScopeKey
-                    )
-                    : [];
+                const occupiedByDirectionDetailed = [];
+                if (modalState?.opId && modalState?.date && op) {
+                    const scopeKey = getBreakConflictDirectionScopeKey(op?.direction);
+                    const seenDetailed = new Set();
+                    (operators || []).forEach(otherOp => {
+                        if (!otherOp || otherOp.id === modalState.opId) return;
+                        if (getBreakConflictDirectionScopeKey(otherOp?.direction) !== scopeKey) return;
+                        const parts = getShiftPartsForDate(otherOp, modalState.date) || [];
+                        parts.forEach((p) => {
+                            const srcSeg = otherOp.shifts?.[p.sourceDate]?.[p.sourceIndex];
+                            const shiftLabel = srcSeg
+                                ? `${srcSeg.start} — ${srcSeg.end}${(timeToMinutes(srcSeg.end) <= timeToMinutes(srcSeg.start) && srcSeg.end !== '00:00') ? ' (+1)' : ''}`
+                                : `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`;
+                            const breakParts = getBreakPartsForPart(otherOp, p, modalState.date) || [];
+                            breakParts.forEach((bPart, breakIndex) => {
+                                const start = Number(bPart?.start);
+                                const end = Number(bPart?.end);
+                                if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return;
+                                const key = `${otherOp.id}|${p.sourceDate}|${p.sourceIndex}|${breakIndex}|${start}|${end}`;
+                                if (seenDetailed.has(key)) return;
+                                seenDetailed.add(key);
+                                occupiedByDirectionDetailed.push({
+                                    key,
+                                    start,
+                                    end,
+                                    operatorName: otherOp.name || `Оператор ${otherOp.id}`,
+                                    shiftLabel
+                                });
+                            });
+                        });
+                    });
+                }
 
                 breaksNormalized.forEach(b => {
-                    const hasDirectionOverlap = (occupiedByDirection || []).some(occ => intervalsOverlap(b, occ));
-                    if (hasDirectionOverlap) {
+                    const overlapDetails = occupiedByDirectionDetailed.filter(occ => intervalsOverlap(b, occ));
+                    if (overlapDetails.length > 0) {
                         conflictIndexes.add(b.idx);
                         overlapsWithDirection += 1;
-                        putReason(b.idx, 'пересечение с перерывами этого направления');
+                        const uniqueNames = Array.from(new Set(overlapDetails.map(item => item.operatorName))).filter(Boolean);
+                        const namesPreview = uniqueNames.slice(0, 2).join(', ');
+                        const namesTail = uniqueNames.length > 2 ? ` +${uniqueNames.length - 2}` : '';
+                        putReason(b.idx, `пересечение с: ${namesPreview}${namesTail}`);
+                        overlapDetails.forEach(item => {
+                            putDetail(b.idx, {
+                                key: `dir:${item.key}`,
+                                text: `${item.operatorName} • ${formatMinuteForConflict(item.start)} — ${formatMinuteForConflict(item.end)} • смена ${item.shiftLabel}`
+                            });
+                        });
                     }
                 });
 
@@ -7963,17 +8012,36 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         conflictIndexes.add(a.idx);
                         conflictIndexes.add(b.idx);
                         overlapsInsideShift += 1;
-                        putReason(a.idx, 'пересечение с другим перерывом этой смены');
-                        putReason(b.idx, 'пересечение с другим перерывом этой смены');
+                        putReason(a.idx, `пересечение с вашим перерывом ${formatMinuteForConflict(b.start)} — ${formatMinuteForConflict(b.end)}`);
+                        putReason(b.idx, `пересечение с вашим перерывом ${formatMinuteForConflict(a.start)} — ${formatMinuteForConflict(a.end)}`);
+                        putDetail(a.idx, {
+                            key: `self:${a.idx}:${b.idx}`,
+                            text: `Ваш перерыв • ${formatMinuteForConflict(b.start)} — ${formatMinuteForConflict(b.end)}`
+                        });
+                        putDetail(b.idx, {
+                            key: `self:${b.idx}:${a.idx}`,
+                            text: `Ваш перерыв • ${formatMinuteForConflict(a.start)} — ${formatMinuteForConflict(a.end)}`
+                        });
                     }
                 }
+
+                const conflictsForDisplay = breaksNormalized
+                    .filter(item => conflictIndexes.has(item.idx))
+                    .map(item => ({
+                        idx: item.idx,
+                        start: item.start,
+                        end: item.end,
+                        details: detailsByIndex.get(item.idx) || []
+                    }));
 
                 return {
                     hasConflict: conflictIndexes.size > 0,
                     conflictIndexes,
                     reasonByIndex,
+                    detailsByIndex,
                     overlapsWithDirection,
-                    overlapsInsideShift
+                    overlapsInsideShift,
+                    conflictsForDisplay
                 };
             }, [modalBreaksForEditor, operators, modalState?.opId, modalState?.date, getBreakConflictDirectionScopeKey]);
 
@@ -12395,12 +12463,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             const widthPercent = ((bEnd - bStart) / segDur) * 100;
                             const hasConflict = modalBreakConflictState.conflictIndexes.has(i);
                             const conflictReason = modalBreakConflictState.reasonByIndex.get(i);
+                            const conflictDetails = modalBreakConflictState.detailsByIndex.get(i) || [];
+                            const conflictDetailsPreview = conflictDetails.slice(0, 2).map(item => item.text).join(' | ');
+                            const conflictDetailsTail = conflictDetails.length > 2 ? ` | +${conflictDetails.length - 2}` : '';
                             return (
                                 <div key={i}
                                 className={`absolute top-1/2 transform -translate-y-1/2 h-4 rounded cursor-grab ${hasConflict ? 'bg-rose-300 border border-rose-600' : 'bg-amber-300 border border-amber-500'}`}
                                 style={{ left: `calc(${leftPercent}% + 16px)`, width: `calc(${widthPercent}% - 0px)` }}
                                 draggable
-                                title={hasConflict ? `${getBreakTimelineTitle(b)} • Конфликт: ${conflictReason || 'есть пересечение'}` : getBreakTimelineTitle(b)}
+                                title={hasConflict
+                                    ? `${getBreakTimelineTitle(b)} • Конфликт: ${conflictReason || 'есть пересечение'}${conflictDetailsPreview ? ` • ${conflictDetailsPreview}${conflictDetailsTail}` : ''}`
+                                    : getBreakTimelineTitle(b)}
                                 onDragStart={(e) => {
                                     dragState.current = { index: i, segStartMin, segEndMin, segDur };
                                 }}
@@ -12452,7 +12525,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 });
                             }} className="p-1 border rounded text-sm" />
                             {modalBreakConflictState.conflictIndexes.has(i) && (
-                                <span className="text-[11px] text-rose-700">
+                                <span
+                                    className="text-[11px] text-rose-700"
+                                    title={(modalBreakConflictState.detailsByIndex.get(i) || []).map(item => item.text).join('\n') || undefined}
+                                >
                                     Пересечение
                                 </span>
                             )}
@@ -12478,6 +12554,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     {modalBreakConflictState.overlapsInsideShift > 0 ? `Внутри смены: ${modalBreakConflictState.overlapsInsideShift}. ` : ''}
                                     {modalBreakConflictState.overlapsWithDirection > 0 ? `С перерывами направления: ${modalBreakConflictState.overlapsWithDirection}.` : ''}
                                 </div>
+                                {modalBreakConflictState.conflictsForDisplay.length > 0 && (
+                                    <div className="mt-1 space-y-1">
+                                        {modalBreakConflictState.conflictsForDisplay.map(item => {
+                                            const detailPreview = (item.details || []).slice(0, 3).map(d => d.text).join('; ');
+                                            const detailTail = (item.details || []).length > 3 ? `; +${(item.details || []).length - 3}` : '';
+                                            return (
+                                                <div key={`modal-break-conflict-${item.idx}`} className="text-[11px] leading-tight">
+                                                    {`${formatBreakMinuteWithDay(item.start)} — ${formatBreakMinuteWithDay(item.end)}: ${detailPreview || 'есть пересечение'}${detailTail}`}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                )}
                             </div>
                         )}
                         </div>
