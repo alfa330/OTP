@@ -5477,6 +5477,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [selectedSupervisors, setSelectedSupervisors] = useState([]);
             const [selectedStatuses, setSelectedStatuses] = useState([]);
             const [selectedDirections, setSelectedDirections] = useState([]);
+            const [daySortMode, setDaySortMode] = useState('default');
             const [breakDirectionGroups, setBreakDirectionGroups] = useState([]);
             const [breakGroupDraftDirections, setBreakGroupDraftDirections] = useState([]);
             const [operators, setOperators] = useState(() => mergePlannerOperators(normalizedInitialOperators, []));
@@ -6007,6 +6008,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     if (typeof parsed?.breakReminderEnabled === 'boolean') {
                         setBreakReminderEnabled(parsed.breakReminderEnabled);
                     }
+                    if (typeof parsed?.daySortMode === 'string' && ['default', 'shift_start_asc'].includes(parsed.daySortMode)) {
+                        setDaySortMode(parsed.daySortMode);
+                    }
                 } catch (e) {
                     console.error('Failed to restore work schedules UI state:', e);
                 } finally {
@@ -6028,7 +6032,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             selectedStatuses,
                             selectedDirections,
                             breakDirectionGroups,
-                            breakReminderEnabled
+                            breakReminderEnabled,
+                            daySortMode
                         })
                     );
                 } catch (e) {
@@ -6042,7 +6047,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 selectedStatuses,
                 selectedDirections,
                 breakDirectionGroups,
-                breakReminderEnabled
+                breakReminderEnabled,
+                daySortMode
             ]);
 
             useEffect(() => {
@@ -6366,6 +6372,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     };
                 });
             };
+            const getEarliestShiftStartMinuteForDate = (op, dateStr) => {
+                if (!op || !dateStr) return null;
+                const shifts = Array.isArray(op?.shifts?.[dateStr]) ? op.shifts[dateStr] : [];
+                let earliestMinute = null;
+                shifts.forEach(seg => {
+                    const rawStart = Number.isFinite(seg?.__startMin) ? Number(seg.__startMin) : timeToMinutes(seg?.start);
+                    if (!Number.isFinite(rawStart)) return;
+                    const startMinute = ((Math.round(rawStart) % 1440) + 1440) % 1440;
+                    if (earliestMinute === null || startMinute < earliestMinute) {
+                        earliestMinute = startMinute;
+                    }
+                });
+                return earliestMinute;
+            };
 
             // Фильтруем операторов по выбранным супервайзерам, статусам и направлениям
             const filteredOperators = useMemo(() => {
@@ -6392,8 +6412,25 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     filtered = filtered.filter(op => selectedDirections.includes(op.direction));
                 }
 
+                const shouldSortByDayShiftStart = viewMode === 'day' && daySortMode === 'shift_start_asc';
+                const currentDayDateStr = shouldSortByDayShiftStart ? todayDateStr(new Date(currentDate)) : null;
+
                 // Сортировка: сначала по направлению (direction), потом по ФИО (name)
                 filtered.sort((a, b) => {
+                    if (shouldSortByDayShiftStart && currentDayDateStr) {
+                        const shiftStartA = getEarliestShiftStartMinuteForDate(a, currentDayDateStr);
+                        const shiftStartB = getEarliestShiftStartMinuteForDate(b, currentDayDateStr);
+                        const hasShiftA = Number.isFinite(shiftStartA);
+                        const hasShiftB = Number.isFinite(shiftStartB);
+
+                        if (hasShiftA !== hasShiftB) {
+                            return hasShiftA ? -1 : 1;
+                        }
+                        if (hasShiftA && hasShiftB && shiftStartA !== shiftStartB) {
+                            return shiftStartA - shiftStartB;
+                        }
+                    }
+
                     const dirA = (a.direction || '').toLowerCase();
                     const dirB = (b.direction || '').toLowerCase();
                     if (dirA !== dirB) {
@@ -6405,7 +6442,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 });
 
                 return filtered;
-            }, [operators, selectedSupervisors, selectedStatuses, selectedDirections]);
+            }, [operators, selectedSupervisors, selectedStatuses, selectedDirections, viewMode, daySortMode, currentDate]);
 
             const dayRange = useMemo(() => [todayDateStr(new Date(currentDate))], [currentDate]);
             const weekRange = useMemo(() => {
@@ -11347,19 +11384,34 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             <button onClick={() => setViewMode('month')} className={`px-3 py-1 rounded ${viewMode === 'month' ? 'bg-slate-800 text-white' : 'bg-white'}`}>Месяц</button>
                         </div>
                         {viewMode === 'day' && (
-                            <button
-                                onClick={() => setShowDayBreaksModal(true)}
-                                className="ml-3 px-3 py-1 rounded bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-800 text-sm font-medium flex items-center gap-2"
-                                title="Показать перерывы операторов за выбранный день"
-                            >
-                                <FaIcon className="fas fa-mug-hot text-amber-600"></FaIcon>
-                                Перерывы
-                                {dayBreaksStats.breaksCount > 0 && (
-                                    <span className="px-1.5 py-0.5 rounded-full bg-amber-200 text-amber-900 text-[10px] leading-none">
-                                        {dayBreaksStats.breaksCount}
-                                    </span>
-                                )}
-                            </button>
+                            <>
+                                <button
+                                    onClick={() => setShowDayBreaksModal(true)}
+                                    className="ml-3 px-3 py-1 rounded bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-800 text-sm font-medium flex items-center gap-2"
+                                    title="Показать перерывы операторов за выбранный день"
+                                >
+                                    <FaIcon className="fas fa-mug-hot text-amber-600"></FaIcon>
+                                    Перерывы
+                                    {dayBreaksStats.breaksCount > 0 && (
+                                        <span className="px-1.5 py-0.5 rounded-full bg-amber-200 text-amber-900 text-[10px] leading-none">
+                                            {dayBreaksStats.breaksCount}
+                                        </span>
+                                    )}
+                                </button>
+                                <div className="ml-3 flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-2 py-1">
+                                    <FaIcon className="fas fa-sort-amount-down text-slate-400 text-xs"></FaIcon>
+                                    <span className="text-xs text-slate-500 whitespace-nowrap">Сортировка</span>
+                                    <select
+                                        value={daySortMode}
+                                        onChange={(e) => setDaySortMode(e.target.value)}
+                                        className="text-xs border border-slate-300 rounded px-2 py-1 bg-white text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        title="Сортировка операторов в режиме День"
+                                    >
+                                        <option value="default">Направление + ФИО</option>
+                                        <option value="shift_start_asc">По смене: ранняя -&gt; поздняя</option>
+                                    </select>
+                                </div>
+                            </>
                         )}
                         </div>
                         <div className="flex gap-2 items-center">
