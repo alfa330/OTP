@@ -7496,6 +7496,36 @@ class Database:
         deleted_rows = cursor.fetchall() or []
         return len(deleted_rows)
 
+    def _delete_shifts_for_period_tx(self, cursor, operator_id, start_date, end_date=None):
+        """
+        Удалить смены оператора в периоде [start_date, end_date] включительно.
+        Если end_date не указан, удаляются смены начиная с start_date и далее.
+        """
+        operator_id = int(operator_id)
+        start_date_obj = self._normalize_schedule_date(start_date)
+        end_date_obj = self._normalize_schedule_date(end_date) if end_date is not None else None
+        if end_date_obj is not None and end_date_obj < start_date_obj:
+            raise ValueError("end_date must be >= start_date")
+
+        if end_date_obj is None:
+            cursor.execute("""
+                DELETE FROM work_shifts
+                WHERE operator_id = %s
+                  AND shift_date >= %s
+                RETURNING id
+            """, (operator_id, start_date_obj))
+        else:
+            cursor.execute("""
+                DELETE FROM work_shifts
+                WHERE operator_id = %s
+                  AND shift_date >= %s
+                  AND shift_date <= %s
+                RETURNING id
+            """, (operator_id, start_date_obj, end_date_obj))
+
+        deleted_rows = cursor.fetchall() or []
+        return len(deleted_rows)
+
     def _clear_day_schedule_tx(self, cursor, operator_id, target_date):
         """
         Очистка дня: удаляет все смены и снимает выходной на указанную дату.
@@ -7862,6 +7892,12 @@ class Database:
                 created_by_id
             ))
             saved_row = cursor.fetchone()
+            self._delete_shifts_for_period_tx(
+                cursor=cursor,
+                operator_id=operator_id,
+                start_date=start_date_obj,
+                end_date=end_date_obj
+            )
             self._sync_user_statuses_from_schedule_periods_tx(cursor, operator_ids=[operator_id])
             return self._serialize_schedule_status_period(saved_row)
 

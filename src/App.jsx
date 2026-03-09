@@ -8102,6 +8102,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const myScheduleDayCards = useMemo(() => {
                 const daysOffSet = new Set(Array.isArray(myScheduleData?.daysOff) ? myScheduleData.daysOff : []);
                 return (visibleRange || []).map(dateStr => {
+                    const scheduleStatus = getPlannerScheduleStatusForDate(myScheduleData, dateStr);
                     const shifts = Array.isArray(myScheduleData?.shifts?.[dateStr]) ? myScheduleData.shifts[dateStr] : [];
                     const normalizedShifts = shifts.map(seg => {
                         const sMin = timeToMinutes(seg.start);
@@ -8113,10 +8114,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             breaks: Array.isArray(seg.breaks) ? seg.breaks : []
                         };
                     });
+                    const effectiveShifts = scheduleStatus ? [] : normalizedShifts;
                     return {
                         date: dateStr,
                         isDayOff: daysOffSet.has(dateStr),
-                        shifts: normalizedShifts
+                        shifts: effectiveShifts,
+                        scheduleStatus
                     };
                 });
             }, [myScheduleData, visibleRange]);
@@ -8156,6 +8159,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 () => myScheduleDayCards.find(day => day.date === dayViewBreaksDateStr) || myScheduleDayCards[0] || null,
                 [myScheduleDayCards, dayViewBreaksDateStr]
             );
+            const myCurrentDayScheduleStatus = myCurrentDayCard?.scheduleStatus || null;
+            const myCurrentDayScheduleStatusTone = myCurrentDayScheduleStatus
+                ? getScheduleStatusTone(myCurrentDayScheduleStatus.statusCode)
+                : null;
             const myTimelineOperator = useMemo(() => {
                 if (!myScheduleData) return null;
                 return {
@@ -9892,10 +9899,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         <div className="absolute inset-0 flex">
                                                                             {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0 border-slate-200/80" />))}
                                                                         </div>
-                                                                        {myCurrentDayCard.isDayOff && myTimelineParts.length === 0 && (
+                                                                        {myCurrentDayScheduleStatus && myTimelineParts.length === 0 && (
+                                                                            <div className={`absolute inset-0 flex items-center justify-center text-sm font-semibold ${myCurrentDayScheduleStatusTone?.text || 'text-slate-700'}`}>
+                                                                                {myCurrentDayScheduleStatus.label || 'Статус'}
+                                                                            </div>
+                                                                        )}
+                                                                        {!myCurrentDayScheduleStatus && myCurrentDayCard.isDayOff && myTimelineParts.length === 0 && (
                                                                             <div className="absolute inset-0 flex items-center justify-center text-sm font-medium text-sky-600">Выходной</div>
                                                                         )}
-                                                                        {!myCurrentDayCard.isDayOff && myTimelineParts.length === 0 && (
+                                                                        {!myCurrentDayScheduleStatus && !myCurrentDayCard.isDayOff && myTimelineParts.length === 0 && (
                                                                             <div className="absolute inset-0 flex items-center justify-center text-sm text-slate-400">Нет смен</div>
                                                                         )}
                                                                         {myTimelineParts.map((p, idx) => {
@@ -9988,6 +10000,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             {myScheduleVisibleDays.map(dayCard => {
                                                 const dateObj = parseDateStr(dayCard.date);
                                                 const isToday = dayCard.date === todayDateStr(new Date());
+                                                const scheduleStatus = dayCard.scheduleStatus || null;
+                                                const scheduleStatusTone = scheduleStatus ? getScheduleStatusTone(scheduleStatus.statusCode) : null;
                                                 const dayWorkMin = (dayCard.shifts || []).reduce((acc, seg) => acc + (seg.durationMin || 0), 0);
                                                 const dayBreakMin = (dayCard.shifts || []).reduce((acc, seg) => acc + (seg.breaks || []).reduce((s, b) => s + Math.max(0, (Number(b?.end) || 0) - (Number(b?.start) || 0)), 0), 0);
                                                 const dayBreakCount = (dayCard.shifts || []).reduce((acc, seg) => acc + (Array.isArray(seg.breaks) ? seg.breaks.length : 0), 0);
@@ -9999,7 +10013,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     return `${seg.start} — ${seg.end}${crossing ? ' (+1)' : ''}`;
                                                 });
                                                 const hasShifts = shiftPreviewLabels.length > 0;
-                                                const primaryShiftLabel = hasShifts ? shiftPreviewLabels[0] : (dayCard.isDayOff ? 'Выходной' : 'Смен нет');
+                                                const primaryShiftLabel = scheduleStatus
+                                                    ? (scheduleStatus.label || 'Статус')
+                                                    : (hasShifts ? shiftPreviewLabels[0] : (dayCard.isDayOff ? 'Выходной' : 'Смен нет'));
                                                 const extraShiftCount = hasShifts ? Math.max(0, shiftPreviewLabels.length - 1) : 0;
                                                 const tailShiftPreviewLabels = hasShifts ? shiftPreviewLabels.slice(1) : [];
                                                 return (
@@ -10015,7 +10031,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         <span className={`inline-flex items-center px-3 py-1 rounded-lg border font-semibold tabular-nums ${
                                                                             viewMode === 'day' ? 'text-base' : 'text-sm'
                                                                         } ${
-                                                                            hasShifts
+                                                                            scheduleStatus
+                                                                                ? (scheduleStatusTone?.pill || 'bg-amber-100 border-amber-200 text-amber-800')
+                                                                                : hasShifts
                                                                                 ? 'bg-blue-50 border-blue-200 text-blue-900'
                                                                                 : dayCard.isDayOff
                                                                                     ? 'bg-sky-50 border-sky-200 text-sky-700'
@@ -10037,8 +10055,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 <div className="flex items-center gap-2">
                                                                     <div className="flex flex-wrap items-center justify-end gap-1">
                                                                         {isToday && <span className="px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 text-xs font-semibold">Сегодня</span>}
+                                                                        {scheduleStatus && <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${scheduleStatusTone?.pill || 'bg-amber-100 text-amber-800 border-amber-200'}`}>{scheduleStatus.label || 'Статус'}</span>}
                                                                         {dayCard.isDayOff && <span className="px-2 py-0.5 rounded-full bg-sky-100 text-sky-700 text-xs font-semibold">Выходной</span>}
-                                                                        {!dayCard.isDayOff && dayCard.shifts.length > 0 && <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-xs font-semibold">{dayCard.shifts.length} смен</span>}
+                                                                        {!scheduleStatus && !dayCard.isDayOff && dayCard.shifts.length > 0 && <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-xs font-semibold">{dayCard.shifts.length} смен</span>}
                                                                     </div>
                                                                     <div className="w-7 h-7 rounded-lg border border-slate-200 bg-white flex items-center justify-center text-slate-500">
                                                                         <FaIcon className={`fas ${isExpanded ? 'fa-chevron-up' : 'fa-chevron-down'} text-xs`}></FaIcon>
@@ -10047,17 +10066,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             </div>
 
                                                             <div className="mt-2 flex flex-wrap gap-1.5">
-                                                                {!dayCard.isDayOff && dayCard.shifts.length === 0 && (
+                                                                {scheduleStatus && (
+                                                                    <span className={`px-2 py-1 rounded-md border text-xs ${scheduleStatusTone?.pill || 'bg-amber-100 text-amber-800 border-amber-200'}`}>
+                                                                        {scheduleStatus.startDate
+                                                                            ? `${scheduleStatus.startDate}${scheduleStatus.endDate ? ` — ${scheduleStatus.endDate}` : ''}`
+                                                                            : 'Статусный день'}
+                                                                    </span>
+                                                                )}
+                                                                {!scheduleStatus && !dayCard.isDayOff && dayCard.shifts.length === 0 && (
                                                                     <span className="px-2 py-1 rounded-md border border-dashed border-slate-300 bg-slate-50 text-xs text-slate-500">
                                                                         Смен нет
                                                                     </span>
                                                                 )}
-                                                                {dayCard.isDayOff && dayCard.shifts.length === 0 && (
+                                                                {!scheduleStatus && dayCard.isDayOff && dayCard.shifts.length === 0 && (
                                                                     <span className="px-2 py-1 rounded-md border border-sky-200 bg-sky-50 text-xs text-sky-700">
                                                                         Выходной
                                                                     </span>
                                                                 )}
-                                                                {dayCard.shifts.length > 0 && (
+                                                                {!scheduleStatus && dayCard.shifts.length > 0 && (
                                                                     <span className="px-2 py-1 rounded-md border border-slate-200 bg-slate-50 text-xs text-slate-700">
                                                                         {dayCard.shifts.length} смен за день
                                                                     </span>
@@ -10083,6 +10109,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         {isExpanded && (
                                                             <div className="px-4 pb-4 border-t border-slate-100 bg-slate-50/40">
                                                                 <div className="pt-3 space-y-2">
+                                                                    {scheduleStatus && (
+                                                                        <div className={`rounded-xl border px-3 py-2 ${scheduleStatusTone?.pill || 'bg-amber-100 text-amber-800 border-amber-200'}`}>
+                                                                            <div className="text-sm font-semibold">{scheduleStatus.label || 'Статус'}</div>
+                                                                            {(scheduleStatus.startDate || scheduleStatus.endDate) && (
+                                                                                <div className="text-xs mt-1">
+                                                                                    Период: {scheduleStatus.startDate || '—'}{scheduleStatus.endDate ? ` — ${scheduleStatus.endDate}` : ''}
+                                                                                </div>
+                                                                            )}
+                                                                            {scheduleStatus.comment && (
+                                                                                <div className="text-xs mt-1">Комментарий: {scheduleStatus.comment}</div>
+                                                                            )}
+                                                                        </div>
+                                                                    )}
                                                                     {dayCard.shifts.map((seg, idx) => {
                                                                         const isCrossing = timeToMinutes(seg.end) <= timeToMinutes(seg.start) && seg.end !== '00:00';
                                                                         const segBreakCount = Array.isArray(seg.breaks) ? seg.breaks.length : 0;
