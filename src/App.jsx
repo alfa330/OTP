@@ -8114,11 +8114,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             breaks: Array.isArray(seg.breaks) ? seg.breaks : []
                         };
                     });
-                    const effectiveShifts = scheduleStatus ? [] : normalizedShifts;
                     return {
                         date: dateStr,
                         isDayOff: daysOffSet.has(dateStr),
-                        shifts: effectiveShifts,
+                        shifts: normalizedShifts,
                         scheduleStatus
                     };
                 });
@@ -10013,9 +10012,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     return `${seg.start} — ${seg.end}${crossing ? ' (+1)' : ''}`;
                                                 });
                                                 const hasShifts = shiftPreviewLabels.length > 0;
-                                                const primaryShiftLabel = scheduleStatus
-                                                    ? (scheduleStatus.label || 'Статус')
-                                                    : (hasShifts ? shiftPreviewLabels[0] : (dayCard.isDayOff ? 'Выходной' : 'Смен нет'));
+                                                const primaryShiftLabel = hasShifts
+                                                    ? shiftPreviewLabels[0]
+                                                    : (scheduleStatus ? (scheduleStatus.label || 'Статус') : (dayCard.isDayOff ? 'Выходной' : 'Смен нет'));
                                                 const extraShiftCount = hasShifts ? Math.max(0, shiftPreviewLabels.length - 1) : 0;
                                                 const tailShiftPreviewLabels = hasShifts ? shiftPreviewLabels.slice(1) : [];
                                                 return (
@@ -10031,10 +10030,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         <span className={`inline-flex items-center px-3 py-1 rounded-lg border font-semibold tabular-nums ${
                                                                             viewMode === 'day' ? 'text-base' : 'text-sm'
                                                                         } ${
-                                                                            scheduleStatus
-                                                                                ? (scheduleStatusTone?.pill || 'bg-amber-100 border-amber-200 text-amber-800')
-                                                                                : hasShifts
+                                                                            hasShifts
                                                                                 ? 'bg-blue-50 border-blue-200 text-blue-900'
+                                                                                : scheduleStatus
+                                                                                    ? (scheduleStatusTone?.pill || 'bg-amber-100 border-amber-200 text-amber-800')
                                                                                 : dayCard.isDayOff
                                                                                     ? 'bg-sky-50 border-sky-200 text-sky-700'
                                                                                     : 'bg-slate-50 border-slate-200 text-slate-600'
@@ -10057,7 +10056,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         {isToday && <span className="px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 text-xs font-semibold">Сегодня</span>}
                                                                         {scheduleStatus && <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${scheduleStatusTone?.pill || 'bg-amber-100 text-amber-800 border-amber-200'}`}>{scheduleStatus.label || 'Статус'}</span>}
                                                                         {dayCard.isDayOff && <span className="px-2 py-0.5 rounded-full bg-sky-100 text-sky-700 text-xs font-semibold">Выходной</span>}
-                                                                        {!scheduleStatus && !dayCard.isDayOff && dayCard.shifts.length > 0 && <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-xs font-semibold">{dayCard.shifts.length} смен</span>}
+                                                                        {!dayCard.isDayOff && dayCard.shifts.length > 0 && <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-xs font-semibold">{dayCard.shifts.length} смен</span>}
                                                                     </div>
                                                                     <div className="w-7 h-7 rounded-lg border border-slate-200 bg-white flex items-center justify-center text-slate-500">
                                                                         <FaIcon className={`fas ${isExpanded ? 'fa-chevron-up' : 'fa-chevron-down'} text-xs`}></FaIcon>
@@ -10073,17 +10072,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                             : 'Статусный день'}
                                                                     </span>
                                                                 )}
-                                                                {!scheduleStatus && !dayCard.isDayOff && dayCard.shifts.length === 0 && (
+                                                                {!dayCard.isDayOff && dayCard.shifts.length === 0 && (
                                                                     <span className="px-2 py-1 rounded-md border border-dashed border-slate-300 bg-slate-50 text-xs text-slate-500">
                                                                         Смен нет
                                                                     </span>
                                                                 )}
-                                                                {!scheduleStatus && dayCard.isDayOff && dayCard.shifts.length === 0 && (
+                                                                {dayCard.isDayOff && dayCard.shifts.length === 0 && (
                                                                     <span className="px-2 py-1 rounded-md border border-sky-200 bg-sky-50 text-xs text-sky-700">
                                                                         Выходной
                                                                     </span>
                                                                 )}
-                                                                {!scheduleStatus && dayCard.shifts.length > 0 && (
+                                                                {dayCard.shifts.length > 0 && (
                                                                     <span className="px-2 py-1 rounded-md border border-slate-200 bg-slate-50 text-xs text-slate-700">
                                                                         {dayCard.shifts.length} смен за день
                                                                     </span>
@@ -10732,6 +10731,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 const matchEnd = !!item?.matchEndsAtRequestStart;
                                                                 const dayShifts = Array.isArray(item?.dayShifts) ? item.dayShifts : [];
                                                                 const nextDayShifts = Array.isArray(item?.nextDayShifts) ? item.nextDayShifts : [];
+                                                                const isDayOff = !!(item?.isDayOff ?? item?.is_day_off);
+                                                                const isNextDayOff = !!(item?.isNextDayOff ?? item?.is_next_day_off);
                                                                 const nextDayDate = String(item?.nextDayDate || '');
                                                                 return (
                                                                     <div
@@ -10782,6 +10783,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                     Стык: конец
                                                                                 </span>
                                                                             )}
+                                                                            {isDayOff && (
+                                                                                <span className="px-2 py-0.5 rounded-md text-[11px] border border-sky-200 bg-sky-50 text-sky-700">
+                                                                                    Выходной
+                                                                                </span>
+                                                                            )}
                                                                         </div>
                                                                         <div className="mt-2 rounded-md border border-slate-200 bg-white p-2">
                                                                             <div className="text-[11px] font-semibold text-slate-700 mb-1">
@@ -10793,8 +10799,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                         {swapForm.swapDate ? formatDateRuShort(swapForm.swapDate) : 'Дата'}
                                                                                     </span>
                                                                                     {dayShifts.length === 0 ? (
-                                                                                        <span className="px-2 py-0.5 rounded border border-slate-200 bg-slate-50 text-[11px] text-slate-500">
-                                                                                            Нет смен
+                                                                                        <span className={`px-2 py-0.5 rounded border text-[11px] ${
+                                                                                            isDayOff
+                                                                                                ? 'border-sky-200 bg-sky-50 text-sky-700'
+                                                                                                : 'border-slate-200 bg-slate-50 text-slate-500'
+                                                                                        }`}>
+                                                                                            {isDayOff ? 'Выходной' : 'Нет смен'}
                                                                                         </span>
                                                                                     ) : (
                                                                                         dayShifts.map((seg, segIdx) => {
@@ -10814,23 +10824,33 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                         })
                                                                                     )}
                                                                                 </div>
-                                                                                {nextDayShifts.length > 0 && (
+                                                                                {(nextDayShifts.length > 0 || isNextDayOff) && (
                                                                                     <div className="flex flex-wrap items-center gap-1.5">
                                                                                         <span className="text-[11px] text-slate-500">
                                                                                             {nextDayDate ? formatDateRuShort(nextDayDate) : 'След. день'}
                                                                                         </span>
-                                                                                        {nextDayShifts.map((seg, segIdx) => {
-                                                                                            const s = String(seg?.start || '');
-                                                                                            const e = String(seg?.end || '');
-                                                                                            return (
-                                                                                                <span
-                                                                                                    key={`swap-candidate-next-${itemId}-${segIdx}`}
-                                                                                                    className="px-2 py-0.5 rounded border border-violet-200 bg-violet-100 text-[11px] font-semibold text-violet-900 tabular-nums"
-                                                                                                >
-                                                                                                    {s} — {e}
-                                                                                                </span>
-                                                                                            );
-                                                                                        })}
+                                                                                        {nextDayShifts.length === 0 ? (
+                                                                                            <span className={`px-2 py-0.5 rounded border text-[11px] ${
+                                                                                                isNextDayOff
+                                                                                                    ? 'border-sky-200 bg-sky-50 text-sky-700'
+                                                                                                    : 'border-slate-200 bg-slate-50 text-slate-500'
+                                                                                            }`}>
+                                                                                                {isNextDayOff ? 'Выходной' : 'Нет смен'}
+                                                                                            </span>
+                                                                                        ) : (
+                                                                                            nextDayShifts.map((seg, segIdx) => {
+                                                                                                const s = String(seg?.start || '');
+                                                                                                const e = String(seg?.end || '');
+                                                                                                return (
+                                                                                                    <span
+                                                                                                        key={`swap-candidate-next-${itemId}-${segIdx}`}
+                                                                                                        className="px-2 py-0.5 rounded border border-violet-200 bg-violet-100 text-[11px] font-semibold text-violet-900 tabular-nums"
+                                                                                                    >
+                                                                                                        {s} — {e}
+                                                                                                    </span>
+                                                                                                );
+                                                                                            })
+                                                                                        )}
                                                                                     </div>
                                                                                 )}
                                                                             </div>

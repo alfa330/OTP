@@ -6803,6 +6803,34 @@ class Database:
 
             candidate_ids = [int(row[0]) for row in candidate_rows]
             day_shift_map_by_operator = {}
+            day_off_map_by_operator = {
+                int(op_id): {
+                    prev_date_str: False,
+                    swap_date_str: False,
+                    next_date_str: False
+                }
+                for op_id in candidate_ids
+            }
+
+            cursor.execute(
+                """
+                SELECT operator_id, day_off_date
+                FROM days_off
+                WHERE operator_id = ANY(%s)
+                  AND day_off_date >= %s
+                  AND day_off_date <= %s
+                """,
+                (candidate_ids, prev_date_obj, next_date_obj)
+            )
+            for op_id_value, day_off_date in (cursor.fetchall() or []):
+                op_id_int = int(op_id_value)
+                bucket = day_off_map_by_operator.get(op_id_int)
+                if bucket is None:
+                    continue
+                day_key = day_off_date.strftime('%Y-%m-%d')
+                if day_key in bucket:
+                    bucket[day_key] = True
+
             for op_id in candidate_ids:
                 shift_map = self._load_operator_shift_map_for_period_tx(
                     cursor=cursor,
@@ -6820,9 +6848,12 @@ class Database:
         for row in candidate_rows:
             op_id = int(row[0])
             shift_payload = day_shift_map_by_operator.get(op_id) or {}
+            day_off_payload = day_off_map_by_operator.get(op_id) or {}
             op_prev_day_shifts = shift_payload.get('prevDayShifts') or []
             op_day_shifts = shift_payload.get('dayShifts') or []
             op_next_day_shifts = shift_payload.get('nextDayShifts') or []
+            op_is_day_off = bool(day_off_payload.get(swap_date_str))
+            op_is_next_day_off = bool(day_off_payload.get(next_date_str))
 
             window_intervals = self._build_swap_window_intervals(
                 prev_day_shifts=op_prev_day_shifts,
@@ -6881,8 +6912,12 @@ class Database:
                 'rate': float(row[4]) if row[4] is not None else None,
                 'supervisorName': row[5],
                 'dayShifts': normalized_day_shifts,
+                'isDayOff': op_is_day_off,
+                'is_day_off': op_is_day_off,
                 'nextDayDate': next_date_str,
                 'nextDayShifts': normalized_next_day_shifts,
+                'isNextDayOff': op_is_next_day_off,
+                'is_next_day_off': op_is_next_day_off,
                 'matchStartsAtRequestEnd': bool(match_starts_at_request_end),
                 'matchEndsAtRequestStart': bool(match_ends_at_request_start),
                 'priorityScore': int(priority_score)
@@ -7498,8 +7533,8 @@ class Database:
 
     def _delete_shifts_for_period_tx(self, cursor, operator_id, start_date, end_date=None):
         """
-        Удалить смены оператора в периоде [start_date, end_date] включительно.
-        Если end_date не указан, удаляются смены начиная с start_date и далее.
+        Удалить смены и выходные оператора в периоде [start_date, end_date] включительно.
+        Если end_date не указан, удаляются записи начиная с start_date и далее.
         """
         operator_id = int(operator_id)
         start_date_obj = self._normalize_schedule_date(start_date)
@@ -7524,7 +7559,27 @@ class Database:
             """, (operator_id, start_date_obj, end_date_obj))
 
         deleted_rows = cursor.fetchall() or []
-        return len(deleted_rows)
+        deleted_shifts_count = len(deleted_rows)
+
+        if end_date_obj is None:
+            cursor.execute("""
+                DELETE FROM days_off
+                WHERE operator_id = %s
+                  AND day_off_date >= %s
+            """, (operator_id, start_date_obj))
+        else:
+            cursor.execute("""
+                DELETE FROM days_off
+                WHERE operator_id = %s
+                  AND day_off_date >= %s
+                  AND day_off_date <= %s
+            """, (operator_id, start_date_obj, end_date_obj))
+
+        deleted_days_off_count = int(cursor.rowcount or 0)
+        return {
+            'deleted_shifts': deleted_shifts_count,
+            'deleted_day_off_rows': deleted_days_off_count
+        }
 
     def _clear_day_schedule_tx(self, cursor, operator_id, target_date):
         """
