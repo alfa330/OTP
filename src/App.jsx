@@ -6,6 +6,7 @@ import jsQR from 'jsqr';
 import ToastContainer from './components/common/ToastContainer';
 import SalaryCalculationResult from './components/salary/SalaryCalculationResult';
 import TasksView from './components/tasks/TasksView';
+import SurveysView from './components/surveys/SurveysView';
 import FaIcon from './components/common/FaIcon';
 import AuthEntranceSplash from './components/common/AuthEntranceSplash';
 
@@ -18717,13 +18718,29 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             
             // Persist and restore view (after user is loaded to ensure role-based access)
             useEffect(() => {
-                if (user) {
-                    const savedView = localStorage.getItem('currentView');
-                    if (savedView) {
-                        setView(savedView);
-                    }
+                if (!user) return;
+
+                const savedView = localStorage.getItem('currentView');
+                if (user.role === 'trainer') {
+                    setView('surveys');
+                    return;
                 }
-            }, [user]);
+
+                if (savedView) {
+                    setView(savedView);
+                    return;
+                }
+
+                if (user.role === 'admin') setView('sv_list');
+                else if (user.role === 'sv' || user.role === 'supervisor') setView('operators');
+                else setView('hours');
+            }, [user?.id, user?.role]);
+
+            useEffect(() => {
+                if (user?.role === 'trainer' && view !== 'surveys') {
+                    setView('surveys');
+                }
+            }, [user?.role, view]);
             
             useEffect(() => {
                 if (view && user) { // Only save if user is logged in
@@ -21571,8 +21588,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     fetchSvList();
                     fetchDirections();
                     fetchUsers();
-                } else if (user.role === 'sv') {
+                } else if (user.role === 'sv' || user.role === 'supervisor') {
                     fetchSvList();
+                    fetchUsers();
+                    fetchDirections();
+                } else if (user.role === 'trainer') {
                     fetchUsers();
                     fetchDirections();
                 } else if (user.role === 'operator') {
@@ -21585,7 +21605,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, [user?.id, user?.role]);
 
             useEffect(() => {
-                if (!user || !user.id || user.role !== 'sv') return;
+                if (!user || !user.id || (user.role !== 'sv' && user.role !== 'supervisor')) return;
                 fetchSvData(selectedReportMonth || selectedMonth);
             }, [user?.id, user?.role, selectedMonth, selectedReportMonth]);
 
@@ -21759,7 +21779,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     ? operatorData.evaluations.reduce((sum, eval1) => sum + (parseFloat(eval1.score) || 0), 0) / operatorData.evaluations.length
                     : 0;
             const callEvaluationIframeUrl = `${APP_BASE_URL}call_evaluation.html`;
-            const isCallEvaluationView = view === 'call_evaluation' && (user.role === 'admin' || user.role === 'sv');
+            const isCallEvaluationView = view === 'call_evaluation' && (user.role === 'admin' || user.role === 'sv' || user.role === 'supervisor');
 
             return (
                 <div className="flex h-screen overflow-hidden">
@@ -21870,6 +21890,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <FaIcon className="fas fa-tasks"></FaIcon> <span className="sidebar-text">Задачи</span>
                                             </button>
                                         </li>
+                                        <li>
+                                            <button onClick={() => { setView('surveys'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
+                                                <FaIcon className="fas fa-clipboard-list"></FaIcon> <span className="sidebar-text">Опросы</span>
+                                            </button>
+                                        </li>
 
                                         <hr className="border-t border-white-700 my-2 opacity-40" />
 
@@ -21893,7 +21918,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </li>
                                     </>
                                 )}
-                                {user.role === 'sv' && (
+                                {(user.role === 'sv' || user.role === 'supervisor') && (
                                     <>
                                         <li>
                                             <button onClick={() => { setView('operators'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'operators' ? 'bg-blue-700' : ''}`}>
@@ -21929,6 +21954,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </button>
                                         </li>
                                         <li>
+                                            <button onClick={() => { setView('surveys'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
+                                                <FaIcon className="fas fa-clipboard-list"></FaIcon> <span className="sidebar-text">Опросы</span>
+                                            </button>
+                                        </li>
+                                        <li>
                                             <button
                                                 onClick={() => { setView('sv_hours'); setMobileMenuOpen(false); }}
                                                 className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sv_hours' ? 'bg-blue-700' : ''}`}
@@ -21955,6 +21985,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         <li>
                                             <button onClick={() => { setView('contests'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'contests' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-award"></FaIcon> <span className="sidebar-text">Конкурсы</span>
+                                            </button>
+                                        </li>
+                                    </>
+                                )}
+                                {user.role === 'trainer' && (
+                                    <>
+                                        <li>
+                                            <button onClick={() => { setView('surveys'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
+                                                <FaIcon className="fas fa-clipboard-list"></FaIcon> <span className="sidebar-text">Опросы</span>
                                             </button>
                                         </li>
                                     </>
@@ -21993,11 +22032,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </li>
                                     </>
                                 )}
-                                <li>
-                                    <button onClick={() => { setView('salary'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'salary' ? 'bg-blue-700' : ''}`}>
-                                        <FaIcon className="fas fa-calculator"></FaIcon> <span className="sidebar-text">Калькулятор зарплаты</span>
-                                    </button>
-                                </li>
+                                {user.role !== 'trainer' && (
+                                    <li>
+                                        <button onClick={() => { setView('salary'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'salary' ? 'bg-blue-700' : ''}`}>
+                                            <FaIcon className="fas fa-calculator"></FaIcon> <span className="sidebar-text">Калькулятор зарплаты</span>
+                                        </button>
+                                    </li>
+                                )}
 
                                 {/*
                                 <li>
@@ -23262,12 +23303,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {( view === "contests" && (<ContestsApp user={user} operators={users} directions={directions} />))}
                                 {( view === "trainings" && (<TrainingsView user={user} operators={users} showToast={showToast} apiBaseUrl={API_BASE_URL} />))}
                                 {( view === "tasks" && (<TasksView user={user} showToast={showToast} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} />))}
+                                {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} showToast={showToast} />))}
                                 {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
                                 {( view === "call_division" && (<AdminCallsUploadView user={user}/>))}
                                 {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
                             </>
                         )}
-                        {user.role === 'sv' && (
+                        {(user.role === 'sv' || user.role === 'supervisor') && (
                             <>
                                 {view === 'qr_access' && (
                                 <>
@@ -23998,9 +24040,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {( view === "trainings" && (<TrainingsView user={user} operators={users} showToast={showToast} apiBaseUrl={API_BASE_URL} />))}
                                 {( view === "contests" && (<ContestsApp user={user} operators={users} directions={directions} />))}
                                 {( view === "tasks" && (<TasksView user={user} showToast={showToast} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} />))}
+                                {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} showToast={showToast} />))}
                                 {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
                                 {( view === "call_division" && (<AdminCallsUploadView user={user}/>))}
                                 {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
+                            </>
+                        )}
+                        {user.role === 'trainer' && (
+                            <>
+                                {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} showToast={showToast} />))}
                             </>
                         )}
                         {user.role === 'operator' && (
@@ -24819,7 +24867,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     )}
                             </>
                         )}
-                                        {view === 'salary' && (
+                                        {user.role !== 'trainer' && view === 'salary' && (
                                             <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                                 <h2 className="text-3xl font-bold mb-8 text-gray-900 flex items-center gap-2">
                                                     <FaIcon className="fas fa-calculator text-blue-600"></FaIcon>
