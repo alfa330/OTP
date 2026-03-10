@@ -251,6 +251,20 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
         }
         return '—';
     }, []);
+    const formatSurveyDateTime = useCallback((value) => {
+        if (!value) return '—';
+        const parsed = new Date(String(value));
+        if (Number.isNaN(parsed.getTime())) {
+            return String(value).replace('T', ' ').slice(0, 16);
+        }
+        return parsed.toLocaleString('ru-RU', {
+            day: '2-digit',
+            month: '2-digit',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit'
+        });
+    }, []);
 
     useEffect(() => {
         if (!isOperator || !selectedSurvey) return;
@@ -1102,7 +1116,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                         <div className="text-xs text-gray-500">
                                             Отправлено:{' '}
                                             <strong className="text-gray-700">
-                                                {selectedSurvey?.my_response?.submitted_at || selectedSurvey?.my_assignment?.submitted_at || '—'}
+                                                {formatSurveyDateTime(selectedSurvey?.my_response?.submitted_at || selectedSurvey?.my_assignment?.submitted_at)}
                                             </strong>
                                         </div>
                                         {(selectedSurvey.questions || []).map((question, index) => {
@@ -1208,7 +1222,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                                                         </Badge>
                                                                     </td>
                                                                     <td className="px-3 py-2.5 whitespace-nowrap text-gray-600">
-                                                                        {row?.submitted_at || '—'}
+                                                                        {formatSurveyDateTime(row?.submitted_at)}
                                                                     </td>
                                                                     {(selectedSurvey?.questions || []).map((question) => {
                                                                         const answer = answersByQuestion[String(question.id)] || answersByQuestion[question.id] || null;
@@ -1239,3 +1253,4 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
 };
 
 export default SurveysView;
+
