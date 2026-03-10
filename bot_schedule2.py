@@ -3706,6 +3706,239 @@ def submit_survey(survey_id):
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 
+def _survey_export_format_dt(value):
+    if value in (None, ''):
+        return ''
+    text = str(value).strip()
+    if not text:
+        return ''
+    try:
+        if text.endswith('Z'):
+            text = text[:-1] + '+00:00'
+        dt_value = datetime.fromisoformat(text)
+        return dt_value.strftime('%d.%m.%Y %H:%M')
+    except Exception:
+        if 'T' in text:
+            return text.replace('T', ' ')[:16]
+        return text
+
+
+def _survey_export_answer_text(question, answer):
+    if not question or not answer:
+        return '—'
+
+    qtype = str((question or {}).get('type') or '').strip().lower()
+    if qtype == 'rating':
+        rating_value = answer.get('rating_value')
+        try:
+            return str(int(rating_value))
+        except Exception:
+            return '—'
+
+    selected = []
+    for item in (answer.get('selected_options') or []):
+        text = str(item or '').strip()
+        if text and text not in selected:
+            selected.append(text)
+
+    other_text = str(answer.get('answer_text') or '').strip()
+    if selected and other_text:
+        return f"{', '.join(selected)}; Другое: {other_text}"
+    if selected:
+        return ', '.join(selected)
+    if other_text:
+        return f"Другое: {other_text}"
+    return '—'
+
+
+@app.route('/api/surveys/<int:survey_id>/export_excel', methods=['GET', 'OPTIONS'])
+@require_api_key
+def export_survey_statistics_excel(survey_id):
+    try:
+        requester_id, requester, requester_role, guard_response, guard_status = _surveys_route_guard()
+        if guard_response is not None:
+            return guard_response, guard_status
+
+        if requester_role not in ('admin', 'sv'):
+            return jsonify({"error": "Only admin, sv and trainer can export survey statistics"}), 403
+
+        surveys = db.get_surveys_for_management(requester_id, requester_role)
+        selected_survey = None
+        for survey_item in surveys:
+            try:
+                if int(survey_item.get('id')) == int(survey_id):
+                    selected_survey = survey_item
+                    break
+            except Exception:
+                continue
+
+        if not selected_survey:
+            return jsonify({"error": "Survey not found"}), 404
+
+        title = str(selected_survey.get('title') or f'Опрос #{survey_id}')
+        description = str(selected_survey.get('description') or '')
+        statistics = selected_survey.get('statistics') or {}
+        questions = list(selected_survey.get('questions') or [])
+        question_stats = list(statistics.get('question_stats') or [])
+        responses_detailed = list(statistics.get('responses_detailed') or [])
+
+        question_type_labels = {
+            'single': 'Один вариант',
+            'multiple': 'Несколько вариантов',
+            'rating': 'Рейтинг 1-5'
+        }
+        question_stats_by_id = {}
+        for stat in question_stats:
+            try:
+                qid = int(stat.get('question_id'))
+            except Exception:
+                continue
+            question_stats_by_id[qid] = stat
+
+        wb = Workbook()
+        ws_summary = wb.active
+        ws_summary.title = 'Сводка'
+
+        ws_summary.append(['Опрос', title])
+        ws_summary.append(['Описание', description])
+        ws_summary.append(['Создан', _survey_export_format_dt(selected_survey.get('created_at'))])
+        ws_summary.append(['Обновлен', _survey_export_format_dt(selected_survey.get('updated_at'))])
+        ws_summary.append(['Назначено', int(statistics.get('assigned_count') or 0)])
+        ws_summary.append(['Пройдено', int(statistics.get('completed_count') or 0)])
+        ws_summary.append(['Ожидают', int(statistics.get('pending_count') or 0)])
+        ws_summary.append(['Процент прохождения, %', float(statistics.get('completion_rate') or 0)])
+        ws_summary.append([])
+        ws_summary.append(['Статистика по вопросам'])
+        ws_summary.append([
+            '№',
+            'Вопрос',
+            'Тип',
+            'Ответили',
+            'Респондентов',
+            'Доля ответивших, %',
+            'Метрика',
+            'Значение',
+            'Количество',
+            '% от ответивших',
+            '% от респондентов'
+        ])
+
+        for idx, question in enumerate(questions, start=1):
+            question_id = int(question.get('id') or 0)
+            qtype = str(question.get('type') or '').strip().lower()
+            qtype_label = question_type_labels.get(qtype, qtype or '—')
+            question_text = str(question.get('text') or f'Вопрос #{idx}')
+            stat = question_stats_by_id.get(question_id)
+
+            if not stat:
+                ws_summary.append([idx, question_text, qtype_label, 0, 0, 0, 'Нет данных', '', '', '', ''])
+                continue
+
+            answered = int(stat.get('responses_with_answer') or 0)
+            respondents = int(stat.get('respondents_total') or 0)
+            response_rate = float(stat.get('response_rate') or 0)
+
+            if qtype == 'rating':
+                ws_summary.append([
+                    idx, question_text, qtype_label, answered, respondents, response_rate,
+                    'Среднее', stat.get('average_rating') if stat.get('average_rating') is not None else '—', '', '', ''
+                ])
+                ws_summary.append([
+                    idx, question_text, qtype_label, answered, respondents, response_rate,
+                    'Медиана', stat.get('median_rating') if stat.get('median_rating') is not None else '—', '', '', ''
+                ])
+                min_rating = stat.get('min_rating')
+                max_rating = stat.get('max_rating')
+                rating_range = '—'
+                if min_rating is not None or max_rating is not None:
+                    rating_range = f"{min_rating if min_rating is not None else '—'}-{max_rating if max_rating is not None else '—'}"
+                ws_summary.append([
+                    idx, question_text, qtype_label, answered, respondents, response_rate,
+                    'Диапазон', rating_range, '', '', ''
+                ])
+                for bucket in (stat.get('ratings_distribution_detailed') or []):
+                    ws_summary.append([
+                        idx,
+                        question_text,
+                        qtype_label,
+                        answered,
+                        respondents,
+                        response_rate,
+                        f"Оценка {bucket.get('value')}",
+                        '',
+                        int(bucket.get('count') or 0),
+                        float(bucket.get('percent_of_answers') or 0),
+                        float(bucket.get('percent_of_respondents') or 0)
+                    ])
+                continue
+
+            options = list(stat.get('options') or [])
+            if not options:
+                ws_summary.append([idx, question_text, qtype_label, answered, respondents, response_rate, 'Нет данных', '', '', '', ''])
+                continue
+
+            for option_item in options:
+                ws_summary.append([
+                    idx,
+                    question_text,
+                    qtype_label,
+                    answered,
+                    respondents,
+                    response_rate,
+                    'Вариант',
+                    str(option_item.get('option') or ''),
+                    int(option_item.get('count') or 0),
+                    float(option_item.get('percent_of_answers') or option_item.get('percent') or 0),
+                    float(option_item.get('percent_of_respondents') or option_item.get('percent') or 0)
+                ])
+
+        ws_answers = wb.create_sheet('Ответы сотрудников')
+        answer_headers = ['Сотрудник', 'ID', 'Статус', 'Отправлено']
+        for idx, question in enumerate(questions, start=1):
+            question_text = str(question.get('text') or f'Вопрос #{idx}').replace('\n', ' ').strip()
+            if len(question_text) > 100:
+                question_text = question_text[:97] + '...'
+            answer_headers.append(f"Q{idx}: {question_text}")
+        ws_answers.append(answer_headers)
+
+        for row in responses_detailed:
+            answers_by_question = row.get('answers_by_question') or {}
+            status_raw = str(row.get('status') or '').strip().lower()
+            status_label = 'Пройден' if status_raw == 'completed' else 'Назначен'
+            row_values = [
+                str(row.get('operator_name') or f"#{row.get('operator_id') or ''}"),
+                int(row.get('operator_id') or 0),
+                status_label,
+                _survey_export_format_dt(row.get('submitted_at'))
+            ]
+
+            for question in questions:
+                question_id = int(question.get('id') or 0)
+                answer = answers_by_question.get(str(question_id)) or answers_by_question.get(question_id)
+                row_values.append(_survey_export_answer_text(question, answer))
+
+            ws_answers.append(row_values)
+
+        output = BytesIO()
+        wb.save(output)
+        output.seek(0)
+
+        safe_title = re.sub(r'[^A-Za-zА-Яа-я0-9 _-]+', '', title).strip().replace(' ', '_')
+        if not safe_title:
+            safe_title = f'survey_{survey_id}'
+        filename = f"{safe_title[:64]}_stats.xlsx"
+
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name=filename,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+    except Exception as e:
+        logging.error(f"Error in export_survey_statistics_excel: {e}", exc_info=True)
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
 @app.route('/api/tasks/recipients', methods=['GET', 'OPTIONS'])
 @require_api_key
 def get_task_recipients():
