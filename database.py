@@ -8649,17 +8649,23 @@ class Database:
 
     def _serialize_survey_list(self, surveys_rows, questions_rows, assignments_rows, responses_rows, answers_rows):
         questions_by_survey = defaultdict(list)
+        question_positions_by_survey = defaultdict(dict)
         for row in questions_rows:
+            survey_id = int(row[1])
+            question_id = int(row[0])
+            position = int(row[2])
             options = row[7] if isinstance(row[7], list) else []
-            questions_by_survey[int(row[1])].append({
-                'id': int(row[0]),
-                'position': int(row[2]),
+            question_obj = {
+                'id': question_id,
+                'position': position,
                 'text': row[3],
                 'type': row[4],
                 'required': bool(row[5]),
                 'allow_other': bool(row[6]),
                 'options': [str(item) for item in options]
-            })
+            }
+            questions_by_survey[survey_id].append(question_obj)
+            question_positions_by_survey[survey_id][question_id] = position
 
         assignments_by_survey = defaultdict(list)
         for row in assignments_rows:
@@ -8681,14 +8687,32 @@ class Database:
             })
 
         answers_by_survey = defaultdict(list)
+        answers_by_response = defaultdict(list)
         for row in answers_rows:
-            selected_options = row[2] if isinstance(row[2], list) else []
-            answers_by_survey[int(row[0])].append({
-                'question_id': int(row[1]),
+            response_id = None
+            if len(row) >= 6:
+                response_id = int(row[0])
+                survey_id = int(row[1])
+                question_id = int(row[2])
+                selected_options = row[3] if isinstance(row[3], list) else []
+                answer_text = row[4] or ''
+                rating_value = row[5]
+            else:
+                survey_id = int(row[0])
+                question_id = int(row[1])
+                selected_options = row[2] if isinstance(row[2], list) else []
+                answer_text = row[3] or ''
+                rating_value = row[4]
+
+            answer_obj = {
+                'question_id': question_id,
                 'selected_options': [str(item) for item in selected_options],
-                'answer_text': row[3] or '',
-                'rating_value': row[4]
-            })
+                'answer_text': answer_text,
+                'rating_value': rating_value
+            }
+            answers_by_survey[survey_id].append(answer_obj)
+            if response_id is not None:
+                answers_by_response[response_id].append(answer_obj)
 
         serialized = []
         for row in surveys_rows:
@@ -8697,6 +8721,7 @@ class Database:
             questions = sorted(questions_by_survey.get(survey_id, []), key=lambda item: (item['position'], item['id']))
             assignments = assignments_by_survey.get(survey_id, [])
             responses = responses_by_survey.get(survey_id, [])
+            question_positions = question_positions_by_survey.get(survey_id, {})
 
             assigned_count = len(assignments)
             completed_count = sum(1 for assignment in assignments if assignment.get('status') == 'completed')
@@ -8711,6 +8736,47 @@ class Database:
                     continue
                 if parsed not in normalized_direction_ids:
                     normalized_direction_ids.append(parsed)
+
+            latest_response_by_operator = {}
+            for response in responses:
+                operator_id = int(response.get('operator_id'))
+                if operator_id not in latest_response_by_operator:
+                    latest_response_by_operator[operator_id] = response
+
+            responses_detailed = []
+            for assignment in assignments:
+                operator_id = int(assignment.get('operator_id'))
+                operator_response = latest_response_by_operator.get(operator_id)
+                response_id = int(operator_response['id']) if operator_response else None
+                response_answers = list(answers_by_response.get(response_id, [])) if response_id is not None else []
+                response_answers.sort(
+                    key=lambda item: (
+                        question_positions.get(int(item.get('question_id') or 0), 10 ** 9),
+                        int(item.get('question_id') or 0)
+                    )
+                )
+
+                answers_by_question = {}
+                for answer in response_answers:
+                    question_id = int(answer.get('question_id'))
+                    answers_by_question[str(question_id)] = {
+                        'question_id': question_id,
+                        'selected_options': list(answer.get('selected_options') or []),
+                        'answer_text': str(answer.get('answer_text') or ''),
+                        'rating_value': answer.get('rating_value')
+                    }
+
+                responses_detailed.append({
+                    'operator_id': operator_id,
+                    'operator_name': assignment.get('operator_name') or f"#{operator_id}",
+                    'status': assignment.get('status') or 'assigned',
+                    'assigned_at': assignment.get('assigned_at'),
+                    'completed_at': assignment.get('completed_at'),
+                    'response_id': response_id,
+                    'submitted_at': operator_response.get('submitted_at') if operator_response else None,
+                    'answers': response_answers,
+                    'answers_by_question': answers_by_question
+                })
 
             serialized.append({
                 'id': survey_id,
@@ -8741,7 +8807,8 @@ class Database:
                         questions,
                         answers_by_survey.get(survey_id, []),
                         respondents_total=len(responses)
-                    )
+                    ),
+                    'responses_detailed': responses_detailed
                 }
             })
 
@@ -8861,6 +8928,7 @@ class Database:
             if response_ids:
                 cursor.execute("""
                     SELECT
+                        a.response_id,
                         r.survey_id,
                         a.question_id,
                         a.selected_options_json,
@@ -8938,21 +9006,53 @@ class Database:
             question_rows = cursor.fetchall()
 
             questions_by_survey = defaultdict(list)
+            question_positions_by_survey = defaultdict(dict)
             for row in question_rows:
+                survey_id = int(row[1])
+                question_id = int(row[0])
+                position = int(row[2])
                 options = row[7] if isinstance(row[7], list) else []
-                questions_by_survey[int(row[1])].append({
-                    'id': int(row[0]),
-                    'position': int(row[2]),
+                questions_by_survey[survey_id].append({
+                    'id': question_id,
+                    'position': position,
                     'text': row[3],
                     'type': row[4],
                     'required': bool(row[5]),
                     'allow_other': bool(row[6]),
                     'options': [str(item) for item in options]
                 })
+                question_positions_by_survey[survey_id][question_id] = position
+
+            response_ids = [int(row[16]) for row in surveys_rows if row[16] is not None]
+            answers_by_response = defaultdict(list)
+            if response_ids:
+                cursor.execute("""
+                    SELECT
+                        a.response_id,
+                        a.question_id,
+                        a.selected_options_json,
+                        a.answer_text,
+                        a.rating_value
+                    FROM survey_answers a
+                    WHERE a.response_id = ANY(%s)
+                """, (response_ids,))
+                for answer_row in cursor.fetchall():
+                    selected_options = answer_row[2] if isinstance(answer_row[2], list) else []
+                    answers_by_response[int(answer_row[0])].append({
+                        'question_id': int(answer_row[1]),
+                        'selected_options': [str(item) for item in selected_options],
+                        'answer_text': answer_row[3] or '',
+                        'rating_value': answer_row[4]
+                    })
 
             result = []
             for row in surveys_rows:
                 survey_id = int(row[0])
+                questions = sorted(
+                    questions_by_survey.get(survey_id, []),
+                    key=lambda item: (item.get('position', 0), item.get('id', 0))
+                )
+                question_positions = question_positions_by_survey.get(survey_id, {})
                 direction_ids = row[6] if isinstance(row[6], list) else []
                 normalized_direction_ids = []
                 for value in direction_ids:
@@ -8964,6 +9064,34 @@ class Database:
                         normalized_direction_ids.append(parsed)
 
                 assignment_status = str(row[13] or 'assigned')
+                response_id = int(row[16]) if row[16] is not None else None
+                my_answers = list(answers_by_response.get(response_id, [])) if response_id is not None else []
+                my_answers.sort(
+                    key=lambda item: (
+                        question_positions.get(int(item.get('question_id') or 0), 10 ** 9),
+                        int(item.get('question_id') or 0)
+                    )
+                )
+
+                my_answers_by_question = {}
+                for answer in my_answers:
+                    question_id = int(answer.get('question_id'))
+                    my_answers_by_question[str(question_id)] = {
+                        'question_id': question_id,
+                        'selected_options': list(answer.get('selected_options') or []),
+                        'answer_text': str(answer.get('answer_text') or ''),
+                        'rating_value': answer.get('rating_value')
+                    }
+
+                my_response = None
+                if response_id is not None:
+                    my_response = {
+                        'id': response_id,
+                        'submitted_at': self._survey_dt_to_iso(row[17]),
+                        'answers': my_answers,
+                        'answers_by_question': my_answers_by_question
+                    }
+
                 result.append({
                     'id': survey_id,
                     'title': row[1],
@@ -8981,21 +9109,22 @@ class Database:
                         'tenure_weeks_max': row[8],
                         'operator_ids': [operator_id]
                     },
-                    'questions': questions_by_survey.get(survey_id, []),
+                    'questions': questions,
                     'my_assignment': {
                         'id': int(row[12]),
                         'status': assignment_status,
                         'assigned_at': self._survey_dt_to_iso(row[14]),
                         'completed_at': self._survey_dt_to_iso(row[15]),
-                        'response_id': int(row[16]) if row[16] is not None else None,
+                        'response_id': response_id,
                         'submitted_at': self._survey_dt_to_iso(row[17]),
                         'can_submit': assignment_status != 'completed'
                     },
+                    'my_response': my_response,
                     'statistics': {
                         'assigned_count': 1,
                         'completed_count': 1 if assignment_status == 'completed' else 0,
                         'pending_count': 0 if assignment_status == 'completed' else 1,
-                        'responses_count': 1 if row[16] is not None else 0,
+                        'responses_count': 1 if response_id is not None else 0,
                         'completion_rate': 100.0 if assignment_status == 'completed' else 0.0,
                         'question_stats': []
                     }
@@ -9125,6 +9254,10 @@ class Database:
                 valid_selected = [item for item in selected_unique if item in allowed_options]
                 if qtype == 'single' and len(valid_selected) > 1:
                     raise ValueError(f"SURVEY_TOO_MANY_OPTIONS_{question['id']}")
+
+                if qtype == 'single' and answer_text:
+                    valid_selected = []
+                    invalid_selected = []
 
                 if question['required'] and not valid_selected and not answer_text and not (question.get('allow_other') and invalid_selected):
                     raise ValueError(f"SURVEY_REQUIRED_QUESTION_{question['id']}")
