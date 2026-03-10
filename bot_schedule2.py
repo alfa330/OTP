@@ -3566,6 +3566,15 @@ def handle_surveys():
         description = data.get('description')
         assignment = data.get('assignment') or {}
         questions = data.get('questions') or []
+        repeat_from_survey_id_raw = data.get('repeat_from_survey_id')
+        repeat_from_survey_id = None
+        if repeat_from_survey_id_raw not in (None, ''):
+            try:
+                repeat_from_survey_id = int(repeat_from_survey_id_raw)
+            except Exception:
+                return jsonify({"error": "Invalid repeat_from_survey_id"}), 400
+            if repeat_from_survey_id <= 0:
+                return jsonify({"error": "Invalid repeat_from_survey_id"}), 400
 
         operator_ids_raw = assignment.get('operator_ids') or []
         operator_ids = []
@@ -3585,20 +3594,34 @@ def handle_surveys():
         if forbidden:
             return jsonify({"error": "You cannot assign surveys to these operators", "operator_ids": forbidden}), 403
 
+        if repeat_from_survey_id is not None:
+            visible_surveys = db.get_surveys_for_management(requester_id, requester_role)
+            visible_survey_ids = set()
+            for survey_item in visible_surveys:
+                try:
+                    visible_survey_ids.add(int(survey_item.get('id')))
+                except Exception:
+                    continue
+            if repeat_from_survey_id not in visible_survey_ids:
+                return jsonify({"error": "Source survey for repeat not found"}), 404
+
         created = db.create_survey(
             title=title,
             description=description,
             created_by=requester_id,
             assignment=assignment,
             questions=questions,
-            operator_ids=operator_ids
+            operator_ids=operator_ids,
+            repeat_from_survey_id=repeat_from_survey_id
         )
 
         return jsonify({
             "status": "success",
             "message": "Survey created successfully",
             "survey_id": created.get('id'),
-            "created_at": created.get('created_at')
+            "created_at": created.get('created_at'),
+            "repeat_root_id": created.get('repeat_root_id'),
+            "repeat_iteration": created.get('repeat_iteration')
         }), 201
 
     except ValueError as value_error:
@@ -3617,6 +3640,8 @@ def handle_surveys():
             return jsonify({"error": "Invalid question type"}), 400
         if code.startswith('SURVEY_OPTIONS_REQUIRED_'):
             return jsonify({"error": "Question must have at least 2 options"}), 400
+        if code == 'SURVEY_REPEAT_SOURCE_NOT_FOUND':
+            return jsonify({"error": "Source survey for repeat not found"}), 404
         return jsonify({"error": code}), 400
     except Exception as e:
         logging.error(f"Error in handle_surveys: {e}", exc_info=True)

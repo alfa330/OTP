@@ -110,6 +110,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
     const [surveys, setSurveys] = useState([]);
     const [selectedSurveyId, setSelectedSurveyId] = useState('');
     const [showBuilder, setShowBuilder] = useState(false);
+    const [repeatSourceSurveyId, setRepeatSourceSurveyId] = useState(null);
     const [draft, setDraft] = useState(emptyDraft);
     const [operatorQuery, setOperatorQuery] = useState('');
     const [answers, setAnswers] = useState({});
@@ -124,6 +125,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
 
     const canManage = isManagerRole(user?.role);
     const isOperator = String(user?.role || '').toLowerCase() === 'operator';
+    const isRepeatMode = repeatSourceSurveyId != null;
 
     useEffect(() => { showToastRef.current = showToast; }, [showToast]);
     useEffect(() => { onSurveyProgressChangedRef.current = onSurveyProgressChanged; }, [onSurveyProgressChanged]);
@@ -216,10 +218,36 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
         [selectedSurveyId, surveys]
     );
 
-    const detailedStatsRows = useMemo(() => {
-        const rows = Array.isArray(selectedSurvey?.statistics?.responses_detailed)
+    const surveyQuestionsBySurveyId = useMemo(() => {
+        const map = new Map();
+        (surveys || []).forEach((survey) => {
+            const surveyId = Number(survey?.id);
+            if (!Number.isFinite(surveyId)) return;
+            const questions = Array.isArray(survey?.questions)
+                ? [...survey.questions].sort((a, b) => {
+                    const posA = Number(a?.position) || 0;
+                    const posB = Number(b?.position) || 0;
+                    if (posA !== posB) return posA - posB;
+                    return (Number(a?.id) || 0) - (Number(b?.id) || 0);
+                })
+                : [];
+            map.set(surveyId, questions);
+        });
+        return map;
+    }, [surveys]);
+
+    const detailedStatsSourceRows = useMemo(() => {
+        const allRepetitionRows = Array.isArray(selectedSurvey?.statistics?.responses_detailed_all_repetitions)
+            ? selectedSurvey.statistics.responses_detailed_all_repetitions
+            : [];
+        if (allRepetitionRows.length > 0) return allRepetitionRows;
+        return Array.isArray(selectedSurvey?.statistics?.responses_detailed)
             ? selectedSurvey.statistics.responses_detailed
             : [];
+    }, [selectedSurvey?.statistics?.responses_detailed_all_repetitions, selectedSurvey?.statistics?.responses_detailed]);
+
+    const detailedStatsRows = useMemo(() => {
+        const rows = detailedStatsSourceRows;
         const query = String(statsOperatorQuery || '').trim().toLowerCase();
         if (!query) return rows;
         return rows.filter((row) => {
@@ -227,7 +255,35 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
             const idText = String(row?.operator_id || '');
             return name.includes(query) || idText.includes(query);
         });
-    }, [selectedSurvey?.statistics?.responses_detailed, statsOperatorQuery]);
+    }, [detailedStatsSourceRows, statsOperatorQuery]);
+
+    const resolveStatsQuestionAndAnswer = useCallback((row, baseQuestion, questionIndex) => {
+        const rowSurveyId = Number(row?.repeat_survey_id);
+        const rowQuestions = Number.isFinite(rowSurveyId)
+            ? (surveyQuestionsBySurveyId.get(rowSurveyId) || [])
+            : [];
+        const rowQuestion = rowQuestions[questionIndex] || baseQuestion;
+        const answersByQuestion = row?.answers_by_question || {};
+
+        let resolvedAnswer = null;
+        if (rowQuestion) {
+            resolvedAnswer = answersByQuestion[String(rowQuestion.id)] || answersByQuestion[rowQuestion.id] || null;
+        }
+        if (!resolvedAnswer) {
+            const answersList = Array.isArray(row?.answers) ? row.answers : [];
+            if (rowQuestion) {
+                resolvedAnswer = answersList.find((item) => Number(item?.question_id) === Number(rowQuestion.id)) || null;
+            }
+            if (!resolvedAnswer) {
+                resolvedAnswer = answersList[questionIndex] || null;
+            }
+        }
+
+        return {
+            question: rowQuestion || baseQuestion,
+            answer: resolvedAnswer
+        };
+    }, [surveyQuestionsBySurveyId]);
 
     const formatQuestionAnswerText = useCallback((question, answer) => {
         if (!question || !answer) return '—';
@@ -316,6 +372,50 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
         setAnswers((prev) => ({ ...prev, [questionId]: { ...(prev[questionId] || {}), ...patch } }));
     };
 
+    const resetBuilder = useCallback(() => {
+        setRepeatSourceSurveyId(null);
+        setDraft(emptyDraft());
+        setOperatorQuery('');
+    }, []);
+
+    const closeBuilder = useCallback(() => {
+        setShowBuilder(false);
+        resetBuilder();
+    }, [resetBuilder]);
+
+    const startRepeatSurvey = useCallback((survey) => {
+        if (!survey || !canManage) return;
+        const sourceId = Number(survey?.id);
+        if (!Number.isFinite(sourceId)) return;
+
+        const sourceQuestions = Array.isArray(survey?.questions) ? survey.questions : [];
+        const clonedQuestions = sourceQuestions.length > 0
+            ? sourceQuestions.map((question) => ({
+                id: `q_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+                text: String(question?.text || ''),
+                type: String(question?.type || 'single'),
+                required: question?.required !== false,
+                allowOther: question?.allow_other === true,
+                options: String(question?.type || 'single') === 'rating'
+                    ? []
+                    : (Array.isArray(question?.options) ? question.options.map((option) => String(option || '')) : ['', ''])
+            }))
+            : [emptyQuestion()];
+
+        setDraft({
+            title: String(survey?.title || ''),
+            description: String(survey?.description || ''),
+            directionIds: (survey?.assignment?.direction_ids || []).map((id) => String(id)).filter(Boolean),
+            tenureWeeksMin: survey?.assignment?.tenure_weeks_min != null ? String(survey.assignment.tenure_weeks_min) : '',
+            tenureWeeksMax: survey?.assignment?.tenure_weeks_max != null ? String(survey.assignment.tenure_weeks_max) : '',
+            operatorIds: (survey?.assignment?.operator_ids || []).map((id) => Number(id)).filter(Number.isFinite),
+            questions: clonedQuestions
+        });
+        setOperatorQuery('');
+        setRepeatSourceSurveyId(sourceId);
+        setShowBuilder(true);
+    }, [canManage]);
+
     const createSurvey = async () => {
         if (!String(draft.title || '').trim()) return notify('Укажите название опроса', 'error');
         if (!(draft.operatorIds || []).length) return notify('Выберите минимум одного оператора', 'error');
@@ -348,14 +448,15 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                 options: question.type === 'rating' ? [] : (question.options || []).map((option) => String(option || '').trim()).filter(Boolean)
             }))
         };
+        if (isRepeatMode) {
+            payload.repeat_from_survey_id = Number(repeatSourceSurveyId);
+        }
 
         setIsSaving(true);
         try {
             await axios.post(`${apiBaseUrl}/api/surveys`, payload, { headers });
             notify('Опрос создан', 'success');
-            setDraft(emptyDraft());
-            setOperatorQuery('');
-            setShowBuilder(false);
+            closeBuilder();
             await loadSurveys();
         } catch (error) {
             notify(error?.response?.data?.error || 'Не удалось создать опрос', 'error');
@@ -610,7 +711,14 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                     </div>
                     {canManage && (
                         <button
-                            onClick={() => setShowBuilder((v) => !v)}
+                            onClick={() => {
+                                if (showBuilder) {
+                                    closeBuilder();
+                                    return;
+                                }
+                                if (!isRepeatMode) resetBuilder();
+                                setShowBuilder(true);
+                            }}
                             className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all shadow-sm ${
                                 showBuilder
                                     ? 'bg-gray-100 text-gray-600 hover:bg-gray-200'
@@ -627,7 +735,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
             {/* ── Survey Builder ── */}
             {canManage && showBuilder && (
                 <div className="bg-white rounded-2xl border border-blue-100 shadow-sm">
-                    <div className="px-6 py-4 border-b border-gray-100 flex items-center gap-2">
+                    <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between gap-3 flex-wrap">
                         <div className="w-6 h-6 rounded-lg bg-blue-50 flex items-center justify-center">
                             <FaIcon className="fas fa-pencil-alt text-blue-500 text-xs" />
                         </div>
@@ -893,6 +1001,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                             const isSelected = String(survey.id) === String(selectedSurveyId);
                             const isCompleted = survey?.my_assignment?.status === 'completed';
                             const completionRate = survey?.statistics?.completion_rate || 0;
+                            const repeatIteration = Number(survey?.repeat?.iteration || 1);
                             return (
                                 <div
                                     key={survey.id}
@@ -902,8 +1011,15 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                     {isSelected && <div className="absolute left-0 inset-y-0 w-0.5 bg-blue-500 rounded-r-full" />}
                                     <div className="flex items-start justify-between gap-2">
                                         <div className="flex-1 min-w-0">
-                                            <div className={`text-sm font-semibold truncate ${isSelected ? 'text-blue-700' : 'text-gray-800'}`}>
-                                                {survey.title}
+                                            <div className="flex items-center gap-1.5 min-w-0">
+                                                <div className={`text-sm font-semibold truncate ${isSelected ? 'text-blue-700' : 'text-gray-800'}`}>
+                                                    {survey.title}
+                                                </div>
+                                                {repeatIteration > 1 && (
+                                                    <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-700">
+                                                        #{repeatIteration}
+                                                    </span>
+                                                )}
                                             </div>
                                             <div className="mt-1.5">
                                                 {canManage ? (
@@ -959,7 +1075,23 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                         {selectedSurvey.description && (
                                             <p className="text-sm text-gray-500 mt-0.5">{selectedSurvey.description}</p>
                                         )}
+                                        {Number(selectedSurvey?.repeat?.iteration || 1) > 1 && (
+                                            <p className="text-xs text-blue-600 mt-1">
+                                                Повторение #{Number(selectedSurvey?.repeat?.iteration || 1)}
+                                            </p>
+                                        )}
                                     </div>
+                                    {canManage && (
+                                        <button
+                                            type="button"
+                                            onClick={() => startRepeatSurvey(selectedSurvey)}
+                                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 transition-colors"
+                                            title="Создать повтор опроса"
+                                        >
+                                            <FaIcon className="fas fa-redo" />
+                                            Повторить
+                                        </button>
+                                    )}
                                     {isOperator && (
                                         <Badge color={selectedSurvey?.my_assignment?.status === 'completed' ? 'green' : 'amber'}>
                                             {selectedSurvey?.my_assignment?.status === 'completed' ? 'Пройден' : 'Назначен'}
@@ -1227,7 +1359,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                                         {isStatsExporting ? 'Экспорт...' : 'Excel'}
                                                     </button>
                                                     <Badge color="blue">
-                                                        {detailedStatsRows.length}/{Array.isArray(selectedSurvey?.statistics?.responses_detailed) ? selectedSurvey.statistics.responses_detailed.length : 0}
+                                                        {detailedStatsRows.length}/{detailedStatsSourceRows.length}
                                                     </Badge>
                                                 </div>
                                             </div>
@@ -1249,6 +1381,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                                             <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Сотрудник</th>
                                                             <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Статус</th>
                                                             <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Отправлено</th>
+                                                            <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Повтор</th>
                                                             {(selectedSurvey?.questions || []).map((question, qIndex) => (
                                                                 <th key={`table_q_${question.id}`} className="px-3 py-2 text-left font-semibold text-gray-600 min-w-[220px]">
                                                                     <div className="text-[10px] text-gray-400 mb-0.5">Вопрос #{qIndex + 1}</div>
@@ -1262,17 +1395,22 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                                             <tr>
                                                                 <td
                                                                     className="px-3 py-4 text-center text-gray-400"
-                                                                    colSpan={3 + (selectedSurvey?.questions || []).length}
+                                                                    colSpan={4 + (selectedSurvey?.questions || []).length}
                                                                 >
                                                                     Сотрудники не найдены
                                                                 </td>
                                                             </tr>
                                                         )}
                                                         {detailedStatsRows.map((row) => {
-                                                            const answersByQuestion = row?.answers_by_question || {};
                                                             const isCompleted = String(row?.status || '').toLowerCase() === 'completed';
+                                                            const repeatIteration = Number(
+                                                                row?.repeat_iteration != null
+                                                                    ? row.repeat_iteration
+                                                                    : (selectedSurvey?.repeat?.iteration || 1)
+                                                            );
+                                                            const repeatSurveyId = Number(row?.repeat_survey_id || selectedSurvey?.id || 0);
                                                             return (
-                                                                <tr key={`stats_row_${row?.operator_id}`}>
+                                                                <tr key={`stats_row_${row?.operator_id}_${repeatSurveyId}`}>
                                                                     <td className="px-3 py-2.5 whitespace-nowrap text-gray-800 font-medium">
                                                                         {row?.operator_name || `#${row?.operator_id || '—'}`}
                                                                     </td>
@@ -1284,12 +1422,17 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                                                     <td className="px-3 py-2.5 whitespace-nowrap text-gray-600">
                                                                         {formatSurveyDateTime(row?.submitted_at)}
                                                                     </td>
-                                                                    {(selectedSurvey?.questions || []).map((question) => {
-                                                                        const answer = answersByQuestion[String(question.id)] || answersByQuestion[question.id] || null;
+                                                                    <td className="px-3 py-2.5 whitespace-nowrap">
+                                                                        <Badge color={repeatIteration > 1 ? 'blue' : 'gray'}>
+                                                                            #{repeatIteration}
+                                                                        </Badge>
+                                                                    </td>
+                                                                    {(selectedSurvey?.questions || []).map((question, questionIndex) => {
+                                                                        const resolved = resolveStatsQuestionAndAnswer(row, question, questionIndex);
                                                                         return (
-                                                                            <td key={`stats_row_${row?.operator_id}_q_${question.id}`} className="px-3 py-2.5 align-top text-gray-700">
+                                                                            <td key={`stats_row_${row?.operator_id}_${repeatSurveyId}_q_${question.id}`} className="px-3 py-2.5 align-top text-gray-700">
                                                                                 <div className="max-w-[280px] break-words">
-                                                                                    {formatQuestionAnswerText(question, answer)}
+                                                                                    {formatQuestionAnswerText(resolved.question, resolved.answer)}
                                                                                 </div>
                                                                             </td>
                                                                         );
