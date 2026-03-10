@@ -713,6 +713,7 @@ class Database:
                     tenure_weeks_max INTEGER,
                     repeat_root_id INTEGER REFERENCES surveys(id) ON DELETE SET NULL,
                     repeat_iteration INTEGER NOT NULL DEFAULT 1,
+                    is_test BOOLEAN NOT NULL DEFAULT FALSE,
                     is_active BOOLEAN NOT NULL DEFAULT TRUE,
                     created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
                     updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
@@ -749,6 +750,10 @@ class Database:
                 WHERE repeat_root_id IS NULL;
             """)
             cursor.execute("""
+                ALTER TABLE surveys
+                ADD COLUMN IF NOT EXISTS is_test BOOLEAN NOT NULL DEFAULT FALSE;
+            """)
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS survey_questions (
                     id SERIAL PRIMARY KEY,
                     survey_id INTEGER NOT NULL REFERENCES surveys(id) ON DELETE CASCADE,
@@ -758,9 +763,27 @@ class Database:
                     is_required BOOLEAN NOT NULL DEFAULT TRUE,
                     allow_other BOOLEAN NOT NULL DEFAULT FALSE,
                     options_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    correct_options_json JSONB NOT NULL DEFAULT '[]'::jsonb,
                     created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
                     UNIQUE (survey_id, position)
                 );
+            """)
+            cursor.execute("""
+                ALTER TABLE survey_questions
+                ADD COLUMN IF NOT EXISTS correct_options_json JSONB;
+            """)
+            cursor.execute("""
+                UPDATE survey_questions
+                SET correct_options_json = '[]'::jsonb
+                WHERE correct_options_json IS NULL;
+            """)
+            cursor.execute("""
+                ALTER TABLE survey_questions
+                ALTER COLUMN correct_options_json SET DEFAULT '[]'::jsonb;
+            """)
+            cursor.execute("""
+                ALTER TABLE survey_questions
+                ALTER COLUMN correct_options_json SET NOT NULL;
             """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS survey_assignments (
@@ -8349,10 +8372,14 @@ class Database:
         with self._get_cursor() as cursor:
             return self._get_visible_operator_ids_for_requester_tx(cursor, requester_id, requester_role)
 
-    def create_survey(self, title, description, created_by, assignment, questions, operator_ids, repeat_from_survey_id=None):
+    def create_survey(self, title, description, created_by, assignment, questions, operator_ids, repeat_from_survey_id=None, is_test=False):
         title_norm = str(title or '').strip()
         description_norm = str(description or '').strip() or None
         created_by_id = int(created_by) if created_by is not None else None
+        if isinstance(is_test, str):
+            is_test_norm = is_test.strip().lower() in ('1', 'true', 'yes', 'on')
+        else:
+            is_test_norm = bool(is_test)
 
         if not title_norm:
             raise ValueError("SURVEY_TITLE_REQUIRED")
@@ -8410,8 +8437,11 @@ class Database:
                 raise ValueError(f"SURVEY_QUESTION_TEXT_REQUIRED_{idx + 1}")
             if qtype not in ('single', 'multiple', 'rating'):
                 raise ValueError(f"SURVEY_INVALID_QUESTION_TYPE_{idx + 1}")
+            if is_test_norm and qtype == 'rating':
+                raise ValueError(f"SURVEY_TEST_RATING_NOT_ALLOWED_{idx + 1}")
 
             options_norm = []
+            correct_options_norm = []
             if qtype != 'rating':
                 for option in (raw_question or {}).get('options') or []:
                     option_text = str(option or '').strip()
@@ -8419,6 +8449,21 @@ class Database:
                         options_norm.append(option_text)
                 if len(options_norm) < 2:
                     raise ValueError(f"SURVEY_OPTIONS_REQUIRED_{idx + 1}")
+
+                for option in (raw_question or {}).get('correct_options') or []:
+                    option_text = str(option or '').strip()
+                    if option_text and option_text not in correct_options_norm:
+                        correct_options_norm.append(option_text)
+
+                if is_test_norm:
+                    allow_other = False
+                    if not correct_options_norm:
+                        raise ValueError(f"SURVEY_CORRECT_OPTIONS_REQUIRED_{idx + 1}")
+                    invalid_correct = [item for item in correct_options_norm if item not in options_norm]
+                    if invalid_correct:
+                        raise ValueError(f"SURVEY_CORRECT_OPTION_INVALID_{idx + 1}")
+                    if qtype == 'single' and len(correct_options_norm) != 1:
+                        raise ValueError(f"SURVEY_SINGLE_CORRECT_OPTION_REQUIRED_{idx + 1}")
             else:
                 allow_other = False
 
@@ -8428,7 +8473,8 @@ class Database:
                 'type': qtype,
                 'required': required,
                 'allow_other': allow_other,
-                'options': options_norm
+                'options': options_norm,
+                'correct_options': correct_options_norm
             })
 
         with self._get_cursor() as cursor:
@@ -8469,6 +8515,7 @@ class Database:
                     tenure_weeks_max,
                     repeat_root_id,
                     repeat_iteration,
+                    is_test,
                     created_at,
                     updated_at
                 )
@@ -8477,6 +8524,7 @@ class Database:
                     %s,
                     %s,
                     %s::jsonb,
+                    %s,
                     %s,
                     %s,
                     %s,
@@ -8493,7 +8541,8 @@ class Database:
                 tenure_weeks_min,
                 tenure_weeks_max,
                 repeat_root_id_to_use,
-                repeat_iteration_to_use
+                repeat_iteration_to_use,
+                is_test_norm
             ))
             survey_id, created_at = cursor.fetchone()
 
@@ -8510,14 +8559,15 @@ class Database:
                 cursor.execute("""
                     INSERT INTO survey_questions (
                         survey_id,
-                        position,
-                        question_text,
-                        question_type,
-                        is_required,
-                        allow_other,
-                        options_json
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)
+                    position,
+                    question_text,
+                    question_type,
+                    is_required,
+                    allow_other,
+                    options_json,
+                    correct_options_json
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
                 """, (
                     survey_id,
                     question['position'],
@@ -8525,7 +8575,8 @@ class Database:
                     question['type'],
                     question['required'],
                     question['allow_other'],
-                    json.dumps(question['options'], ensure_ascii=False)
+                    json.dumps(question['options'], ensure_ascii=False),
+                    json.dumps(question['correct_options'], ensure_ascii=False)
                 ))
 
             for operator_id in operator_ids_norm:
@@ -8562,7 +8613,8 @@ class Database:
                 'id': int(survey_id),
                 'created_at': self._survey_dt_to_iso(created_at),
                 'repeat_root_id': int(repeat_root_id_to_use),
-                'repeat_iteration': int(repeat_iteration_to_use)
+                'repeat_iteration': int(repeat_iteration_to_use),
+                'is_test': bool(is_test_norm)
             }
 
     def delete_survey(self, survey_id, requester_id, requester_role):
@@ -8729,6 +8781,7 @@ class Database:
             question_id = int(row[0])
             position = int(row[2])
             options = row[7] if isinstance(row[7], list) else []
+            correct_options = row[8] if len(row) > 8 and isinstance(row[8], list) else []
             question_obj = {
                 'id': question_id,
                 'position': position,
@@ -8736,7 +8789,8 @@ class Database:
                 'type': row[4],
                 'required': bool(row[5]),
                 'allow_other': bool(row[6]),
-                'options': [str(item) for item in options]
+                'options': [str(item) for item in options],
+                'correct_options': [str(item) for item in correct_options]
             }
             questions_by_survey[survey_id].append(question_obj)
             question_positions_by_survey[survey_id][question_id] = position
@@ -8793,6 +8847,7 @@ class Database:
             survey_id = int(row[0])
             repeat_root_id = survey_id
             repeat_iteration = 1
+            is_test = False
             if len(row) > 12:
                 try:
                     repeat_root_id = int(row[12]) if row[12] is not None else survey_id
@@ -8804,6 +8859,8 @@ class Database:
                     repeat_iteration = parsed_repeat_iteration if parsed_repeat_iteration >= 1 else 1
                 except Exception:
                     repeat_iteration = 1
+            if len(row) > 14:
+                is_test = bool(row[14])
 
             direction_ids = row[6] if isinstance(row[6], list) else []
             questions = sorted(questions_by_survey.get(survey_id, []), key=lambda item: (item['position'], item['id']))
@@ -8885,6 +8942,7 @@ class Database:
                     'iteration': int(repeat_iteration),
                     'is_repeat': int(repeat_iteration) > 1
                 },
+                'is_test': bool(is_test),
                 'assignment': {
                     'direction_ids': normalized_direction_ids,
                     'tenure_weeks_min': row[7],
@@ -8966,7 +9024,8 @@ class Database:
                         creator.name,
                         creator.role,
                         s.repeat_root_id,
-                        s.repeat_iteration
+                        s.repeat_iteration,
+                        s.is_test
                     FROM surveys s
                     LEFT JOIN users creator ON creator.id = s.created_by
                     ORDER BY s.created_at DESC, s.id DESC
@@ -8987,7 +9046,8 @@ class Database:
                         creator.name,
                         creator.role,
                         s.repeat_root_id,
-                        s.repeat_iteration
+                        s.repeat_iteration,
+                        s.is_test
                     FROM surveys s
                     LEFT JOIN users creator ON creator.id = s.created_by
                     LEFT JOIN survey_assignments sa ON sa.survey_id = s.id
@@ -9014,7 +9074,8 @@ class Database:
                     q.question_type,
                     q.is_required,
                     q.allow_other,
-                    q.options_json
+                    q.options_json,
+                    q.correct_options_json
                 FROM survey_questions q
                 WHERE q.survey_id = ANY(%s)
                 ORDER BY q.survey_id, q.position, q.id
@@ -9105,7 +9166,8 @@ class Database:
                     sr.id,
                     sr.submitted_at,
                     s.repeat_root_id,
-                    s.repeat_iteration
+                    s.repeat_iteration,
+                    s.is_test
                 FROM survey_assignments sa
                 JOIN surveys s ON s.id = sa.survey_id
                 LEFT JOIN users creator ON creator.id = s.created_by
@@ -9132,7 +9194,8 @@ class Database:
                     q.question_type,
                     q.is_required,
                     q.allow_other,
-                    q.options_json
+                    q.options_json,
+                    q.correct_options_json
                 FROM survey_questions q
                 WHERE q.survey_id = ANY(%s)
                 ORDER BY q.survey_id, q.position, q.id
@@ -9146,6 +9209,7 @@ class Database:
                 question_id = int(row[0])
                 position = int(row[2])
                 options = row[7] if isinstance(row[7], list) else []
+                correct_options = row[8] if len(row) > 8 and isinstance(row[8], list) else []
                 questions_by_survey[survey_id].append({
                     'id': question_id,
                     'position': position,
@@ -9153,7 +9217,8 @@ class Database:
                     'type': row[4],
                     'required': bool(row[5]),
                     'allow_other': bool(row[6]),
-                    'options': [str(item) for item in options]
+                    'options': [str(item) for item in options],
+                    'correct_options': [str(item) for item in correct_options]
                 })
                 question_positions_by_survey[survey_id][question_id] = position
 
@@ -9184,6 +9249,7 @@ class Database:
                 survey_id = int(row[0])
                 repeat_root_id = survey_id
                 repeat_iteration = 1
+                is_test = bool(row[20]) if len(row) > 20 else False
                 if len(row) > 18:
                     try:
                         repeat_root_id = int(row[18]) if row[18] is not None else survey_id
@@ -9196,7 +9262,7 @@ class Database:
                     except Exception:
                         repeat_iteration = 1
 
-                questions = sorted(
+                questions_source = sorted(
                     questions_by_survey.get(survey_id, []),
                     key=lambda item: (item.get('position', 0), item.get('id', 0))
                 )
@@ -9212,6 +9278,21 @@ class Database:
                         normalized_direction_ids.append(parsed)
 
                 assignment_status = str(row[13] or 'assigned')
+                questions = []
+                for question in questions_source:
+                    question_copy = {
+                        'id': int(question.get('id')),
+                        'position': int(question.get('position') or 0),
+                        'text': str(question.get('text') or ''),
+                        'type': str(question.get('type') or ''),
+                        'required': bool(question.get('required')),
+                        'allow_other': bool(question.get('allow_other')),
+                        'options': list(question.get('options') or [])
+                    }
+                    if is_test and assignment_status == 'completed':
+                        question_copy['correct_options'] = list(question.get('correct_options') or [])
+                    questions.append(question_copy)
+
                 response_id = int(row[16]) if row[16] is not None else None
                 my_answers = list(answers_by_response.get(response_id, [])) if response_id is not None else []
                 my_answers.sort(
@@ -9222,13 +9303,52 @@ class Database:
                 )
 
                 my_answers_by_question = {}
+                test_total_questions = 0
+                test_answered_questions = 0
+                test_correct_answers = 0
+                question_meta_by_id = {int(item.get('id')): item for item in questions_source}
+                if is_test:
+                    test_total_questions = len([item for item in questions_source if item.get('type') in ('single', 'multiple')])
                 for answer in my_answers:
                     question_id = int(answer.get('question_id'))
-                    my_answers_by_question[str(question_id)] = {
+                    answer_selected_options = list(answer.get('selected_options') or [])
+                    answer_text_value = str(answer.get('answer_text') or '')
+                    answer_payload = {
                         'question_id': question_id,
-                        'selected_options': list(answer.get('selected_options') or []),
-                        'answer_text': str(answer.get('answer_text') or ''),
+                        'selected_options': answer_selected_options,
+                        'answer_text': answer_text_value,
                         'rating_value': answer.get('rating_value')
+                    }
+                    if is_test:
+                        question_meta = question_meta_by_id.get(question_id) or {}
+                        expected_options = list(question_meta.get('correct_options') or [])
+                        question_type = str(question_meta.get('type') or '')
+                        has_answer = bool(answer_selected_options or answer_text_value or answer.get('rating_value') is not None)
+                        if has_answer:
+                            test_answered_questions += 1
+
+                        is_correct_answer = False
+                        if question_type == 'single':
+                            is_correct_answer = (
+                                len(expected_options) == 1
+                                and len(answer_selected_options) == 1
+                                and answer_selected_options[0] == expected_options[0]
+                                and not answer_text_value
+                            )
+                        elif question_type == 'multiple':
+                            is_correct_answer = (
+                                set(answer_selected_options) == set(expected_options)
+                                and len(expected_options) > 0
+                                and not answer_text_value
+                            )
+                        if is_correct_answer:
+                            test_correct_answers += 1
+
+                        answer_payload['is_correct'] = bool(is_correct_answer)
+                        answer_payload['expected_options'] = expected_options
+
+                    my_answers_by_question[str(question_id)] = {
+                        **answer_payload
                     }
 
                 my_response = None
@@ -9239,6 +9359,14 @@ class Database:
                         'answers': my_answers,
                         'answers_by_question': my_answers_by_question
                     }
+                    if is_test:
+                        score_percent = round((test_correct_answers / test_total_questions) * 100, 1) if test_total_questions > 0 else 0.0
+                        my_response['test_summary'] = {
+                            'total_questions': int(test_total_questions),
+                            'answered_questions': int(test_answered_questions),
+                            'correct_answers': int(test_correct_answers),
+                            'score_percent': float(score_percent)
+                        }
 
                 result.append({
                     'id': survey_id,
@@ -9256,6 +9384,7 @@ class Database:
                         'iteration': int(repeat_iteration),
                         'is_repeat': int(repeat_iteration) > 1
                     },
+                    'is_test': bool(is_test),
                     'assignment': {
                         'direction_ids': normalized_direction_ids,
                         'tenure_weeks_min': row[7],
@@ -9294,13 +9423,14 @@ class Database:
 
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT id
+                SELECT id, COALESCE(is_test, FALSE)
                 FROM surveys
                 WHERE id = %s
             """, (survey_id,))
             survey_row = cursor.fetchone()
             if not survey_row:
                 raise ValueError("SURVEY_NOT_FOUND")
+            is_test = bool(survey_row[1])
 
             cursor.execute("""
                 SELECT id, status
@@ -9323,7 +9453,8 @@ class Database:
                     question_type,
                     is_required,
                     allow_other,
-                    options_json
+                    options_json,
+                    correct_options_json
                 FROM survey_questions
                 WHERE survey_id = %s
                 ORDER BY position, id
@@ -9335,13 +9466,15 @@ class Database:
             questions_by_id = {}
             for row in question_rows:
                 options = row[5] if isinstance(row[5], list) else []
+                correct_options = row[6] if len(row) > 6 and isinstance(row[6], list) else []
                 questions_by_id[int(row[0])] = {
                     'id': int(row[0]),
                     'text': row[1],
                     'type': row[2],
                     'required': bool(row[3]),
                     'allow_other': bool(row[4]),
-                    'options': [str(item) for item in options]
+                    'options': [str(item) for item in options],
+                    'correct_options': [str(item) for item in correct_options]
                 }
 
             answers_by_question = {}
@@ -9360,7 +9493,12 @@ class Database:
             for question in questions_by_id.values():
                 raw_answer = answers_by_question.get(question['id']) or {}
                 qtype = question['type']
+                if is_test and qtype not in ('single', 'multiple'):
+                    raise ValueError(f"SURVEY_TEST_RATING_NOT_ALLOWED_{question['id']}")
+
                 answer_text = str(raw_answer.get('answer_text') or '').strip()
+                if is_test:
+                    answer_text = ''
                 if answer_text and not question.get('allow_other'):
                     answer_text = ''
 

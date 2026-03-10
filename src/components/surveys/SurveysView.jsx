@@ -18,6 +18,16 @@ const parseWeeksInput = (value) => {
     return Math.max(0, Math.floor(number));
 };
 
+const toUniqueTrimmedList = (values) => {
+    const source = Array.isArray(values) ? values : [];
+    const normalized = [];
+    source.forEach((value) => {
+        const text = String(value || '').trim();
+        if (text && !normalized.includes(text)) normalized.push(text);
+    });
+    return normalized;
+};
+
 const parseFlexibleDate = (value) => {
     if (!value) return null;
     const text = String(value).trim();
@@ -52,12 +62,14 @@ const emptyQuestion = () => ({
     type: 'single',
     required: true,
     allowOther: false,
-    options: ['', '']
+    options: ['', ''],
+    correctOptions: []
 });
 
 const emptyDraft = () => ({
     title: '',
     description: '',
+    isTest: false,
     directionIds: [],
     tenureWeeksMin: '',
     tenureWeeksMax: '',
@@ -308,6 +320,41 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
         }
         return '—';
     }, []);
+
+    const getExpectedOptionsForTest = useCallback((question, answer) => {
+        const fromAnswer = toUniqueTrimmedList(answer?.expected_options);
+        if (fromAnswer.length > 0) return fromAnswer;
+        return toUniqueTrimmedList(question?.correct_options);
+    }, []);
+
+    const isTestAnswerCorrect = useCallback((question, answer) => {
+        if (!question || !answer) return false;
+        if (typeof answer?.is_correct === 'boolean') return answer.is_correct;
+
+        const type = String(question?.type || '');
+        const selectedOptions = toUniqueTrimmedList(answer?.selected_options);
+        const answerText = String(answer?.answer_text || '').trim();
+        const expectedOptions = getExpectedOptionsForTest(question, answer);
+
+        if (type === 'single') {
+            return (
+                expectedOptions.length === 1
+                && selectedOptions.length === 1
+                && selectedOptions[0] === expectedOptions[0]
+                && !answerText
+            );
+        }
+        if (type === 'multiple') {
+            return (
+                expectedOptions.length > 0
+                && selectedOptions.length === expectedOptions.length
+                && expectedOptions.every((option) => selectedOptions.includes(option))
+                && !answerText
+            );
+        }
+        return false;
+    }, [getExpectedOptionsForTest]);
+
     const formatSurveyDateTime = useCallback((value) => {
         if (!value) return '—';
         const parsed = new Date(String(value));
@@ -363,7 +410,80 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                 if (question.id !== questionId || question.type === 'rating') return question;
                 const options = Array.isArray(question.options) ? question.options : [];
                 if (options.length <= 2) return question;
-                return { ...question, options: options.filter((_, idx) => idx !== optionIndex) };
+                const removedOption = String(options[optionIndex] || '').trim();
+                const nextCorrectOptions = toUniqueTrimmedList(
+                    (question.correctOptions || []).filter((option) => String(option || '').trim() !== removedOption)
+                );
+                return {
+                    ...question,
+                    options: options.filter((_, idx) => idx !== optionIndex),
+                    correctOptions: nextCorrectOptions
+                };
+            })
+        }));
+    };
+
+    const toggleTestMode = (enabled) => {
+        const nextEnabled = !!enabled;
+        setDraft((prev) => ({
+            ...prev,
+            isTest: nextEnabled,
+            questions: (prev.questions || []).map((question) => {
+                let nextType = question.type;
+                let nextOptions = Array.isArray(question.options) ? question.options : [];
+                let nextAllowOther = !!question.allowOther;
+                let nextCorrectOptions = toUniqueTrimmedList(question.correctOptions);
+
+                if (nextEnabled) {
+                    if (nextType === 'rating') {
+                        nextType = 'single';
+                        nextOptions = nextOptions.length ? nextOptions : ['', ''];
+                    }
+                    nextAllowOther = false;
+
+                    const normalizedOptions = toUniqueTrimmedList(nextOptions);
+                    nextCorrectOptions = nextCorrectOptions.filter((option) => normalizedOptions.includes(option));
+                    if (nextType === 'single' && nextCorrectOptions.length > 1) {
+                        nextCorrectOptions = [nextCorrectOptions[0]];
+                    }
+                }
+
+                return {
+                    ...question,
+                    type: nextType,
+                    allowOther: nextAllowOther,
+                    options: nextType === 'rating' ? [] : (nextOptions.length ? nextOptions : ['', '']),
+                    correctOptions: nextCorrectOptions
+                };
+            })
+        }));
+    };
+
+    const toggleCorrectOption = (questionId, optionValue) => {
+        const normalizedValue = String(optionValue || '').trim();
+        if (!normalizedValue) return;
+
+        setDraft((prev) => ({
+            ...prev,
+            questions: (prev.questions || []).map((question) => {
+                if (question.id !== questionId || question.type === 'rating') return question;
+
+                const options = toUniqueTrimmedList(question.options);
+                if (!options.includes(normalizedValue)) return question;
+
+                const currentCorrectOptions = toUniqueTrimmedList(question.correctOptions);
+                const hasValue = currentCorrectOptions.includes(normalizedValue);
+                let nextCorrectOptions;
+
+                if (question.type === 'single') {
+                    nextCorrectOptions = hasValue ? [] : [normalizedValue];
+                } else {
+                    nextCorrectOptions = hasValue
+                        ? currentCorrectOptions.filter((option) => option !== normalizedValue)
+                        : [...currentCorrectOptions, normalizedValue];
+                }
+
+                return { ...question, correctOptions: nextCorrectOptions };
             })
         }));
     };
@@ -390,21 +510,27 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
 
         const sourceQuestions = Array.isArray(survey?.questions) ? survey.questions : [];
         const clonedQuestions = sourceQuestions.length > 0
-            ? sourceQuestions.map((question) => ({
-                id: `q_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-                text: String(question?.text || ''),
-                type: String(question?.type || 'single'),
-                required: question?.required !== false,
-                allowOther: question?.allow_other === true,
-                options: String(question?.type || 'single') === 'rating'
-                    ? []
-                    : (Array.isArray(question?.options) ? question.options.map((option) => String(option || '')) : ['', ''])
-            }))
+            ? sourceQuestions.map((question) => {
+                const rawType = String(question?.type || 'single');
+                const type = survey?.is_test && rawType === 'rating' ? 'single' : rawType;
+                return {
+                    id: `q_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+                    text: String(question?.text || ''),
+                    type,
+                    required: question?.required !== false,
+                    allowOther: survey?.is_test ? false : (question?.allow_other === true),
+                    options: type === 'rating'
+                        ? []
+                        : (Array.isArray(question?.options) ? question.options.map((option) => String(option || '')) : ['', '']),
+                    correctOptions: toUniqueTrimmedList(question?.correct_options)
+                };
+            })
             : [emptyQuestion()];
 
         setDraft({
             title: String(survey?.title || ''),
             description: String(survey?.description || ''),
+            isTest: !!survey?.is_test,
             directionIds: (survey?.assignment?.direction_ids || []).map((id) => String(id)).filter(Boolean),
             tenureWeeksMin: survey?.assignment?.tenure_weeks_min != null ? String(survey.assignment.tenure_weeks_min) : '',
             tenureWeeksMax: survey?.assignment?.tenure_weeks_max != null ? String(survey.assignment.tenure_weeks_max) : '',
@@ -423,30 +549,55 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
         const maxWeeks = parseWeeksInput(draft.tenureWeeksMax);
         if (minWeeks != null && maxWeeks != null && minWeeks > maxWeeks) return notify('Минимальный стаж не может быть больше максимального', 'error');
 
+        const normalizedQuestions = (draft.questions || []).map((question) => {
+            const normalizedOptions = question.type === 'rating'
+                ? []
+                : toUniqueTrimmedList(question.options);
+            const normalizedCorrectOptions = toUniqueTrimmedList(question.correctOptions);
+            return {
+                text: String(question.text || '').trim(),
+                type: question.type,
+                required: !!question.required,
+                allow_other: draft.isTest ? false : (question.type === 'rating' ? false : !!question.allowOther),
+                options: normalizedOptions,
+                correct_options: normalizedCorrectOptions
+            };
+        });
+
         for (let i = 0; i < draft.questions.length; i += 1) {
-            const question = draft.questions[i];
+            const question = normalizedQuestions[i];
             if (!String(question.text || '').trim()) return notify(`Заполните текст вопроса #${i + 1}`, 'error');
-            if (question.type !== 'rating' && (question.options || []).map((option) => String(option || '').trim()).filter(Boolean).length < 2) {
+            if (question.type !== 'rating' && (question.options || []).length < 2) {
                 return notify(`Нужно минимум 2 варианта в вопросе #${i + 1}`, 'error');
+            }
+            if (draft.isTest && question.type === 'rating') {
+                return notify(`В тесте нельзя использовать рейтинг (вопрос #${i + 1})`, 'error');
+            }
+            if (draft.isTest && question.type !== 'rating') {
+                if (!question.correct_options.length) {
+                    return notify(`Укажите правильный ответ для вопроса #${i + 1}`, 'error');
+                }
+                const invalidCorrect = question.correct_options.filter((option) => !question.options.includes(option));
+                if (invalidCorrect.length > 0) {
+                    return notify(`Правильные ответы должны совпадать с вариантами в вопросе #${i + 1}`, 'error');
+                }
+                if (question.type === 'single' && question.correct_options.length !== 1) {
+                    return notify(`Для одиночного выбора в вопросе #${i + 1} нужен ровно один правильный ответ`, 'error');
+                }
             }
         }
 
         const payload = {
             title: String(draft.title || '').trim(),
             description: String(draft.description || '').trim(),
+            is_test: !!draft.isTest,
             assignment: {
                 direction_ids: (draft.directionIds || []).map((id) => Number(id)).filter(Number.isFinite),
                 tenure_weeks_min: minWeeks,
                 tenure_weeks_max: maxWeeks,
                 operator_ids: (draft.operatorIds || []).map((id) => Number(id)).filter(Number.isFinite)
             },
-            questions: (draft.questions || []).map((question) => ({
-                text: String(question.text || '').trim(),
-                type: question.type,
-                required: !!question.required,
-                allow_other: question.type === 'rating' ? false : !!question.allowOther,
-                options: question.type === 'rating' ? [] : (question.options || []).map((option) => String(option || '').trim()).filter(Boolean)
-            }))
+            questions: normalizedQuestions
         };
         if (isRepeatMode) {
             payload.repeat_from_survey_id = Number(repeatSourceSurveyId);
@@ -765,6 +916,20 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                     />
                                 </FormField>
                             </div>
+                            <label className="inline-flex items-center gap-2 text-xs text-gray-600">
+                                <input
+                                    type="checkbox"
+                                    checked={!!draft.isTest}
+                                    onChange={(e) => toggleTestMode(e.target.checked)}
+                                    className="rounded border-gray-300"
+                                />
+                                Тест (с правильными и неправильными ответами)
+                            </label>
+                            {draft.isTest && (
+                                <div className="text-[11px] text-amber-600">
+                                    В тесте недоступны вопросы типа рейтинг и вариант «Другое».
+                                </div>
+                            )}
                         </div>
 
                         {/* Filters */}
@@ -862,6 +1027,9 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                             <div className="space-y-3">
                                 {draft.questions.map((question, index) => {
                                     const options = Array.isArray(question.options) ? question.options : [];
+                                    const availableQuestionTypes = draft.isTest
+                                        ? QUESTION_TYPES.filter((item) => item.value !== 'rating')
+                                        : QUESTION_TYPES;
                                     return (
                                         <div key={question.id} className="border border-gray-200 rounded-xl p-4 space-y-3 bg-gray-50/50">
                                             <div className="flex items-center justify-between">
@@ -886,45 +1054,89 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                                 </div>
                                                 <select
                                                     value={question.type}
-                                                    onChange={(e) =>
+                                                    onChange={(e) => {
+                                                        const nextType = e.target.value;
+                                                        const normalizedOptions = toUniqueTrimmedList(question.options);
+                                                        let nextCorrectOptions = toUniqueTrimmedList(question.correctOptions)
+                                                            .filter((option) => normalizedOptions.includes(option));
+                                                        if (nextType === 'single' && nextCorrectOptions.length > 1) {
+                                                            nextCorrectOptions = [nextCorrectOptions[0]];
+                                                        }
                                                         updateQuestion(question.id, {
-                                                            type: e.target.value,
-                                                            allowOther: e.target.value === 'rating' ? false : question.allowOther,
-                                                            options: e.target.value === 'rating' ? [] : (question.options?.length ? question.options : ['', ''])
-                                                        })
-                                                    }
+                                                            type: nextType,
+                                                            allowOther: draft.isTest ? false : (nextType === 'rating' ? false : question.allowOther),
+                                                            options: nextType === 'rating' ? [] : (question.options?.length ? question.options : ['', '']),
+                                                            correctOptions: nextCorrectOptions
+                                                        });
+                                                    }}
                                                     className={inputCls}
                                                 >
-                                                    {QUESTION_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                                                    {availableQuestionTypes.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
                                                 </select>
                                             </div>
 
                                             {question.type !== 'rating' && (
                                                 <div className="space-y-2 pl-1">
                                                     <div className="text-[11px] text-gray-400 font-medium">Варианты ответа</div>
-                                                    {options.map((option, optionIndex) => (
-                                                        <div key={`${question.id}_${optionIndex}`} className="flex items-center gap-2">
-                                                            <div className="w-5 h-5 rounded-full border-2 border-gray-200 shrink-0" />
-                                                            <input
-                                                                value={option}
-                                                                onChange={(e) =>
-                                                                    updateQuestion(question.id, {
-                                                                        options: options.map((cur, idx) => (idx === optionIndex ? e.target.value : cur))
-                                                                    })
-                                                                }
-                                                                placeholder={`Вариант ${optionIndex + 1}`}
-                                                                className={inputCls}
-                                                            />
-                                                            <button
-                                                                type="button"
-                                                                disabled={options.length <= 2}
-                                                                onClick={() => removeQuestionOption(question.id, optionIndex)}
-                                                                className="text-gray-300 hover:text-red-400 disabled:opacity-20 transition-colors px-1"
-                                                            >
-                                                                <FaIcon className="fas fa-times" />
-                                                            </button>
-                                                        </div>
-                                                    ))}
+                                                    {options.map((option, optionIndex) => {
+                                                        const normalizedOption = String(option || '').trim();
+                                                        const isCorrectOption = draft.isTest
+                                                            && normalizedOption
+                                                            && toUniqueTrimmedList(question.correctOptions).includes(normalizedOption);
+
+                                                        return (
+                                                            <div key={`${question.id}_${optionIndex}`} className="flex items-center gap-2">
+                                                                {draft.isTest ? (
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => toggleCorrectOption(question.id, option)}
+                                                                        className={`w-5 h-5 shrink-0 flex items-center justify-center border-2 transition-all ${
+                                                                            question.type === 'single' ? 'rounded-full' : 'rounded'
+                                                                        } ${
+                                                                            isCorrectOption
+                                                                                ? 'bg-emerald-500 border-emerald-500 text-white'
+                                                                                : 'border-gray-300 text-transparent hover:border-emerald-400'
+                                                                        }`}
+                                                                        title={isCorrectOption ? 'Правильный вариант' : 'Отметить как правильный'}
+                                                                    >
+                                                                        <FaIcon className="fas fa-check text-[9px]" />
+                                                                    </button>
+                                                                ) : (
+                                                                    <div className="w-5 h-5 rounded-full border-2 border-gray-200 shrink-0" />
+                                                                )}
+                                                                <input
+                                                                    value={option}
+                                                                    onChange={(e) => {
+                                                                        const prevOptionTrimmed = String(options[optionIndex] || '').trim();
+                                                                        const nextOptionValue = e.target.value;
+                                                                        const nextOptionTrimmed = String(nextOptionValue || '').trim();
+                                                                        const nextCorrectOptions = toUniqueTrimmedList(
+                                                                            (question.correctOptions || []).map((value) => {
+                                                                                const normalizedValue = String(value || '').trim();
+                                                                                if (!normalizedValue) return '';
+                                                                                if (normalizedValue !== prevOptionTrimmed) return normalizedValue;
+                                                                                return nextOptionTrimmed;
+                                                                            })
+                                                                        );
+                                                                        updateQuestion(question.id, {
+                                                                            options: options.map((cur, idx) => (idx === optionIndex ? nextOptionValue : cur)),
+                                                                            correctOptions: nextCorrectOptions
+                                                                        });
+                                                                    }}
+                                                                    placeholder={`Вариант ${optionIndex + 1}`}
+                                                                    className={inputCls}
+                                                                />
+                                                                <button
+                                                                    type="button"
+                                                                    disabled={options.length <= 2}
+                                                                    onClick={() => removeQuestionOption(question.id, optionIndex)}
+                                                                    className="text-gray-300 hover:text-red-400 disabled:opacity-20 transition-colors px-1"
+                                                                >
+                                                                    <FaIcon className="fas fa-times" />
+                                                                </button>
+                                                            </div>
+                                                        );
+                                                    })}
                                                     <button
                                                         type="button"
                                                         onClick={() => addQuestionOption(question.id)}
@@ -933,15 +1145,21 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                                         <FaIcon className="fas fa-plus mr-1" />Добавить вариант
                                                     </button>
 
-                                                    <label className="inline-flex items-center gap-2 text-xs text-gray-500 ml-7">
-                                                        <input
-                                                            type="checkbox"
-                                                            checked={!!question.allowOther}
-                                                            onChange={(e) => updateQuestion(question.id, { allowOther: e.target.checked })}
-                                                            className="rounded border-gray-300"
-                                                        />
-                                                        Разрешить вариант "Другое"
-                                                    </label>
+                                                    {draft.isTest ? (
+                                                        <div className="text-[11px] text-emerald-600 ml-7">
+                                                            Отметьте правильные варианты слева от текста ответа.
+                                                        </div>
+                                                    ) : (
+                                                        <label className="inline-flex items-center gap-2 text-xs text-gray-500 ml-7">
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={!!question.allowOther}
+                                                                onChange={(e) => updateQuestion(question.id, { allowOther: e.target.checked })}
+                                                                className="rounded border-gray-300"
+                                                            />
+                                                            Разрешить вариант "Другое"
+                                                        </label>
+                                                    )}
                                                 </div>
                                             )}
                                         </div>
@@ -964,7 +1182,9 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                 disabled={isSaving}
                                 className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-all shadow-sm"
                             >
-                                {isSaving ? <><FaIcon className="fas fa-spinner fa-spin" />Сохранение...</> : <><FaIcon className="fas fa-check" />Сохранить опрос</>}
+                                {isSaving
+                                    ? <><FaIcon className="fas fa-spinner fa-spin" />Сохранение...</>
+                                    : <><FaIcon className="fas fa-check" />{draft.isTest ? 'Сохранить тест' : 'Сохранить опрос'}</>}
                             </button>
                         </div>
                     </div>
@@ -1015,6 +1235,11 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                                 <div className={`text-sm font-semibold truncate ${isSelected ? 'text-blue-700' : 'text-gray-800'}`}>
                                                     {survey.title}
                                                 </div>
+                                                {survey?.is_test && (
+                                                    <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700">
+                                                        Тест
+                                                    </span>
+                                                )}
                                                 {repeatIteration > 1 && (
                                                     <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-700">
                                                         #{repeatIteration}
@@ -1071,7 +1296,10 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                             <div className="px-5 py-4 border-b border-gray-100">
                                 <div className="flex items-start justify-between gap-3">
                                     <div>
-                                        <h3 className="text-base font-bold text-gray-900">{selectedSurvey.title}</h3>
+                                        <div className="flex items-center gap-2">
+                                            <h3 className="text-base font-bold text-gray-900">{selectedSurvey.title}</h3>
+                                            {selectedSurvey?.is_test && <Badge color="green">Тест</Badge>}
+                                        </div>
                                         {selectedSurvey.description && (
                                             <p className="text-sm text-gray-500 mt-0.5">{selectedSurvey.description}</p>
                                         )}
@@ -1284,6 +1512,13 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                                         <Badge color="gray">{questionTypeLabel(question.type)}</Badge>
                                                         {question.required && <Badge color="blue">Обязательный</Badge>}
                                                     </div>
+                                                    {selectedSurvey?.is_test && question.type !== 'rating' && (
+                                                        <div className="mt-1 text-xs text-emerald-700">
+                                                            Правильный ответ: {toUniqueTrimmedList(question.correct_options).length > 0
+                                                                ? toUniqueTrimmedList(question.correct_options).join(', ')
+                                                                : '—'}
+                                                        </div>
+                                                    )}
                                                 </div>
                                             </div>
                                         ))}
@@ -1299,9 +1534,30 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                                 {formatSurveyDateTime(selectedSurvey?.my_response?.submitted_at || selectedSurvey?.my_assignment?.submitted_at)}
                                             </strong>
                                         </div>
+                                        {selectedSurvey?.is_test && (
+                                            <div className="rounded-xl border border-emerald-100 bg-emerald-50 p-3">
+                                                <div className="text-xs text-emerald-700">
+                                                    Результат теста
+                                                </div>
+                                                <div className="text-sm font-semibold text-emerald-800 mt-1">
+                                                    {Number(selectedSurvey?.my_response?.test_summary?.score_percent || 0).toFixed(1).replace(/\.0$/, '')}%
+                                                </div>
+                                                <div className="text-xs text-emerald-700 mt-1">
+                                                    Верных ответов: {Number(selectedSurvey?.my_response?.test_summary?.correct_answers || 0)}
+                                                    {' '}из{' '}
+                                                    {Number(selectedSurvey?.my_response?.test_summary?.total_questions || 0)}
+                                                </div>
+                                            </div>
+                                        )}
                                         {(selectedSurvey.questions || []).map((question, index) => {
                                             const answersByQuestion = selectedSurvey?.my_response?.answers_by_question || {};
                                             const answer = answersByQuestion[String(question.id)] || answersByQuestion[question.id] || null;
+                                            const selectedOptions = toUniqueTrimmedList(answer?.selected_options);
+                                            const hasAnswer = question.type === 'rating'
+                                                ? Number.isFinite(Number(answer?.rating_value))
+                                                : (selectedOptions.length > 0 || String(answer?.answer_text || '').trim().length > 0);
+                                            const expectedOptions = getExpectedOptionsForTest(question, answer);
+                                            const isCorrect = selectedSurvey?.is_test ? isTestAnswerCorrect(question, answer) : false;
                                             return (
                                                 <div key={question.id} className="p-3 rounded-xl border border-gray-100 bg-gray-50/60 space-y-2">
                                                     <div className="flex items-start gap-3">
@@ -1313,6 +1569,11 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                                             <div className="flex items-center gap-2 mt-1">
                                                                 <Badge color="gray">{questionTypeLabel(question.type)}</Badge>
                                                                 {question.required && <Badge color="blue">Обязательный</Badge>}
+                                                                {selectedSurvey?.is_test && (
+                                                                    <Badge color={!hasAnswer ? 'gray' : (isCorrect ? 'green' : 'amber')}>
+                                                                        {!hasAnswer ? 'Нет ответа' : (isCorrect ? 'Верно' : 'Неверно')}
+                                                                    </Badge>
+                                                                )}
                                                             </div>
                                                         </div>
                                                     </div>
@@ -1322,6 +1583,14 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                                             {formatQuestionAnswerText(question, answer)}
                                                         </strong>
                                                     </div>
+                                                    {selectedSurvey?.is_test && (
+                                                        <div className="ml-9 text-sm text-gray-700">
+                                                            <span className="text-gray-500 mr-1">Правильный ответ:</span>
+                                                            <strong className="font-medium text-emerald-700 break-words">
+                                                                {expectedOptions.length > 0 ? expectedOptions.join(', ') : '—'}
+                                                            </strong>
+                                                        </div>
+                                                    )}
                                                 </div>
                                             );
                                         })}
@@ -1456,5 +1725,3 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
 };
 
 export default SurveysView;
-
-

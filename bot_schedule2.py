@@ -3568,6 +3568,11 @@ def handle_surveys():
         description = data.get('description')
         assignment = data.get('assignment') or {}
         questions = data.get('questions') or []
+        is_test_raw = data.get('is_test', False)
+        if isinstance(is_test_raw, str):
+            is_test = is_test_raw.strip().lower() in ('1', 'true', 'yes', 'on')
+        else:
+            is_test = bool(is_test_raw)
         repeat_from_survey_id_raw = data.get('repeat_from_survey_id')
         repeat_from_survey_id = None
         if repeat_from_survey_id_raw not in (None, ''):
@@ -3614,7 +3619,8 @@ def handle_surveys():
             assignment=assignment,
             questions=questions,
             operator_ids=operator_ids,
-            repeat_from_survey_id=repeat_from_survey_id
+            repeat_from_survey_id=repeat_from_survey_id,
+            is_test=is_test
         )
 
         return jsonify({
@@ -3623,7 +3629,8 @@ def handle_surveys():
             "survey_id": created.get('id'),
             "created_at": created.get('created_at'),
             "repeat_root_id": created.get('repeat_root_id'),
-            "repeat_iteration": created.get('repeat_iteration')
+            "repeat_iteration": created.get('repeat_iteration'),
+            "is_test": bool(created.get('is_test'))
         }), 201
 
     except ValueError as value_error:
@@ -3642,6 +3649,14 @@ def handle_surveys():
             return jsonify({"error": "Invalid question type"}), 400
         if code.startswith('SURVEY_OPTIONS_REQUIRED_'):
             return jsonify({"error": "Question must have at least 2 options"}), 400
+        if code.startswith('SURVEY_TEST_RATING_NOT_ALLOWED_'):
+            return jsonify({"error": "Rating questions are not allowed in test mode"}), 400
+        if code.startswith('SURVEY_CORRECT_OPTIONS_REQUIRED_'):
+            return jsonify({"error": "Each test question must have at least one correct option"}), 400
+        if code.startswith('SURVEY_CORRECT_OPTION_INVALID_'):
+            return jsonify({"error": "Correct options must match question options"}), 400
+        if code.startswith('SURVEY_SINGLE_CORRECT_OPTION_REQUIRED_'):
+            return jsonify({"error": "Single-choice test questions must have exactly one correct option"}), 400
         if code == 'SURVEY_REPEAT_SOURCE_NOT_FOUND':
             return jsonify({"error": "Source survey for repeat not found"}), 404
         return jsonify({"error": code}), 400
@@ -3721,6 +3736,8 @@ def submit_survey(survey_id):
             return jsonify({"error": "Rating answer must be between 1 and 5"}), 400
         if code.startswith('SURVEY_INVALID_OPTION_') or code.startswith('SURVEY_TOO_MANY_OPTIONS_'):
             return jsonify({"error": "Invalid selected option"}), 400
+        if code.startswith('SURVEY_TEST_RATING_NOT_ALLOWED_'):
+            return jsonify({"error": "Test configuration is invalid for this survey"}), 400
         if code.startswith('SURVEY_OTHER_TEXT_TOO_LONG_'):
             return jsonify({"error": "Other answer must not exceed 500 characters"}), 400
         return jsonify({"error": code}), 400
