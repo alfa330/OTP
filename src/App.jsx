@@ -17114,6 +17114,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [profileData, setProfileData] = useState(null);
             const [hoursData, setHoursData] = useState(null);
             const [view, setView] = useState('hours');
+            const [pendingSurveysBadgeCount, setPendingSurveysBadgeCount] = useState(0);
             const [newSvName, setNewSvName] = useState('');
             const [newTableUrl, setNewTableUrl] = useState('');
             const [isLoading, setIsLoading] = useState(false);
@@ -20029,6 +20030,44 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return promise;
             }, []);
 
+            const fetchSurveysPendingBadgeCount = async () => {
+                const role = String(user?.role || '').trim().toLowerCase();
+                const roleHasSurveyAccess = ['admin', 'sv', 'supervisor', 'trainer', 'operator'].includes(role);
+                if (!user?.id || !roleHasSurveyAccess) {
+                    if (isMounted.current) setPendingSurveysBadgeCount(0);
+                    return;
+                }
+
+                const requestKey = `fetchSurveysPendingBadgeCount:${user?.id || 'anonymous'}:${role}`;
+                return runSingleFlight(requestKey, async () => {
+                    try {
+                        const response = await axios.get(`${API_BASE_URL}/api/surveys`, {
+                            headers: withAccessTokenHeader({
+                                'X-API-Key': user.apiKey,
+                                'X-User-Id': user.id
+                            })
+                        });
+
+                        const surveys = Array.isArray(response?.data?.surveys) ? response.data.surveys : [];
+                        let nextCount = 0;
+
+                        if (role === 'operator') {
+                            nextCount = surveys.filter((survey) => String(survey?.my_assignment?.status || '').toLowerCase() !== 'completed').length;
+                        } else {
+                            nextCount = surveys.reduce((sum, survey) => {
+                                const pending = Number(survey?.statistics?.pending_count || 0);
+                                return sum + (Number.isFinite(pending) ? pending : 0);
+                            }, 0);
+                        }
+
+                        if (isMounted.current) setPendingSurveysBadgeCount(Math.max(0, nextCount));
+                    } catch (err) {
+                        console.error('Fetch surveys badge count error:', err);
+                        if (isMounted.current) setPendingSurveysBadgeCount(0);
+                    }
+                });
+            };
+
             const debouncedFetch = useCallback(_.debounce((fn) => {
                 if (isMounted.current) {
                     try {
@@ -21602,6 +21641,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
 
                 fetchSensitiveAccessStatus();
+                fetchSurveysPendingBadgeCount();
             }, [user?.id, user?.role]);
 
             useEffect(() => {
@@ -21615,6 +21655,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 fetchOperatorData();
                 fetchTrainings();
             }, [user?.id, user?.role, selectedMonth]);
+
+            useEffect(() => {
+                if (view !== 'surveys') return;
+                fetchSurveysPendingBadgeCount();
+            }, [view, user?.id, user?.role]);
+
+            useEffect(() => {
+                const role = String(user?.role || '').trim().toLowerCase();
+                const roleHasSurveyAccess = ['admin', 'sv', 'supervisor', 'trainer', 'operator'].includes(role);
+                if (!user?.id || !roleHasSurveyAccess) {
+                    if (isMounted.current) setPendingSurveysBadgeCount(0);
+                    return;
+                }
+
+                const intervalId = setInterval(() => {
+                    fetchSurveysPendingBadgeCount();
+                }, 90000);
+
+                return () => clearInterval(intervalId);
+            }, [user?.id, user?.role]);
 
             useEffect(() => {
                 if (view !== 'qr_access') {
@@ -21636,6 +21696,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     refreshAdminSessions();
                 }
             }, [user?.id, user?.role, view]);
+
+            const renderSurveysSidebarLabel = () => (
+                <span className="sidebar-text inline-flex items-center gap-2">
+                    <span>Опросы</span>
+                    {pendingSurveysBadgeCount > 0 && (
+                        <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-amber-500 text-white text-[10px] font-semibold leading-none">
+                            {pendingSurveysBadgeCount > 99 ? '99+' : pendingSurveysBadgeCount}
+                        </span>
+                    )}
+                </span>
+            );
 
             if (isAuthInitializing) {
                 return (
@@ -21892,7 +21963,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </li>
                                         <li>
                                             <button onClick={() => { setView('surveys'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
-                                                <FaIcon className="fas fa-list-alt"></FaIcon> <span className="sidebar-text">Опросы</span>
+                                                <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarLabel()}
                                             </button>
                                         </li>
 
@@ -21955,7 +22026,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </li>
                                         <li>
                                             <button onClick={() => { setView('surveys'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
-                                                <FaIcon className="fas fa-list-alt"></FaIcon> <span className="sidebar-text">Опросы</span>
+                                                <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarLabel()}
                                             </button>
                                         </li>
                                         <li>
@@ -21993,7 +22064,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <>
                                         <li>
                                             <button onClick={() => { setView('surveys'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
-                                                <FaIcon className="fas fa-list-alt"></FaIcon> <span className="sidebar-text">Опросы</span>
+                                                <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarLabel()}
                                             </button>
                                         </li>
                                     </>
@@ -22012,7 +22083,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </li>
                                         <li>
                                             <button onClick={() => { setView('surveys'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
-                                                <FaIcon className="fas fa-list-alt"></FaIcon> <span className="sidebar-text">Опросы</span>
+                                                <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarLabel()}
                                             </button>
                                         </li>
                                         <li>
