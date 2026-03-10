@@ -3694,6 +3694,8 @@ def submit_survey(survey_id):
             return jsonify({"error": "Rating answer must be between 1 and 5"}), 400
         if code.startswith('SURVEY_INVALID_OPTION_') or code.startswith('SURVEY_TOO_MANY_OPTIONS_'):
             return jsonify({"error": "Invalid selected option"}), 400
+        if code.startswith('SURVEY_OTHER_TEXT_TOO_LONG_'):
+            return jsonify({"error": "Other answer must not exceed 500 characters"}), 400
         return jsonify({"error": code}), 400
     except PermissionError as permission_error:
         if str(permission_error) == 'SURVEY_NOT_ASSIGNED':
