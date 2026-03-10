@@ -711,13 +711,42 @@ class Database:
                     direction_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
                     tenure_weeks_min INTEGER,
                     tenure_weeks_max INTEGER,
+                    repeat_root_id INTEGER REFERENCES surveys(id) ON DELETE SET NULL,
+                    repeat_iteration INTEGER NOT NULL DEFAULT 1,
                     is_active BOOLEAN NOT NULL DEFAULT TRUE,
                     created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
                     updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
                     CHECK (tenure_weeks_min IS NULL OR tenure_weeks_min >= 0),
                     CHECK (tenure_weeks_max IS NULL OR tenure_weeks_max >= 0),
-                    CHECK (tenure_weeks_min IS NULL OR tenure_weeks_max IS NULL OR tenure_weeks_min <= tenure_weeks_max)
+                    CHECK (tenure_weeks_min IS NULL OR tenure_weeks_max IS NULL OR tenure_weeks_min <= tenure_weeks_max),
+                    CHECK (repeat_iteration >= 1)
                 );
+            """)
+            cursor.execute("""
+                ALTER TABLE surveys
+                ADD COLUMN IF NOT EXISTS repeat_root_id INTEGER REFERENCES surveys(id) ON DELETE SET NULL;
+            """)
+            cursor.execute("""
+                ALTER TABLE surveys
+                ADD COLUMN IF NOT EXISTS repeat_iteration INTEGER;
+            """)
+            cursor.execute("""
+                UPDATE surveys
+                SET repeat_iteration = 1
+                WHERE repeat_iteration IS NULL OR repeat_iteration < 1;
+            """)
+            cursor.execute("""
+                ALTER TABLE surveys
+                ALTER COLUMN repeat_iteration SET DEFAULT 1;
+            """)
+            cursor.execute("""
+                ALTER TABLE surveys
+                ALTER COLUMN repeat_iteration SET NOT NULL;
+            """)
+            cursor.execute("""
+                UPDATE surveys
+                SET repeat_root_id = id
+                WHERE repeat_root_id IS NULL;
             """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS survey_questions (
@@ -901,6 +930,7 @@ class Database:
                 ON work_shift_swap_requests(start_date, end_date);
                 CREATE INDEX IF NOT EXISTS idx_ai_feedback_cache_operator_month ON ai_feedback_cache(operator_id, month);
                 CREATE INDEX IF NOT EXISTS idx_surveys_created_by ON surveys(created_by, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_surveys_repeat_root_iteration ON surveys(repeat_root_id, repeat_iteration);
                 CREATE INDEX IF NOT EXISTS idx_survey_questions_survey_position ON survey_questions(survey_id, position);
                 CREATE INDEX IF NOT EXISTS idx_survey_assignments_operator ON survey_assignments(operator_id, status);
                 CREATE INDEX IF NOT EXISTS idx_survey_assignments_survey ON survey_assignments(survey_id);
@@ -8319,7 +8349,7 @@ class Database:
         with self._get_cursor() as cursor:
             return self._get_visible_operator_ids_for_requester_tx(cursor, requester_id, requester_role)
 
-    def create_survey(self, title, description, created_by, assignment, questions, operator_ids):
+    def create_survey(self, title, description, created_by, assignment, questions, operator_ids, repeat_from_survey_id=None):
         title_norm = str(title or '').strip()
         description_norm = str(description or '').strip() or None
         created_by_id = int(created_by) if created_by is not None else None
@@ -8402,6 +8432,33 @@ class Database:
             })
 
         with self._get_cursor() as cursor:
+            repeat_root_id_to_use = None
+            repeat_iteration_to_use = 1
+            if repeat_from_survey_id is not None:
+                try:
+                    repeat_from_survey_id = int(repeat_from_survey_id)
+                except Exception:
+                    raise ValueError("SURVEY_REPEAT_SOURCE_NOT_FOUND")
+
+                cursor.execute("""
+                    SELECT id, COALESCE(repeat_root_id, id), COALESCE(repeat_iteration, 1)
+                    FROM surveys
+                    WHERE id = %s
+                """, (repeat_from_survey_id,))
+                repeat_source_row = cursor.fetchone()
+                if not repeat_source_row:
+                    raise ValueError("SURVEY_REPEAT_SOURCE_NOT_FOUND")
+
+                repeat_root_id_to_use = int(repeat_source_row[1])
+                cursor.execute("""
+                    SELECT COALESCE(MAX(repeat_iteration), 1)
+                    FROM surveys
+                    WHERE repeat_root_id = %s OR id = %s
+                """, (repeat_root_id_to_use, repeat_root_id_to_use))
+                max_iteration_row = cursor.fetchone()
+                current_max_iteration = int(max_iteration_row[0] or 1) if max_iteration_row else 1
+                repeat_iteration_to_use = max(1, current_max_iteration + 1)
+
             cursor.execute("""
                 INSERT INTO surveys (
                     title,
@@ -8410,6 +8467,8 @@ class Database:
                     direction_ids,
                     tenure_weeks_min,
                     tenure_weeks_max,
+                    repeat_root_id,
+                    repeat_iteration,
                     created_at,
                     updated_at
                 )
@@ -8418,6 +8477,8 @@ class Database:
                     %s,
                     %s,
                     %s::jsonb,
+                    %s,
+                    %s,
                     %s,
                     %s,
                     (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
@@ -8430,9 +8491,20 @@ class Database:
                 created_by_id,
                 json.dumps(direction_ids_norm),
                 tenure_weeks_min,
-                tenure_weeks_max
+                tenure_weeks_max,
+                repeat_root_id_to_use,
+                repeat_iteration_to_use
             ))
             survey_id, created_at = cursor.fetchone()
+
+            if repeat_root_id_to_use is None:
+                repeat_root_id_to_use = int(survey_id)
+                cursor.execute("""
+                    UPDATE surveys
+                    SET repeat_root_id = %s
+                    WHERE id = %s
+                """, (repeat_root_id_to_use, survey_id))
+                repeat_iteration_to_use = 1
 
             for question in normalized_questions:
                 cursor.execute("""
@@ -8488,7 +8560,9 @@ class Database:
 
             return {
                 'id': int(survey_id),
-                'created_at': self._survey_dt_to_iso(created_at)
+                'created_at': self._survey_dt_to_iso(created_at),
+                'repeat_root_id': int(repeat_root_id_to_use),
+                'repeat_iteration': int(repeat_iteration_to_use)
             }
 
     def delete_survey(self, survey_id, requester_id, requester_role):
@@ -8717,6 +8791,20 @@ class Database:
         serialized = []
         for row in surveys_rows:
             survey_id = int(row[0])
+            repeat_root_id = survey_id
+            repeat_iteration = 1
+            if len(row) > 12:
+                try:
+                    repeat_root_id = int(row[12]) if row[12] is not None else survey_id
+                except Exception:
+                    repeat_root_id = survey_id
+            if len(row) > 13:
+                try:
+                    parsed_repeat_iteration = int(row[13]) if row[13] is not None else 1
+                    repeat_iteration = parsed_repeat_iteration if parsed_repeat_iteration >= 1 else 1
+                except Exception:
+                    repeat_iteration = 1
+
             direction_ids = row[6] if isinstance(row[6], list) else []
             questions = sorted(questions_by_survey.get(survey_id, []), key=lambda item: (item['position'], item['id']))
             assignments = assignments_by_survey.get(survey_id, [])
@@ -8774,6 +8862,9 @@ class Database:
                     'completed_at': assignment.get('completed_at'),
                     'response_id': response_id,
                     'submitted_at': operator_response.get('submitted_at') if operator_response else None,
+                    'repeat_iteration': int(repeat_iteration),
+                    'repeat_root_id': int(repeat_root_id),
+                    'repeat_survey_id': int(survey_id),
                     'answers': response_answers,
                     'answers_by_question': answers_by_question
                 })
@@ -8788,6 +8879,11 @@ class Database:
                     'id': row[9],
                     'name': row[10] or 'Система',
                     'role': row[11] or 'unknown'
+                },
+                'repeat': {
+                    'root_id': int(repeat_root_id),
+                    'iteration': int(repeat_iteration),
+                    'is_repeat': int(repeat_iteration) > 1
                 },
                 'assignment': {
                     'direction_ids': normalized_direction_ids,
@@ -8811,6 +8907,38 @@ class Database:
                     'responses_detailed': responses_detailed
                 }
             })
+
+        grouped_repetition_rows = defaultdict(list)
+        for survey in serialized:
+            repeat_info = survey.get('repeat') or {}
+            try:
+                root_id = int(repeat_info.get('root_id') or survey.get('id'))
+            except Exception:
+                root_id = int(survey.get('id'))
+            repeat_iteration = int(repeat_info.get('iteration') or 1)
+
+            for response_row in (survey.get('statistics') or {}).get('responses_detailed') or []:
+                row_copy = dict(response_row)
+                row_copy['repeat_iteration'] = int(repeat_iteration)
+                row_copy['repeat_root_id'] = int(root_id)
+                row_copy['repeat_survey_id'] = int(survey.get('id'))
+                row_copy['repeat_survey_title'] = survey.get('title') or f"#{survey.get('id')}"
+                grouped_repetition_rows[root_id].append(row_copy)
+
+        for root_id, rows in grouped_repetition_rows.items():
+            rows.sort(key=lambda item: (
+                int(item.get('repeat_iteration') or 1),
+                str(item.get('operator_name') or '').lower(),
+                int(item.get('operator_id') or 0)
+            ))
+
+        for survey in serialized:
+            repeat_info = survey.get('repeat') or {}
+            try:
+                root_id = int(repeat_info.get('root_id') or survey.get('id'))
+            except Exception:
+                root_id = int(survey.get('id'))
+            survey.setdefault('statistics', {})['responses_detailed_all_repetitions'] = list(grouped_repetition_rows.get(root_id, []))
 
         return serialized
 
@@ -8836,7 +8964,9 @@ class Database:
                         s.tenure_weeks_max,
                         creator.id,
                         creator.name,
-                        creator.role
+                        creator.role,
+                        s.repeat_root_id,
+                        s.repeat_iteration
                     FROM surveys s
                     LEFT JOIN users creator ON creator.id = s.created_by
                     ORDER BY s.created_at DESC, s.id DESC
@@ -8855,7 +8985,9 @@ class Database:
                         s.tenure_weeks_max,
                         creator.id,
                         creator.name,
-                        creator.role
+                        creator.role,
+                        s.repeat_root_id,
+                        s.repeat_iteration
                     FROM surveys s
                     LEFT JOIN users creator ON creator.id = s.created_by
                     LEFT JOIN survey_assignments sa ON sa.survey_id = s.id
@@ -8971,7 +9103,9 @@ class Database:
                     sa.assigned_at,
                     sa.completed_at,
                     sr.id,
-                    sr.submitted_at
+                    sr.submitted_at,
+                    s.repeat_root_id,
+                    s.repeat_iteration
                 FROM survey_assignments sa
                 JOIN surveys s ON s.id = sa.survey_id
                 LEFT JOIN users creator ON creator.id = s.created_by
@@ -9048,6 +9182,20 @@ class Database:
             result = []
             for row in surveys_rows:
                 survey_id = int(row[0])
+                repeat_root_id = survey_id
+                repeat_iteration = 1
+                if len(row) > 18:
+                    try:
+                        repeat_root_id = int(row[18]) if row[18] is not None else survey_id
+                    except Exception:
+                        repeat_root_id = survey_id
+                if len(row) > 19:
+                    try:
+                        parsed_repeat_iteration = int(row[19]) if row[19] is not None else 1
+                        repeat_iteration = parsed_repeat_iteration if parsed_repeat_iteration >= 1 else 1
+                    except Exception:
+                        repeat_iteration = 1
+
                 questions = sorted(
                     questions_by_survey.get(survey_id, []),
                     key=lambda item: (item.get('position', 0), item.get('id', 0))
@@ -9102,6 +9250,11 @@ class Database:
                         'id': row[9],
                         'name': row[10] or 'Система',
                         'role': row[11] or 'unknown'
+                    },
+                    'repeat': {
+                        'root_id': int(repeat_root_id),
+                        'iteration': int(repeat_iteration),
+                        'is_repeat': int(repeat_iteration) > 1
                     },
                     'assignment': {
                         'direction_ids': normalized_direction_ids,
