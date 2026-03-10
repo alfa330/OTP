@@ -773,6 +773,26 @@ def _task_route_guard():
     return requester_id, requester, None, None
 
 
+def _normalize_surveys_role(role):
+    role_norm = str(role or '').strip().lower()
+    if role_norm == 'supervisor':
+        return 'sv'
+    return role_norm
+
+
+def _surveys_route_guard():
+    requester_id, requester, error = _resolve_requester()
+    if error:
+        message, status_code = error
+        return None, None, None, jsonify({"error": message}), status_code
+
+    role = _normalize_surveys_role(requester[3])
+    if role not in ('admin', 'sv', 'operator'):
+        return None, None, None, jsonify({"error": "Only admin, sv and operator can access surveys"}), 403
+
+    return requester_id, requester, role, None, None
+
+
 def _cleanup_task_uploaded_blobs(gcs_bucket, uploaded_blob_paths):
     if not gcs_bucket or not uploaded_blob_paths:
         return
@@ -3517,6 +3537,172 @@ def notify_supervisor():
     except Exception as e:
         logging.error(f"Error in notify_supervisor: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
+@app.route('/api/surveys', methods=['GET', 'POST', 'OPTIONS'])
+@require_api_key
+def handle_surveys():
+    try:
+        requester_id, requester, requester_role, guard_response, guard_status = _surveys_route_guard()
+        if guard_response is not None:
+            return guard_response, guard_status
+
+        if request.method == 'GET':
+            if requester_role == 'operator':
+                surveys = db.get_surveys_for_operator(requester_id)
+            else:
+                surveys = db.get_surveys_for_management(requester_id, requester_role)
+
+            return jsonify({
+                "status": "success",
+                "surveys": surveys
+            }), 200
+
+        if requester_role not in ('admin', 'sv'):
+            return jsonify({"error": "Only admin and sv can create surveys"}), 403
+
+        data = request.get_json() or {}
+        title = data.get('title')
+        description = data.get('description')
+        assignment = data.get('assignment') or {}
+        questions = data.get('questions') or []
+
+        operator_ids_raw = assignment.get('operator_ids') or []
+        operator_ids = []
+        for op_id in operator_ids_raw:
+            try:
+                parsed = int(op_id)
+            except Exception:
+                continue
+            if parsed > 0 and parsed not in operator_ids:
+                operator_ids.append(parsed)
+
+        if not operator_ids:
+            return jsonify({"error": "At least one operator must be assigned"}), 400
+
+        visible_operator_ids = set(db.get_visible_operator_ids_for_requester(requester_id, requester_role))
+        forbidden = [op_id for op_id in operator_ids if op_id not in visible_operator_ids]
+        if forbidden:
+            return jsonify({"error": "You cannot assign surveys to these operators", "operator_ids": forbidden}), 403
+
+        created = db.create_survey(
+            title=title,
+            description=description,
+            created_by=requester_id,
+            assignment=assignment,
+            questions=questions,
+            operator_ids=operator_ids
+        )
+
+        return jsonify({
+            "status": "success",
+            "message": "Survey created successfully",
+            "survey_id": created.get('id'),
+            "created_at": created.get('created_at')
+        }), 201
+
+    except ValueError as value_error:
+        code = str(value_error)
+        if code == 'SURVEY_TITLE_REQUIRED':
+            return jsonify({"error": "Survey title is required"}), 400
+        if code == 'SURVEY_QUESTIONS_REQUIRED':
+            return jsonify({"error": "At least one question is required"}), 400
+        if code == 'SURVEY_OPERATORS_REQUIRED':
+            return jsonify({"error": "At least one operator is required"}), 400
+        if code in ('SURVEY_INVALID_TENURE_MIN', 'SURVEY_INVALID_TENURE_MAX', 'SURVEY_INVALID_TENURE_RANGE'):
+            return jsonify({"error": "Invalid tenure range"}), 400
+        if code.startswith('SURVEY_QUESTION_TEXT_REQUIRED_'):
+            return jsonify({"error": "Question text is required"}), 400
+        if code.startswith('SURVEY_INVALID_QUESTION_TYPE_'):
+            return jsonify({"error": "Invalid question type"}), 400
+        if code.startswith('SURVEY_OPTIONS_REQUIRED_'):
+            return jsonify({"error": "Question must have at least 2 options"}), 400
+        return jsonify({"error": code}), 400
+    except Exception as e:
+        logging.error(f"Error in handle_surveys: {e}", exc_info=True)
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
+@app.route('/api/surveys/<int:survey_id>', methods=['DELETE', 'OPTIONS'])
+@require_api_key
+def delete_survey(survey_id):
+    try:
+        requester_id, requester, requester_role, guard_response, guard_status = _surveys_route_guard()
+        if guard_response is not None:
+            return guard_response, guard_status
+
+        if requester_role not in ('admin', 'sv'):
+            return jsonify({"error": "Only admin and sv can delete surveys"}), 403
+
+        db.delete_survey(
+            survey_id=survey_id,
+            requester_id=requester_id,
+            requester_role=requester_role
+        )
+        return jsonify({"status": "success", "message": "Survey deleted"}), 200
+    except ValueError as value_error:
+        if str(value_error) == 'SURVEY_NOT_FOUND':
+            return jsonify({"error": "Survey not found"}), 404
+        return jsonify({"error": str(value_error)}), 400
+    except PermissionError:
+        return jsonify({"error": "You do not have access to delete this survey"}), 403
+    except Exception as e:
+        logging.error(f"Error in delete_survey: {e}", exc_info=True)
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
+@app.route('/api/surveys/<int:survey_id>/submit', methods=['POST', 'OPTIONS'])
+@require_api_key
+def submit_survey(survey_id):
+    try:
+        requester_id, requester, requester_role, guard_response, guard_status = _surveys_route_guard()
+        if guard_response is not None:
+            return guard_response, guard_status
+
+        if requester_role != 'operator':
+            return jsonify({"error": "Only operators can submit surveys"}), 403
+
+        data = request.get_json() or {}
+        answers = data.get('answers')
+
+        result = db.submit_survey_response(
+            survey_id=survey_id,
+            operator_id=requester_id,
+            answers=answers
+        )
+
+        return jsonify({
+            "status": "success",
+            "message": "Survey completed",
+            "result": result
+        }), 200
+    except ValueError as value_error:
+        code = str(value_error)
+        if code == 'SURVEY_NOT_FOUND':
+            return jsonify({"error": "Survey not found"}), 404
+        if code == 'SURVEY_ALREADY_COMPLETED':
+            return jsonify({"error": "Survey already completed"}), 409
+        if code == 'SURVEY_HAS_NO_QUESTIONS':
+            return jsonify({"error": "Survey has no questions"}), 400
+        if code == 'SURVEY_ANSWERS_REQUIRED':
+            return jsonify({"error": "Answers are required"}), 400
+        if code == 'SURVEY_EMPTY_RESPONSE':
+            return jsonify({"error": "Please answer at least one question"}), 400
+        if code.startswith('SURVEY_REQUIRED_QUESTION_'):
+            return jsonify({"error": "Please answer all required questions"}), 400
+        if code.startswith('SURVEY_INVALID_RATING_'):
+            return jsonify({"error": "Rating answer must be between 1 and 5"}), 400
+        if code.startswith('SURVEY_INVALID_OPTION_') or code.startswith('SURVEY_TOO_MANY_OPTIONS_'):
+            return jsonify({"error": "Invalid selected option"}), 400
+        return jsonify({"error": code}), 400
+    except PermissionError as permission_error:
+        if str(permission_error) == 'SURVEY_NOT_ASSIGNED':
+            return jsonify({"error": "Survey is not assigned to this operator"}), 403
+        return jsonify({"error": str(permission_error)}), 403
+    except Exception as e:
+        logging.error(f"Error in submit_survey: {e}", exc_info=True)
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
 
 @app.route('/api/tasks/recipients', methods=['GET', 'OPTIONS'])
 @require_api_key
