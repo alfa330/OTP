@@ -244,6 +244,8 @@ def get_pool():
     return POOL
 
 class Database:
+    SURVEY_OTHER_ANSWER_MAX_LENGTH = 500
+
     def __init__(self):
         self._init_db()
 
@@ -9077,6 +9079,8 @@ class Database:
                 raw_answer = answers_by_question.get(question['id']) or {}
                 qtype = question['type']
                 answer_text = str(raw_answer.get('answer_text') or '').strip()
+                if answer_text and not question.get('allow_other'):
+                    answer_text = ''
 
                 if qtype == 'rating':
                     rating_value = raw_answer.get('rating_value')
@@ -9127,6 +9131,9 @@ class Database:
 
                 if question.get('allow_other') and invalid_selected and not answer_text:
                     answer_text = ', '.join(invalid_selected)
+
+                if answer_text and len(answer_text) > self.SURVEY_OTHER_ANSWER_MAX_LENGTH:
+                    raise ValueError(f"SURVEY_OTHER_TEXT_TOO_LONG_{question['id']}")
 
                 if not valid_selected and not answer_text:
                     continue

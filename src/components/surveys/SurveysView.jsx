@@ -7,6 +7,7 @@ const QUESTION_TYPES = [
     { value: 'multiple', label: 'Несколько вариантов' },
     { value: 'rating', label: 'Рейтинг 1–5' }
 ];
+const OTHER_ANSWER_MAX_LENGTH = 500;
 
 const isManagerRole = (role) => ['admin', 'sv', 'supervisor', 'trainer'].includes(String(role || '').toLowerCase());
 const questionTypeLabel = (type) => QUESTION_TYPES.find((item) => item.value === type)?.label || type;
@@ -320,7 +321,8 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
             if (question.type === 'rating') payload.rating_value = answer.rating_value === '' ? null : Number(answer.rating_value);
             else {
                 payload.selected_options = Array.isArray(answer.selected_options) ? answer.selected_options : [];
-                if (String(answer.answer_text || '').trim()) payload.answer_text = String(answer.answer_text || '').trim();
+                const otherAnswerText = String(answer.answer_text || '').trim();
+                if (otherAnswerText) payload.answer_text = otherAnswerText.slice(0, OTHER_ANSWER_MAX_LENGTH);
             }
             return payload;
         });
@@ -702,6 +704,16 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                                     >
                                                         <i className="fas fa-plus mr-1" />Добавить вариант
                                                     </button>
+
+                                                    <label className="inline-flex items-center gap-2 text-xs text-gray-500 ml-7">
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={!!question.allowOther}
+                                                            onChange={(e) => updateQuestion(question.id, { allowOther: e.target.checked })}
+                                                            className="rounded border-gray-300"
+                                                        />
+                                                        Разрешить вариант "Другое"
+                                                    </label>
                                                 </div>
                                             )}
                                         </div>
@@ -962,12 +974,22 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                                                 );
                                                             })}
                                                             {question.allow_other && (
-                                                                <input
-                                                                    value={answer.answer_text || ''}
-                                                                    onChange={(e) => updateAnswer(question.id, { answer_text: e.target.value })}
-                                                                    placeholder="Другое..."
-                                                                    className={inputCls}
-                                                                />
+                                                                <div className="space-y-1">
+                                                                    <input
+                                                                        value={answer.answer_text || ''}
+                                                                        onChange={(e) =>
+                                                                            updateAnswer(question.id, {
+                                                                                answer_text: String(e.target.value || '').slice(0, OTHER_ANSWER_MAX_LENGTH)
+                                                                            })
+                                                                        }
+                                                                        maxLength={OTHER_ANSWER_MAX_LENGTH}
+                                                                        placeholder="Другое..."
+                                                                        className={inputCls}
+                                                                    />
+                                                                    <div className="text-[10px] text-gray-400 text-right">
+                                                                        {String(answer.answer_text || '').length}/{OTHER_ANSWER_MAX_LENGTH}
+                                                                    </div>
+                                                                </div>
                                                             )}
                                                         </div>
                                                     )}
