@@ -9,7 +9,7 @@ const QUESTION_TYPES = [
 ];
 const OTHER_ANSWER_MAX_LENGTH = 500;
 
-const isManagerRole = (role) => ['admin', 'sv', 'supervisor', 'trainer'].includes(String(role || '').toLowerCase());
+const isManagerRole = (role) => ['admin', 'sv', 'supervisor', 'trainer'].includes(String(role || '').trim().toLowerCase());
 const questionTypeLabel = (type) => QUESTION_TYPES.find((item) => item.value === type)?.label || type;
 const parseWeeksInput = (value) => {
     if (value === '' || value == null) return null;
@@ -804,7 +804,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                         {canManage && (
                                             <button
                                                 onClick={(e) => { e.stopPropagation(); removeSurvey(survey.id); }}
-                                                className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-lg hover:bg-red-50 text-red-400"
+                                                className="p-1.5 rounded-lg hover:bg-red-50 text-red-500 transition-colors"
                                                 title="Удалить"
                                             >
                                                 <i className="fas fa-trash-alt text-xs" />
