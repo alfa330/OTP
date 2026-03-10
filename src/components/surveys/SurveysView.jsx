@@ -117,6 +117,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
     const [isSaving, setIsSaving] = useState(false);
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [activeTab, setActiveTab] = useState('questions'); // 'questions' | 'stats'
+    const [statsOperatorQuery, setStatsOperatorQuery] = useState('');
     const showToastRef = useRef(showToast);
     const onSurveyProgressChangedRef = useRef(onSurveyProgressChanged);
 
@@ -205,10 +206,51 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
         }
     }, [selectedSurveyId, surveys]);
 
+    useEffect(() => {
+        setStatsOperatorQuery('');
+    }, [selectedSurveyId]);
+
     const selectedSurvey = useMemo(
         () => surveys.find((item) => String(item.id) === String(selectedSurveyId)) || null,
         [selectedSurveyId, surveys]
     );
+
+    const detailedStatsRows = useMemo(() => {
+        const rows = Array.isArray(selectedSurvey?.statistics?.responses_detailed)
+            ? selectedSurvey.statistics.responses_detailed
+            : [];
+        const query = String(statsOperatorQuery || '').trim().toLowerCase();
+        if (!query) return rows;
+        return rows.filter((row) => {
+            const name = String(row?.operator_name || '').toLowerCase();
+            const idText = String(row?.operator_id || '');
+            return name.includes(query) || idText.includes(query);
+        });
+    }, [selectedSurvey?.statistics?.responses_detailed, statsOperatorQuery]);
+
+    const formatQuestionAnswerText = useCallback((question, answer) => {
+        if (!question || !answer) return '—';
+        if (question.type === 'rating') {
+            const rating = Number(answer.rating_value);
+            return Number.isFinite(rating) ? `${rating}` : '—';
+        }
+
+        const selectedOptions = Array.isArray(answer.selected_options)
+            ? answer.selected_options.map((item) => String(item || '').trim()).filter(Boolean)
+            : [];
+        const otherText = String(answer.answer_text || '').trim();
+
+        if (selectedOptions.length > 0 && otherText) {
+            return `${selectedOptions.join(', ')}; Другое: ${otherText}`;
+        }
+        if (selectedOptions.length > 0) {
+            return selectedOptions.join(', ');
+        }
+        if (otherText) {
+            return `Другое: ${otherText}`;
+        }
+        return '—';
+    }, []);
 
     useEffect(() => {
         if (!isOperator || !selectedSurvey) return;
@@ -323,11 +365,22 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
         const preparedAnswers = (selectedSurvey.questions || []).map((question) => {
             const answer = answers[question.id] || {};
             const payload = { question_id: Number(question.id) };
-            if (question.type === 'rating') payload.rating_value = answer.rating_value === '' ? null : Number(answer.rating_value);
-            else {
-                payload.selected_options = Array.isArray(answer.selected_options) ? answer.selected_options : [];
-                const otherAnswerText = String(answer.answer_text || '').trim();
-                if (otherAnswerText) payload.answer_text = otherAnswerText.slice(0, OTHER_ANSWER_MAX_LENGTH);
+            if (question.type === 'rating') {
+                payload.rating_value = answer.rating_value === '' ? null : Number(answer.rating_value);
+            } else {
+                const selectedOptionsRaw = Array.isArray(answer.selected_options) ? answer.selected_options : [];
+                const selectedOptions = selectedOptionsRaw.map((item) => String(item || '').trim()).filter(Boolean);
+                const otherAnswerText = String(answer.answer_text || '').trim().slice(0, OTHER_ANSWER_MAX_LENGTH);
+
+                if (question.type === 'single' && otherAnswerText) {
+                    payload.selected_options = [];
+                    payload.answer_text = otherAnswerText;
+                } else {
+                    payload.selected_options = question.type === 'single'
+                        ? (selectedOptions[0] ? [selectedOptions[0]] : [])
+                        : selectedOptions;
+                    if (otherAnswerText) payload.answer_text = otherAnswerText;
+                }
             }
             return payload;
         });
@@ -966,7 +1019,9 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                                                             name={`q_${question.id}`}
                                                                             checked={selected}
                                                                             onChange={() => {
-                                                                                if (question.type === 'single') updateAnswer(question.id, { selected_options: [option] });
+                                                                                if (question.type === 'single') {
+                                                                                    updateAnswer(question.id, { selected_options: [option], answer_text: '' });
+                                                                                }
                                                                                 else {
                                                                                     const set = new Set(answer.selected_options || []);
                                                                                     if (set.has(option)) set.delete(option);
@@ -983,11 +1038,17 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                                                 <div className="space-y-1">
                                                                     <input
                                                                         value={answer.answer_text || ''}
-                                                                        onChange={(e) =>
-                                                                            updateAnswer(question.id, {
-                                                                                answer_text: String(e.target.value || '').slice(0, OTHER_ANSWER_MAX_LENGTH)
-                                                                            })
-                                                                        }
+                                                                        onChange={(e) => {
+                                                                            const nextText = String(e.target.value || '').slice(0, OTHER_ANSWER_MAX_LENGTH);
+                                                                            if (question.type === 'single') {
+                                                                                updateAnswer(question.id, {
+                                                                                    answer_text: nextText,
+                                                                                    selected_options: nextText ? [] : (answer.selected_options || [])
+                                                                                });
+                                                                                return;
+                                                                            }
+                                                                            updateAnswer(question.id, { answer_text: nextText });
+                                                                        }}
                                                                         maxLength={OTHER_ANSWER_MAX_LENGTH}
                                                                         placeholder="Другое..."
                                                                         className={inputCls}
@@ -1015,8 +1076,8 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                     </div>
                                 )}
 
-                                {/* Completed operator view / manager questions tab */}
-                                {((!isOperator && (!canManage || activeTab === 'questions')) || selectedSurvey?.my_assignment?.status === 'completed') && (
+                                {/* Manager questions tab */}
+                                {!isOperator && (!canManage || activeTab === 'questions') && (
                                     <div className="space-y-2">
                                         {(selectedSurvey.questions || []).map((question, index) => (
                                             <div key={question.id} className="flex gap-3 items-start p-3 rounded-xl border border-gray-100 bg-gray-50/60">
@@ -1035,6 +1096,44 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                     </div>
                                 )}
 
+                                {/* Completed operator view */}
+                                {isOperator && selectedSurvey?.my_assignment?.status === 'completed' && (
+                                    <div className="space-y-3">
+                                        <div className="text-xs text-gray-500">
+                                            Отправлено:{' '}
+                                            <strong className="text-gray-700">
+                                                {selectedSurvey?.my_response?.submitted_at || selectedSurvey?.my_assignment?.submitted_at || '—'}
+                                            </strong>
+                                        </div>
+                                        {(selectedSurvey.questions || []).map((question, index) => {
+                                            const answersByQuestion = selectedSurvey?.my_response?.answers_by_question || {};
+                                            const answer = answersByQuestion[String(question.id)] || answersByQuestion[question.id] || null;
+                                            return (
+                                                <div key={question.id} className="p-3 rounded-xl border border-gray-100 bg-gray-50/60 space-y-2">
+                                                    <div className="flex items-start gap-3">
+                                                        <div className="w-6 h-6 rounded-lg bg-blue-50 flex items-center justify-center shrink-0 mt-0.5">
+                                                            <span className="text-[10px] font-bold text-blue-500">{index + 1}</span>
+                                                        </div>
+                                                        <div className="flex-1 min-w-0">
+                                                            <div className="text-sm font-medium text-gray-800">{question.text}</div>
+                                                            <div className="flex items-center gap-2 mt-1">
+                                                                <Badge color="gray">{questionTypeLabel(question.type)}</Badge>
+                                                                {question.required && <Badge color="blue">Обязательный</Badge>}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                    <div className="ml-9 text-sm text-gray-700">
+                                                        <span className="text-gray-500 mr-1">Ваш ответ:</span>
+                                                        <strong className="font-medium text-gray-800 break-words">
+                                                            {formatQuestionAnswerText(question, answer)}
+                                                        </strong>
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+
                                 {/* Manager stats tab */}
                                 {canManage && activeTab === 'stats' && (
                                     <div className="space-y-3">
@@ -1045,6 +1144,89 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                             </div>
                                         )}
                                         {(selectedSurvey?.statistics?.question_stats || []).map((stat, index) => renderDetailedQuestionStats(stat, index))}
+
+                                        <div className="border border-gray-100 rounded-xl p-4 bg-white space-y-3">
+                                            <div className="flex items-center justify-between gap-3 flex-wrap">
+                                                <div>
+                                                    <h4 className="text-sm font-semibold text-gray-800">Ответы сотрудников</h4>
+                                                    <p className="text-[11px] text-gray-500 mt-0.5">
+                                                        Табличный просмотр: что выбрал и что написал каждый сотрудник
+                                                    </p>
+                                                </div>
+                                                <Badge color="blue">
+                                                    {detailedStatsRows.length}/{Array.isArray(selectedSurvey?.statistics?.responses_detailed) ? selectedSurvey.statistics.responses_detailed.length : 0}
+                                                </Badge>
+                                            </div>
+
+                                            <div className="relative max-w-sm">
+                                                <i className="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-gray-300 text-xs" />
+                                                <input
+                                                    value={statsOperatorQuery}
+                                                    onChange={(e) => setStatsOperatorQuery(e.target.value)}
+                                                    placeholder="Поиск по сотруднику"
+                                                    className={`${inputCls} pl-8 py-2`}
+                                                />
+                                            </div>
+
+                                            <div className="overflow-x-auto border border-gray-100 rounded-lg">
+                                                <table className="min-w-full divide-y divide-gray-100 text-xs">
+                                                    <thead className="bg-gray-50">
+                                                        <tr>
+                                                            <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Сотрудник</th>
+                                                            <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Статус</th>
+                                                            <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Отправлено</th>
+                                                            {(selectedSurvey?.questions || []).map((question, qIndex) => (
+                                                                <th key={`table_q_${question.id}`} className="px-3 py-2 text-left font-semibold text-gray-600 min-w-[220px]">
+                                                                    <div className="text-[10px] text-gray-400 mb-0.5">Вопрос #{qIndex + 1}</div>
+                                                                    <div className="line-clamp-2">{question.text}</div>
+                                                                </th>
+                                                            ))}
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody className="divide-y divide-gray-100">
+                                                        {detailedStatsRows.length === 0 && (
+                                                            <tr>
+                                                                <td
+                                                                    className="px-3 py-4 text-center text-gray-400"
+                                                                    colSpan={3 + (selectedSurvey?.questions || []).length}
+                                                                >
+                                                                    Сотрудники не найдены
+                                                                </td>
+                                                            </tr>
+                                                        )}
+                                                        {detailedStatsRows.map((row) => {
+                                                            const answersByQuestion = row?.answers_by_question || {};
+                                                            const isCompleted = String(row?.status || '').toLowerCase() === 'completed';
+                                                            return (
+                                                                <tr key={`stats_row_${row?.operator_id}`}>
+                                                                    <td className="px-3 py-2.5 whitespace-nowrap text-gray-800 font-medium">
+                                                                        {row?.operator_name || `#${row?.operator_id || '—'}`}
+                                                                    </td>
+                                                                    <td className="px-3 py-2.5 whitespace-nowrap">
+                                                                        <Badge color={isCompleted ? 'green' : 'amber'}>
+                                                                            {isCompleted ? 'Пройден' : 'Назначен'}
+                                                                        </Badge>
+                                                                    </td>
+                                                                    <td className="px-3 py-2.5 whitespace-nowrap text-gray-600">
+                                                                        {row?.submitted_at || '—'}
+                                                                    </td>
+                                                                    {(selectedSurvey?.questions || []).map((question) => {
+                                                                        const answer = answersByQuestion[String(question.id)] || answersByQuestion[question.id] || null;
+                                                                        return (
+                                                                            <td key={`stats_row_${row?.operator_id}_q_${question.id}`} className="px-3 py-2.5 align-top text-gray-700">
+                                                                                <div className="max-w-[280px] break-words">
+                                                                                    {formatQuestionAnswerText(question, answer)}
+                                                                                </div>
+                                                                            </td>
+                                                                        );
+                                                                    })}
+                                                                </tr>
+                                                            );
+                                                        })}
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        </div>
                                     </div>
                                 )}
                             </div>
