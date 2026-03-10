@@ -569,7 +569,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                     : 'bg-blue-600 text-white hover:bg-blue-700'
                             }`}
                         >
-                            <i className={`fas ${showBuilder ? 'fa-times' : 'fa-plus'} text-xs`} />
+                            <FaIcon className={`fas ${showBuilder ? 'fa-times' : 'fa-plus'} text-xs`} />
                             {showBuilder ? 'Отменить' : 'Создать опрос'}
                         </button>
                     )}
@@ -581,7 +581,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                 <div className="bg-white rounded-2xl border border-blue-100 shadow-sm">
                     <div className="px-6 py-4 border-b border-gray-100 flex items-center gap-2">
                         <div className="w-6 h-6 rounded-lg bg-blue-50 flex items-center justify-center">
-                            <i className="fas fa-pencil-alt text-blue-500 text-xs" />
+                            <FaIcon className="fas fa-pencil-alt text-blue-500 text-xs" />
                         </div>
                         <span className="font-semibold text-gray-800 text-sm">Новый опрос</span>
                     </div>
@@ -668,7 +668,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                 )}
                             </div>
                             <div className="relative">
-                                <i className="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-gray-300 text-xs" />
+                                <FaIcon className="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-gray-300 text-xs" />
                                 <input
                                     value={operatorQuery}
                                     onChange={(e) => setOperatorQuery(e.target.value)}
@@ -688,7 +688,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                             className={`flex items-center gap-3 px-3 py-2.5 cursor-pointer transition-colors ${checked ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
                                         >
                                             <div className={`w-4 h-4 rounded flex items-center justify-center shrink-0 border transition-all ${checked ? 'bg-blue-600 border-blue-600' : 'border-gray-300'}`}>
-                                                {checked && <i className="fas fa-check text-white text-[9px]" />}
+                                                {checked && <FaIcon className="fas fa-check text-white text-[9px]" />}
                                             </div>
                                             <input type="checkbox" className="hidden" checked={checked} onChange={() => toggleArrayValue(setDraft, 'operatorIds', operator.id)} />
                                             <span className="text-sm font-medium text-gray-800 flex-1">{operator.name}</span>
@@ -715,7 +715,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                                     onClick={() => setDraft((p) => ({ ...p, questions: p.questions.filter((item) => item.id !== question.id) }))}
                                                     className="text-xs px-2 py-1 rounded-lg bg-red-50 text-red-500 hover:bg-red-100 disabled:opacity-30 transition-colors"
                                                 >
-                                                    <i className="fas fa-trash-alt mr-1" />Удалить
+                                                    <FaIcon className="fas fa-trash-alt mr-1" />Удалить
                                                 </button>
                                             </div>
 
@@ -765,7 +765,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                                                 onClick={() => removeQuestionOption(question.id, optionIndex)}
                                                                 className="text-gray-300 hover:text-red-400 disabled:opacity-20 transition-colors px-1"
                                                             >
-                                                                <i className="fas fa-times" />
+                                                                <FaIcon className="fas fa-times" />
                                                             </button>
                                                         </div>
                                                     ))}
@@ -774,7 +774,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                                         onClick={() => addQuestionOption(question.id)}
                                                         className="text-xs text-blue-500 hover:text-blue-700 transition-colors ml-7"
                                                     >
-                                                        <i className="fas fa-plus mr-1" />Добавить вариант
+                                                        <FaIcon className="fas fa-plus mr-1" />Добавить вариант
                                                     </button>
 
                                                     <label className="inline-flex items-center gap-2 text-xs text-gray-500 ml-7">
@@ -797,7 +797,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                 onClick={() => setDraft((p) => ({ ...p, questions: [...p.questions, emptyQuestion()] }))}
                                 className="w-full py-2.5 border-2 border-dashed border-gray-200 rounded-xl text-sm text-gray-400 hover:border-blue-300 hover:text-blue-500 transition-all"
                             >
-                                <i className="fas fa-plus mr-2" />Добавить вопрос
+                                <FaIcon className="fas fa-plus mr-2" />Добавить вопрос
                             </button>
                         </div>
 
@@ -808,7 +808,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                 disabled={isSaving}
                                 className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-all shadow-sm"
                             >
-                                {isSaving ? <><i className="fas fa-spinner fa-spin" />Сохранение...</> : <><i className="fas fa-check" />Сохранить опрос</>}
+                                {isSaving ? <><FaIcon className="fas fa-spinner fa-spin" />Сохранение...</> : <><FaIcon className="fas fa-check" />Сохранить опрос</>}
                             </button>
                         </div>
                     </div>
@@ -828,13 +828,13 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                     <div className="flex-1 overflow-y-auto divide-y divide-gray-50">
                         {isLoading && (
                             <div className="p-6 flex items-center justify-center gap-2 text-sm text-gray-400">
-                                <i className="fas fa-spinner fa-spin" />Загрузка...
+                                <FaIcon className="fas fa-spinner fa-spin" />Загрузка...
                             </div>
                         )}
                         {!isLoading && surveys.length === 0 && (
                             <div className="p-8 text-center">
                                 <div className="w-12 h-12 rounded-2xl bg-gray-50 flex items-center justify-center mx-auto mb-3">
-                                    <i className="fas fa-clipboard-list text-gray-300 text-xl" />
+                                    <FaIcon className="fas fa-clipboard-list text-gray-300 text-xl" />
                                 </div>
                                 <p className="text-sm text-gray-400">
                                     {isOperator ? 'Назначенных опросов пока нет' : 'Опросов пока нет'}
@@ -896,7 +896,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                         <div className="flex-1 flex items-center justify-center p-12 text-center">
                             <div>
                                 <div className="w-14 h-14 rounded-2xl bg-gray-50 flex items-center justify-center mx-auto mb-3">
-                                    <i className="fas fa-hand-point-left text-gray-300 text-2xl" />
+                                    <FaIcon className="fas fa-hand-point-left text-gray-300 text-2xl" />
                                 </div>
                                 <p className="text-sm text-gray-400">Выберите опрос из списка</p>
                             </div>
@@ -922,11 +922,11 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                 {/* Meta row */}
                                 <div className="flex flex-wrap gap-2 mt-3">
                                     <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-gray-50 rounded-lg px-2.5 py-1.5">
-                                        <i className="fas fa-users text-gray-400 text-[10px]" />
+                                        <FaIcon className="fas fa-users text-gray-400 text-[10px]" />
                                         Операторов: <strong className="text-gray-700">{selectedSurvey?.assignment?.operator_ids?.length || 0}</strong>
                                     </div>
                                     <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-gray-50 rounded-lg px-2.5 py-1.5">
-                                        <i className="fas fa-clock text-gray-400 text-[10px]" />
+                                        <FaIcon className="fas fa-clock text-gray-400 text-[10px]" />
                                         Стаж:{' '}
                                         <strong className="text-gray-700">
                                             {selectedSurvey?.assignment?.tenure_weeks_min != null || selectedSurvey?.assignment?.tenure_weeks_max != null
@@ -937,11 +937,11 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                     {canManage && (
                                         <>
                                             <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-gray-50 rounded-lg px-2.5 py-1.5">
-                                                <i className="fas fa-check-circle text-gray-400 text-[10px]" />
+                                                <FaIcon className="fas fa-check-circle text-gray-400 text-[10px]" />
                                                 Пройдено: <strong className="text-gray-700">{selectedSurvey?.statistics?.completed_count || 0} / {selectedSurvey?.statistics?.assigned_count || 0}</strong>
                                             </div>
                                             <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-gray-50 rounded-lg px-2.5 py-1.5">
-                                                <i className="fas fa-hourglass-half text-gray-400 text-[10px]" />
+                                                <FaIcon className="fas fa-hourglass-half text-gray-400 text-[10px]" />
                                                 Ожидают: <strong className="text-gray-700">{selectedSurvey?.statistics?.pending_count || 0}</strong>
                                             </div>
                                         </>
@@ -961,7 +961,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                                         : 'text-gray-500 hover:bg-gray-100'
                                                 }`}
                                             >
-                                                {tab === 'questions' ? <><i className="fas fa-question-circle mr-1" />Вопросы</> : <><i className="fas fa-chart-bar mr-1" />Статистика</>}
+                                                {tab === 'questions' ? <><FaIcon className="fas fa-question-circle mr-1" />Вопросы</> : <><FaIcon className="fas fa-chart-bar mr-1" />Статистика</>}
                                             </button>
                                         ))}
                                     </div>
@@ -1025,7 +1025,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                                                                 : `rounded border-2 ${selected ? 'bg-blue-600 border-blue-600' : 'border-gray-300'}`
                                                                         }`}>
                                                                             {selected && question.type === 'single' && <div className="w-1.5 h-1.5 rounded-full bg-blue-600" />}
-                                                                            {selected && question.type === 'multiple' && <i className="fas fa-check text-white text-[8px]" />}
+                                                                            {selected && question.type === 'multiple' && <FaIcon className="fas fa-check text-white text-[8px]" />}
                                                                         </div>
                                                                         <input
                                                                             type={question.type === 'single' ? 'radio' : 'checkbox'}
@@ -1084,8 +1084,8 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                             className="w-full py-3 rounded-xl bg-emerald-600 text-white font-medium text-sm hover:bg-emerald-700 disabled:opacity-50 transition-all shadow-sm"
                                         >
                                             {isSubmitting
-                                                ? <><i className="fas fa-spinner fa-spin mr-2" />Отправка...</>
-                                                : <><i className="fas fa-paper-plane mr-2" />Завершить опрос</>}
+                                                ? <><FaIcon className="fas fa-spinner fa-spin mr-2" />Отправка...</>
+                                                : <><FaIcon className="fas fa-paper-plane mr-2" />Завершить опрос</>}
                                         </button>
                                     </div>
                                 )}
@@ -1153,7 +1153,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                     <div className="space-y-3">
                                         {(selectedSurvey?.statistics?.question_stats || []).length === 0 && (
                                             <div className="text-center py-8">
-                                                <i className="fas fa-chart-bar text-gray-200 text-3xl mb-2 block" />
+                                                <FaIcon className="fas fa-chart-bar text-gray-200 text-3xl mb-2 block" />
                                                 <p className="text-sm text-gray-400">Данных для статистики пока нет</p>
                                             </div>
                                         )}
@@ -1173,7 +1173,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                             </div>
 
                                             <div className="relative max-w-sm">
-                                                <i className="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-gray-300 text-xs" />
+                                                <FaIcon className="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-gray-300 text-xs" />
                                                 <input
                                                     value={statsOperatorQuery}
                                                     onChange={(e) => setStatsOperatorQuery(e.target.value)}
@@ -1253,4 +1253,5 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
 };
 
 export default SurveysView;
+
 
