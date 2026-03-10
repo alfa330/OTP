@@ -18709,12 +18709,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, [user]);
 
             useEffect(() => {
-                if (isAuthInitializing) return;
-                if (user) {
-                    setShowAuthEntranceSplash(true);
-                } else {
+                if (isAuthInitializing || !user) {
                     setShowAuthEntranceSplash(false);
+                    return;
                 }
+
+                const now = new Date();
+                const isMarchEntranceWindow =
+                    now.getMonth() === 2 &&
+                    now.getDate() >= 7 &&
+                    now.getDate() <= 9;
+
+                setShowAuthEntranceSplash(isMarchEntranceWindow);
             }, [isAuthInitializing, user?.id]);
             
             // Persist and restore view (after user is loaded to ensure role-based access)
