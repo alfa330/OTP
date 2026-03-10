@@ -116,6 +116,15 @@
       opacity: 1;
       width: auto;
     }
+    .sidebar .sidebar-surveys-collapsed-badge {
+      display: none;
+    }
+    .sidebar.collapsed .sidebar-surveys-collapsed-badge {
+      display: inline-flex;
+    }
+    .sidebar.collapsed:hover .sidebar-surveys-collapsed-badge {
+      display: none;
+    }
     .sidebar .sidebar-logo-full {
       display: flex;
     }

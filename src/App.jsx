@@ -21693,6 +21693,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 </span>
             );
 
+            const renderSurveysSidebarCompactBadge = () => {
+                if (pendingSurveysBadgeCount <= 0) return null;
+                return (
+                    <span className="sidebar-surveys-collapsed-badge inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-amber-500 text-white text-[10px] font-semibold leading-none">
+                        {pendingSurveysBadgeCount > 99 ? '99+' : pendingSurveysBadgeCount}
+                    </span>
+                );
+            };
+
             if (isAuthInitializing) {
                 return (
                   <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-100 to-purple-100">
@@ -21948,7 +21957,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </li>
                                         <li>
                                             <button onClick={() => { setView('surveys'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
-                                                <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarLabel()}
+                                                <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarCompactBadge()} {renderSurveysSidebarLabel()}
                                             </button>
                                         </li>
 
@@ -22011,7 +22020,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </li>
                                         <li>
                                             <button onClick={() => { setView('surveys'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
-                                                <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarLabel()}
+                                                <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarCompactBadge()} {renderSurveysSidebarLabel()}
                                             </button>
                                         </li>
                                         <li>
@@ -22049,7 +22058,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <>
                                         <li>
                                             <button onClick={() => { setView('surveys'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
-                                                <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarLabel()}
+                                                <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarCompactBadge()} {renderSurveysSidebarLabel()}
                                             </button>
                                         </li>
                                     </>
@@ -22068,7 +22077,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </li>
                                         <li>
                                             <button onClick={() => { setView('surveys'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
-                                                <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarLabel()}
+                                                <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarCompactBadge()} {renderSurveysSidebarLabel()}
                                             </button>
                                         </li>
                                         <li>
@@ -23364,7 +23373,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {( view === "contests" && (<ContestsApp user={user} operators={users} directions={directions} />))}
                                 {( view === "trainings" && (<TrainingsView user={user} operators={users} showToast={showToast} apiBaseUrl={API_BASE_URL} />))}
                                 {( view === "tasks" && (<TasksView user={user} showToast={showToast} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} />))}
-                                {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} showToast={showToast} apiBaseUrl={API_BASE_URL} />))}
+                                {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
                                 {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
                                 {( view === "call_division" && (<AdminCallsUploadView user={user}/>))}
                                 {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
@@ -24101,7 +24110,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {( view === "trainings" && (<TrainingsView user={user} operators={users} showToast={showToast} apiBaseUrl={API_BASE_URL} />))}
                                 {( view === "contests" && (<ContestsApp user={user} operators={users} directions={directions} />))}
                                 {( view === "tasks" && (<TasksView user={user} showToast={showToast} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} />))}
-                                {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} showToast={showToast} apiBaseUrl={API_BASE_URL} />))}
+                                {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
                                 {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
                                 {( view === "call_division" && (<AdminCallsUploadView user={user}/>))}
                                 {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
@@ -24109,13 +24118,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         )}
                         {user.role === 'trainer' && (
                             <>
-                                {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} showToast={showToast} apiBaseUrl={API_BASE_URL} />))}
+                                {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
                             </>
                         )}
                         {user.role === 'operator' && (
                             <>
                                 {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
-                                {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} showToast={showToast} apiBaseUrl={API_BASE_URL} />))}
+                                {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
                                 {view === 'profile' && ( 
                                   <div className="bg-white p-4 sm:p-6 lg:p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                     <h2 className="text-xl sm:text-2xl lg:text-3xl font-bold mb-4 sm:mb-6 lg:mb-8 text-gray-900 flex items-center gap-2">

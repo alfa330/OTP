@@ -106,7 +106,7 @@ const inputCls = "w-full px-3 py-2.5 text-sm border border-gray-200 rounded-lg b
 
 /* ─── main component ─── */
 
-const SurveysView = ({ user, operators = [], directions = [], showToast, apiBaseUrl }) => {
+const SurveysView = ({ user, operators = [], directions = [], showToast, apiBaseUrl, onSurveyProgressChanged }) => {
     const [surveys, setSurveys] = useState([]);
     const [selectedSurveyId, setSelectedSurveyId] = useState('');
     const [showBuilder, setShowBuilder] = useState(false);
@@ -118,11 +118,13 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [activeTab, setActiveTab] = useState('questions'); // 'questions' | 'stats'
     const showToastRef = useRef(showToast);
+    const onSurveyProgressChangedRef = useRef(onSurveyProgressChanged);
 
     const canManage = isManagerRole(user?.role);
     const isOperator = String(user?.role || '').toLowerCase() === 'operator';
 
     useEffect(() => { showToastRef.current = showToast; }, [showToast]);
+    useEffect(() => { onSurveyProgressChangedRef.current = onSurveyProgressChanged; }, [onSurveyProgressChanged]);
 
     const notify = useCallback((message, type = 'success') => {
         if (typeof showToastRef.current === 'function') showToastRef.current(message, type);
@@ -184,6 +186,9 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
         try {
             const response = await axios.get(`${apiBaseUrl}/api/surveys`, { headers });
             setSurveys(Array.isArray(response?.data?.surveys) ? response.data.surveys : []);
+            if (typeof onSurveyProgressChangedRef.current === 'function') {
+                onSurveyProgressChangedRef.current();
+            }
         } catch (error) {
             notify(error?.response?.data?.error || 'Не удалось загрузить опросы', 'error');
         } finally {
