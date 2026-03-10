@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
+import FaIcon from '../common/FaIcon';
 
 const QUESTION_TYPES = [
     { value: 'single', label: 'Один вариант' },
@@ -187,6 +188,29 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
         setDraft((prev) => ({ ...prev, questions: prev.questions.map((q) => (q.id === questionId ? { ...q, ...patch } : q)) }));
     };
 
+    const addQuestionOption = (questionId) => {
+        setDraft((prev) => ({
+            ...prev,
+            questions: prev.questions.map((question) => {
+                if (question.id !== questionId || question.type === 'rating') return question;
+                const options = Array.isArray(question.options) ? question.options : [];
+                return { ...question, options: [...options, ''] };
+            })
+        }));
+    };
+
+    const removeQuestionOption = (questionId, optionIndex) => {
+        setDraft((prev) => ({
+            ...prev,
+            questions: prev.questions.map((question) => {
+                if (question.id !== questionId || question.type === 'rating') return question;
+                const options = Array.isArray(question.options) ? question.options : [];
+                if (options.length <= 2) return question;
+                return { ...question, options: options.filter((_, idx) => idx !== optionIndex) };
+            })
+        }));
+    };
+
     const updateAnswer = (questionId, patch) => {
         setAnswers((prev) => ({ ...prev, [questionId]: { ...(prev[questionId] || {}), ...patch } }));
     };
@@ -280,7 +304,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
             <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
                 <div className="flex items-center justify-between gap-3 flex-wrap">
                     <div>
-                        <h2 className="text-2xl font-semibold text-gray-800 flex items-center gap-2"><i className="fas fa-list-alt text-blue-600" />Опросы</h2>
+                        <h2 className="text-2xl font-semibold text-gray-800 flex items-center gap-2"><FaIcon className="fas fa-list-alt text-blue-600" />Опросы</h2>
                         <p className="text-sm text-gray-600">{canManage ? 'Назначение по стажу в неделях, направлению и операторам.' : 'Назначенные вам опросы.'}</p>
                     </div>
                     {canManage && <button onClick={() => setShowBuilder((value) => !value)} className="px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700">{showBuilder ? 'Закрыть' : 'Создать опрос'}</button>}
@@ -300,7 +324,77 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                     <div className="flex flex-wrap gap-2">{Array.from(directionNameById.entries()).map(([id, name]) => <button key={id} onClick={() => toggleArrayValue(setDraft, 'directionIds', id)} className={`px-3 py-1 rounded-full border text-sm ${draft.directionIds.includes(id) ? 'bg-blue-600 text-white border-blue-600' : 'border-gray-300'}`}>{name}</button>)}</div>
                     <input value={operatorQuery} onChange={(event) => setOperatorQuery(event.target.value)} placeholder="Поиск оператора" className="w-full p-2.5 border border-gray-300 rounded-lg" />
                     <div className="max-h-44 overflow-y-auto border border-gray-200 rounded-lg divide-y divide-gray-100">{filteredOperators.map((operator) => <label key={operator.id} className="flex items-center gap-2 p-2 text-sm"><input type="checkbox" checked={draft.operatorIds.includes(operator.id)} onChange={() => toggleArrayValue(setDraft, 'operatorIds', operator.id)} /><span className="font-medium">{operator.name}</span><span className="text-gray-500">| {operator.directionName} | {operator.tenureLabel}</span></label>)}</div>
-                    <div className="space-y-2">{draft.questions.map((question, index) => <div key={question.id} className="border border-gray-200 rounded-lg p-3 space-y-2"><div className="flex items-center justify-between"><span className="text-xs text-gray-500">Вопрос #{index + 1}</span><button disabled={draft.questions.length <= 1} onClick={() => setDraft((prev) => ({ ...prev, questions: prev.questions.filter((item) => item.id !== question.id) }))} className="text-xs px-2 py-1 bg-red-50 text-red-600 rounded">Удалить</button></div><input value={question.text} onChange={(event) => updateQuestion(question.id, { text: event.target.value })} placeholder="Текст вопроса" className="w-full p-2 border border-gray-300 rounded-lg" /><select value={question.type} onChange={(event) => updateQuestion(question.id, { type: event.target.value, allowOther: event.target.value === 'rating' ? false : question.allowOther, options: event.target.value === 'rating' ? [] : (question.options?.length ? question.options : ['', '']) })} className="w-full p-2 border border-gray-300 rounded-lg">{QUESTION_TYPES.map((type) => <option key={type.value} value={type.value}>{type.label}</option>)}</select>{question.type !== 'rating' && <div className="space-y-1">{(question.options || []).map((option, optionIndex) => <input key={`${question.id}_${optionIndex}`} value={option} onChange={(event) => updateQuestion(question.id, { options: question.options.map((current, idx) => idx === optionIndex ? event.target.value : current) })} placeholder={`Вариант ${optionIndex + 1}`} className="w-full p-2 border border-gray-300 rounded-lg" />)}</div>}</div>)}</div>
+                    <div className="space-y-2">
+                        {draft.questions.map((question, index) => {
+                            const options = Array.isArray(question.options) ? question.options : [];
+                            return (
+                                <div key={question.id} className="border border-gray-200 rounded-lg p-3 space-y-2">
+                                    <div className="flex items-center justify-between">
+                                        <span className="text-xs text-gray-500">Вопрос #{index + 1}</span>
+                                        <button
+                                            disabled={draft.questions.length <= 1}
+                                            onClick={() => setDraft((prev) => ({ ...prev, questions: prev.questions.filter((item) => item.id !== question.id) }))}
+                                            className="text-xs px-2 py-1 bg-red-50 text-red-600 rounded"
+                                        >
+                                            Удалить
+                                        </button>
+                                    </div>
+                                    <input
+                                        value={question.text}
+                                        onChange={(event) => updateQuestion(question.id, { text: event.target.value })}
+                                        placeholder="Текст вопроса"
+                                        className="w-full p-2 border border-gray-300 rounded-lg"
+                                    />
+                                    <select
+                                        value={question.type}
+                                        onChange={(event) =>
+                                            updateQuestion(question.id, {
+                                                type: event.target.value,
+                                                allowOther: event.target.value === 'rating' ? false : question.allowOther,
+                                                options: event.target.value === 'rating' ? [] : (question.options?.length ? question.options : ['', ''])
+                                            })
+                                        }
+                                        className="w-full p-2 border border-gray-300 rounded-lg"
+                                    >
+                                        {QUESTION_TYPES.map((type) => <option key={type.value} value={type.value}>{type.label}</option>)}
+                                    </select>
+                                    {question.type !== 'rating' && (
+                                        <div className="space-y-1">
+                                            {options.map((option, optionIndex) => (
+                                                <div key={`${question.id}_${optionIndex}`} className="flex items-center gap-2">
+                                                    <input
+                                                        value={option}
+                                                        onChange={(event) =>
+                                                            updateQuestion(question.id, {
+                                                                options: options.map((current, idx) => (idx === optionIndex ? event.target.value : current))
+                                                            })
+                                                        }
+                                                        placeholder={`Вариант ${optionIndex + 1}`}
+                                                        className="w-full p-2 border border-gray-300 rounded-lg"
+                                                    />
+                                                    <button
+                                                        type="button"
+                                                        disabled={options.length <= 2}
+                                                        onClick={() => removeQuestionOption(question.id, optionIndex)}
+                                                        className="text-xs px-2 py-1 bg-red-50 text-red-600 rounded disabled:opacity-50"
+                                                    >
+                                                        Удалить
+                                                    </button>
+                                                </div>
+                                            ))}
+                                            <button
+                                                type="button"
+                                                onClick={() => addQuestionOption(question.id)}
+                                                className="text-xs px-2 py-1 rounded bg-gray-100 hover:bg-gray-200"
+                                            >
+                                                + Вариант
+                                            </button>
+                                        </div>
+                                    )}
+                                </div>
+                            );
+                        })}
+                    </div>
                     <div className="flex gap-2"><button onClick={() => setDraft((prev) => ({ ...prev, questions: [...prev.questions, emptyQuestion()] }))} className="px-3 py-2 rounded bg-gray-100">+ Вопрос</button><button onClick={createSurvey} disabled={isSaving} className="px-4 py-2 rounded bg-green-600 text-white disabled:opacity-50">{isSaving ? 'Сохранение...' : 'Сохранить'}</button></div>
                 </div>
             )}

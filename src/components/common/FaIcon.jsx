@@ -195,6 +195,7 @@ const TOKEN_TO_ICON = {
     'fa-layer-group': 'Layers3',
     'fa-lightbulb': 'Lightbulb',
     'fa-list': 'List',
+    'fa-list-alt': 'List',
     'fa-list-check': 'ListChecks',
     'fa-list-ol': 'ListOrdered',
     'fa-list-ul': 'List',
