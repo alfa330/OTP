@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 
 const QUESTION_TYPES = [
@@ -73,13 +73,18 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
     const [isLoading, setIsLoading] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
     const [isSubmitting, setIsSubmitting] = useState(false);
+    const showToastRef = useRef(showToast);
 
     const canManage = isManagerRole(user?.role);
     const isOperator = String(user?.role || '').toLowerCase() === 'operator';
 
-    const notify = useCallback((message, type = 'success') => {
-        if (typeof showToast === 'function') showToast(message, type);
+    useEffect(() => {
+        showToastRef.current = showToast;
     }, [showToast]);
+
+    const notify = useCallback((message, type = 'success') => {
+        if (typeof showToastRef.current === 'function') showToastRef.current(message, type);
+    }, []);
 
     const headers = useMemo(
         () => ({ 'X-API-Key': user?.apiKey, 'X-User-Id': user?.id }),
