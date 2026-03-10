@@ -804,10 +804,11 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                         {canManage && (
                                             <button
                                                 onClick={(e) => { e.stopPropagation(); removeSurvey(survey.id); }}
-                                                className="p-1.5 rounded-lg hover:bg-red-50 text-red-500 transition-colors"
+                                                className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg hover:bg-red-50 text-red-600 transition-colors text-xs font-medium"
                                                 title="Удалить"
                                             >
-                                                <i className="fas fa-trash-alt text-xs" />
+                                                <FaIcon className="fas fa-trash-alt text-xs" />
+                                                <span>Удалить</span>
                                             </button>
                                         )}
                                     </div>
