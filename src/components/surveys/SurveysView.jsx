@@ -116,6 +116,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
     const [isLoading, setIsLoading] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
     const [isSubmitting, setIsSubmitting] = useState(false);
+    const [isStatsExporting, setIsStatsExporting] = useState(false);
     const [activeTab, setActiveTab] = useState('questions'); // 'questions' | 'stats'
     const [statsOperatorQuery, setStatsOperatorQuery] = useState('');
     const showToastRef = useRef(showToast);
@@ -408,6 +409,53 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
             notify(error?.response?.data?.error || 'Не удалось отправить ответы', 'error');
         } finally {
             setIsSubmitting(false);
+        }
+    };
+
+    const exportSurveyStatsExcel = async () => {
+        if (!selectedSurvey?.id || !apiBaseUrl) return;
+        setIsStatsExporting(true);
+        try {
+            const response = await axios.get(
+                `${apiBaseUrl}/api/surveys/${selectedSurvey.id}/export_excel`,
+                {
+                    headers,
+                    responseType: 'blob'
+                }
+            );
+
+            const contentDisposition = response?.headers?.['content-disposition'] || '';
+            let filename = `survey_${selectedSurvey.id}_stats.xlsx`;
+            const utf8NameMatch = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i);
+            const plainNameMatch = contentDisposition.match(/filename=\"?([^\";]+)\"?/i);
+            if (utf8NameMatch?.[1]) {
+                try {
+                    filename = decodeURIComponent(utf8NameMatch[1]);
+                } catch (e) {
+                    filename = utf8NameMatch[1];
+                }
+            } else if (plainNameMatch?.[1]) {
+                filename = plainNameMatch[1];
+            }
+
+            const blob = new Blob(
+                [response.data],
+                { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }
+            );
+            const objectUrl = window.URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = objectUrl;
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            window.URL.revokeObjectURL(objectUrl);
+
+            notify('Статистика выгружена в Excel', 'success');
+        } catch (error) {
+            notify(error?.response?.data?.error || 'Не удалось выгрузить статистику в Excel', 'error');
+        } finally {
+            setIsStatsExporting(false);
         }
     };
 
@@ -1167,9 +1215,21 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                                         Табличный просмотр: что выбрал и что написал каждый сотрудник
                                                     </p>
                                                 </div>
-                                                <Badge color="blue">
-                                                    {detailedStatsRows.length}/{Array.isArray(selectedSurvey?.statistics?.responses_detailed) ? selectedSurvey.statistics.responses_detailed.length : 0}
-                                                </Badge>
+                                                <div className="flex items-center gap-2">
+                                                    <button
+                                                        type="button"
+                                                        onClick={exportSurveyStatsExcel}
+                                                        disabled={isStatsExporting || !selectedSurvey?.id}
+                                                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                                                        title="Выгрузить статистику в Excel"
+                                                    >
+                                                        <FaIcon className={`fas ${isStatsExporting ? 'fa-spinner fa-spin' : 'fa-file-excel'}`} />
+                                                        {isStatsExporting ? 'Экспорт...' : 'Excel'}
+                                                    </button>
+                                                    <Badge color="blue">
+                                                        {detailedStatsRows.length}/{Array.isArray(selectedSurvey?.statistics?.responses_detailed) ? selectedSurvey.statistics.responses_detailed.length : 0}
+                                                    </Badge>
+                                                </div>
                                             </div>
 
                                             <div className="relative max-w-sm">
