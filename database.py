@@ -8281,7 +8281,7 @@ class Database:
     @staticmethod
     def _normalize_survey_role(role):
         role_norm = str(role or '').strip().lower()
-        if role_norm == 'supervisor':
+        if role_norm in ('supervisor', 'trainer'):
             return 'sv'
         return role_norm
 
@@ -8511,16 +8511,27 @@ class Database:
             cursor.execute("DELETE FROM surveys WHERE id = %s", (survey_id,))
             return True
 
-    def _build_survey_question_stats(self, questions, answers_for_survey):
+    def _build_survey_question_stats(self, questions, answers_for_survey, respondents_total=0):
+        try:
+            respondents_total = int(respondents_total or 0)
+        except Exception:
+            respondents_total = 0
+        respondents_total = max(0, respondents_total)
+
         answers_by_question = defaultdict(list)
         for answer in answers_for_survey:
-            answers_by_question[int(answer.get('question_id'))].append(answer)
+            try:
+                question_id = int(answer.get('question_id'))
+            except Exception:
+                continue
+            answers_by_question[question_id].append(answer)
 
         stats = []
         for question in questions:
             question_id = int(question['id'])
             qtype = question.get('type')
             question_answers = answers_by_question.get(question_id, [])
+            answered_count = 0
 
             if qtype == 'rating':
                 values = []
@@ -8531,21 +8542,48 @@ class Database:
                     except Exception:
                         continue
                     if 1 <= value <= 5:
+                        answered_count += 1
                         values.append(value)
                         distribution[str(value)] += 1
+
+                sorted_values = sorted(values)
+                median_rating = None
+                if sorted_values:
+                    middle = len(sorted_values) // 2
+                    if len(sorted_values) % 2:
+                        median_rating = float(sorted_values[middle])
+                    else:
+                        median_rating = round((sorted_values[middle - 1] + sorted_values[middle]) / 2, 2)
+
+                detailed_distribution = []
+                for score in range(1, 6):
+                    count = int(distribution[str(score)])
+                    detailed_distribution.append({
+                        'value': score,
+                        'count': count,
+                        'percent_of_answers': round((count / answered_count) * 100, 1) if answered_count > 0 else 0.0,
+                        'percent_of_respondents': round((count / respondents_total) * 100, 1) if respondents_total > 0 else 0.0
+                    })
 
                 stats.append({
                     'question_id': question_id,
                     'type': qtype,
-                    'responses_with_answer': len(values),
+                    'respondents_total': respondents_total,
+                    'responses_with_answer': answered_count,
+                    'skipped_count': max(0, respondents_total - answered_count),
+                    'response_rate': round((answered_count / respondents_total) * 100, 1) if respondents_total > 0 else 0.0,
                     'average_rating': round(sum(values) / len(values), 2) if values else None,
-                    'ratings_distribution': distribution
+                    'median_rating': median_rating,
+                    'min_rating': min(values) if values else None,
+                    'max_rating': max(values) if values else None,
+                    'ratings_distribution': distribution,
+                    'ratings_distribution_detailed': detailed_distribution
                 })
                 continue
 
             option_counts = defaultdict(int)
             other_count = 0
-            answered_count = 0
+            selections_total = 0
 
             for answer in question_answers:
                 selected_values = []
@@ -8560,30 +8598,49 @@ class Database:
 
                 for selected_value in selected_values:
                     option_counts[selected_value] += 1
+                    selections_total += 1
                 if answer_text:
                     other_count += 1
 
-            denominator = answered_count if answered_count > 0 else 1
             options_stats = []
             for option in question.get('options') or []:
                 count = int(option_counts.get(option, 0))
                 options_stats.append({
                     'option': option,
                     'count': count,
-                    'percent': round((count / denominator) * 100, 1)
+                    'percent': round((count / answered_count) * 100, 1) if answered_count > 0 else 0.0,
+                    'percent_of_answers': round((count / answered_count) * 100, 1) if answered_count > 0 else 0.0,
+                    'percent_of_respondents': round((count / respondents_total) * 100, 1) if respondents_total > 0 else 0.0,
+                    'percent_of_selections': round((count / selections_total) * 100, 1) if selections_total > 0 else 0.0
                 })
             if question.get('allow_other'):
                 options_stats.append({
                     'option': 'Другое',
                     'count': int(other_count),
-                    'percent': round((other_count / denominator) * 100, 1)
+                    'is_other': True,
+                    'percent': round((other_count / answered_count) * 100, 1) if answered_count > 0 else 0.0,
+                    'percent_of_answers': round((other_count / answered_count) * 100, 1) if answered_count > 0 else 0.0,
+                    'percent_of_respondents': round((other_count / respondents_total) * 100, 1) if respondents_total > 0 else 0.0,
+                    'percent_of_selections': None
                 })
+
+            top_options = [
+                option for option in sorted(
+                    [item for item in options_stats if int(item.get('count') or 0) > 0],
+                    key=lambda item: (-int(item.get('count') or 0), str(item.get('option') or ''))
+                )
+            ][:3]
 
             stats.append({
                 'question_id': question_id,
                 'type': qtype,
+                'respondents_total': respondents_total,
                 'responses_with_answer': answered_count,
-                'options': options_stats
+                'skipped_count': max(0, respondents_total - answered_count),
+                'response_rate': round((answered_count / respondents_total) * 100, 1) if respondents_total > 0 else 0.0,
+                'selections_total': int(selections_total),
+                'options': options_stats,
+                'top_options': top_options
             })
 
         return stats
@@ -8678,7 +8735,11 @@ class Database:
                     'pending_count': pending_count,
                     'responses_count': len(responses),
                     'completion_rate': completion_rate,
-                    'question_stats': self._build_survey_question_stats(questions, answers_by_survey.get(survey_id, []))
+                    'question_stats': self._build_survey_question_stats(
+                        questions,
+                        answers_by_survey.get(survey_id, []),
+                        respondents_total=len(responses)
+                    )
                 }
             })
 

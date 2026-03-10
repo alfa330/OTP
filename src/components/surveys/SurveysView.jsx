@@ -299,6 +299,144 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
         }
     };
 
+    const formatPercent = (value) => {
+        const number = Number(value);
+        if (!Number.isFinite(number)) return '0%';
+        return `${number.toFixed(1).replace(/\.0$/, '')}%`;
+    };
+
+    const percentToWidth = (value) => {
+        const number = Number(value);
+        if (!Number.isFinite(number)) return '0%';
+        return `${Math.max(0, Math.min(100, number))}%`;
+    };
+
+    const renderDetailedQuestionStats = (stat, index) => {
+        if (!stat) return null;
+
+        const answeredCount = Number(stat.responses_with_answer || 0);
+        const respondentsTotal = Number(
+            stat.respondents_total != null
+                ? stat.respondents_total
+                : selectedSurvey?.statistics?.responses_count || 0
+        );
+        const skippedCount = Number(
+            stat.skipped_count != null
+                ? stat.skipped_count
+                : Math.max(0, respondentsTotal - answeredCount)
+        );
+        const responseRate = Number.isFinite(Number(stat.response_rate))
+            ? Number(stat.response_rate)
+            : (respondentsTotal > 0 ? (answeredCount / respondentsTotal) * 100 : 0);
+
+        const ratingDistribution = Array.isArray(stat.ratings_distribution_detailed) && stat.ratings_distribution_detailed.length
+            ? stat.ratings_distribution_detailed
+            : [1, 2, 3, 4, 5].map((value) => {
+                const count = Number(stat?.ratings_distribution?.[String(value)] || 0);
+                return {
+                    value,
+                    count,
+                    percent_of_answers: answeredCount > 0 ? (count / answeredCount) * 100 : 0,
+                    percent_of_respondents: respondentsTotal > 0 ? (count / respondentsTotal) * 100 : 0
+                };
+            });
+
+        const options = Array.isArray(stat.options) ? stat.options : [];
+        const topOptions = Array.isArray(stat.top_options) ? stat.top_options : [];
+
+        return (
+            <div key={`${selectedSurvey?.id || 'survey'}_stat_${index}`} className="text-xs text-gray-700 border border-gray-200 rounded-lg p-3 space-y-2">
+                <div className="flex items-start justify-between gap-2">
+                    <div className="font-medium text-gray-800">Вопрос #{index + 1}</div>
+                    <div className="text-[11px] text-gray-500">
+                        Ответили: {answeredCount} из {respondentsTotal} ({formatPercent(responseRate)})
+                    </div>
+                </div>
+                <div className="h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                    <div className="h-full bg-blue-500" style={{ width: percentToWidth(responseRate) }} />
+                </div>
+                <div className="text-[11px] text-gray-500">Пропустили: {skippedCount}</div>
+
+                {stat.type === 'rating' && (
+                    <div className="space-y-1">
+                        <div className="text-[11px] text-gray-600">
+                            Средний рейтинг: <strong>{stat.average_rating ?? '-'}</strong>
+                            {' | '}
+                            Медиана: <strong>{stat.median_rating ?? '-'}</strong>
+                            {' | '}
+                            Диапазон: <strong>{stat.min_rating ?? '-'}-{stat.max_rating ?? '-'}</strong>
+                        </div>
+                        <div className="space-y-1">
+                            {ratingDistribution.map((bucket) => {
+                                const value = Number(bucket.value);
+                                const count = Number(bucket.count || 0);
+                                const percentAnswers = Number(bucket.percent_of_answers || 0);
+                                return (
+                                    <div key={`${selectedSurvey?.id || 'survey'}_stat_${index}_rating_${value}`} className="space-y-0.5">
+                                        <div className="flex items-center justify-between gap-2 text-[11px]">
+                                            <span>{value} ★</span>
+                                            <span>{count} ({formatPercent(percentAnswers)})</span>
+                                        </div>
+                                        <div className="h-1.5 bg-amber-100 rounded-full overflow-hidden">
+                                            <div className="h-full bg-amber-500" style={{ width: percentToWidth(percentAnswers) }} />
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    </div>
+                )}
+
+                {stat.type !== 'rating' && (
+                    <div className="space-y-1">
+                        {stat.type === 'multiple' && (
+                            <div className="text-[11px] text-gray-500">
+                                Всего выборов: <strong>{Number(stat.selections_total || 0)}</strong> (можно выбрать несколько вариантов)
+                            </div>
+                        )}
+
+                        {options.length === 0 && <div className="text-[11px] text-gray-500">Данных по вариантам пока нет.</div>}
+
+                        {options.map((option, optionIndex) => {
+                            const optionLabel = String(option?.option || `Вариант ${optionIndex + 1}`);
+                            const optionCount = Number(option?.count || 0);
+                            const percentRespondents = Number(
+                                option?.percent_of_respondents != null
+                                    ? option.percent_of_respondents
+                                    : option?.percent || 0
+                            );
+                            const percentAnswers = Number(
+                                option?.percent_of_answers != null
+                                    ? option.percent_of_answers
+                                    : option?.percent || 0
+                            );
+                            return (
+                                <div key={`${selectedSurvey?.id || 'survey'}_stat_${index}_option_${optionIndex}`} className="space-y-0.5">
+                                    <div className="flex items-center justify-between gap-2 text-[11px]">
+                                        <span className="truncate" title={optionLabel}>{optionLabel}</span>
+                                        <span>{optionCount} ({formatPercent(percentRespondents)})</span>
+                                    </div>
+                                    <div className="h-1.5 bg-blue-100 rounded-full overflow-hidden">
+                                        <div className="h-full bg-blue-500" style={{ width: percentToWidth(percentRespondents) }} />
+                                    </div>
+                                    <div className="text-[10px] text-gray-500">
+                                        От ответивших на вопрос: {formatPercent(percentAnswers)}
+                                    </div>
+                                </div>
+                            );
+                        })}
+
+                        {topOptions.length > 0 && (
+                            <div className="text-[11px] text-gray-500">
+                                Топ варианты: {topOptions.map((option) => `${option.option} (${option.count})`).join(', ')}
+                            </div>
+                        )}
+                    </div>
+                )}
+            </div>
+        );
+    };
+
     return (
         <div className="space-y-6">
             <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
@@ -400,8 +538,158 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
             )}
 
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-                <div className="bg-white rounded-xl border border-gray-200 shadow-sm"><div className="px-4 py-3 border-b border-gray-100 font-semibold text-gray-800">Список опросов</div><div className="p-4 space-y-2 max-h-[560px] overflow-y-auto">{isLoading && <div className="text-sm text-gray-500">Загрузка...</div>}{!isLoading && surveys.length === 0 && <div className="text-sm text-gray-500">{isOperator ? 'Назначенных опросов пока нет.' : 'Опросов пока нет.'}</div>}{!isLoading && surveys.map((survey) => <div key={survey.id} className={`border rounded-lg p-3 ${String(survey.id) === String(selectedSurveyId) ? 'border-blue-400 bg-blue-50' : 'border-gray-200'}`}><div className="flex items-start justify-between gap-2"><button onClick={() => setSelectedSurveyId(survey.id)} className="text-left flex-1"><div className="font-semibold text-gray-800">{survey.title}</div><div className="text-xs text-gray-500 mt-1">{canManage ? `Назначено: ${survey?.statistics?.assigned_count || 0} | Пройдено: ${survey?.statistics?.completed_count || 0} (${survey?.statistics?.completion_rate || 0}%)` : `Статус: ${survey?.my_assignment?.status === 'completed' ? 'Пройден' : 'Назначен'}`}</div></button>{canManage && <button onClick={() => removeSurvey(survey.id)} className="text-xs px-2 py-1 rounded bg-red-50 text-red-600">Удалить</button>}</div></div>)}</div></div>
-                <div className="bg-white rounded-xl border border-gray-200 shadow-sm"><div className="px-4 py-3 border-b border-gray-100 font-semibold text-gray-800">Детали опроса</div><div className="p-4 space-y-3 max-h-[560px] overflow-y-auto">{!selectedSurvey && <div className="text-sm text-gray-500">Выберите опрос слева.</div>}{selectedSurvey && <><div><div className="text-xl font-semibold text-gray-900">{selectedSurvey.title}</div>{selectedSurvey.description && <div className="text-sm text-gray-600">{selectedSurvey.description}</div>}</div><div className="text-xs text-gray-600 rounded-lg border border-gray-200 bg-gray-50 p-3">Операторов: {selectedSurvey?.assignment?.operator_ids?.length || 0}<br />Стаж: {selectedSurvey?.assignment?.tenure_weeks_min != null || selectedSurvey?.assignment?.tenure_weeks_max != null ? `${selectedSurvey?.assignment?.tenure_weeks_min != null ? `от ${selectedSurvey.assignment.tenure_weeks_min} нед.` : 'без минимума'}${selectedSurvey?.assignment?.tenure_weeks_max != null ? ` до ${selectedSurvey.assignment.tenure_weeks_max} нед.` : ''}` : 'Любой'}</div>{isOperator && selectedSurvey?.my_assignment?.can_submit && <div className="space-y-3">{(selectedSurvey.questions || []).map((question, index) => {const answer = answers[question.id] || {};return <div key={question.id} className="border border-gray-200 rounded-lg p-3"><div className="text-xs text-gray-500">#{index + 1} | {questionTypeLabel(question.type)}</div><div className="font-medium text-gray-800 mb-2">{question.text}</div>{question.type === 'rating' ? <div className="flex gap-2">{[1,2,3,4,5].map((value) => <button key={`${question.id}_${value}`} type="button" onClick={() => updateAnswer(question.id, { rating_value: value })} className={`px-3 py-1 rounded border ${Number(answer.rating_value) === value ? 'bg-amber-500 text-white border-amber-500' : 'border-gray-300'}`}>{value}</button>)}</div> : <div className="space-y-1">{(question.options || []).map((option) => {const selected = Array.isArray(answer.selected_options) && answer.selected_options.includes(option);return <label key={`${question.id}_${option}`} className="flex items-center gap-2 text-sm"><input type={question.type === 'single' ? 'radio' : 'checkbox'} name={`q_${question.id}`} checked={selected} onChange={() => {if (question.type === 'single') updateAnswer(question.id, { selected_options: [option] }); else {const set = new Set(answer.selected_options || []); if (set.has(option)) set.delete(option); else set.add(option); updateAnswer(question.id, { selected_options: Array.from(set) });}}} /><span>{option}</span></label>;})}{question.allow_other && <input value={answer.answer_text || ''} onChange={(event) => updateAnswer(question.id, { answer_text: event.target.value })} placeholder="Другое..." className="w-full p-2 border border-gray-300 rounded-lg text-sm" />}</div>}</div>;})}<button onClick={submitSurvey} disabled={isSubmitting} className="px-4 py-2 rounded bg-green-600 text-white disabled:opacity-50">{isSubmitting ? 'Отправка...' : 'Завершить опрос'}</button></div>}{(!isOperator || selectedSurvey?.my_assignment?.status === 'completed') && <div className="space-y-2">{(selectedSurvey.questions || []).map((question, index) => <div key={question.id} className="border border-gray-200 rounded-lg p-3"><div className="text-xs text-gray-500">#{index + 1} | {questionTypeLabel(question.type)}{question.required ? ' | обязательный' : ''}</div><div className="font-medium text-gray-800">{question.text}</div></div>)}</div>}{canManage && <div className="space-y-2"><div className="text-sm font-medium text-gray-700">Статистика</div><div className="text-sm text-gray-700">Назначено: <strong>{selectedSurvey?.statistics?.assigned_count || 0}</strong> | Пройдено: <strong>{selectedSurvey?.statistics?.completed_count || 0}</strong> | Ожидают: <strong>{selectedSurvey?.statistics?.pending_count || 0}</strong></div>{(selectedSurvey?.statistics?.question_stats || []).map((stat, index) => <div key={`${selectedSurvey.id}_stat_${index}`} className="text-xs text-gray-600 border border-gray-200 rounded p-2">Вопрос #{index + 1}: ответов {stat.responses_with_answer || 0}{stat.type === 'rating' && <> | средний рейтинг {stat.average_rating ?? '-'}</>}</div>)}</div>}</>}</div></div>
+                <div className="bg-white rounded-xl border border-gray-200 shadow-sm">
+                    <div className="px-4 py-3 border-b border-gray-100 font-semibold text-gray-800">Список опросов</div>
+                    <div className="p-4 space-y-2 max-h-[560px] overflow-y-auto">
+                        {isLoading && <div className="text-sm text-gray-500">Загрузка...</div>}
+                        {!isLoading && surveys.length === 0 && (
+                            <div className="text-sm text-gray-500">
+                                {isOperator ? 'Назначенных опросов пока нет.' : 'Опросов пока нет.'}
+                            </div>
+                        )}
+                        {!isLoading && surveys.map((survey) => (
+                            <div
+                                key={survey.id}
+                                className={`border rounded-lg p-3 ${String(survey.id) === String(selectedSurveyId) ? 'border-blue-400 bg-blue-50' : 'border-gray-200'}`}
+                            >
+                                <div className="flex items-start justify-between gap-2">
+                                    <button onClick={() => setSelectedSurveyId(survey.id)} className="text-left flex-1">
+                                        <div className="font-semibold text-gray-800">{survey.title}</div>
+                                        <div className="text-xs text-gray-500 mt-1">
+                                            {canManage
+                                                ? `Назначено: ${survey?.statistics?.assigned_count || 0} | Пройдено: ${survey?.statistics?.completed_count || 0} (${survey?.statistics?.completion_rate || 0}%)`
+                                                : `Статус: ${survey?.my_assignment?.status === 'completed' ? 'Пройден' : 'Назначен'}`}
+                                        </div>
+                                    </button>
+                                    {canManage && (
+                                        <button onClick={() => removeSurvey(survey.id)} className="text-xs px-2 py-1 rounded bg-red-50 text-red-600">
+                                            Удалить
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+
+                <div className="bg-white rounded-xl border border-gray-200 shadow-sm">
+                    <div className="px-4 py-3 border-b border-gray-100 font-semibold text-gray-800">Детали опроса</div>
+                    <div className="p-4 space-y-3 max-h-[560px] overflow-y-auto">
+                        {!selectedSurvey && <div className="text-sm text-gray-500">Выберите опрос слева.</div>}
+
+                        {selectedSurvey && (
+                            <>
+                                <div>
+                                    <div className="text-xl font-semibold text-gray-900">{selectedSurvey.title}</div>
+                                    {selectedSurvey.description && <div className="text-sm text-gray-600">{selectedSurvey.description}</div>}
+                                </div>
+
+                                <div className="text-xs text-gray-600 rounded-lg border border-gray-200 bg-gray-50 p-3">
+                                    Операторов: {selectedSurvey?.assignment?.operator_ids?.length || 0}
+                                    <br />
+                                    Стаж: {
+                                        selectedSurvey?.assignment?.tenure_weeks_min != null || selectedSurvey?.assignment?.tenure_weeks_max != null
+                                            ? `${selectedSurvey?.assignment?.tenure_weeks_min != null ? `от ${selectedSurvey.assignment.tenure_weeks_min} нед.` : 'без минимума'}${selectedSurvey?.assignment?.tenure_weeks_max != null ? ` до ${selectedSurvey.assignment.tenure_weeks_max} нед.` : ''}`
+                                            : 'Любой'
+                                    }
+                                </div>
+
+                                {isOperator && selectedSurvey?.my_assignment?.can_submit && (
+                                    <div className="space-y-3">
+                                        {(selectedSurvey.questions || []).map((question, index) => {
+                                            const answer = answers[question.id] || {};
+                                            return (
+                                                <div key={question.id} className="border border-gray-200 rounded-lg p-3">
+                                                    <div className="text-xs text-gray-500">#{index + 1} | {questionTypeLabel(question.type)}</div>
+                                                    <div className="font-medium text-gray-800 mb-2">{question.text}</div>
+                                                    {question.type === 'rating' ? (
+                                                        <div className="flex gap-2">
+                                                            {[1, 2, 3, 4, 5].map((value) => (
+                                                                <button
+                                                                    key={`${question.id}_${value}`}
+                                                                    type="button"
+                                                                    onClick={() => updateAnswer(question.id, { rating_value: value })}
+                                                                    className={`px-3 py-1 rounded border ${Number(answer.rating_value) === value ? 'bg-amber-500 text-white border-amber-500' : 'border-gray-300'}`}
+                                                                >
+                                                                    {value}
+                                                                </button>
+                                                            ))}
+                                                        </div>
+                                                    ) : (
+                                                        <div className="space-y-1">
+                                                            {(question.options || []).map((option) => {
+                                                                const selected = Array.isArray(answer.selected_options) && answer.selected_options.includes(option);
+                                                                return (
+                                                                    <label key={`${question.id}_${option}`} className="flex items-center gap-2 text-sm">
+                                                                        <input
+                                                                            type={question.type === 'single' ? 'radio' : 'checkbox'}
+                                                                            name={`q_${question.id}`}
+                                                                            checked={selected}
+                                                                            onChange={() => {
+                                                                                if (question.type === 'single') updateAnswer(question.id, { selected_options: [option] });
+                                                                                else {
+                                                                                    const set = new Set(answer.selected_options || []);
+                                                                                    if (set.has(option)) set.delete(option);
+                                                                                    else set.add(option);
+                                                                                    updateAnswer(question.id, { selected_options: Array.from(set) });
+                                                                                }
+                                                                            }}
+                                                                        />
+                                                                        <span>{option}</span>
+                                                                    </label>
+                                                                );
+                                                            })}
+                                                            {question.allow_other && (
+                                                                <input
+                                                                    value={answer.answer_text || ''}
+                                                                    onChange={(event) => updateAnswer(question.id, { answer_text: event.target.value })}
+                                                                    placeholder="Другое..."
+                                                                    className="w-full p-2 border border-gray-300 rounded-lg text-sm"
+                                                                />
+                                                            )}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            );
+                                        })}
+                                        <button onClick={submitSurvey} disabled={isSubmitting} className="px-4 py-2 rounded bg-green-600 text-white disabled:opacity-50">
+                                            {isSubmitting ? 'Отправка...' : 'Завершить опрос'}
+                                        </button>
+                                    </div>
+                                )}
+
+                                {(!isOperator || selectedSurvey?.my_assignment?.status === 'completed') && (
+                                    <div className="space-y-2">
+                                        {(selectedSurvey.questions || []).map((question, index) => (
+                                            <div key={question.id} className="border border-gray-200 rounded-lg p-3">
+                                                <div className="text-xs text-gray-500">
+                                                    #{index + 1} | {questionTypeLabel(question.type)}{question.required ? ' | обязательный' : ''}
+                                                </div>
+                                                <div className="font-medium text-gray-800">{question.text}</div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+
+                                {canManage && (
+                                    <div className="space-y-3">
+                                        <div className="text-sm font-medium text-gray-700">Статистика</div>
+                                        <div className="text-sm text-gray-700">
+                                            Назначено: <strong>{selectedSurvey?.statistics?.assigned_count || 0}</strong>
+                                            {' | '}
+                                            Пройдено: <strong>{selectedSurvey?.statistics?.completed_count || 0}</strong>
+                                            {' | '}
+                                            Ответов получено: <strong>{selectedSurvey?.statistics?.responses_count || 0}</strong>
+                                            {' | '}
+                                            Ожидают: <strong>{selectedSurvey?.statistics?.pending_count || 0}</strong>
+                                        </div>
+                                        {(selectedSurvey?.statistics?.question_stats || []).map((stat, index) => renderDetailedQuestionStats(stat, index))}
+                                    </div>
+                                )}
+                            </>
+                        )}
+                    </div>
+                </div>
             </div>
         </div>
     );
