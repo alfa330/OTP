@@ -21892,7 +21892,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </li>
                                         <li>
                                             <button onClick={() => { setView('surveys'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
-                                                <FaIcon className="fas fa-clipboard-list"></FaIcon> <span className="sidebar-text">Опросы</span>
+                                                <FaIcon className="fas fa-list-alt"></FaIcon> <span className="sidebar-text">Опросы</span>
                                             </button>
                                         </li>
 
@@ -21955,7 +21955,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </li>
                                         <li>
                                             <button onClick={() => { setView('surveys'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
-                                                <FaIcon className="fas fa-clipboard-list"></FaIcon> <span className="sidebar-text">Опросы</span>
+                                                <FaIcon className="fas fa-list-alt"></FaIcon> <span className="sidebar-text">Опросы</span>
                                             </button>
                                         </li>
                                         <li>
@@ -21993,7 +21993,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <>
                                         <li>
                                             <button onClick={() => { setView('surveys'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
-                                                <FaIcon className="fas fa-clipboard-list"></FaIcon> <span className="sidebar-text">Опросы</span>
+                                                <FaIcon className="fas fa-list-alt"></FaIcon> <span className="sidebar-text">Опросы</span>
                                             </button>
                                         </li>
                                     </>
@@ -22008,6 +22008,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         <li>
                                             <button onClick={() => { setView('hours'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'hours' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-clock"></FaIcon> <span className="sidebar-text">Мои часы</span>
+                                            </button>
+                                        </li>
+                                        <li>
+                                            <button onClick={() => { setView('surveys'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
+                                                <FaIcon className="fas fa-list-alt"></FaIcon> <span className="sidebar-text">Опросы</span>
                                             </button>
                                         </li>
                                         <li>
@@ -23303,7 +23308,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {( view === "contests" && (<ContestsApp user={user} operators={users} directions={directions} />))}
                                 {( view === "trainings" && (<TrainingsView user={user} operators={users} showToast={showToast} apiBaseUrl={API_BASE_URL} />))}
                                 {( view === "tasks" && (<TasksView user={user} showToast={showToast} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} />))}
-                                {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} showToast={showToast} />))}
+                                {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} showToast={showToast} apiBaseUrl={API_BASE_URL} />))}
                                 {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
                                 {( view === "call_division" && (<AdminCallsUploadView user={user}/>))}
                                 {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
@@ -24040,7 +24045,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {( view === "trainings" && (<TrainingsView user={user} operators={users} showToast={showToast} apiBaseUrl={API_BASE_URL} />))}
                                 {( view === "contests" && (<ContestsApp user={user} operators={users} directions={directions} />))}
                                 {( view === "tasks" && (<TasksView user={user} showToast={showToast} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} />))}
-                                {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} showToast={showToast} />))}
+                                {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} showToast={showToast} apiBaseUrl={API_BASE_URL} />))}
                                 {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
                                 {( view === "call_division" && (<AdminCallsUploadView user={user}/>))}
                                 {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
@@ -24048,12 +24053,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         )}
                         {user.role === 'trainer' && (
                             <>
-                                {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} showToast={showToast} />))}
+                                {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} showToast={showToast} apiBaseUrl={API_BASE_URL} />))}
                             </>
                         )}
                         {user.role === 'operator' && (
                             <>
                                 {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
+                                {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} showToast={showToast} apiBaseUrl={API_BASE_URL} />))}
                                 {view === 'profile' && ( 
                                   <div className="bg-white p-4 sm:p-6 lg:p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                     <h2 className="text-xl sm:text-2xl lg:text-3xl font-bold mb-4 sm:mb-6 lg:mb-8 text-gray-900 flex items-center gap-2">

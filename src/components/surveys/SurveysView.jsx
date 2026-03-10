@@ -1,114 +1,115 @@
-import React, { useEffect, useMemo, useState } from 'react';
-
-const STORAGE_KEY = 'otp_surveys_v1';
-
-const TENURE_BUCKETS = [
-    { id: 'lt3', label: 'До 3 месяцев' },
-    { id: 'm3_6', label: '3-6 месяцев' },
-    { id: 'm7_12', label: '7-12 месяцев' },
-    { id: 'gt12', label: 'Больше 12 месяцев' },
-    { id: 'unknown', label: 'Стаж не указан' }
-];
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import axios from 'axios';
 
 const QUESTION_TYPES = [
     { value: 'single', label: 'Один вариант' },
     { value: 'multiple', label: 'Несколько вариантов' },
-    { value: 'rating', label: 'Рейтинг 1-5 звезд' }
+    { value: 'rating', label: 'Рейтинг 1-5' }
 ];
 
-const buildId = (prefix = 'id') => `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-
-const emptyQuestion = () => ({ id: buildId('q'), text: '', type: 'single', required: true, allowOther: false, options: ['', ''] });
-const emptyDraft = () => ({ title: '', description: '', directionIds: [], tenureBuckets: [], operatorIds: [], questions: [emptyQuestion()] });
-
-const tenureMonths = (dateLike) => {
-    if (!dateLike) return null;
-    const d = new Date(dateLike);
-    if (Number.isNaN(d.getTime())) return null;
-    const now = new Date();
-    let m = (now.getFullYear() - d.getFullYear()) * 12 + (now.getMonth() - d.getMonth());
-    if (now.getDate() < d.getDate()) m -= 1;
-    return Math.max(0, m);
+const isManagerRole = (role) => ['admin', 'sv', 'supervisor', 'trainer'].includes(String(role || '').toLowerCase());
+const questionTypeLabel = (type) => QUESTION_TYPES.find((item) => item.value === type)?.label || type;
+const parseWeeksInput = (value) => {
+    if (value === '' || value == null) return null;
+    const number = Number(value);
+    if (!Number.isFinite(number)) return null;
+    return Math.max(0, Math.floor(number));
 };
 
-const tenureBucket = (m) => {
-    if (!Number.isFinite(m)) return 'unknown';
-    if (m < 3) return 'lt3';
-    if (m <= 6) return 'm3_6';
-    if (m <= 12) return 'm7_12';
-    return 'gt12';
+const parseFlexibleDate = (value) => {
+    if (!value) return null;
+    const text = String(value).trim();
+    let match = text.match(/^(\d{2})-(\d{2})-(\d{4})$/);
+    if (match) return new Date(Number(match[3]), Number(match[2]) - 1, Number(match[1]));
+    match = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (match) return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+    const parsed = new Date(text);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
 };
 
-const tenureLabel = (m) => {
-    if (!Number.isFinite(m)) return 'Стаж не указан';
-    if (m === 0) return 'Меньше месяца';
-    if (m < 12) return `${m} мес.`;
-    const y = Math.floor(m / 12);
-    const r = m % 12;
-    return r ? `${y} г. ${r} мес.` : `${y} г.`;
+const getTenureWeeks = (dateLike) => {
+    const date = parseFlexibleDate(dateLike);
+    if (!date) return null;
+    const ms = Date.now() - date.getTime();
+    if (ms < 0) return 0;
+    return Math.floor(ms / (7 * 24 * 60 * 60 * 1000));
 };
 
-const SurveysView = ({ user, operators = [], directions = [], showToast }) => {
-    const [surveys, setSurveys] = useState(() => {
-        try {
-            const raw = window.localStorage.getItem(STORAGE_KEY);
-            const parsed = raw ? JSON.parse(raw) : [];
-            return Array.isArray(parsed) ? parsed : [];
-        } catch {
-            return [];
-        }
-    });
-    const [draft, setDraft] = useState(emptyDraft);
-    const [showBuilder, setShowBuilder] = useState(false);
+const tenureLabel = (weeks) => {
+    if (!Number.isFinite(weeks)) return 'Стаж не указан';
+    if (weeks < 1) return 'Меньше недели';
+    if (weeks < 4) return `${weeks} нед.`;
+    const months = Math.floor(weeks / 4);
+    const rest = weeks % 4;
+    return rest ? `${months} мес. ${rest} нед.` : `${months} мес.`;
+};
+
+const emptyQuestion = () => ({
+    id: `q_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    text: '',
+    type: 'single',
+    required: true,
+    allowOther: false,
+    options: ['', '']
+});
+
+const emptyDraft = () => ({
+    title: '',
+    description: '',
+    directionIds: [],
+    tenureWeeksMin: '',
+    tenureWeeksMax: '',
+    operatorIds: [],
+    questions: [emptyQuestion()]
+});
+
+const SurveysView = ({ user, operators = [], directions = [], showToast, apiBaseUrl }) => {
+    const [surveys, setSurveys] = useState([]);
     const [selectedSurveyId, setSelectedSurveyId] = useState('');
+    const [showBuilder, setShowBuilder] = useState(false);
+    const [draft, setDraft] = useState(emptyDraft);
     const [operatorQuery, setOperatorQuery] = useState('');
+    const [answers, setAnswers] = useState({});
+    const [isLoading, setIsLoading] = useState(false);
+    const [isSaving, setIsSaving] = useState(false);
+    const [isSubmitting, setIsSubmitting] = useState(false);
 
-    useEffect(() => {
-        try {
-            window.localStorage.setItem(STORAGE_KEY, JSON.stringify(surveys));
-        } catch {
-            // ignore storage write errors
-        }
-    }, [surveys]);
+    const canManage = isManagerRole(user?.role);
+    const isOperator = String(user?.role || '').toLowerCase() === 'operator';
 
-    useEffect(() => {
-        if (!selectedSurveyId && surveys[0]?.id) setSelectedSurveyId(surveys[0].id);
-        if (selectedSurveyId && !surveys.some((s) => s.id === selectedSurveyId)) setSelectedSurveyId(surveys[0]?.id || '');
-    }, [selectedSurveyId, surveys]);
-
-    const notify = (message, type = 'success') => {
+    const notify = useCallback((message, type = 'success') => {
         if (typeof showToast === 'function') showToast(message, type);
-    };
+    }, [showToast]);
+
+    const headers = useMemo(
+        () => ({ 'X-API-Key': user?.apiKey, 'X-User-Id': user?.id }),
+        [user?.apiKey, user?.id]
+    );
 
     const directionNameById = useMemo(() => {
         const map = new Map();
-        (directions || []).forEach((d) => {
-            const id = d?.id != null ? String(d.id) : null;
-            const name = d?.name || d?.title || d?.displayName || d?.direction_name || d?.direction || 'Без направления';
+        (directions || []).forEach((direction) => {
+            const id = direction?.id != null ? String(direction.id) : null;
+            const name = direction?.name || direction?.title || direction?.direction_name || 'Без направления';
             if (id) map.set(id, name);
         });
         return map;
     }, [directions]);
 
-    const directionOptions = useMemo(
-        () => Array.from(directionNameById.entries()).map(([id, name]) => ({ id, name })),
-        [directionNameById]
-    );
-
     const normalizedOperators = useMemo(() => {
         return (operators || [])
-            .map((op) => {
-                const id = Number(op?.id);
+            .map((operator) => {
+                const id = Number(operator?.id);
                 if (!Number.isFinite(id)) return null;
-                const m = tenureMonths(op?.hire_date);
-                const directionId = op?.direction_id != null ? String(op.direction_id) : 'none';
+                const directionId = operator?.direction_id != null ? String(operator.direction_id) : 'none';
+                const weeks = getTenureWeeks(operator?.hire_date);
                 return {
                     id,
-                    name: String(op?.name || op?.login || `#${id}`),
+                    name: String(operator?.name || `#${id}`),
                     directionId,
-                    directionName: op?.direction || op?.direction_name || directionNameById.get(directionId) || 'Без направления',
-                    tenureBucket: tenureBucket(m),
-                    tenureLabel: tenureLabel(m)
+                    directionName: operator?.direction || directionNameById.get(directionId) || 'Без направления',
+                    tenureWeeks: weeks,
+                    tenureLabel: tenureLabel(weeks)
                 };
             })
             .filter(Boolean)
@@ -116,23 +117,57 @@ const SurveysView = ({ user, operators = [], directions = [], showToast }) => {
     }, [operators, directionNameById]);
 
     const filteredOperators = useMemo(() => {
-        const q = operatorQuery.trim().toLowerCase();
-        const directionSet = new Set(draft.directionIds.map(String));
-        const tenureSet = new Set(draft.tenureBuckets);
-        return normalizedOperators.filter((op) => {
-            const byDirection = directionSet.size === 0 || directionSet.has(op.directionId);
-            const byTenure = tenureSet.size === 0 || tenureSet.has(op.tenureBucket);
-            const byQuery = !q || op.name.toLowerCase().includes(q) || op.directionName.toLowerCase().includes(q) || op.tenureLabel.toLowerCase().includes(q);
-            return byDirection && byTenure && byQuery;
+        const query = operatorQuery.trim().toLowerCase();
+        const selectedDirections = new Set((draft.directionIds || []).map(String));
+        const minWeeks = parseWeeksInput(draft.tenureWeeksMin);
+        const maxWeeks = parseWeeksInput(draft.tenureWeeksMax);
+        return normalizedOperators.filter((operator) => {
+            const byDirection = selectedDirections.size === 0 || selectedDirections.has(operator.directionId);
+            const byQuery = !query || operator.name.toLowerCase().includes(query) || operator.directionName.toLowerCase().includes(query);
+            const hasTenure = Number.isFinite(operator.tenureWeeks);
+            const byMin = minWeeks == null || (hasTenure && operator.tenureWeeks >= minWeeks);
+            const byMax = maxWeeks == null || (hasTenure && operator.tenureWeeks <= maxWeeks);
+            return byDirection && byQuery && byMin && byMax;
         });
-    }, [draft.directionIds, draft.tenureBuckets, normalizedOperators, operatorQuery]);
+    }, [draft.directionIds, draft.tenureWeeksMax, draft.tenureWeeksMin, normalizedOperators, operatorQuery]);
 
-    const selectedSurvey = useMemo(() => surveys.find((s) => s.id === selectedSurveyId) || null, [selectedSurveyId, surveys]);
-    const selectedSurveyOperators = useMemo(() => {
-        if (!selectedSurvey) return [];
-        const ids = new Set((selectedSurvey.assignment?.operatorIds || []).map(Number));
-        return normalizedOperators.filter((op) => ids.has(op.id));
-    }, [normalizedOperators, selectedSurvey]);
+    const loadSurveys = useCallback(async () => {
+        if (!apiBaseUrl || !user?.id) return;
+        setIsLoading(true);
+        try {
+            const response = await axios.get(`${apiBaseUrl}/api/surveys`, { headers });
+            setSurveys(Array.isArray(response?.data?.surveys) ? response.data.surveys : []);
+        } catch (error) {
+            notify(error?.response?.data?.error || 'Не удалось загрузить опросы', 'error');
+        } finally {
+            setIsLoading(false);
+        }
+    }, [apiBaseUrl, headers, notify, user?.id]);
+
+    useEffect(() => {
+        loadSurveys();
+    }, [loadSurveys]);
+
+    useEffect(() => {
+        if (!selectedSurveyId && surveys[0]?.id) setSelectedSurveyId(surveys[0].id);
+        if (selectedSurveyId && !surveys.some((item) => String(item.id) === String(selectedSurveyId))) {
+            setSelectedSurveyId(surveys[0]?.id || '');
+        }
+    }, [selectedSurveyId, surveys]);
+
+    const selectedSurvey = useMemo(
+        () => surveys.find((item) => String(item.id) === String(selectedSurveyId)) || null,
+        [selectedSurveyId, surveys]
+    );
+
+    useEffect(() => {
+        if (!isOperator || !selectedSurvey) return;
+        const initial = {};
+        (selectedSurvey.questions || []).forEach((question) => {
+            initial[question.id] = { selected_options: [], answer_text: '', rating_value: '' };
+        });
+        setAnswers(initial);
+    }, [isOperator, selectedSurveyId, selectedSurvey]);
 
     const toggleArrayValue = (setter, key, value) => {
         setter((prev) => {
@@ -143,142 +178,131 @@ const SurveysView = ({ user, operators = [], directions = [], showToast }) => {
         });
     };
 
-    const updateQuestion = (id, patch) => {
-        setDraft((prev) => ({ ...prev, questions: prev.questions.map((q) => (q.id === id ? { ...q, ...patch } : q)) }));
+    const updateQuestion = (questionId, patch) => {
+        setDraft((prev) => ({ ...prev, questions: prev.questions.map((q) => (q.id === questionId ? { ...q, ...patch } : q)) }));
     };
 
-    const validate = () => {
-        if (!draft.title.trim()) return 'Укажите название опроса';
-        if (!draft.operatorIds.length) return 'Выберите минимум одного оператора';
+    const updateAnswer = (questionId, patch) => {
+        setAnswers((prev) => ({ ...prev, [questionId]: { ...(prev[questionId] || {}), ...patch } }));
+    };
+
+    const createSurvey = async () => {
+        if (!String(draft.title || '').trim()) return notify('Укажите название опроса', 'error');
+        if (!(draft.operatorIds || []).length) return notify('Выберите минимум одного оператора', 'error');
+        const minWeeks = parseWeeksInput(draft.tenureWeeksMin);
+        const maxWeeks = parseWeeksInput(draft.tenureWeeksMax);
+        if (minWeeks != null && maxWeeks != null && minWeeks > maxWeeks) return notify('Минимальный стаж не может быть больше максимального', 'error');
+
         for (let i = 0; i < draft.questions.length; i += 1) {
-            const q = draft.questions[i];
-            if (!q.text.trim()) return `Заполните текст вопроса #${i + 1}`;
-            if (q.type !== 'rating') {
-                const options = (q.options || []).map((o) => String(o || '').trim()).filter(Boolean);
-                if (options.length < 2) return `Нужно минимум 2 варианта в вопросе #${i + 1}`;
+            const question = draft.questions[i];
+            if (!String(question.text || '').trim()) return notify(`Заполните текст вопроса #${i + 1}`, 'error');
+            if (question.type !== 'rating' && (question.options || []).map((option) => String(option || '').trim()).filter(Boolean).length < 2) {
+                return notify(`Нужно минимум 2 варианта в вопросе #${i + 1}`, 'error');
             }
         }
-        return '';
-    };
 
-    const createSurvey = () => {
-        const error = validate();
-        if (error) return notify(error, 'error');
         const payload = {
-            id: buildId('survey'),
-            title: draft.title.trim(),
-            description: draft.description.trim(),
-            createdAt: new Date().toISOString(),
-            createdBy: { id: user?.id || null, name: user?.name || 'Система', role: user?.role || 'unknown' },
+            title: String(draft.title || '').trim(),
+            description: String(draft.description || '').trim(),
             assignment: {
-                directionIds: [...draft.directionIds],
-                tenureBuckets: [...draft.tenureBuckets],
-                operatorIds: [...draft.operatorIds]
+                direction_ids: (draft.directionIds || []).map((id) => Number(id)).filter(Number.isFinite),
+                tenure_weeks_min: minWeeks,
+                tenure_weeks_max: maxWeeks,
+                operator_ids: (draft.operatorIds || []).map((id) => Number(id)).filter(Number.isFinite)
             },
-            questions: draft.questions.map((q) => ({
-                id: buildId('question'),
-                text: q.text.trim(),
-                type: q.type,
-                required: !!q.required,
-                allowOther: q.type === 'rating' ? false : !!q.allowOther,
-                options: q.type === 'rating' ? [] : (q.options || []).map((o) => String(o || '').trim()).filter(Boolean)
+            questions: (draft.questions || []).map((question) => ({
+                text: String(question.text || '').trim(),
+                type: question.type,
+                required: !!question.required,
+                allow_other: question.type === 'rating' ? false : !!question.allowOther,
+                options: question.type === 'rating' ? [] : (question.options || []).map((option) => String(option || '').trim()).filter(Boolean)
             }))
         };
-        setSurveys((prev) => [payload, ...prev]);
-        setSelectedSurveyId(payload.id);
-        setDraft(emptyDraft());
-        setOperatorQuery('');
-        setShowBuilder(false);
-        notify('Опрос создан', 'success');
+
+        setIsSaving(true);
+        try {
+            await axios.post(`${apiBaseUrl}/api/surveys`, payload, { headers });
+            notify('Опрос создан', 'success');
+            setDraft(emptyDraft());
+            setOperatorQuery('');
+            setShowBuilder(false);
+            await loadSurveys();
+        } catch (error) {
+            notify(error?.response?.data?.error || 'Не удалось создать опрос', 'error');
+        } finally {
+            setIsSaving(false);
+        }
     };
 
-    const removeSurvey = (id) => {
-        const survey = surveys.find((s) => s.id === id);
-        if (!survey) return;
-        if (!window.confirm(`Удалить опрос "${survey.title}"?`)) return;
-        setSurveys((prev) => prev.filter((s) => s.id !== id));
+    const removeSurvey = async (surveyId) => {
+        if (!window.confirm('Удалить опрос?')) return;
+        try {
+            await axios.delete(`${apiBaseUrl}/api/surveys/${surveyId}`, { headers });
+            notify('Опрос удален', 'success');
+            await loadSurveys();
+        } catch (error) {
+            notify(error?.response?.data?.error || 'Не удалось удалить опрос', 'error');
+        }
+    };
+
+    const submitSurvey = async () => {
+        if (!selectedSurvey || !selectedSurvey?.my_assignment?.can_submit) return;
+        const preparedAnswers = (selectedSurvey.questions || []).map((question) => {
+            const answer = answers[question.id] || {};
+            const payload = { question_id: Number(question.id) };
+            if (question.type === 'rating') payload.rating_value = answer.rating_value === '' ? null : Number(answer.rating_value);
+            else {
+                payload.selected_options = Array.isArray(answer.selected_options) ? answer.selected_options : [];
+                if (String(answer.answer_text || '').trim()) payload.answer_text = String(answer.answer_text || '').trim();
+            }
+            return payload;
+        });
+
+        setIsSubmitting(true);
+        try {
+            await axios.post(`${apiBaseUrl}/api/surveys/${selectedSurvey.id}/submit`, { answers: preparedAnswers }, { headers });
+            notify('Опрос успешно пройден', 'success');
+            await loadSurveys();
+        } catch (error) {
+            notify(error?.response?.data?.error || 'Не удалось отправить ответы', 'error');
+        } finally {
+            setIsSubmitting(false);
+        }
     };
 
     return (
         <div className="space-y-6">
             <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
-                <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                <div className="flex items-center justify-between gap-3 flex-wrap">
                     <div>
-                        <h2 className="text-2xl font-semibold text-gray-800">Опросы</h2>
-                        <p className="text-sm text-gray-600">Создание опросов с назначением по стажу и направлению.</p>
+                        <h2 className="text-2xl font-semibold text-gray-800 flex items-center gap-2"><i className="fas fa-list-alt text-blue-600" />Опросы</h2>
+                        <p className="text-sm text-gray-600">{canManage ? 'Назначение по стажу в неделях, направлению и операторам.' : 'Назначенные вам опросы.'}</p>
                     </div>
-                    <button onClick={() => setShowBuilder((v) => !v)} className="px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700">
-                        {showBuilder ? 'Закрыть' : 'Создать опрос'}
-                    </button>
+                    {canManage && <button onClick={() => setShowBuilder((value) => !value)} className="px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700">{showBuilder ? 'Закрыть' : 'Создать опрос'}</button>}
                 </div>
             </div>
 
-            {showBuilder && (
-                <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm space-y-4">
+            {canManage && showBuilder && (
+                <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm space-y-3">
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        <input value={draft.title} onChange={(e) => setDraft((p) => ({ ...p, title: e.target.value }))} placeholder="Название опроса" className="p-3 border border-gray-300 rounded-lg" />
-                        <input value={draft.description} onChange={(e) => setDraft((p) => ({ ...p, description: e.target.value }))} placeholder="Описание (необязательно)" className="p-3 border border-gray-300 rounded-lg" />
+                        <input value={draft.title} onChange={(event) => setDraft((prev) => ({ ...prev, title: event.target.value }))} placeholder="Название опроса" className="p-3 border border-gray-300 rounded-lg" />
+                        <input value={draft.description} onChange={(event) => setDraft((prev) => ({ ...prev, description: event.target.value }))} placeholder="Описание (необязательно)" className="p-3 border border-gray-300 rounded-lg" />
                     </div>
-
-                    <div className="space-y-2">
-                        <div className="text-sm font-medium text-gray-700">Направления</div>
-                        <div className="flex flex-wrap gap-2">{directionOptions.map((d) => <button key={d.id} onClick={() => toggleArrayValue(setDraft, 'directionIds', d.id)} className={`px-3 py-1 rounded-full border text-sm ${draft.directionIds.includes(d.id) ? 'bg-blue-600 text-white border-blue-600' : 'border-gray-300'}`}>{d.name}</button>)}</div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <input type="number" min="0" value={draft.tenureWeeksMin} onChange={(event) => setDraft((prev) => ({ ...prev, tenureWeeksMin: event.target.value }))} placeholder="Стаж от, недель" className="p-2.5 border border-gray-300 rounded-lg" />
+                        <input type="number" min="0" value={draft.tenureWeeksMax} onChange={(event) => setDraft((prev) => ({ ...prev, tenureWeeksMax: event.target.value }))} placeholder="Стаж до, недель" className="p-2.5 border border-gray-300 rounded-lg" />
                     </div>
-
-                    <div className="space-y-2">
-                        <div className="text-sm font-medium text-gray-700">Стаж</div>
-                        <div className="flex flex-wrap gap-2">{TENURE_BUCKETS.map((t) => <button key={t.id} onClick={() => toggleArrayValue(setDraft, 'tenureBuckets', t.id)} className={`px-3 py-1 rounded-full border text-sm ${draft.tenureBuckets.includes(t.id) ? 'bg-emerald-600 text-white border-emerald-600' : 'border-gray-300'}`}>{t.label}</button>)}</div>
-                    </div>
-
-                    <div className="space-y-2">
-                        <div className="flex items-center justify-between"><div className="text-sm font-medium text-gray-700">Операторы ({filteredOperators.length})</div><div className="flex gap-2"><button onClick={() => setDraft((p) => ({ ...p, operatorIds: filteredOperators.map((o) => o.id) }))} className="text-xs px-2 py-1 bg-blue-100 rounded">Выбрать всех</button><button onClick={() => setDraft((p) => ({ ...p, operatorIds: [] }))} className="text-xs px-2 py-1 bg-gray-100 rounded">Очистить</button></div></div>
-                        <input value={operatorQuery} onChange={(e) => setOperatorQuery(e.target.value)} placeholder="Поиск оператора" className="w-full p-2.5 border border-gray-300 rounded-lg" />
-                        <div className="max-h-52 overflow-y-auto border border-gray-200 rounded-lg divide-y divide-gray-100">{filteredOperators.map((op) => <label key={op.id} className="flex items-center gap-2 p-2 text-sm hover:bg-gray-50"><input type="checkbox" checked={draft.operatorIds.includes(op.id)} onChange={() => toggleArrayValue(setDraft, 'operatorIds', op.id)} /><span className="font-medium">{op.name}</span><span className="text-gray-500">| {op.directionName} | {op.tenureLabel}</span></label>)}</div>
-                    </div>
-
-                    <div className="space-y-3">
-                        <div className="flex items-center justify-between"><div className="text-sm font-medium text-gray-700">Вопросы</div><button onClick={() => setDraft((p) => ({ ...p, questions: [...p.questions, emptyQuestion()] }))} className="text-xs px-2 py-1 bg-indigo-100 rounded">+ Вопрос</button></div>
-                        {draft.questions.map((q, idx) => (
-                            <div key={q.id} className="border border-gray-200 rounded-lg p-3 space-y-2">
-                                <div className="flex items-center justify-between"><span className="text-xs font-medium text-gray-500">Вопрос #{idx + 1}</span><button disabled={draft.questions.length <= 1} onClick={() => setDraft((p) => ({ ...p, questions: p.questions.filter((x) => x.id !== q.id) }))} className="text-xs px-2 py-1 bg-red-50 text-red-600 rounded">Удалить</button></div>
-                                <input value={q.text} onChange={(e) => updateQuestion(q.id, { text: e.target.value })} placeholder="Текст вопроса" className="w-full p-2.5 border border-gray-300 rounded-lg" />
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                                    <select value={q.type} onChange={(e) => updateQuestion(q.id, { type: e.target.value, allowOther: e.target.value === 'rating' ? false : q.allowOther, options: e.target.value === 'rating' ? [] : (q.options?.length ? q.options : ['', '']) })} className="p-2.5 border border-gray-300 rounded-lg">{QUESTION_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}</select>
-                                    <div className="flex items-center gap-4 text-sm">
-                                        <label className="inline-flex items-center gap-1"><input type="checkbox" checked={!!q.required} onChange={(e) => updateQuestion(q.id, { required: e.target.checked })} />Обязательный</label>
-                                        {q.type !== 'rating' && <label className="inline-flex items-center gap-1"><input type="checkbox" checked={!!q.allowOther} onChange={(e) => updateQuestion(q.id, { allowOther: e.target.checked })} />Другой</label>}
-                                    </div>
-                                </div>
-                                {q.type !== 'rating' && <div className="space-y-2">{(q.options || []).map((o, i) => <div key={`${q.id}_${i}`} className="flex gap-2"><input value={o} onChange={(e) => updateQuestion(q.id, { options: (q.options || []).map((v, idx2) => (idx2 === i ? e.target.value : v)) })} placeholder={`Вариант ${i + 1}`} className="flex-1 p-2 border border-gray-300 rounded-lg" /><button disabled={(q.options || []).length <= 2} onClick={() => updateQuestion(q.id, { options: (q.options || []).filter((_, idx2) => idx2 !== i) })} className="px-2 rounded bg-gray-100">-</button></div>)}<button onClick={() => updateQuestion(q.id, { options: [...(q.options || []), ''] })} className="text-xs px-2 py-1 bg-gray-100 rounded">+ Вариант</button></div>}
-                            </div>
-                        ))}
-                    </div>
-
-                    <div className="flex gap-2"><button onClick={createSurvey} className="px-4 py-2 rounded-lg bg-green-600 text-white">Сохранить</button><button onClick={() => { setShowBuilder(false); setDraft(emptyDraft()); setOperatorQuery(''); }} className="px-4 py-2 rounded-lg bg-gray-100">Отмена</button></div>
+                    <div className="flex flex-wrap gap-2">{Array.from(directionNameById.entries()).map(([id, name]) => <button key={id} onClick={() => toggleArrayValue(setDraft, 'directionIds', id)} className={`px-3 py-1 rounded-full border text-sm ${draft.directionIds.includes(id) ? 'bg-blue-600 text-white border-blue-600' : 'border-gray-300'}`}>{name}</button>)}</div>
+                    <input value={operatorQuery} onChange={(event) => setOperatorQuery(event.target.value)} placeholder="Поиск оператора" className="w-full p-2.5 border border-gray-300 rounded-lg" />
+                    <div className="max-h-44 overflow-y-auto border border-gray-200 rounded-lg divide-y divide-gray-100">{filteredOperators.map((operator) => <label key={operator.id} className="flex items-center gap-2 p-2 text-sm"><input type="checkbox" checked={draft.operatorIds.includes(operator.id)} onChange={() => toggleArrayValue(setDraft, 'operatorIds', operator.id)} /><span className="font-medium">{operator.name}</span><span className="text-gray-500">| {operator.directionName} | {operator.tenureLabel}</span></label>)}</div>
+                    <div className="space-y-2">{draft.questions.map((question, index) => <div key={question.id} className="border border-gray-200 rounded-lg p-3 space-y-2"><div className="flex items-center justify-between"><span className="text-xs text-gray-500">Вопрос #{index + 1}</span><button disabled={draft.questions.length <= 1} onClick={() => setDraft((prev) => ({ ...prev, questions: prev.questions.filter((item) => item.id !== question.id) }))} className="text-xs px-2 py-1 bg-red-50 text-red-600 rounded">Удалить</button></div><input value={question.text} onChange={(event) => updateQuestion(question.id, { text: event.target.value })} placeholder="Текст вопроса" className="w-full p-2 border border-gray-300 rounded-lg" /><select value={question.type} onChange={(event) => updateQuestion(question.id, { type: event.target.value, allowOther: event.target.value === 'rating' ? false : question.allowOther, options: event.target.value === 'rating' ? [] : (question.options?.length ? question.options : ['', '']) })} className="w-full p-2 border border-gray-300 rounded-lg">{QUESTION_TYPES.map((type) => <option key={type.value} value={type.value}>{type.label}</option>)}</select>{question.type !== 'rating' && <div className="space-y-1">{(question.options || []).map((option, optionIndex) => <input key={`${question.id}_${optionIndex}`} value={option} onChange={(event) => updateQuestion(question.id, { options: question.options.map((current, idx) => idx === optionIndex ? event.target.value : current) })} placeholder={`Вариант ${optionIndex + 1}`} className="w-full p-2 border border-gray-300 rounded-lg" />)}</div>}</div>)}</div>
+                    <div className="flex gap-2"><button onClick={() => setDraft((prev) => ({ ...prev, questions: [...prev.questions, emptyQuestion()] }))} className="px-3 py-2 rounded bg-gray-100">+ Вопрос</button><button onClick={createSurvey} disabled={isSaving} className="px-4 py-2 rounded bg-green-600 text-white disabled:opacity-50">{isSaving ? 'Сохранение...' : 'Сохранить'}</button></div>
                 </div>
             )}
 
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-                <div className="bg-white rounded-xl border border-gray-200 shadow-sm">
-                    <div className="px-4 py-3 border-b border-gray-100 font-semibold text-gray-800">Список опросов</div>
-                    <div className="p-4 space-y-2 max-h-[560px] overflow-y-auto">
-                        {surveys.length === 0 && <div className="text-sm text-gray-500">Опросов пока нет.</div>}
-                        {surveys.map((s) => <div key={s.id} className={`border rounded-lg p-3 ${s.id === selectedSurveyId ? 'border-blue-400 bg-blue-50' : 'border-gray-200'}`}><div className="flex items-start justify-between gap-2"><button onClick={() => setSelectedSurveyId(s.id)} className="text-left flex-1"><div className="font-semibold text-gray-800">{s.title}</div><div className="text-xs text-gray-500 mt-1">Вопросов: {s.questions?.length || 0} | Назначено: {s.assignment?.operatorIds?.length || 0}</div></button><button onClick={() => removeSurvey(s.id)} className="text-xs px-2 py-1 rounded bg-red-50 text-red-600">Удалить</button></div></div>)}
-                    </div>
-                </div>
-
-                <div className="bg-white rounded-xl border border-gray-200 shadow-sm">
-                    <div className="px-4 py-3 border-b border-gray-100 font-semibold text-gray-800">Детали опроса</div>
-                    <div className="p-4 space-y-3 max-h-[560px] overflow-y-auto">
-                        {!selectedSurvey && <div className="text-sm text-gray-500">Выберите опрос слева.</div>}
-                        {selectedSurvey && <>
-                            <div><div className="text-xl font-semibold text-gray-900">{selectedSurvey.title}</div>{selectedSurvey.description && <div className="text-sm text-gray-600">{selectedSurvey.description}</div>}</div>
-                            <div className="text-xs text-gray-600 rounded-lg border border-gray-200 bg-gray-50 p-3">Направления: {selectedSurvey.assignment?.directionIds?.length ? selectedSurvey.assignment.directionIds.map((id) => directionNameById.get(String(id)) || id).join(', ') : 'Все'}<br />Стаж: {selectedSurvey.assignment?.tenureBuckets?.length ? selectedSurvey.assignment.tenureBuckets.map((id) => TENURE_BUCKETS.find((x) => x.id === id)?.label || id).join(', ') : 'Любой'}<br />Операторов: {selectedSurvey.assignment?.operatorIds?.length || 0}</div>
-                            <div className="space-y-2">{(selectedSurvey.questions || []).map((q, i) => <div key={q.id || i} className="border border-gray-200 rounded-lg p-3"><div className="text-xs text-gray-500 mb-1">#{i + 1} | {QUESTION_TYPES.find((t) => t.value === q.type)?.label || q.type}{q.required ? ' | обязательный' : ''}{q.allowOther ? ' | есть "Другой"' : ''}</div><div className="font-medium text-gray-800 mb-1">{q.text}</div>{q.type === 'rating' ? <div className="text-amber-500">★ ★ ★ ★ ★</div> : <ul className="list-disc pl-5 text-sm text-gray-600">{(q.options || []).map((o, oi) => <li key={`${q.id}_${oi}`}>{o}</li>)}{q.allowOther && <li>Другой...</li>}</ul>}</div>)}</div>
-                            <div className="space-y-1"><div className="text-sm font-medium text-gray-700">Операторы назначения</div><div className="max-h-36 overflow-y-auto border border-gray-200 rounded-lg divide-y divide-gray-100">{selectedSurveyOperators.length === 0 && <div className="p-2 text-sm text-gray-500">Нет данных</div>}{selectedSurveyOperators.map((op) => <div key={`${selectedSurvey.id}_${op.id}`} className="p-2 text-sm"><div className="font-medium">{op.name}</div><div className="text-xs text-gray-500">{op.directionName} | {op.tenureLabel}</div></div>)}</div></div>
-                        </>}
-                    </div>
-                </div>
+                <div className="bg-white rounded-xl border border-gray-200 shadow-sm"><div className="px-4 py-3 border-b border-gray-100 font-semibold text-gray-800">Список опросов</div><div className="p-4 space-y-2 max-h-[560px] overflow-y-auto">{isLoading && <div className="text-sm text-gray-500">Загрузка...</div>}{!isLoading && surveys.length === 0 && <div className="text-sm text-gray-500">{isOperator ? 'Назначенных опросов пока нет.' : 'Опросов пока нет.'}</div>}{!isLoading && surveys.map((survey) => <div key={survey.id} className={`border rounded-lg p-3 ${String(survey.id) === String(selectedSurveyId) ? 'border-blue-400 bg-blue-50' : 'border-gray-200'}`}><div className="flex items-start justify-between gap-2"><button onClick={() => setSelectedSurveyId(survey.id)} className="text-left flex-1"><div className="font-semibold text-gray-800">{survey.title}</div><div className="text-xs text-gray-500 mt-1">{canManage ? `Назначено: ${survey?.statistics?.assigned_count || 0} | Пройдено: ${survey?.statistics?.completed_count || 0} (${survey?.statistics?.completion_rate || 0}%)` : `Статус: ${survey?.my_assignment?.status === 'completed' ? 'Пройден' : 'Назначен'}`}</div></button>{canManage && <button onClick={() => removeSurvey(survey.id)} className="text-xs px-2 py-1 rounded bg-red-50 text-red-600">Удалить</button>}</div></div>)}</div></div>
+                <div className="bg-white rounded-xl border border-gray-200 shadow-sm"><div className="px-4 py-3 border-b border-gray-100 font-semibold text-gray-800">Детали опроса</div><div className="p-4 space-y-3 max-h-[560px] overflow-y-auto">{!selectedSurvey && <div className="text-sm text-gray-500">Выберите опрос слева.</div>}{selectedSurvey && <><div><div className="text-xl font-semibold text-gray-900">{selectedSurvey.title}</div>{selectedSurvey.description && <div className="text-sm text-gray-600">{selectedSurvey.description}</div>}</div><div className="text-xs text-gray-600 rounded-lg border border-gray-200 bg-gray-50 p-3">Операторов: {selectedSurvey?.assignment?.operator_ids?.length || 0}<br />Стаж: {selectedSurvey?.assignment?.tenure_weeks_min != null || selectedSurvey?.assignment?.tenure_weeks_max != null ? `${selectedSurvey?.assignment?.tenure_weeks_min != null ? `от ${selectedSurvey.assignment.tenure_weeks_min} нед.` : 'без минимума'}${selectedSurvey?.assignment?.tenure_weeks_max != null ? ` до ${selectedSurvey.assignment.tenure_weeks_max} нед.` : ''}` : 'Любой'}</div>{isOperator && selectedSurvey?.my_assignment?.can_submit && <div className="space-y-3">{(selectedSurvey.questions || []).map((question, index) => {const answer = answers[question.id] || {};return <div key={question.id} className="border border-gray-200 rounded-lg p-3"><div className="text-xs text-gray-500">#{index + 1} | {questionTypeLabel(question.type)}</div><div className="font-medium text-gray-800 mb-2">{question.text}</div>{question.type === 'rating' ? <div className="flex gap-2">{[1,2,3,4,5].map((value) => <button key={`${question.id}_${value}`} type="button" onClick={() => updateAnswer(question.id, { rating_value: value })} className={`px-3 py-1 rounded border ${Number(answer.rating_value) === value ? 'bg-amber-500 text-white border-amber-500' : 'border-gray-300'}`}>{value}</button>)}</div> : <div className="space-y-1">{(question.options || []).map((option) => {const selected = Array.isArray(answer.selected_options) && answer.selected_options.includes(option);return <label key={`${question.id}_${option}`} className="flex items-center gap-2 text-sm"><input type={question.type === 'single' ? 'radio' : 'checkbox'} name={`q_${question.id}`} checked={selected} onChange={() => {if (question.type === 'single') updateAnswer(question.id, { selected_options: [option] }); else {const set = new Set(answer.selected_options || []); if (set.has(option)) set.delete(option); else set.add(option); updateAnswer(question.id, { selected_options: Array.from(set) });}}} /><span>{option}</span></label>;})}{question.allow_other && <input value={answer.answer_text || ''} onChange={(event) => updateAnswer(question.id, { answer_text: event.target.value })} placeholder="Другое..." className="w-full p-2 border border-gray-300 rounded-lg text-sm" />}</div>}</div>;})}<button onClick={submitSurvey} disabled={isSubmitting} className="px-4 py-2 rounded bg-green-600 text-white disabled:opacity-50">{isSubmitting ? 'Отправка...' : 'Завершить опрос'}</button></div>}{(!isOperator || selectedSurvey?.my_assignment?.status === 'completed') && <div className="space-y-2">{(selectedSurvey.questions || []).map((question, index) => <div key={question.id} className="border border-gray-200 rounded-lg p-3"><div className="text-xs text-gray-500">#{index + 1} | {questionTypeLabel(question.type)}{question.required ? ' | обязательный' : ''}</div><div className="font-medium text-gray-800">{question.text}</div></div>)}</div>}{canManage && <div className="space-y-2"><div className="text-sm font-medium text-gray-700">Статистика</div><div className="text-sm text-gray-700">Назначено: <strong>{selectedSurvey?.statistics?.assigned_count || 0}</strong> | Пройдено: <strong>{selectedSurvey?.statistics?.completed_count || 0}</strong> | Ожидают: <strong>{selectedSurvey?.statistics?.pending_count || 0}</strong></div>{(selectedSurvey?.statistics?.question_stats || []).map((stat, index) => <div key={`${selectedSurvey.id}_stat_${index}`} className="text-xs text-gray-600 border border-gray-200 rounded p-2">Вопрос #{index + 1}: ответов {stat.responses_with_answer || 0}{stat.type === 'rating' && <> | средний рейтинг {stat.average_rating ?? '-'}</>}</div>)}</div>}</>}</div></div>
             </div>
         </div>
     );
