@@ -21662,21 +21662,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, [view, user?.id, user?.role]);
 
             useEffect(() => {
-                const role = String(user?.role || '').trim().toLowerCase();
-                const roleHasSurveyAccess = ['admin', 'sv', 'supervisor', 'trainer', 'operator'].includes(role);
-                if (!user?.id || !roleHasSurveyAccess) {
-                    if (isMounted.current) setPendingSurveysBadgeCount(0);
-                    return;
-                }
-
-                const intervalId = setInterval(() => {
-                    fetchSurveysPendingBadgeCount();
-                }, 90000);
-
-                return () => clearInterval(intervalId);
-            }, [user?.id, user?.role]);
-
-            useEffect(() => {
                 if (view !== 'qr_access') {
                     stopQrScanner();
                     setQrScannerError('');
