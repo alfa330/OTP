@@ -21697,7 +21697,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (pendingSurveysBadgeCount <= 0) return null;
                 return (
                     <span className="sidebar-surveys-collapsed-badge inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-amber-500 text-white text-[10px] font-semibold leading-none">
-                        {pendingSurveysBadgeCount > 99 ? '99+' : pendingSurveysBadgeCount}
+                        {pendingSurveysBadgeCount > 9 ? '9+' : pendingSurveysBadgeCount}
                     </span>
                 );
             };
@@ -21956,7 +21956,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </button>
                                         </li>
                                         <li>
-                                            <button onClick={() => { setView('surveys'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
+                                            <button onClick={() => { setView('surveys'); setMobileMenuOpen(false); }} className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarCompactBadge()} {renderSurveysSidebarLabel()}
                                             </button>
                                         </li>
@@ -22019,7 +22019,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </button>
                                         </li>
                                         <li>
-                                            <button onClick={() => { setView('surveys'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
+                                            <button onClick={() => { setView('surveys'); setMobileMenuOpen(false); }} className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarCompactBadge()} {renderSurveysSidebarLabel()}
                                             </button>
                                         </li>
@@ -22057,7 +22057,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {user.role === 'trainer' && (
                                     <>
                                         <li>
-                                            <button onClick={() => { setView('surveys'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
+                                            <button onClick={() => { setView('surveys'); setMobileMenuOpen(false); }} className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarCompactBadge()} {renderSurveysSidebarLabel()}
                                             </button>
                                         </li>
@@ -22076,7 +22076,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </button>
                                         </li>
                                         <li>
-                                            <button onClick={() => { setView('surveys'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
+                                            <button onClick={() => { setView('surveys'); setMobileMenuOpen(false); }} className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarCompactBadge()} {renderSurveysSidebarLabel()}
                                             </button>
                                         </li>

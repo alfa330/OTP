@@ -118,6 +118,15 @@
     }
     .sidebar .sidebar-surveys-collapsed-badge {
       display: none;
+      position: absolute;
+      top: 6px;
+      right: 8px;
+      min-width: 16px;
+      height: 16px;
+      padding: 0 4px;
+      font-size: 10px;
+      line-height: 1;
+      z-index: 1;
     }
     .sidebar.collapsed .sidebar-surveys-collapsed-badge {
       display: inline-flex;
