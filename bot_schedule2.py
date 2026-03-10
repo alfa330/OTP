@@ -20,6 +20,8 @@ from flask import Flask, request, jsonify, send_file, g
 from flask_cors import CORS
 from functools import wraps
 from openpyxl import load_workbook, Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 import re
 import xlsxwriter
 import json
@@ -3806,6 +3808,12 @@ def export_survey_statistics_excel(survey_id):
         questions = list(selected_survey.get('questions') or [])
         question_stats = list(statistics.get('question_stats') or [])
         responses_detailed = list(statistics.get('responses_detailed') or [])
+        repeat_info = selected_survey.get('repeat') or {}
+        try:
+            repeat_iteration = int(repeat_info.get('iteration') or 1)
+        except Exception:
+            repeat_iteration = 1
+        repeat_iteration = repeat_iteration if repeat_iteration >= 1 else 1
 
         question_type_labels = {
             'single': 'Один вариант',
@@ -3824,10 +3832,13 @@ def export_survey_statistics_excel(survey_id):
         ws_summary = wb.active
         ws_summary.title = 'Сводка'
 
+        ws_summary.append(['Отчет', 'Статистика по опросу'])
         ws_summary.append(['Опрос', title])
         ws_summary.append(['Описание', description])
+        ws_summary.append(['Повторение', f"#{repeat_iteration}"])
         ws_summary.append(['Создан', _survey_export_format_dt(selected_survey.get('created_at'))])
         ws_summary.append(['Обновлен', _survey_export_format_dt(selected_survey.get('updated_at'))])
+        ws_summary.append(['Сформирован', datetime.now().strftime('%d.%m.%Y %H:%M')])
         ws_summary.append(['Назначено', int(statistics.get('assigned_count') or 0)])
         ws_summary.append(['Пройдено', int(statistics.get('completed_count') or 0)])
         ws_summary.append(['Ожидают', int(statistics.get('pending_count') or 0)])
@@ -3918,7 +3929,7 @@ def export_survey_statistics_excel(survey_id):
                 ])
 
         ws_answers = wb.create_sheet('Ответы сотрудников')
-        answer_headers = ['Сотрудник', 'ID', 'Статус', 'Отправлено']
+        answer_headers = ['Сотрудник', 'ID', 'Статус', 'Отправлено', 'Повторение']
         for idx, question in enumerate(questions, start=1):
             question_text = str(question.get('text') or f'Вопрос #{idx}').replace('\n', ' ').strip()
             if len(question_text) > 100:
@@ -3934,7 +3945,8 @@ def export_survey_statistics_excel(survey_id):
                 str(row.get('operator_name') or f"#{row.get('operator_id') or ''}"),
                 int(row.get('operator_id') or 0),
                 status_label,
-                _survey_export_format_dt(row.get('submitted_at'))
+                _survey_export_format_dt(row.get('submitted_at')),
+                int(row.get('repeat_iteration') or repeat_iteration)
             ]
 
             for question in questions:
@@ -3943,6 +3955,149 @@ def export_survey_statistics_excel(survey_id):
                 row_values.append(_survey_export_answer_text(question, answer))
 
             ws_answers.append(row_values)
+
+        # Visual formatting for a cleaner, management-friendly export
+        title_fill = PatternFill(fill_type='solid', start_color='1F4E78', end_color='1F4E78')
+        section_fill = PatternFill(fill_type='solid', start_color='2F75B5', end_color='2F75B5')
+        header_fill = PatternFill(fill_type='solid', start_color='4472C4', end_color='4472C4')
+        label_fill = PatternFill(fill_type='solid', start_color='E9EFFB', end_color='E9EFFB')
+        even_row_fill = PatternFill(fill_type='solid', start_color='F8FAFF', end_color='F8FAFF')
+        status_done_fill = PatternFill(fill_type='solid', start_color='E6F4EA', end_color='E6F4EA')
+        status_pending_fill = PatternFill(fill_type='solid', start_color='FFF4E5', end_color='FFF4E5')
+
+        white_bold_font = Font(color='FFFFFF', bold=True)
+        dark_bold_font = Font(color='1F4E78', bold=True)
+        regular_font = Font(color='1F2937')
+
+        thin_side = Side(style='thin', color='D9E2F3')
+        thin_border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
+
+        # ---- Summary sheet styles ----
+        summary_header_row = None
+        for row_idx in range(1, ws_summary.max_row + 1):
+            if ws_summary.cell(row=row_idx, column=1).value == '№':
+                summary_header_row = row_idx
+                break
+
+        summary_section_row = summary_header_row - 1 if summary_header_row else None
+        if summary_section_row and summary_section_row >= 1:
+            ws_summary.merge_cells(start_row=summary_section_row, start_column=1, end_row=summary_section_row, end_column=11)
+            section_cell = ws_summary.cell(row=summary_section_row, column=1)
+            section_cell.fill = section_fill
+            section_cell.font = white_bold_font
+            section_cell.alignment = Alignment(horizontal='left', vertical='center')
+
+        # Report title row
+        ws_summary.merge_cells(start_row=1, start_column=1, end_row=1, end_column=11)
+        ws_summary.cell(row=1, column=1).value = 'Статистика по опросу'
+        ws_summary.cell(row=1, column=1).fill = title_fill
+        ws_summary.cell(row=1, column=1).font = white_bold_font
+        ws_summary.cell(row=1, column=1).alignment = Alignment(horizontal='left', vertical='center')
+        ws_summary.row_dimensions[1].height = 24
+
+        # Meta rows (key-value)
+        meta_last_row = (summary_section_row - 2) if summary_section_row else 1
+        for row_idx in range(2, max(2, meta_last_row + 1)):
+            key_cell = ws_summary.cell(row=row_idx, column=1)
+            val_cell = ws_summary.cell(row=row_idx, column=2)
+            key_cell.fill = label_fill
+            key_cell.font = dark_bold_font
+            key_cell.alignment = Alignment(horizontal='left', vertical='center')
+            val_cell.font = regular_font
+            val_cell.alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
+            key_cell.border = thin_border
+            val_cell.border = thin_border
+
+        if summary_header_row:
+            for col_idx in range(1, 12):
+                cell = ws_summary.cell(row=summary_header_row, column=col_idx)
+                cell.fill = header_fill
+                cell.font = white_bold_font
+                cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+                cell.border = thin_border
+
+            for row_idx in range(summary_header_row + 1, ws_summary.max_row + 1):
+                for col_idx in range(1, 12):
+                    cell = ws_summary.cell(row=row_idx, column=col_idx)
+                    cell.font = regular_font
+                    cell.border = thin_border
+                    if col_idx in (2, 8):
+                        cell.alignment = Alignment(horizontal='left', vertical='top', wrap_text=True)
+                    elif col_idx in (1, 3, 4, 5, 6, 7, 9, 10, 11):
+                        cell.alignment = Alignment(horizontal='center', vertical='center')
+
+                    if isinstance(cell.value, (int, float)):
+                        if col_idx in (6, 10, 11):
+                            cell.number_format = '0.0"%"'
+                        elif col_idx in (4, 5, 9):
+                            cell.number_format = '0'
+
+        summary_widths = {
+            1: 6,   # №
+            2: 56,  # Вопрос
+            3: 22,  # Тип
+            4: 12,  # Ответили
+            5: 14,  # Респондентов
+            6: 18,  # Доля ответивших
+            7: 20,  # Метрика
+            8: 24,  # Значение
+            9: 14,  # Количество
+            10: 18, # % от ответивших
+            11: 20  # % от респондентов
+        }
+        for col_idx, width in summary_widths.items():
+            ws_summary.column_dimensions[get_column_letter(col_idx)].width = width
+
+        if summary_header_row:
+            ws_summary.auto_filter.ref = f"A{summary_header_row}:K{ws_summary.max_row}"
+            ws_summary.freeze_panes = f"A{summary_header_row + 1}"
+            ws_summary.row_dimensions[summary_header_row].height = 30
+
+        # ---- Answers sheet styles ----
+        last_answers_col = ws_answers.max_column
+        last_answers_row = ws_answers.max_row
+
+        for col_idx in range(1, last_answers_col + 1):
+            header_cell = ws_answers.cell(row=1, column=col_idx)
+            header_cell.fill = header_fill
+            header_cell.font = white_bold_font
+            header_cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+            header_cell.border = thin_border
+        ws_answers.row_dimensions[1].height = 28
+
+        for row_idx in range(2, last_answers_row + 1):
+            for col_idx in range(1, last_answers_col + 1):
+                cell = ws_answers.cell(row=row_idx, column=col_idx)
+                cell.font = regular_font
+                cell.border = thin_border
+                if row_idx % 2 == 0:
+                    cell.fill = even_row_fill
+
+                if col_idx >= 6:
+                    cell.alignment = Alignment(horizontal='left', vertical='top', wrap_text=True)
+                elif col_idx in (2, 3, 4, 5):
+                    cell.alignment = Alignment(horizontal='center', vertical='center')
+                else:
+                    cell.alignment = Alignment(horizontal='left', vertical='center')
+
+            status_cell = ws_answers.cell(row=row_idx, column=3)
+            status_text = str(status_cell.value or '').strip().lower()
+            if status_text == 'пройден':
+                status_cell.fill = status_done_fill
+            else:
+                status_cell.fill = status_pending_fill
+            status_cell.font = Font(color='1F2937', bold=True)
+
+        ws_answers.column_dimensions['A'].width = 28
+        ws_answers.column_dimensions['B'].width = 10
+        ws_answers.column_dimensions['C'].width = 14
+        ws_answers.column_dimensions['D'].width = 20
+        ws_answers.column_dimensions['E'].width = 12
+        for col_idx in range(6, last_answers_col + 1):
+            ws_answers.column_dimensions[get_column_letter(col_idx)].width = 38
+
+        ws_answers.freeze_panes = 'F2'
+        ws_answers.auto_filter.ref = f"A1:{get_column_letter(last_answers_col)}{max(1, last_answers_row)}"
 
         output = BytesIO()
         wb.save(output)
