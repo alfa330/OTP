@@ -2200,7 +2200,7 @@ def preview_calls_table():
             selected_sv = db.get_user(id=selected_sv_id)
             selected_sv_role = str(selected_sv[3] or '').strip().lower() if selected_sv else ''
             if not selected_sv or selected_sv_role not in ('sv', 'supervisor'):
-                return jsonify({"error": "Супервайзер не найден"}), 404
+                return jsonify({"error": "Супервайзер не найден"}), 404 
 
         # Только парсим файл, не сохраняем
         sheet_name, operators, error = db.parse_calls_file(file)
