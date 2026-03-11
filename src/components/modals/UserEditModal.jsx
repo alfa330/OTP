@@ -450,6 +450,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     };
 
     const resetForCreate = () => {
+        const createRole = userToEdit?.role || editedUser?.role || "operator";
         revokeAvatarPreviewUrl();
         closeAvatarCropEditor();
         setEditedUser({
@@ -461,6 +462,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         direction_id: "",
         supervisor_id: user?.role === 'admin' ? "" : (user?.id ?? ""),
         status: "working",
+        role: createRole,
         status_period_start_date: todayInputDate(),
         status_period_end_date: todayInputDate(),
         status_period_dismissal_reason: "",

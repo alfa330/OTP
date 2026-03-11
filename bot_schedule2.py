@@ -3143,27 +3143,34 @@ def add_sv():
 @require_api_key
 def add_user():
     try:
-        data = request.get_json()
-        # теперь обязательные только эти поля
-        required_fields = ['name', 'rate', 'direction_id', 'hire_date']
-        if not data or not all(field in data and data[field] for field in required_fields):
-            return jsonify({"error": "Missing required field"}), 400
+        data = request.get_json() or {}
 
-        name = data['name'].strip()
+        name = str(data.get('name') or '').strip()
         if not name:
             return jsonify({"error": "Name cannot be empty"}), 400
 
-        # role всегда оператор
-        role = 'operator'
+        role = str(data.get('role') or 'operator').strip().lower()
+        if role not in ('operator', 'trainer'):
+            return jsonify({"error": "Unsupported role. Allowed: operator, trainer"}), 400
 
-        # supervisor_id опционален
         supervisor_id = int(data['supervisor_id']) if data.get('supervisor_id') else None
 
-        hire_date = data['hire_date']
+        hire_date = data.get('hire_date')
+        if not hire_date:
+            return jsonify({"error": "Missing required field: hire_date"}), 400
         try:
             datetime.strptime(hire_date, '%Y-%m-%d')
         except ValueError:
             return jsonify({"error": "Invalid hire_date format. Use YYYY-MM-DD"}), 400
+
+        if role == 'operator':
+            if not data.get('direction_id'):
+                return jsonify({"error": "Missing required field: direction_id"}), 400
+            if not data.get('rate'):
+                return jsonify({"error": "Missing required field: rate"}), 400
+        else:
+            # Trainer should not be tied to a supervisor.
+            supervisor_id = None
 
         rate = float(data['rate']) if data.get('rate') else 1.0
         direction_id = int(data['direction_id']) if data.get('direction_id') else None
@@ -3182,10 +3189,10 @@ def add_user():
         else:
             birth_date = None
 
-        login = f"user_{str(uuid.uuid4())[:8]}"
+        login_prefix = 'trainer' if role == 'trainer' else 'user'
+        login = f"{login_prefix}_{str(uuid.uuid4())[:8]}"
         password = str(uuid.uuid4())[:8]
 
-        # Создаём оператора
         user_id = db.create_user(
             telegram_id=None,
             name=name,
@@ -3200,10 +3207,12 @@ def add_user():
             birth_date=birth_date
         )
 
+        role_label = 'Тренер' if role == 'trainer' else 'Оператор'
         return jsonify({
             "status": "success",
-            "message": f"Оператор {name} добавлен",
+            "message": f"{role_label} {name} добавлен",
             "id": user_id,
+            "role": role,
             "login": login,
             "password": password
         })
