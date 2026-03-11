@@ -2178,8 +2178,29 @@ def preview_calls_table():
         user_id = int(user_id_header)
 
         user = db.get_user(id=user_id)
-        if not user or user[3] != 'sv':  # user[3] == role
-            return jsonify({"error": "Unauthorized: только супервайзеры могут загружать таблицы"}), 403
+        if not user:
+            return jsonify({"error": "Requester not found"}), 403
+
+        requester_role = str(user[3] or '').strip().lower()
+        if requester_role not in ('sv', 'supervisor', 'admin'):
+            return jsonify({"error": "Unauthorized: только супервайзеры или администраторы могут загружать таблицы"}), 403
+
+        selected_sv_id = None
+        if requester_role in ('sv', 'supervisor'):
+            selected_sv_id = user_id
+        else:
+            sv_id_raw = (request.form.get('sv_id') or '').strip()
+            if not sv_id_raw:
+                return jsonify({"error": "Для администратора требуется выбранный супервайзер (sv_id)"}), 400
+            try:
+                selected_sv_id = int(sv_id_raw)
+            except Exception:
+                return jsonify({"error": "Некорректный sv_id"}), 400
+
+            selected_sv = db.get_user(id=selected_sv_id)
+            selected_sv_role = str(selected_sv[3] or '').strip().lower() if selected_sv else ''
+            if not selected_sv or selected_sv_role not in ('sv', 'supervisor'):
+                return jsonify({"error": "Супервайзер не найден"}), 404
 
         # Только парсим файл, не сохраняем
         sheet_name, operators, error = db.parse_calls_file(file)
@@ -2189,6 +2210,7 @@ def preview_calls_table():
         return jsonify({
             "status": "success",
             "sheet_name": sheet_name,
+            "sv_id": selected_sv_id,
             "operators": operators
         }), 200
 
@@ -2379,14 +2401,25 @@ def upload_group_day():
         if not requester:
             return jsonify({"error": "Requester not found"}), 403
 
-        requester_role = requester[3]  # согласно get_user селекту: u.role в позиции 3
+        requester_role = str(requester[3] or '').strip().lower()  # согласно get_user селекту: u.role в позиции 3
 
         # Если запрос делает супервайзер — разрешаем только для его id (или если payload sv_id указан, он должен совпадать)
-        if requester_role == 'sv':
+        if requester_role in ('sv', 'supervisor'):
             sv_id = requester_id
+        elif requester_role == 'admin':
+            if sv_id_payload in (None, ''):
+                return jsonify({"error": "Field 'sv_id' is required for admin requests"}), 400
+            try:
+                sv_id = int(sv_id_payload)
+            except Exception:
+                return jsonify({"error": "Invalid 'sv_id' value"}), 400
+
+            supervisor_user = db.get_user(id=sv_id)
+            supervisor_role = str(supervisor_user[3] or '').strip().lower() if supervisor_user else ''
+            if not supervisor_user or supervisor_role not in ('sv', 'supervisor'):
+                return jsonify({"error": "Selected supervisor not found"}), 404
         else:
-            # admin or others
-            sv_id = int(sv_id_payload) if sv_id_payload else None
+            return jsonify({"error": "Unauthorized: only supervisors or admins can upload hours"}), 403
 
         processed = []
         skipped = []
@@ -2444,9 +2477,9 @@ def upload_group_day():
                         op_id_int = int(op_id)
                         user_row = db.get_user(id=op_id_int)
                         if user_row and user_row[3] == 'operator':  # role == operator
-                            # if requester is sv, ensure operator belongs to that sv
-                            if requester_role == 'sv' and user_row[6] != requester_id:  # user_row[6] == supervisor_id in get_user select
-                                skipped.append({"row": idx, "reason": "operator not under this supervisor", "name": name, "operator_id": op_id})
+                            # Ensure operator belongs to the selected/current supervisor.
+                            if user_row[6] != sv_id:  # user_row[6] == supervisor_id in get_user select
+                                skipped.append({"row": idx, "reason": "operator not under selected supervisor", "name": name, "operator_id": op_id})
                                 continue
                             resolved_operator_id = op_id_int
                         else:
@@ -2467,8 +2500,11 @@ def upload_group_day():
                             res = cursor.fetchone()
                             if res:
                                 resolved_operator_id = res[0]
-                    # if still not found, try global lookup (admins may allow)
+                    # if still not found, try global lookup (supervisor requests only)
                     if not resolved_operator_id:
+                        if requester_role == 'admin':
+                            skipped.append({"row": idx, "reason": "operator not found under selected supervisor", "name": name})
+                            continue
                         with db._get_cursor() as cursor:
                             cursor.execute("""
                                 SELECT id FROM users
@@ -2478,12 +2514,12 @@ def upload_group_day():
                             res2 = cursor.fetchone()
                             if res2:
                                 # if requester is sv, ensure operator belongs to them
-                                if requester_role == 'sv':
+                                if requester_role in ('sv', 'supervisor'):
                                     # check supervisor
                                     with db._get_cursor() as c2:
                                         c2.execute("SELECT supervisor_id FROM users WHERE id = %s", (res2[0],))
                                         sp = c2.fetchone()
-                                        if sp and sp[0] == requester_id:
+                                        if sp and sp[0] == sv_id:
                                             resolved_operator_id = res2[0]
                                         else:
                                             skipped.append({"row": idx, "reason": "operator found but not under this supervisor", "name": name})
