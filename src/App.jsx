@@ -574,6 +574,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         // ====== Upload-per-day (preview) ======
         function openUploadForDay(day) {
+            if (user?.role === 'admin' && !selectedSvId) {
+            fallbackToast('Выберите супервайзера перед загрузкой файла', 'error');
+            return;
+            }
             const dateStr = dayToDateStr(day);
             setSelectedDayUpload({ dateStr, day, monthLabel });
             setUploadFile(null);
@@ -588,10 +592,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             fallbackToast('Выберите файл', 'error');
             return;
             }
+            if (user?.role === 'admin' && !selectedSvId) {
+            fallbackToast('Выберите супервайзера перед загрузкой файла', 'error');
+            return;
+            }
             setIsPreviewing(true);
             try {
             const form = new FormData();
             form.append('file', uploadFile);
+            if (selectedSvId) {
+                form.append('sv_id', String(selectedSvId));
+            }
             const resp = await axios.post(`${API_BASE_URL}/api/sv/preview_calls_table`, form, {
                 headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id, 'Content-Type': 'multipart/form-data' },
                 onUploadProgress: (p) => {
@@ -627,6 +638,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         async function handleConfirmSave() {
             if (!selectedDayUpload || previewOperators.length === 0) {
             fallbackToast('Нет данных для сохранения', 'error');
+            return;
+            }
+            if (user?.role === 'admin' && !selectedSvId) {
+            fallbackToast('Выберите супервайзера перед сохранением', 'error');
             return;
             }
             setIsSavingPreview(true);
@@ -1598,6 +1613,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         }
 
         // ======= RENDER =======
+        const isAdminWithoutSupervisorSelected = user?.role === 'admin' && !selectedSvId;
         return (
             <div className="bg-white p-5 rounded-xl shadow-md">
             <div className="flex items-center justify-between mb-4 gap-4">
@@ -1750,7 +1766,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                     {daysArray.map(day => (
                     <div key={day} className="p-2 min-w-[72px] text-center border-l">
-                        <button onClick={() => openUploadForDay(day)} className="text-xs font-semibold px-2 py-1 rounded hover:bg-gray-100">
+                        <button
+                        onClick={() => openUploadForDay(day)}
+                        disabled={isAdminWithoutSupervisorSelected}
+                        className={`text-xs font-semibold px-2 py-1 rounded ${isAdminWithoutSupervisorSelected ? 'text-gray-400 cursor-not-allowed' : 'hover:bg-gray-100'}`}
+                        title={isAdminWithoutSupervisorSelected ? 'Сначала выберите супервайзера' : 'Загрузить файл на выбранный день'}
+                        >
                         {formatHeaderLabel(day)}
                         </button>
                     </div>
@@ -1794,7 +1815,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 <div>
                     {isLoading ? (
                     <div className="p-4 text-gray-600">Загрузка данных...</div>
-                    ) : user?.role === 'admin' && !selectedSvId ? (
+                    ) : isAdminWithoutSupervisorSelected ? (
                     <div className="p-4 text-gray-600">Супервайзер не выбран.</div>
                     ) : filteredOperators.length === 0 ? (
                     <div className="p-4 text-gray-600">Операторы не найдены.</div>
