@@ -177,9 +177,6 @@
       -ms-overflow-style: none;
       scrollbar-width: none;
     }
-    .sidebar-menu-scroll.sidebar-menu-overflow-visible {
-      overflow: visible;
-    }
     .sidebar-menu-scroll::-webkit-scrollbar {
       width: 0;
     }
