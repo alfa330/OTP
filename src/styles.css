@@ -172,12 +172,15 @@
     }
     .sidebar-menu-scroll {
       direction: ltr;
+      overflow-y: auto;
       overflow-x: hidden;
       -ms-overflow-style: none;
       scrollbar-width: none;
     }
     .sidebar-menu-scroll.sidebar-menu-overflow-visible {
-      overflow-x: visible;
+      overflow: visible;
+      position: relative;
+      z-index: 2;
     }
     .sidebar-menu-scroll::-webkit-scrollbar {
       width: 0;
@@ -562,3 +565,4 @@
             -ms-overflow-style: none;
             scrollbar-width: none;
         }
+

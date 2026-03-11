@@ -21944,7 +21944,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 <img src="https://iili.io/Kfw7PQp.png" alt="Site Icon" className="w-10 h-10 object-contain"/>
                               </span>
                             </h1>
-                            <ul className={`space-y-2 flex-1 overflow-y-auto overflow-x-hidden min-h-0 sidebar-menu-scroll ${showSidebarEmployeesDropdown ? 'sidebar-menu-overflow-visible' : ''}`}>
+                            <ul className={`space-y-2 flex-1 min-h-0 sidebar-menu-scroll ${showSidebarEmployeesDropdown ? 'sidebar-menu-overflow-visible' : ''}`}>
                                 {user.role === 'admin' && (
                                     <>
                                         <li className="relative" ref={sidebarEmployeesRef}>
