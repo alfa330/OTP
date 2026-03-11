@@ -8383,7 +8383,7 @@ class Database:
     @staticmethod
     def _normalize_survey_role(role):
         role_norm = str(role or '').strip().lower()
-        if role_norm in ('supervisor', 'trainer'):
+        if role_norm == 'supervisor':
             return 'sv'
         return role_norm
 
@@ -8391,7 +8391,7 @@ class Database:
         role = self._normalize_survey_role(requester_role)
         requester_id = int(requester_id)
 
-        if role == 'admin':
+        if role in ('admin', 'trainer'):
             cursor.execute("""
                 SELECT id
                 FROM users
@@ -9051,11 +9051,11 @@ class Database:
         requester_id = int(requester_id)
         role = self._normalize_survey_role(requester_role)
 
-        if role not in ('admin', 'sv'):
+        if role not in ('admin', 'sv', 'trainer'):
             return []
 
         with self._get_cursor() as cursor:
-            if role == 'admin':
+            if role in ('admin', 'trainer'):
                 cursor.execute("""
                     SELECT
                         s.id,
