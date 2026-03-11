@@ -777,7 +777,7 @@ def _task_route_guard():
 
 def _normalize_surveys_role(role):
     role_norm = str(role or '').strip().lower()
-    if role_norm in ('supervisor', 'trainer'):
+    if role_norm == 'supervisor':
         return 'sv'
     return role_norm
 
@@ -789,7 +789,7 @@ def _surveys_route_guard():
         return None, None, None, jsonify({"error": message}), status_code
 
     role = _normalize_surveys_role(requester[3])
-    if role not in ('admin', 'sv', 'operator'):
+    if role not in ('admin', 'sv', 'trainer', 'operator'):
         return None, None, None, jsonify({"error": "Only admin, sv, trainer and operator can access surveys"}), 403
 
     return requester_id, requester, role, None, None
@@ -3649,7 +3649,7 @@ def handle_surveys():
                 "surveys": surveys
             }), 200
 
-        if requester_role not in ('admin', 'sv'):
+        if requester_role not in ('admin', 'sv', 'trainer'):
             return jsonify({"error": "Only admin, sv and trainer can create surveys"}), 403
 
         data = request.get_json() or {}
@@ -3762,7 +3762,7 @@ def delete_survey(survey_id):
         if guard_response is not None:
             return guard_response, guard_status
 
-        if requester_role not in ('admin', 'sv'):
+        if requester_role not in ('admin', 'sv', 'trainer'):
             return jsonify({"error": "Only admin, sv and trainer can delete surveys"}), 403
 
         db.delete_survey(
@@ -3892,7 +3892,7 @@ def export_survey_statistics_excel(survey_id):
         if guard_response is not None:
             return guard_response, guard_status
 
-        if requester_role not in ('admin', 'sv'):
+        if requester_role not in ('admin', 'sv', 'trainer'):
             return jsonify({"error": "Only admin, sv and trainer can export survey statistics"}), 403
 
         surveys = db.get_surveys_for_management(requester_id, requester_role)
