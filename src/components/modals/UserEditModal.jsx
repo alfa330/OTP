@@ -221,6 +221,9 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         return status === 'dismissal' || status === 'fired';
     };
     const usesScheduleStatusPeriodForm = (value) => isPeriodStatus(value) || String(value || '').trim() === 'fired';
+    const getRoleValue = (draft) => String(draft?.role || userToEdit?.role || '').trim().toLowerCase();
+    const isTrainerDraft = (draft) => getRoleValue(draft) === 'trainer';
+    const isOperatorDraft = (draft) => getRoleValue(draft) === 'operator';
     const normalizeModalStatusValue = (value) => {
         const status = String(value ?? '').trim();
         if (status === 'unpaid_leave') return 'bs';
@@ -257,12 +260,14 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     useEffect(() => {
         // Устанавливаем defaults при открытии для режима создания
         const base = userToEdit || {};
+        const baseRole = String(base.role || '').trim().toLowerCase();
+        const isTrainerBase = baseRole === 'trainer';
         const initialStatus = normalizeModalStatusValue(base.status);
         const initialDate = todayInputDate();
         const defaults = {
         rate: base.rate ?? 1.0,
-        direction_id: base.direction_id ?? "",
-        supervisor_id: base.supervisor_id ?? (user?.role === 'admin' ? "" : (user?.id ?? "")),
+        direction_id: isTrainerBase ? "" : (base.direction_id ?? ""),
+        supervisor_id: isTrainerBase ? "" : (base.supervisor_id ?? (user?.role === 'admin' ? "" : (user?.id ?? ""))),
         status: initialStatus,
         gender: base.gender ?? "",
         birth_date: base.birth_date ?? "",
@@ -274,6 +279,10 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         use_schedule_status_period: false,
         ...base,
         };
+        if (isTrainerBase) {
+            defaults.direction_id = "";
+            defaults.supervisor_id = "";
+        }
         if (defaults.status === 'unpaid_leave' || defaults.status === 'dismissal') {
             defaults.status = normalizeModalStatusValue(defaults.status);
             defaults.use_schedule_status_period = true;
@@ -451,6 +460,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
 
     const resetForCreate = () => {
         const createRole = userToEdit?.role || editedUser?.role || "operator";
+        const isTrainerCreateRole = String(createRole || '').trim().toLowerCase() === 'trainer';
         revokeAvatarPreviewUrl();
         closeAvatarCropEditor();
         setEditedUser({
@@ -460,7 +470,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         birth_date: "",
         gender: "",
         direction_id: "",
-        supervisor_id: user?.role === 'admin' ? "" : (user?.id ?? ""),
+        supervisor_id: isTrainerCreateRole ? "" : (user?.role === 'admin' ? "" : (user?.id ?? "")),
         status: "working",
         role: createRole,
         status_period_start_date: todayInputDate(),
@@ -485,6 +495,8 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
 
     const handleSave = async () => {
         const isCreateMode = !editedUser?.id;
+        const isTrainerUser = isTrainerDraft(editedUser);
+        const isOperatorUser = isOperatorDraft(editedUser);
 
         // Простая локальная валидация
         if (!editedUser || !editedUser.name || editedUser.name.trim().length === 0) {
@@ -492,12 +504,12 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         return;
         }
 
-        if (isCreateMode && user?.role === 'admin' && !editedUser.supervisor_id) {
+        if (isCreateMode && isOperatorUser && user?.role === 'admin' && !editedUser.supervisor_id) {
         setModalError("Супервайзер обязателен.");
         return;
         }
 
-        if (!editedUser.direction_id && editedUser.role !== 'sv') {
+        if (isOperatorUser && !editedUser.direction_id) {
         setModalError("Направление обязательно.");
         return;
         }
@@ -549,8 +561,11 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         setIsLoading(true);
 
         try {
+        const normalizedUser = isTrainerUser
+            ? { ...editedUser, supervisor_id: null, direction_id: null }
+            : editedUser;
         const result = await onSave({
-            ...editedUser,
+            ...normalizedUser,
             avatar_file: avatarUploadFile || null,
             avatar_original_file: avatarUploadFile ? (avatarOriginalFile || null) : null,
             avatar_remove: !!avatarRemoveRequested
@@ -947,7 +962,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     </div>
                     )}
 
-                    {user?.role === "admin" && (
+                    {user?.role === "admin" && !isTrainerDraft(editedUser) && (
                     <div>
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Супервайзер</label>
                         <select
@@ -982,6 +997,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         </select>
                     </div>
 
+                    {!isTrainerDraft(editedUser) && (
                     <div>
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Направление</label>
                         <select
@@ -998,6 +1014,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         ))}
                         </select>
                     </div>
+                    )}
                     </>
                 )}
 
@@ -1220,6 +1237,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             <>
                             {user?.role === "admin" && (
                                 <div className="grid grid-cols-1 gap-4">
+                                {!isTrainerDraft(editedUser) && (
                                 <div>
                                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Супервайзер</label>
                                     <select
@@ -1242,6 +1260,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     })()}
                                     </select>
                                 </div>
+                                )}
 
                                 <div>
                                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Ставка</label>
@@ -1259,6 +1278,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 </div>
                             )}
 
+                            {!isTrainerDraft(editedUser) && (
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Направление</label>
                                 <select
@@ -1275,6 +1295,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 ))}
                                 </select>
                             </div>
+                            )}
                             </>
                         )}
                         </>

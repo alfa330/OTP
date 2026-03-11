@@ -1018,8 +1018,19 @@ class Database:
 
         password = password or "123456"
         password_hash = pbkdf2_sha256.hash(password)
+        role_norm = str(role or '').strip().lower()
+        if role_norm == 'trainer':
+            direction_id = None
+            supervisor_id = None
 
         with self._get_cursor() as cursor:
+            def _clear_trainer_links(target_user_id):
+                if role_norm == 'trainer' and target_user_id is not None:
+                    cursor.execute(
+                        "UPDATE users SET direction_id = NULL, supervisor_id = NULL WHERE id = %s",
+                        (target_user_id,)
+                    )
+
             cursor.execute("SAVEPOINT before_insert")
             try:
                 cursor.execute("""
@@ -1027,7 +1038,9 @@ class Database:
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                 """, (telegram_id, name, role, direction_id, rate, hire_date, supervisor_id, login, password_hash, hours_table_url, gender, birth_date))
-                return cursor.fetchone()[0]
+                created_user_id = cursor.fetchone()[0]
+                _clear_trainer_links(created_user_id)
+                return created_user_id
             except psycopg2.IntegrityError as e:
                 cursor.execute("ROLLBACK TO SAVEPOINT before_insert")
                 if 'unique_name_role' in str(e):
@@ -1043,7 +1056,9 @@ class Database:
                     """, (direction_id, supervisor_id, hours_table_url, gender, birth_date, name, role))
                     result = cursor.fetchone()
                     if result:
-                        return result[0]
+                        updated_user_id = result[0]
+                        _clear_trainer_links(updated_user_id)
+                        return updated_user_id
                     else:
                         raise ValueError("User with this name and role not found")
                 elif 'telegram_id' in str(e):
@@ -1062,7 +1077,9 @@ class Database:
                         WHERE telegram_id = %s
                         RETURNING id
                     """, (name, role, direction_id, hire_date, supervisor_id, login, password_hash, hours_table_url, gender, birth_date, telegram_id))
-                    return cursor.fetchone()[0]
+                    updated_user_id = cursor.fetchone()[0]
+                    _clear_trainer_links(updated_user_id)
+                    return updated_user_id
                 else:
                     raise
 
@@ -3186,9 +3203,15 @@ class Database:
         
         with self._get_cursor() as cursor:
             # Fetch old value
-            cursor.execute(f"SELECT {field} FROM users WHERE id = %s", (user_id,))
-            old_value = cursor.fetchone()
-            old_value = str(old_value[0]) if old_value and old_value[0] is not None else None
+            cursor.execute(f"SELECT role, {field} FROM users WHERE id = %s", (user_id,))
+            row = cursor.fetchone()
+            if not row:
+                return False
+            current_role = str(row[0] or '').strip().lower()
+            old_field_value = row[1]
+            if current_role == 'trainer' and field in ('direction_id', 'supervisor_id'):
+                value = None
+            old_value = str(old_field_value) if old_field_value is not None else None
             
             # Update
             cursor.execute(f"UPDATE users SET {field} = %s WHERE id = %s RETURNING id", (value, user_id))

@@ -19860,6 +19860,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         // Local duplicate name check before creating
                         const newName = (editedUser.name || '').trim();
                         const createdRole = String(editedUser?.role || 'operator').trim().toLowerCase();
+                        const isCreatedTrainer = createdRole === 'trainer';
                         const createdRoleLabel = createdRole === 'trainer'
                             ? 'Тренер'
                             : (createdRole === 'sv' || createdRole === 'supervisor' ? 'Супервайзер' : 'Оператор');
@@ -19879,8 +19880,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         const payload = {
                             name: editedUser.name || "",
                             role: editedUser.role || "operator",
-                            supervisor_id: editedUser.supervisor_id || null,
-                            direction_id: editedUser.direction_id || null,
+                            supervisor_id: isCreatedTrainer ? null : (editedUser.supervisor_id || null),
+                            direction_id: isCreatedTrainer ? null : (editedUser.direction_id || null),
                             rate: editedUser.rate || 1.0,
                             hire_date: normalizeDateForApi(editedUser.hire_date),
                             gender: editedUser.gender || null,
@@ -19964,23 +19965,48 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
                         });
                     }
-                    if (editedUser.direction_id && editedUser.direction_id !== userToEdit.direction_id) {
-                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
-                            user_id: editedUser.id,
-                            field: 'direction_id',
-                            value: editedUser.direction_id
-                        }, {
-                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
-                        });
-                    }
-                    if (editedUser.supervisor_id && editedUser.supervisor_id !== userToEdit.supervisor_id) {
-                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
-                            user_id: editedUser.id,
-                            field: 'supervisor_id',
-                            value: editedUser.supervisor_id
-                        }, {
-                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
-                        });
+                    const editedRole = String(editedUser?.role || userToEdit?.role || '').trim().toLowerCase();
+                    const isEditedTrainer = editedRole === 'trainer';
+                    if (isEditedTrainer) {
+                        const hasDirection = userToEdit?.direction_id !== null && userToEdit?.direction_id !== undefined && userToEdit?.direction_id !== '';
+                        const hasSupervisor = userToEdit?.supervisor_id !== null && userToEdit?.supervisor_id !== undefined && userToEdit?.supervisor_id !== '';
+                        if (hasDirection) {
+                            await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                                user_id: editedUser.id,
+                                field: 'direction_id',
+                                value: null
+                            }, {
+                                headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            });
+                        }
+                        if (hasSupervisor) {
+                            await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                                user_id: editedUser.id,
+                                field: 'supervisor_id',
+                                value: null
+                            }, {
+                                headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            });
+                        }
+                    } else {
+                        if (editedUser.direction_id && editedUser.direction_id !== userToEdit.direction_id) {
+                            await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                                user_id: editedUser.id,
+                                field: 'direction_id',
+                                value: editedUser.direction_id
+                            }, {
+                                headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            });
+                        }
+                        if (editedUser.supervisor_id && editedUser.supervisor_id !== userToEdit.supervisor_id) {
+                            await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                                user_id: editedUser.id,
+                                field: 'supervisor_id',
+                                value: editedUser.supervisor_id
+                            }, {
+                                headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            });
+                        }
                     }
                     if (editedUser.new_login && editedUser.new_login.trim() !== '') {
                         await axios.post(`${API_BASE_URL}/api/user/change_login`, {
