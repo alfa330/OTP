@@ -1416,33 +1416,57 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                 </div>
 
                                 {/* Meta row */}
-                                <div className="flex flex-wrap gap-2 mt-3">
-                                    <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-gray-50 rounded-lg px-2.5 py-1.5">
-                                        <FaIcon className="fas fa-users text-gray-400 text-[10px]" />
-                                        Операторов: <strong className="text-gray-700">{selectedSurvey?.assignment?.operator_ids?.length || 0}</strong>
+                                {(!canManage || activeTab === 'stats') && (
+                                    <div className="flex flex-wrap gap-2 mt-3">
+                                        <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-gray-50 rounded-lg px-2.5 py-1.5">
+                                            <FaIcon className="fas fa-users text-gray-400 text-[10px]" />
+                                            Операторов: <strong className="text-gray-700">{selectedSurvey?.assignment?.operator_ids?.length || 0}</strong>
+                                        </div>
+                                        <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-gray-50 rounded-lg px-2.5 py-1.5">
+                                            <FaIcon className="fas fa-clock text-gray-400 text-[10px]" />
+                                            Стаж:{' '}
+                                            <strong className="text-gray-700">
+                                                {selectedSurvey?.assignment?.tenure_weeks_min != null || selectedSurvey?.assignment?.tenure_weeks_max != null
+                                                    ? `${selectedSurvey?.assignment?.tenure_weeks_min != null ? `от ${selectedSurvey.assignment.tenure_weeks_min} нед.` : 'без минимума'}${selectedSurvey?.assignment?.tenure_weeks_max != null ? ` до ${selectedSurvey.assignment.tenure_weeks_max} нед.` : ''}`
+                                                    : 'Любой'}
+                                            </strong>
+                                        </div>
+                                        {canManage && (
+                                            <>
+                                                <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-gray-50 rounded-lg px-2.5 py-1.5">
+                                                    <FaIcon className="fas fa-check-circle text-gray-400 text-[10px]" />
+                                                    Пройдено: <strong className="text-gray-700">{selectedSurvey?.statistics?.completed_count || 0} / {selectedSurvey?.statistics?.assigned_count || 0}</strong>
+                                                </div>
+                                                <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-gray-50 rounded-lg px-2.5 py-1.5">
+                                                    <FaIcon className="fas fa-hourglass-half text-gray-400 text-[10px]" />
+                                                    Ожидают: <strong className="text-gray-700">{selectedSurvey?.statistics?.pending_count || 0}</strong>
+                                                </div>
+                                            </>
+                                        )}
                                     </div>
-                                    <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-gray-50 rounded-lg px-2.5 py-1.5">
-                                        <FaIcon className="fas fa-clock text-gray-400 text-[10px]" />
-                                        Стаж:{' '}
-                                        <strong className="text-gray-700">
-                                            {selectedSurvey?.assignment?.tenure_weeks_min != null || selectedSurvey?.assignment?.tenure_weeks_max != null
-                                                ? `${selectedSurvey?.assignment?.tenure_weeks_min != null ? `от ${selectedSurvey.assignment.tenure_weeks_min} нед.` : 'без минимума'}${selectedSurvey?.assignment?.tenure_weeks_max != null ? ` до ${selectedSurvey.assignment.tenure_weeks_max} нед.` : ''}`
-                                                : 'Любой'}
-                                        </strong>
+                                )}
+                                {canManage && activeTab === 'questions' && (
+                                    <div className="flex flex-wrap gap-2 mt-3">
+                                        <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-blue-50 rounded-lg px-2.5 py-1.5">
+                                            <FaIcon className="fas fa-list-ul text-blue-400 text-[10px]" />
+                                            Вопросов: <strong className="text-gray-700">{(selectedSurvey?.questions || []).length}</strong>
+                                        </div>
+                                        <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-blue-50 rounded-lg px-2.5 py-1.5">
+                                            <FaIcon className="fas fa-asterisk text-blue-400 text-[10px]" />
+                                            Обязательных:{' '}
+                                            <strong className="text-gray-700">
+                                                {(selectedSurvey?.questions || []).filter((question) => question?.required).length}
+                                            </strong>
+                                        </div>
+                                        <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-blue-50 rounded-lg px-2.5 py-1.5">
+                                            <FaIcon className="fas fa-comment-dots text-blue-400 text-[10px]" />
+                                            С полем «Другое»:{' '}
+                                            <strong className="text-gray-700">
+                                                {(selectedSurvey?.questions || []).filter((question) => question?.allow_other).length}
+                                            </strong>
+                                        </div>
                                     </div>
-                                    {canManage && (
-                                        <>
-                                            <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-gray-50 rounded-lg px-2.5 py-1.5">
-                                                <FaIcon className="fas fa-check-circle text-gray-400 text-[10px]" />
-                                                Пройдено: <strong className="text-gray-700">{selectedSurvey?.statistics?.completed_count || 0} / {selectedSurvey?.statistics?.assigned_count || 0}</strong>
-                                            </div>
-                                            <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-gray-50 rounded-lg px-2.5 py-1.5">
-                                                <FaIcon className="fas fa-hourglass-half text-gray-400 text-[10px]" />
-                                                Ожидают: <strong className="text-gray-700">{selectedSurvey?.statistics?.pending_count || 0}</strong>
-                                            </div>
-                                        </>
-                                    )}
-                                </div>
+                                )}
 
                                 {/* Tabs for manager */}
                                 {canManage && (
@@ -1589,27 +1613,58 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                 {/* Manager questions tab */}
                                 {!isOperator && (!canManage || activeTab === 'questions') && (
                                     <div className="space-y-2">
-                                        {(selectedSurvey.questions || []).map((question, index) => (
-                                            <div key={question.id} className="flex gap-3 items-start p-3 rounded-xl border border-gray-100 bg-gray-50/60">
-                                                <div className="w-6 h-6 rounded-lg bg-blue-50 flex items-center justify-center shrink-0 mt-0.5">
-                                                    <span className="text-[10px] font-bold text-blue-500">{index + 1}</span>
-                                                </div>
-                                                <div className="flex-1">
-                                                    <div className="text-sm font-medium text-gray-800">{question.text}</div>
-                                                    <div className="flex items-center gap-2 mt-1">
-                                                        <Badge color="gray">{questionTypeLabel(question.type)}</Badge>
-                                                        {question.required && <Badge color="blue">Обязательный</Badge>}
-                                                    </div>
-                                                    {selectedSurvey?.is_test && question.type !== 'rating' && (
-                                                        <div className="mt-1 text-xs text-emerald-700">
-                                                            Правильный ответ: {toUniqueTrimmedList(question.correct_options).length > 0
-                                                                ? toUniqueTrimmedList(question.correct_options).join(', ')
-                                                                : '—'}
-                                                        </div>
-                                                    )}
-                                                </div>
+                                        {(selectedSurvey.questions || []).length === 0 && (
+                                            <div className="rounded-xl border border-gray-100 bg-gray-50 p-4 text-sm text-gray-400">
+                                                В этом опросе нет сохраненных вопросов.
                                             </div>
-                                        ))}
+                                        )}
+                                        {(selectedSurvey.questions || []).map((question, index) => {
+                                            const normalizedOptions = toUniqueTrimmedList(question.options);
+                                            return (
+                                                <div key={question.id} className="flex gap-3 items-start p-3 rounded-xl border border-gray-100 bg-gray-50/60">
+                                                    <div className="w-6 h-6 rounded-lg bg-blue-50 flex items-center justify-center shrink-0 mt-0.5">
+                                                        <span className="text-[10px] font-bold text-blue-500">{index + 1}</span>
+                                                    </div>
+                                                    <div className="flex-1">
+                                                        <div className="text-sm font-medium text-gray-800">{question.text}</div>
+                                                        <div className="flex items-center gap-2 mt-1">
+                                                            <Badge color="gray">{questionTypeLabel(question.type)}</Badge>
+                                                            {question.required && <Badge color="blue">Обязательный</Badge>}
+                                                        </div>
+                                                        {question.type !== 'rating' && (
+                                                            <div className="mt-2 space-y-1">
+                                                                <div className="text-[11px] text-gray-400">Варианты ответа</div>
+                                                                {normalizedOptions.length > 0 ? (
+                                                                    <div className="flex flex-wrap gap-1.5">
+                                                                        {normalizedOptions.map((option) => (
+                                                                            <span key={`${question.id}_${option}`} className="inline-flex items-center px-2 py-0.5 rounded bg-white border border-gray-200 text-xs text-gray-700">
+                                                                                {option}
+                                                                            </span>
+                                                                        ))}
+                                                                        {question.allow_other && (
+                                                                            <span className="inline-flex items-center px-2 py-0.5 rounded bg-amber-50 border border-amber-200 text-xs text-amber-700">
+                                                                                Другое
+                                                                            </span>
+                                                                        )}
+                                                                    </div>
+                                                                ) : (
+                                                                    <div className="text-xs text-gray-500">
+                                                                        {question.allow_other ? 'Только поле «Другое»' : 'Без фиксированных вариантов'}
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        )}
+                                                        {selectedSurvey?.is_test && question.type !== 'rating' && (
+                                                            <div className="mt-1 text-xs text-emerald-700">
+                                                                Правильный ответ: {toUniqueTrimmedList(question.correct_options).length > 0
+                                                                    ? toUniqueTrimmedList(question.correct_options).join(', ')
+                                                                    : '—'}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
                                     </div>
                                 )}
 
