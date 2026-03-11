@@ -292,6 +292,30 @@ class Database:
                     CONSTRAINT unique_name_role UNIQUE (name, role)
                 );
             """)
+            cursor.execute("""
+                DO $$
+                DECLARE role_constraint RECORD;
+                BEGIN
+                    FOR role_constraint IN
+                        SELECT conname
+                        FROM pg_constraint
+                        WHERE conrelid = 'users'::regclass
+                          AND contype = 'c'
+                          AND pg_get_constraintdef(oid) ILIKE '%role%'
+                    LOOP
+                        EXECUTE format('ALTER TABLE users DROP CONSTRAINT IF EXISTS %I', role_constraint.conname);
+                    END LOOP;
+
+                    BEGIN
+                        ALTER TABLE users
+                            ADD CONSTRAINT users_role_check
+                            CHECK (role IN ('admin', 'sv', 'supervisor', 'trainer', 'operator'));
+                    EXCEPTION
+                        WHEN duplicate_object THEN
+                            NULL;
+                    END;
+                END $$;
+            """)
             # Directions table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS directions (

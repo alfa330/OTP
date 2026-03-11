@@ -17165,6 +17165,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [directions, setDirections] = useState([]);
             const [selectedMonth, setSelectedMonth] = useState(() => getStoredValue('selectedMonth', currentMonth));
             const [users, setUsers] = useState([]);
+            const [adminUsers, setAdminUsers] = useState([]);
+            const [trainerUsers, setTrainerUsers] = useState([]);
             const [adminSessions, setAdminSessions] = useState([]);
             const [adminSessionsSummary, setAdminSessionsSummary] = useState({
                 total_sessions: 0,
@@ -17308,15 +17310,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [isBulkManageUsersSaving, setIsBulkManageUsersSaving] = useState(false);
             const [promotingUserId, setPromotingUserId] = useState(null);
             const [showSidebarAccountDropdown, setShowSidebarAccountDropdown] = useState(false);
+            const [showSidebarEmployeesDropdown, setShowSidebarEmployeesDropdown] = useState(false);
             const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
             const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
             const sidebarAccountRef = useRef(null);
+            const sidebarEmployeesRef = useRef(null);
             const [modalError, setModalError] = useState("");
             const [isClosing, setIsClosing] = useState(false);
+            const [isEmployeesClosing, setIsEmployeesClosing] = useState(false);
             const [activeTab, setActiveTab] = useState("active");
             const [activeUserTab, setActiveUserTab] = useState("active");
             const [activeOperatorsTab, setActiveOperatorsTab] = useState("active");
             const [activeSvTab, setActiveSvTab] = useState("active");
+            const [activeTrainerTab, setActiveTrainerTab] = useState("active");
             const normalizeEmployeeStatusCode = (status) => {
                 const value = String(status || '').trim().toLowerCase();
                 if (!value) return 'working';
@@ -17654,7 +17660,32 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setIsClosing(false);
                 }, 200);
             } else {
+                setShowSidebarEmployeesDropdown(false);
+                setIsEmployeesClosing(false);
                 setShowSidebarAccountDropdown(true);
+            }
+            };
+
+            const handleToggleEmployeesDropdown = (forceClose = null) => {
+            if (forceClose === true) {
+                setIsEmployeesClosing(true);
+                setTimeout(() => {
+                setShowSidebarEmployeesDropdown(false);
+                setIsEmployeesClosing(false);
+                }, 200);
+                return;
+            }
+
+            if (showSidebarEmployeesDropdown) {
+                setIsEmployeesClosing(true);
+                setTimeout(() => {
+                setShowSidebarEmployeesDropdown(false);
+                setIsEmployeesClosing(false);
+                }, 200);
+            } else {
+                setShowSidebarAccountDropdown(false);
+                setIsClosing(false);
+                setShowSidebarEmployeesDropdown(true);
             }
             };
 
@@ -17674,10 +17705,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     handleToggleDropdown(true); 
                 }
                 }
+                if (sidebarEmployeesRef.current && !sidebarEmployeesRef.current.contains(e.target)) {
+                if (showSidebarEmployeesDropdown) {
+                    handleToggleEmployeesDropdown(true);
+                }
+                }
             }
             document.addEventListener("mousedown", handleClickOutside);
             return () => document.removeEventListener("mousedown", handleClickOutside);
-            }, [showSidebarAccountDropdown]);
+            }, [showSidebarAccountDropdown, showSidebarEmployeesDropdown]);
 
             function TrainingModal({ isOpen, onClose, onSave, initialData = {} }) {
                 const [date, setDate] = useState(initialData.date || "");
@@ -19543,7 +19579,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         });
                         const data = response.data;
                         if (data.status === 'success' && isMounted.current) {
-                            setUsers(data.users.filter(u => u.role === 'operator') || []);
+                            const nextUsers = Array.isArray(data.users) ? data.users : [];
+                            setAdminUsers(nextUsers);
+                            setUsers(nextUsers.filter((u) => String(u?.role || '').toLowerCase() === 'operator'));
+                            setTrainerUsers(nextUsers.filter((u) => String(u?.role || '').toLowerCase() === 'trainer'));
                         } else {
                             showToast(data.error || 'Failed to fetch users', 'error');
                         }
@@ -19799,12 +19838,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     if (!editedUser.id) {
                         // Local duplicate name check before creating
                         const newName = (editedUser.name || '').trim();
+                        const createdRole = String(editedUser?.role || 'operator').trim().toLowerCase();
+                        const createdRoleLabel = createdRole === 'trainer'
+                            ? 'Тренер'
+                            : (createdRole === 'sv' || createdRole === 'supervisor' ? 'Супервайзер' : 'Оператор');
+                        const duplicateUsersPool = (adminUsers && adminUsers.length > 0) ? adminUsers : users;
                         if (!newName) {
                             showToast('Имя обязательно.', 'error');
                             setIsLoading(false);
                             return;
                         }
-                        const exists = (users || []).some(u => u.id !== editedUser.id && (u.name || '').toLowerCase() === newName.toLowerCase());
+                        const exists = (duplicateUsersPool || []).some(u => u.id !== editedUser.id && (u.name || '').toLowerCase() === newName.toLowerCase());
                         if (exists) {
                             showToast('Пользователь с таким именем уже существует.', 'error');
                             setIsLoading(false);
@@ -19813,7 +19857,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         // payload минимальный — дополни по API сервера
                         const payload = {
                             name: editedUser.name || "",
-                            role: "operator",
+                            role: editedUser.role || "operator",
                             supervisor_id: editedUser.supervisor_id || null,
                             direction_id: editedUser.direction_id || null,
                             rate: editedUser.rate || 1.0,
@@ -19865,7 +19909,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
                                 });
                             }
-                            showToast('Оператор создан успешно', 'success');
+                            showToast(`${createdRoleLabel} создан успешно`, 'success');
                             // при создании обычно сервер возвращает логин/пароль — если есть, покажи их
                             if (data.login || data.password) {
                             // например reuse переменной newCredentials (если есть) или просто показать toast
@@ -19877,14 +19921,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             await fetchUsers(); // обновим список операторов на клиенте
                             setShowUserEditModal(false);
                         } else {
-                            showToast(data.error || 'Не удалось создать оператора', 'error');
+                            showToast(data.error || 'Не удалось создать сотрудника', 'error');
                         }
                         return;
                         }
                     // If editing existing user, handle name change first (validate duplicate locally and request to server)
                     if (editedUser.id && editedUser.name && editedUser.name.trim() !== userToEdit?.name) {
                         const newName = editedUser.name.trim();
-                        const exists = (users || []).some(u => u.id !== editedUser.id && (u.name || '').toLowerCase() === newName.toLowerCase());
+                        const duplicateUsersPool = (adminUsers && adminUsers.length > 0) ? adminUsers : users;
+                        const exists = (duplicateUsersPool || []).some(u => u.id !== editedUser.id && (u.name || '').toLowerCase() === newName.toLowerCase());
                         if (exists) {
                             showToast('Пользователь с таким именем уже существует.', 'error');
                             setIsLoading(false);
@@ -20826,6 +20871,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
 
             const filteredUsers = users.filter(u => 
+                (u.name || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+                (u.direction || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+                (u.supervisor_name || '').toLowerCase().includes(searchQuery.toLowerCase())
+            );
+
+            const filteredTrainerUsers = trainerUsers.filter(u =>
                 (u.name || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
                 (u.direction || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
                 (u.supervisor_name || '').toLowerCase().includes(searchQuery.toLowerCase())
@@ -21896,15 +21947,50 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             <ul className="space-y-2 flex-1 overflow-y-auto overflow-x-hidden min-h-0 sidebar-menu-scroll">
                                 {user.role === 'admin' && (
                                     <>
-                                        <li>
-                                            <button onClick={() => { setView('sv_list'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sv_list' ? 'bg-blue-700' : ''}`}>
-                                                <FaIcon className="fas fa-users"></FaIcon> <span className="sidebar-text">Супервайзеры</span>
-                                            </button>
-                                        </li>
-                                        <li>
-                                            <button onClick={() => { setView('manage_users'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_users' ? 'bg-blue-700' : ''}`}>
+                                        <li className="relative" ref={sidebarEmployeesRef}>
+                                            <button
+                                                onClick={handleToggleEmployeesDropdown}
+                                                className={`group w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 relative ${
+                                                    ['sv_list', 'manage_users', 'manage_trainers'].includes(view) ? 'bg-blue-700' : ''
+                                                }`}
+                                                aria-expanded={showSidebarEmployeesDropdown}
+                                                aria-haspopup="menu"
+                                            >
                                                 <FaIcon className="fas fa-user-cog"></FaIcon> <span className="sidebar-text">Сотрудники</span>
+                                                <FaIcon className="fas fa-chevron-right ml-auto opacity-0 transform translate-x-2 transition-all duration-300 group-hover:opacity-100 group-hover:translate-x-0 sidebar-text"></FaIcon>
                                             </button>
+
+                                            {(showSidebarEmployeesDropdown || isEmployeesClosing) && (
+                                                <div
+                                                    className={`absolute left-full top-0 ml-2 w-56 origin-top bg-white/95 text-black backdrop-blur-sm rounded-md shadow-lg border border-gray-200 z-40
+                                                    ${showSidebarEmployeesDropdown && !isEmployeesClosing ? "animate-dropdown" : "animate-dropdown-reverse"}`}
+                                                >
+                                                    <button
+                                                        onClick={() => { setView('sv_list'); setMobileMenuOpen(false); handleToggleEmployeesDropdown(true); }}
+                                                        className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'sv_list' ? 'bg-gray-100 font-medium' : ''}`}
+                                                    >
+                                                        <FaIcon className="fas fa-users mr-2"></FaIcon> Супервайзеры
+                                                    </button>
+
+                                                    <div className="border-t border-gray-200" />
+
+                                                    <button
+                                                        onClick={() => { setView('manage_users'); setMobileMenuOpen(false); handleToggleEmployeesDropdown(true); }}
+                                                        className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'manage_users' ? 'bg-gray-100 font-medium' : ''}`}
+                                                    >
+                                                        <FaIcon className="fas fa-user-cog mr-2"></FaIcon> Операторы
+                                                    </button>
+
+                                                    <div className="border-t border-gray-200" />
+
+                                                    <button
+                                                        onClick={() => { setView('manage_trainers'); setMobileMenuOpen(false); handleToggleEmployeesDropdown(true); }}
+                                                        className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'manage_trainers' ? 'bg-gray-100 font-medium' : ''}`}
+                                                    >
+                                                        <FaIcon className="fas fa-book mr-2"></FaIcon> Тренеры
+                                                    </button>
+                                                </div>
+                                            )}
                                         </li>
                                         <li>
                                             <button onClick={() => { setView('admin_sessions'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'admin_sessions' ? 'bg-blue-700' : ''}`}>
@@ -22975,7 +23061,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {view === 'manage_users' && (
                                 <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                     <div className="flex items-center justify-between mb-6">
-                                    <h2 className="text-2xl font-semibold text-gray-800">Сотрудники</h2>
+                                    <h2 className="text-2xl font-semibold text-gray-800">Операторы</h2>
 
                                     <div className="flex items-center gap-3">
                                         <button
@@ -22993,7 +23079,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         }}
                                         className="inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition"
                                         >
-                                        <FaIcon className="fas fa-user-plus"></FaIcon> Добавить сотрудника
+                                        <FaIcon className="fas fa-user-plus"></FaIcon> Добавить оператора
                                         </button>
 
                                         {/* Generate Report Button */}
@@ -23041,7 +23127,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         const filteredByStatus = (users || []).filter((u) => isEmployeeVisibleByStatusTab(u?.status, activeUserTab));
 
                                         if (filteredByStatus.length === 0) {
-                                        return <p className="text-center text-gray-600">No users found.</p>;
+                                        return <p className="text-center text-gray-600">Операторы не найдены.</p>;
                                         }
 
                                         // применяем локальный поиск (как у вас раньше)
@@ -23370,6 +23456,253 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </div>
                                             );
                                             })}
+                                        </div>
+                                        );
+                                    })()
+                                    )}
+                                </div>
+                                )}
+                                {view === 'manage_trainers' && (
+                                <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
+                                    <div className="flex items-center justify-between mb-6">
+                                    <h2 className="text-2xl font-semibold text-gray-800">Тренеры</h2>
+
+                                    <button
+                                        onClick={() => {
+                                            setUserToEdit({
+                                                name: "",
+                                                rate: 1.0,
+                                                direction_id: "",
+                                                hire_date: "",
+                                                supervisor_id: "",
+                                                status: "working",
+                                                role: "trainer",
+                                            });
+                                            setShowUserEditModal(true);
+                                        }}
+                                        className="inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition"
+                                    >
+                                        <FaIcon className="fas fa-user-plus"></FaIcon> Добавить тренера
+                                    </button>
+                                    </div>
+
+                                    <div className="flex flex-wrap gap-3 mb-6">
+                                    {(() => {
+                                        const allTrainers = Array.isArray(trainerUsers) ? trainerUsers : [];
+                                        return USER_STATUS_FILTER_TABS.map((tab) => {
+                                            const count = allTrainers.filter((u) => isEmployeeVisibleByStatusTab(u?.status, tab.key)).length;
+                                            const isActive = activeTrainerTab === tab.key;
+                                            return (
+                                                <button
+                                                    key={tab.key}
+                                                    onClick={() => setActiveTrainerTab(tab.key)}
+                                                    className={`px-4 py-2 rounded-lg font-medium text-sm transition ${isActive ? tab.activeClass : tab.idleClass}`}
+                                                >
+                                                    {tab.label}
+                                                    <span className={`ml-2 inline-flex items-center justify-center px-2 py-0.5 text-xs rounded font-medium ${isActive ? 'bg-white/90 text-gray-800' : 'bg-white text-gray-700'}`}>
+                                                        {count}
+                                                    </span>
+                                                </button>
+                                            );
+                                        });
+                                    })()}
+                                    </div>
+
+                                    {isAdminDataLoading ? (
+                                    <p className="text-center text-gray-600">Загрузка...</p>
+                                    ) : (
+                                    (() => {
+                                        const filteredByStatus = (trainerUsers || []).filter((u) => isEmployeeVisibleByStatusTab(u?.status, activeTrainerTab));
+                                        if (filteredByStatus.length === 0) {
+                                            return <p className="text-center text-gray-600">Тренеры не найдены.</p>;
+                                        }
+
+                                        const searched = filteredTrainerUsers.filter((u) => filteredByStatus.includes(u));
+                                        const sortedTrainers = [...searched].sort((a, b) => compareUsersByField(a, b, usersSortField));
+                                        if (sortedTrainers.length === 0) {
+                                            return <p className="text-center text-gray-600">Тренеры по запросу не найдены.</p>;
+                                        }
+
+                                        return (
+                                        <div className="overflow-x-auto rounded-lg border border-gray-200">
+                                            <div className="mb-4">
+                                            <input
+                                                type="text"
+                                                placeholder="Поиск по имени, направлению или супервайзеру..."
+                                                value={searchQuery}
+                                                onChange={(e) => setSearchQuery(e.target.value)}
+                                                className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                            />
+                                            </div>
+
+                                            <table className="min-w-full table-fixed border rounded-lg w-full">
+                                                <colgroup>
+                                                    <col style={{ width: "30%" }} />
+                                                    <col style={{ width: "18%" }} />
+                                                    <col style={{ width: "15%" }} />
+                                                    <col style={{ width: "17%" }} />
+                                                    <col style={{ width: "15%" }} />
+                                                    <col style={{ width: "5%" }} />
+                                                </colgroup>
+
+                                                <thead className="bg-gray-50">
+                                                    <tr>
+                                                        <th
+                                                            onClick={() => handleUsersSort('name')}
+                                                            className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer"
+                                                        >
+                                                            Имя {getUsersSortIcon('name')}
+                                                        </th>
+                                                        <th
+                                                            onClick={() => handleUsersSort('direction')}
+                                                            className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer"
+                                                        >
+                                                            Направление {getUsersSortIcon('direction')}
+                                                        </th>
+                                                        <th
+                                                            onClick={() => handleUsersSort('status')}
+                                                            className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer"
+                                                        >
+                                                            Статус {getUsersSortIcon('status')}
+                                                        </th>
+                                                        <th
+                                                            onClick={() => handleUsersSort('hire_date')}
+                                                            className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer"
+                                                        >
+                                                            Дата найма {getUsersSortIcon('hire_date')}
+                                                        </th>
+                                                        <th
+                                                            onClick={() => handleUsersSort('rate')}
+                                                            className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase cursor-pointer"
+                                                        >
+                                                            Ставка {getUsersSortIcon('rate')}
+                                                        </th>
+                                                        <th className="px-6 py-3"></th>
+                                                    </tr>
+                                                </thead>
+
+                                                <tbody className="bg-white divide-y divide-gray-200">
+                                                    {sortedTrainers.map((u) => (
+                                                        <tr key={u.id} className="transition-colors duration-200 group hover:bg-gray-50">
+                                                            <td className="px-6 py-4">
+                                                                <div className="flex items-center gap-3 min-w-0">
+                                                                    <div className="h-9 w-9 rounded-full overflow-hidden border border-slate-200 bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-xs font-semibold text-white shrink-0">
+                                                                        {u.avatar_url ? (
+                                                                            <AvatarImage src={u.avatar_url} alt={u.name || 'avatar'} className="h-full w-full object-cover" />
+                                                                        ) : (
+                                                                            (u.name || 'U').charAt(0).toUpperCase()
+                                                                        )}
+                                                                    </div>
+                                                                    <span className="truncate">{u.name}</span>
+                                                                </div>
+                                                            </td>
+                                                            <td className="px-6 py-4">{u.direction || "-"}</td>
+                                                            <td className="px-6 py-4">
+                                                                {renderEmployeeStatusBadge(u.status, u)}
+                                                            </td>
+                                                            <td className="px-6 py-4">
+                                                                {u.hire_date
+                                                                    ? (() => {
+                                                                        const [day, month, year] = u.hire_date.split("-");
+                                                                        const date = new Date(`${year}-${month}-${day}`);
+                                                                        return date.toLocaleDateString("ru-RU");
+                                                                    })()
+                                                                    : "-"}
+                                                            </td>
+                                                            <td className="px-6 py-4 text-center">
+                                                                <div className="inline-flex items-center justify-center">
+                                                                    <RateCircle rate={u.rate || 1.0} />
+                                                                </div>
+                                                            </td>
+                                                            <td className={`px-2 py-4 text-right transition-opacity duration-200 ${openMenuId === u.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
+                                                                <div className="relative inline-block text-left">
+                                                                    <button
+                                                                        onClick={() => setOpenMenuId(openMenuId === u.id ? null : u.id)}
+                                                                        className="p-2 rounded-full hover:bg-gray-100"
+                                                                    >
+                                                                        <FaIcon className="fas fa-ellipsis-v"></FaIcon>
+                                                                    </button>
+
+                                                                    {openMenuId === u.id && (
+                                                                        <div className="absolute right-0 mt-2 w-52 bg-white border rounded-lg shadow-lg z-50">
+                                                                            <button
+                                                                                onClick={() => {
+                                                                                    setUserToEdit(u);
+                                                                                    setShowUserEditModal(true);
+                                                                                    setOpenMenuId(null);
+                                                                                }}
+                                                                                className="block w-full text-left px-4 py-2 hover:bg-gray-100"
+                                                                            >
+                                                                                <FaIcon className="fas fa-edit mr-2"></FaIcon>Править
+                                                                            </button>
+                                                                            <button
+                                                                                onClick={() => {
+                                                                                    setSelectedUserForHistory(u);
+                                                                                    fetchUserHistory(u.id);
+                                                                                    setOpenMenuId(null);
+                                                                                }}
+                                                                                disabled={loadingHistoryId === u.id}
+                                                                                className="block w-full text-left px-4 py-2 hover:bg-gray-100"
+                                                                            >
+                                                                                {loadingHistoryId === u.id ? (
+                                                                                    <>
+                                                                                        <FaIcon className="fas fa-spinner fa-spin mr-2"></FaIcon>
+                                                                                        Загрузка...
+                                                                                    </>
+                                                                                ) : (
+                                                                                    <>
+                                                                                        <FaIcon className="fas fa-history mr-2"></FaIcon>
+                                                                                        История
+                                                                                    </>
+                                                                                )}
+                                                                            </button>
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+                                                            </td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+
+                                                <tfoot className="bg-gray-50">
+                                                    <tr>
+                                                        <td className="px-6 py-3 font-medium text-gray-700">{sortedTrainers.length} тренеров</td>
+                                                        <td className="px-6 py-3 text-gray-700">
+                                                            {Array.from(new Set(sortedTrainers.map((u) => u.direction || "-"))).join(", ")}
+                                                        </td>
+                                                        <td className="px-6 py-3">
+                                                            <div className="flex gap-2 flex-wrap">
+                                                                {Object.entries(
+                                                                    sortedTrainers.reduce((acc, u) => {
+                                                                        const st = u.status || "working";
+                                                                        acc[st] = (acc[st] || 0) + 1;
+                                                                        return acc;
+                                                                    }, {})
+                                                                ).map(([status, count]) => (
+                                                                    <span
+                                                                        key={status}
+                                                                        title={
+                                                                            status === "working" || !status ? "Работает" : status === "unpaid_leave" ? "БС" : status === "fired" ? "Уволен" : status
+                                                                        }
+                                                                        className={`px-2 py-1 rounded-full text-xs font-medium border ${
+                                                                            status === "working" || !status ? "border-green-500 text-green-700" :
+                                                                            status === "unpaid_leave" ? "border-yellow-500 text-yellow-700" :
+                                                                            status === "fired" ? "border-red-500 text-red-700" : "border-gray-500 text-gray-700"
+                                                                        }`}
+                                                                    >
+                                                                        {count}
+                                                                    </span>
+                                                                ))}
+                                                            </div>
+                                                        </td>
+                                                        <td className="px-6 py-3"></td>
+                                                        <td className="px-6 py-3 text-center">
+                                                            <RateCircle rate={sortedTrainers.reduce((sum, u) => sum + (u.rate || 0), 0)} len={sortedTrainers.length} />
+                                                        </td>
+                                                        <td></td>
+                                                    </tr>
+                                                </tfoot>
+                                            </table>
                                         </div>
                                         );
                                     })()
