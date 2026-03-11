@@ -1880,10 +1880,21 @@ def admin_update_user():
             return jsonify({"error": "Missing required fields"}), 400
 
         user_id = int(data['user_id'])
+        target_user = db.get_user(id=user_id)
+        if not target_user:
+            return jsonify({"error": "User not found"}), 404
+        target_role = str(target_user[3] or '').strip().lower()
+
         field = data['field']
         value = data['value']
         if field in ['direction_id', 'supervisor_id']:
-            value = int(value) if value else None
+            if target_role == 'trainer':
+                value = None
+            else:
+                try:
+                    value = int(value) if value else None
+                except (TypeError, ValueError):
+                    return jsonify({"error": f"Invalid {field}"}), 400
         elif field == 'name':
             # Validate name and prevent duplicates
             if not value or not str(value).strip():
@@ -2001,9 +2012,15 @@ def admin_bulk_update_users():
         failed_user_ids = []
         for target_user_id in user_ids:
             try:
+                target_user = db.get_user(id=target_user_id)
+                if not target_user:
+                    failed_user_ids.append(target_user_id)
+                    continue
+                target_role = str(target_user[3] or '').strip().lower()
                 update_ok = True
                 for field, value in updates.items():
-                    if not db.update_user(target_user_id, field, value, changed_by=requester_id):
+                    value_to_apply = None if (target_role == 'trainer' and field in ('direction_id', 'supervisor_id')) else value
+                    if not db.update_user(target_user_id, field, value_to_apply, changed_by=requester_id):
                         update_ok = False
                         break
                 if update_ok:
@@ -3189,7 +3206,8 @@ def add_user():
         if role not in ('operator', 'trainer'):
             return jsonify({"error": "Unsupported role. Allowed: operator, trainer"}), 400
 
-        supervisor_id = int(data['supervisor_id']) if data.get('supervisor_id') else None
+        supervisor_id = None
+        direction_id = None
 
         hire_date = data.get('hire_date')
         if not hire_date:
@@ -3200,16 +3218,33 @@ def add_user():
             return jsonify({"error": "Invalid hire_date format. Use YYYY-MM-DD"}), 400
 
         if role == 'operator':
+            supervisor_raw = data.get('supervisor_id')
+            if supervisor_raw not in [None, '']:
+                try:
+                    supervisor_id = int(supervisor_raw)
+                except (TypeError, ValueError):
+                    return jsonify({"error": "Invalid supervisor_id"}), 400
             if not data.get('direction_id'):
                 return jsonify({"error": "Missing required field: direction_id"}), 400
             if not data.get('rate'):
                 return jsonify({"error": "Missing required field: rate"}), 400
+            try:
+                direction_id = int(data['direction_id'])
+            except (TypeError, ValueError):
+                return jsonify({"error": "Invalid direction_id"}), 400
+            try:
+                rate = float(data['rate'])
+            except (TypeError, ValueError):
+                return jsonify({"error": "Invalid rate"}), 400
         else:
-            # Trainer should not be tied to a supervisor.
+            # Trainers are never tied to a direction or supervisor.
             supervisor_id = None
+            direction_id = None
+            try:
+                rate = float(data['rate']) if data.get('rate') else 1.0
+            except (TypeError, ValueError):
+                return jsonify({"error": "Invalid rate"}), 400
 
-        rate = float(data['rate']) if data.get('rate') else 1.0
-        direction_id = int(data['direction_id']) if data.get('direction_id') else None
         gender = data.get('gender')
         if gender in [None, '']:
             gender = None
@@ -3242,6 +3277,15 @@ def add_user():
             gender=gender,
             birth_date=birth_date
         )
+
+        requester_header = request.headers.get('X-User-Id')
+        try:
+            changed_by = int(requester_header) if requester_header else None
+        except (TypeError, ValueError):
+            changed_by = None
+        if role == 'trainer':
+            db.update_user(user_id, 'direction_id', None, changed_by=changed_by)
+            db.update_user(user_id, 'supervisor_id', None, changed_by=changed_by)
 
         role_label = 'Тренер' if role == 'trainer' else 'Оператор'
         return jsonify({
