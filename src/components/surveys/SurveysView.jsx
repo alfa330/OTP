@@ -5,9 +5,11 @@ import FaIcon from '../common/FaIcon';
 const QUESTION_TYPES = [
     { value: 'single', label: 'Один вариант' },
     { value: 'multiple', label: 'Несколько вариантов' },
-    { value: 'rating', label: 'Рейтинг 1–5' }
+    { value: 'rating', label: 'Рейтинг 1–5' },
+    { value: 'other_only', label: 'Только "Другое"' }
 ];
 const OTHER_ANSWER_MAX_LENGTH = 500;
+const QUESTION_TYPE_OTHER_ONLY = 'other_only';
 
 const isManagerRole = (role) => ['admin', 'sv', 'supervisor', 'trainer'].includes(String(role || '').trim().toLowerCase());
 const questionTypeLabel = (type) => QUESTION_TYPES.find((item) => item.value === type)?.label || type;
@@ -166,6 +168,8 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
             .map((operator) => {
                 const id = Number(operator?.id);
                 if (!Number.isFinite(id)) return null;
+                const status = String(operator?.status || 'working').trim().toLowerCase();
+                if (status === 'fired' || status === 'dismissal') return null;
                 const directionId = operator?.direction_id != null ? String(operator.direction_id) : 'none';
                 const weeks = getTenureWeeks(operator?.hire_date);
                 return {
@@ -195,6 +199,38 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
             return byDirection && byQuery && byMin && byMax;
         });
     }, [draft.directionIds, draft.tenureWeeksMax, draft.tenureWeeksMin, normalizedOperators, operatorQuery]);
+
+    const filteredOperatorIds = useMemo(
+        () => filteredOperators.map((operator) => Number(operator.id)).filter(Number.isFinite),
+        [filteredOperators]
+    );
+    const filteredOperatorIdSet = useMemo(() => new Set(filteredOperatorIds), [filteredOperatorIds]);
+    const selectedFilteredOperatorsCount = useMemo(
+        () => (draft.operatorIds || []).reduce(
+            (count, id) => count + (filteredOperatorIdSet.has(Number(id)) ? 1 : 0),
+            0
+        ),
+        [draft.operatorIds, filteredOperatorIdSet]
+    );
+    const hasFilteredOperators = filteredOperatorIds.length > 0;
+    const allFilteredOperatorsSelected = hasFilteredOperators && selectedFilteredOperatorsCount === filteredOperatorIds.length;
+
+    const selectAllFilteredOperators = useCallback(() => {
+        setDraft((prev) => {
+            const nextSelected = new Set((prev.operatorIds || []).map((id) => Number(id)).filter(Number.isFinite));
+            filteredOperatorIds.forEach((id) => nextSelected.add(id));
+            return { ...prev, operatorIds: Array.from(nextSelected) };
+        });
+    }, [filteredOperatorIds]);
+
+    const clearFilteredOperators = useCallback(() => {
+        if (!hasFilteredOperators) return;
+        const toRemove = new Set(filteredOperatorIds);
+        setDraft((prev) => ({
+            ...prev,
+            operatorIds: (prev.operatorIds || []).filter((id) => !toRemove.has(Number(id)))
+        }));
+    }, [filteredOperatorIds, hasFilteredOperators]);
 
     const loadSurveys = useCallback(async () => {
         if (!apiBaseUrl || !user?.id) return;
@@ -396,7 +432,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
         setDraft((prev) => ({
             ...prev,
             questions: prev.questions.map((question) => {
-                if (question.id !== questionId || question.type === 'rating') return question;
+                if (question.id !== questionId || question.type === 'rating' || question.type === QUESTION_TYPE_OTHER_ONLY) return question;
                 const options = Array.isArray(question.options) ? question.options : [];
                 return { ...question, options: [...options, ''] };
             })
@@ -407,7 +443,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
         setDraft((prev) => ({
             ...prev,
             questions: prev.questions.map((question) => {
-                if (question.id !== questionId || question.type === 'rating') return question;
+                if (question.id !== questionId || question.type === 'rating' || question.type === QUESTION_TYPE_OTHER_ONLY) return question;
                 const options = Array.isArray(question.options) ? question.options : [];
                 if (options.length <= 2) return question;
                 const removedOption = String(options[optionIndex] || '').trim();
@@ -435,7 +471,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                 let nextCorrectOptions = toUniqueTrimmedList(question.correctOptions);
 
                 if (nextEnabled) {
-                    if (nextType === 'rating') {
+                    if (nextType === 'rating' || nextType === QUESTION_TYPE_OTHER_ONLY) {
                         nextType = 'single';
                         nextOptions = nextOptions.length ? nextOptions : ['', ''];
                     }
@@ -451,9 +487,11 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                 return {
                     ...question,
                     type: nextType,
-                    allowOther: nextAllowOther,
-                    options: nextType === 'rating' ? [] : (nextOptions.length ? nextOptions : ['', '']),
-                    correctOptions: nextCorrectOptions
+                    allowOther: nextType === QUESTION_TYPE_OTHER_ONLY ? true : nextAllowOther,
+                    options: (nextType === 'rating' || nextType === QUESTION_TYPE_OTHER_ONLY)
+                        ? []
+                        : (nextOptions.length ? nextOptions : ['', '']),
+                    correctOptions: nextType === QUESTION_TYPE_OTHER_ONLY ? [] : nextCorrectOptions
                 };
             })
         }));
@@ -466,7 +504,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
         setDraft((prev) => ({
             ...prev,
             questions: (prev.questions || []).map((question) => {
-                if (question.id !== questionId || question.type === 'rating') return question;
+                if (question.id !== questionId || question.type === 'rating' || question.type === QUESTION_TYPE_OTHER_ONLY) return question;
 
                 const options = toUniqueTrimmedList(question.options);
                 if (!options.includes(normalizedValue)) return question;
@@ -512,17 +550,25 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
         const clonedQuestions = sourceQuestions.length > 0
             ? sourceQuestions.map((question) => {
                 const rawType = String(question?.type || 'single');
-                const type = survey?.is_test && rawType === 'rating' ? 'single' : rawType;
+                const isOtherOnlyQuestion = (
+                    rawType === 'single'
+                    && survey?.is_test !== true
+                    && question?.allow_other === true
+                    && (!Array.isArray(question?.options) || question.options.length === 0)
+                );
+                const type = isOtherOnlyQuestion
+                    ? QUESTION_TYPE_OTHER_ONLY
+                    : (survey?.is_test && rawType === 'rating' ? 'single' : rawType);
                 return {
                     id: `q_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
                     text: String(question?.text || ''),
                     type,
                     required: question?.required !== false,
-                    allowOther: survey?.is_test ? false : (question?.allow_other === true),
-                    options: type === 'rating'
+                    allowOther: type === QUESTION_TYPE_OTHER_ONLY ? true : (survey?.is_test ? false : (question?.allow_other === true)),
+                    options: (type === 'rating' || type === QUESTION_TYPE_OTHER_ONLY)
                         ? []
                         : (Array.isArray(question?.options) ? question.options.map((option) => String(option || '')) : ['', '']),
-                    correctOptions: toUniqueTrimmedList(question?.correct_options)
+                    correctOptions: type === QUESTION_TYPE_OTHER_ONLY ? [] : toUniqueTrimmedList(question?.correct_options)
                 };
             })
             : [emptyQuestion()];
@@ -550,25 +596,34 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
         if (minWeeks != null && maxWeeks != null && minWeeks > maxWeeks) return notify('Минимальный стаж не может быть больше максимального', 'error');
 
         const normalizedQuestions = (draft.questions || []).map((question) => {
-            const normalizedOptions = question.type === 'rating'
+            const isOtherOnlyQuestion = question.type === QUESTION_TYPE_OTHER_ONLY;
+            const payloadType = isOtherOnlyQuestion ? 'single' : question.type;
+            const normalizedOptions = (payloadType === 'rating' || isOtherOnlyQuestion)
                 ? []
                 : toUniqueTrimmedList(question.options);
-            const normalizedCorrectOptions = toUniqueTrimmedList(question.correctOptions);
+            const normalizedCorrectOptions = isOtherOnlyQuestion
+                ? []
+                : toUniqueTrimmedList(question.correctOptions).filter((option) => normalizedOptions.includes(option));
             return {
                 text: String(question.text || '').trim(),
-                type: question.type,
+                type: payloadType,
                 required: !!question.required,
-                allow_other: draft.isTest ? false : (question.type === 'rating' ? false : !!question.allowOther),
+                allow_other: draft.isTest ? false : (payloadType === 'rating' ? false : (isOtherOnlyQuestion ? true : !!question.allowOther)),
                 options: normalizedOptions,
                 correct_options: normalizedCorrectOptions
             };
         });
 
         for (let i = 0; i < draft.questions.length; i += 1) {
+            const sourceQuestion = draft.questions[i] || {};
             const question = normalizedQuestions[i];
+            const isOtherOnlyQuestion = sourceQuestion.type === QUESTION_TYPE_OTHER_ONLY;
             if (!String(question.text || '').trim()) return notify(`Заполните текст вопроса #${i + 1}`, 'error');
-            if (question.type !== 'rating' && (question.options || []).length < 2) {
+            if (question.type !== 'rating' && !isOtherOnlyQuestion && (question.options || []).length < 2) {
                 return notify(`Нужно минимум 2 варианта в вопросе #${i + 1}`, 'error');
+            }
+            if (draft.isTest && isOtherOnlyQuestion) {
+                return notify(`В тесте нельзя использовать тип "Только Другое" (вопрос #${i + 1})`, 'error');
             }
             if (draft.isTest && question.type === 'rating') {
                 return notify(`В тесте нельзя использовать рейтинг (вопрос #${i + 1})`, 'error');
@@ -997,6 +1052,29 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                     className={`${inputCls} pl-8`}
                                 />
                             </div>
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                                <div className="text-[11px] text-gray-500">
+                                    По фильтрам: {selectedFilteredOperatorsCount}/{filteredOperatorIds.length} выбрано
+                                </div>
+                                <div className="flex flex-wrap items-center gap-2">
+                                    <button
+                                        type="button"
+                                        onClick={selectAllFilteredOperators}
+                                        disabled={!hasFilteredOperators || allFilteredOperatorsSelected}
+                                        className="px-2.5 py-1 text-xs rounded-lg border border-blue-200 text-blue-600 hover:bg-blue-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                                    >
+                                        Выбрать всех по фильтрам
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={clearFilteredOperators}
+                                        disabled={!hasFilteredOperators || selectedFilteredOperatorsCount === 0}
+                                        className="px-2.5 py-1 text-xs rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                                    >
+                                        Снять по фильтрам
+                                    </button>
+                                </div>
+                            </div>
                             <div className="max-h-48 overflow-y-auto border border-gray-100 rounded-xl divide-y divide-gray-50 bg-white">
                                 {filteredOperators.length === 0 && (
                                     <div className="p-3 text-xs text-gray-400 text-center">Операторы не найдены</div>
@@ -1028,7 +1106,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                 {draft.questions.map((question, index) => {
                                     const options = Array.isArray(question.options) ? question.options : [];
                                     const availableQuestionTypes = draft.isTest
-                                        ? QUESTION_TYPES.filter((item) => item.value !== 'rating')
+                                        ? QUESTION_TYPES.filter((item) => item.value !== 'rating' && item.value !== QUESTION_TYPE_OTHER_ONLY)
                                         : QUESTION_TYPES;
                                     return (
                                         <div key={question.id} className="border border-gray-200 rounded-xl p-4 space-y-3 bg-gray-50/50">
@@ -1059,14 +1137,18 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                                         const normalizedOptions = toUniqueTrimmedList(question.options);
                                                         let nextCorrectOptions = toUniqueTrimmedList(question.correctOptions)
                                                             .filter((option) => normalizedOptions.includes(option));
-                                                        if (nextType === 'single' && nextCorrectOptions.length > 1) {
+                                                        if ((nextType === 'single' || nextType === QUESTION_TYPE_OTHER_ONLY) && nextCorrectOptions.length > 1) {
                                                             nextCorrectOptions = [nextCorrectOptions[0]];
                                                         }
                                                         updateQuestion(question.id, {
                                                             type: nextType,
-                                                            allowOther: draft.isTest ? false : (nextType === 'rating' ? false : question.allowOther),
-                                                            options: nextType === 'rating' ? [] : (question.options?.length ? question.options : ['', '']),
-                                                            correctOptions: nextCorrectOptions
+                                                            allowOther: nextType === QUESTION_TYPE_OTHER_ONLY
+                                                                ? true
+                                                                : (draft.isTest ? false : (nextType === 'rating' ? false : question.allowOther)),
+                                                            options: (nextType === 'rating' || nextType === QUESTION_TYPE_OTHER_ONLY)
+                                                                ? []
+                                                                : (question.options?.length ? question.options : ['', '']),
+                                                            correctOptions: nextType === QUESTION_TYPE_OTHER_ONLY ? [] : nextCorrectOptions
                                                         });
                                                     }}
                                                     className={inputCls}
@@ -1137,6 +1219,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                                             </div>
                                                         );
                                                     })}
+                                                    {question.type !== QUESTION_TYPE_OTHER_ONLY && (
                                                     <button
                                                         type="button"
                                                         onClick={() => addQuestionOption(question.id)}
@@ -1144,10 +1227,15 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                                     >
                                                         <FaIcon className="fas fa-plus mr-1" />Добавить вариант
                                                     </button>
+                                                    )}
 
                                                     {draft.isTest ? (
                                                         <div className="text-[11px] text-emerald-600 ml-7">
                                                             Отметьте правильные варианты слева от текста ответа.
+                                                        </div>
+                                                    ) : question.type === QUESTION_TYPE_OTHER_ONLY ? (
+                                                        <div className="text-[11px] text-gray-500 ml-7">
+                                                            Для этого типа доступно только поле "Другое" без фиксированных вариантов.
                                                         </div>
                                                     ) : (
                                                         <label className="inline-flex items-center gap-2 text-xs text-gray-500 ml-7">

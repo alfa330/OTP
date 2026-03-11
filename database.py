@@ -8490,11 +8490,16 @@ class Database:
             options_norm = []
             correct_options_norm = []
             if qtype != 'rating':
+                if is_test_norm:
+                    allow_other = False
+
                 for option in (raw_question or {}).get('options') or []:
                     option_text = str(option or '').strip()
                     if option_text and option_text not in options_norm:
                         options_norm.append(option_text)
-                if len(options_norm) < 2:
+
+                is_other_only_question = (qtype == 'single' and allow_other and len(options_norm) == 0)
+                if len(options_norm) < 2 and not is_other_only_question:
                     raise ValueError(f"SURVEY_OPTIONS_REQUIRED_{idx + 1}")
 
                 for option in (raw_question or {}).get('correct_options') or []:
@@ -8503,7 +8508,6 @@ class Database:
                         correct_options_norm.append(option_text)
 
                 if is_test_norm:
-                    allow_other = False
                     if not correct_options_norm:
                         raise ValueError(f"SURVEY_CORRECT_OPTIONS_REQUIRED_{idx + 1}")
                     invalid_correct = [item for item in correct_options_norm if item not in options_norm]
@@ -8511,6 +8515,8 @@ class Database:
                         raise ValueError(f"SURVEY_CORRECT_OPTION_INVALID_{idx + 1}")
                     if qtype == 'single' and len(correct_options_norm) != 1:
                         raise ValueError(f"SURVEY_SINGLE_CORRECT_OPTION_REQUIRED_{idx + 1}")
+                elif is_other_only_question:
+                    correct_options_norm = []
             else:
                 allow_other = False
 
