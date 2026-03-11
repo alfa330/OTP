@@ -1839,7 +1839,7 @@ def get_admin_users():
                             p.id DESC
                         LIMIT 1
                     ) sp ON TRUE
-                    WHERE u.role = 'operator'
+                    WHERE u.role IN ('operator', 'trainer')
                 """)
             users = []
             for row in cursor.fetchall():
