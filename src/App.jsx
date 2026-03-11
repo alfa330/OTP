@@ -21962,7 +21962,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                             {(showSidebarEmployeesDropdown || isEmployeesClosing) && (
                                                 <div
-                                                    className={`absolute left-full top-0 ml-2 w-56 origin-top bg-white/95 text-black backdrop-blur-sm rounded-md shadow-lg border border-gray-200 z-40
+                                                    className={`absolute origin-top bg-white/95 text-black backdrop-blur-sm rounded-md shadow-lg border border-gray-200 z-40
+                                                    ${sidebarCollapsed ? 'left-full top-0 ml-2 w-56' : 'left-0 right-0 top-full mt-1'}
                                                     ${showSidebarEmployeesDropdown && !isEmployeesClosing ? "animate-dropdown" : "animate-dropdown-reverse"}`}
                                                 >
                                                     <button
