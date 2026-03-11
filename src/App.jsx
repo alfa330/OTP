@@ -1,5 +1,4 @@
 ﻿import React, { Suspense, lazy, useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { createPortal } from 'react-dom';
 import axios from 'axios';
 import _ from 'lodash';
 import Papa from 'papaparse';
@@ -17316,12 +17315,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
             const sidebarAccountRef = useRef(null);
             const sidebarEmployeesRef = useRef(null);
-            const sidebarEmployeesDropdownRef = useRef(null);
-            const sidebarMenuScrollRef = useRef(null);
             const [modalError, setModalError] = useState("");
             const [isClosing, setIsClosing] = useState(false);
             const [isEmployeesClosing, setIsEmployeesClosing] = useState(false);
-            const [sidebarEmployeesDropdownStyle, setSidebarEmployeesDropdownStyle] = useState(null);
             const [activeTab, setActiveTab] = useState("active");
             const [activeUserTab, setActiveUserTab] = useState("active");
             const [activeOperatorsTab, setActiveOperatorsTab] = useState("active");
@@ -17645,58 +17641,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             return res * dir;
             };
 
-            const updateSidebarEmployeesDropdownPosition = useCallback(() => {
-            if (typeof window === 'undefined') return;
-            if (!sidebarEmployeesRef.current) return;
-
-            const anchorRect = sidebarEmployeesRef.current.getBoundingClientRect();
-            const gap = 8;
-            const dropdownWidth = 224; // w-56
-            const approxDropdownHeight = 132;
-            const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
-            const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
-
-            let left = anchorRect.right + gap;
-            if (left + dropdownWidth > viewportWidth - gap) {
-                left = Math.max(gap, anchorRect.left - dropdownWidth - gap);
-            }
-
-            let top = anchorRect.top;
-            if (top + approxDropdownHeight > viewportHeight - gap) {
-                top = Math.max(gap, viewportHeight - approxDropdownHeight - gap);
-            }
-
-            setSidebarEmployeesDropdownStyle({
-                top: Math.round(top),
-                left: Math.round(left)
-            });
-            }, []);
-
-            useEffect(() => {
-            if (!(showSidebarEmployeesDropdown || isEmployeesClosing)) {
-                setSidebarEmployeesDropdownStyle(null);
-                return;
-            }
-
-            const syncDropdownPosition = () => updateSidebarEmployeesDropdownPosition();
-            syncDropdownPosition();
-
-            window.addEventListener('resize', syncDropdownPosition);
-            window.addEventListener('scroll', syncDropdownPosition, true);
-            const menuScrollEl = sidebarMenuScrollRef.current;
-            if (menuScrollEl) {
-                menuScrollEl.addEventListener('scroll', syncDropdownPosition, { passive: true });
-            }
-
-            return () => {
-                window.removeEventListener('resize', syncDropdownPosition);
-                window.removeEventListener('scroll', syncDropdownPosition, true);
-                if (menuScrollEl) {
-                menuScrollEl.removeEventListener('scroll', syncDropdownPosition);
-                }
-            };
-            }, [showSidebarEmployeesDropdown, isEmployeesClosing, sidebarCollapsed, mobileMenuOpen, updateSidebarEmployeesDropdownPosition]);
-
             const handleToggleDropdown = (forceClose = null) => {
             if (forceClose === true) {
                 // закрытие с анимацией
@@ -17741,7 +17685,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             } else {
                 setShowSidebarAccountDropdown(false);
                 setIsClosing(false);
-                updateSidebarEmployeesDropdownPosition();
                 setShowSidebarEmployeesDropdown(true);
             }
             };
@@ -17763,10 +17706,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
                 }
                 if (sidebarEmployeesRef.current && !sidebarEmployeesRef.current.contains(e.target)) {
-                const clickedInsideEmployeesDropdown =
-                    sidebarEmployeesDropdownRef.current &&
-                    sidebarEmployeesDropdownRef.current.contains(e.target);
-                if (showSidebarEmployeesDropdown && !clickedInsideEmployeesDropdown) {
+                if (showSidebarEmployeesDropdown) {
                     handleToggleEmployeesDropdown(true);
                 }
                 }
@@ -22004,7 +21944,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 <img src="https://iili.io/Kfw7PQp.png" alt="Site Icon" className="w-10 h-10 object-contain"/>
                               </span>
                             </h1>
-                            <ul className="space-y-2 flex-1 min-h-0 sidebar-menu-scroll" ref={sidebarMenuScrollRef}>
+                            <ul className={`space-y-2 flex-1 min-h-0 sidebar-menu-scroll relative z-10 ${showSidebarEmployeesDropdown ? 'sidebar-menu-overflow-visible' : ''}`}>
                                 {user.role === 'admin' && (
                                     <>
                                         <li className="relative" ref={sidebarEmployeesRef}>
@@ -22020,18 +21960,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <FaIcon className="fas fa-chevron-right ml-auto opacity-0 transform translate-x-2 transition-all duration-300 group-hover:opacity-100 group-hover:translate-x-0 sidebar-text"></FaIcon>
                                             </button>
 
-                                            {(showSidebarEmployeesDropdown || isEmployeesClosing) && typeof document !== 'undefined' && createPortal(
+                                            {(showSidebarEmployeesDropdown || isEmployeesClosing) && (
                                                 <div
-                                                    ref={sidebarEmployeesDropdownRef}
-                                                    className={`origin-top bg-white/95 text-black backdrop-blur-sm rounded-md shadow-lg border border-gray-200 w-56
+                                                    className={`absolute origin-top bg-white/95 text-black backdrop-blur-sm rounded-md shadow-lg border border-gray-200 z-40
+                                                    left-full top-0 ml-2 w-56
                                                     ${showSidebarEmployeesDropdown && !isEmployeesClosing ? "animate-dropdown" : "animate-dropdown-reverse"}`}
-                                                    style={{
-                                                        position: 'fixed',
-                                                        top: sidebarEmployeesDropdownStyle?.top ?? 0,
-                                                        left: sidebarEmployeesDropdownStyle?.left ?? 0,
-                                                        zIndex: 70,
-                                                        visibility: sidebarEmployeesDropdownStyle ? 'visible' : 'hidden'
-                                                    }}
                                                 >
                                                     <button
                                                         onClick={() => { setView('sv_list'); setMobileMenuOpen(false); handleToggleEmployeesDropdown(true); }}
@@ -22057,8 +21990,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     >
                                                         <FaIcon className="fas fa-book mr-2"></FaIcon> Тренеры
                                                     </button>
-                                                </div>,
-                                                document.body
+                                                </div>
                                             )}
                                         </li>
                                         <li>
@@ -22279,7 +22211,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 </li>
                                 */}
                             </ul>
-                            <ul className="mt-3 pt-3 border-t border-white/30 space-y-2">
+                            <ul className="mt-3 pt-3 border-t border-white/30 space-y-2 relative z-20">
                                 <li className="relative" ref={sidebarAccountRef}>
                                     <button
                                         onClick={handleToggleDropdown}
