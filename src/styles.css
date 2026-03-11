@@ -179,8 +179,6 @@
     }
     .sidebar-menu-scroll.sidebar-menu-overflow-visible {
       overflow: visible;
-      position: relative;
-      z-index: 2;
     }
     .sidebar-menu-scroll::-webkit-scrollbar {
       width: 0;
