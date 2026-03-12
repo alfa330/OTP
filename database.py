@@ -481,9 +481,20 @@ class Database:
                     audio_path TEXT,
                     scores JSONB NOT NULL DEFAULT '[]',
                     criterion_comments JSONB NOT NULL DEFAULT '[]',
+                    etalon_scores JSONB NOT NULL DEFAULT '[]',
+                    etalon_criterion_comments JSONB NOT NULL DEFAULT '[]',
+                    etalon_updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    etalon_updated_at TIMESTAMP,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
+            """)
+            cursor.execute("""
+                ALTER TABLE calibration_room_calls
+                    ADD COLUMN IF NOT EXISTS etalon_scores JSONB NOT NULL DEFAULT '[]',
+                    ADD COLUMN IF NOT EXISTS etalon_criterion_comments JSONB NOT NULL DEFAULT '[]',
+                    ADD COLUMN IF NOT EXISTS etalon_updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    ADD COLUMN IF NOT EXISTS etalon_updated_at TIMESTAMP;
             """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS calibration_room_call_evaluations (
