@@ -245,9 +245,12 @@ def get_pool():
 
 class Database:
     SURVEY_OTHER_ANSWER_MAX_LENGTH = 500
+    SCHEMA_INIT_LOCK_KEY = 915904137
+    SCHEMA_INIT_LOCK_TIMEOUT_SEC = 120
+    SCHEMA_INIT_RETRY_ATTEMPTS = 4
 
     def __init__(self):
-        self._init_db()
+        self._init_db_with_retry()
 
     @contextmanager
     def _get_connection(self):
@@ -270,6 +273,56 @@ class Database:
                 raise e
             finally:
                 cursor.close()
+
+    @contextmanager
+    def _schema_init_lock(self):
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            acquired = False
+            started_at = time.time()
+            try:
+                while True:
+                    cursor.execute("SELECT pg_try_advisory_lock(%s)", (self.SCHEMA_INIT_LOCK_KEY,))
+                    acquired = bool(cursor.fetchone()[0])
+                    if acquired:
+                        break
+                    if (time.time() - started_at) >= float(self.SCHEMA_INIT_LOCK_TIMEOUT_SEC):
+                        raise TimeoutError("Timeout waiting for schema init advisory lock")
+                    time.sleep(0.25)
+                yield
+            finally:
+                if acquired:
+                    try:
+                        cursor.execute("SELECT pg_advisory_unlock(%s)", (self.SCHEMA_INIT_LOCK_KEY,))
+                        conn.commit()
+                    except Exception:
+                        conn.rollback()
+                        logging.exception("Failed to release schema init advisory lock")
+                cursor.close()
+
+    def _init_db_with_retry(self):
+        last_error = None
+        for attempt in range(1, int(self.SCHEMA_INIT_RETRY_ATTEMPTS) + 1):
+            try:
+                with self._schema_init_lock():
+                    self._init_db()
+                return
+            except psycopg2.Error as exc:
+                last_error = exc
+                # 40P01 = deadlock_detected
+                if getattr(exc, "pgcode", None) == '40P01' and attempt < int(self.SCHEMA_INIT_RETRY_ATTEMPTS):
+                    delay = min(3.0, 0.4 * attempt)
+                    logging.warning(
+                        "Deadlock during DB init (attempt %s/%s). Retrying in %.1fs",
+                        attempt,
+                        self.SCHEMA_INIT_RETRY_ATTEMPTS,
+                        delay
+                    )
+                    time.sleep(delay)
+                    continue
+                raise
+        if last_error:
+            raise last_error
 
     def _init_db(self):
         with self._get_cursor() as cursor:
