@@ -5544,6 +5544,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [plannerStatusTimelineZoom, setPlannerStatusTimelineZoom] = useState(1);
             const [plannerStatusSpecialViewEnabled, setPlannerStatusSpecialViewEnabled] = useState(false);
             const [plannerStatusModalFocus, setPlannerStatusModalFocus] = useState(null);
+            const [plannerStatusModalSection, setPlannerStatusModalSection] = useState('report');
             const [plannerStatusHourlyDayKey, setPlannerStatusHourlyDayKey] = useState('');
             const [plannerStatusHourlyExpandedKey, setPlannerStatusHourlyExpandedKey] = useState('');
             const [showBreakRulesSettingsModal, setShowBreakRulesSettingsModal] = useState(false);
@@ -7494,6 +7495,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     dateKey: String(dateKey),
                     operatorName: String(op?.name || '').trim()
                 });
+                setPlannerStatusModalSection('report');
                 setPlannerStatusHourlyDayKey(String(dateKey));
                 setPlannerStatusHourlyExpandedKey('');
                 setPlannerStatusAnomalyExpandedDays({ [String(dateKey)]: true });
@@ -7514,6 +7516,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const analysis = analyzePlannerStatusTransitionsCsv(csvText);
                     setPlannerStatusAnomalyFileName(file.name || '');
                     setPlannerStatusAnomalyAnalysis(analysis);
+                    setPlannerStatusModalSection('report');
                     setPlannerStatusModalFocus(null);
                     setPlannerStatusHourlyDayKey('');
                     setPlannerStatusHourlyExpandedKey('');
@@ -7525,6 +7528,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 } catch (error) {
                     console.error('Error analyzing status anomaly csv:', error);
                     setPlannerStatusAnomalyAnalysis(null);
+                    setPlannerStatusModalSection('report');
                     setPlannerStatusModalFocus(null);
                     setPlannerStatusHourlyDayKey('');
                     setPlannerStatusHourlyExpandedKey('');
@@ -11538,12 +11542,28 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <button
                                                     onClick={() => {
                                                         setShowPlannerTopActionsMenu(false);
+                                                        setPlannerStatusModalSection('report');
                                                         setShowPlannerStatusAnomalyModal(true);
                                                     }}
                                                     className="w-full px-3 py-2 rounded-xl border border-violet-200 bg-violet-50 hover:bg-violet-100 text-violet-700 text-sm font-medium flex items-center gap-2"
                                                 >
                                                     <FaIcon className="fas fa-chart-line"></FaIcon>
                                                     Открыть отчет статусов
+                                                </button>
+                                            )}
+                                            {plannerStatusAnomalyAnalysis && (
+                                                <button
+                                                    onClick={() => {
+                                                        setShowPlannerTopActionsMenu(false);
+                                                        setPlannerStatusModalSection('hourly');
+                                                        setPlannerStatusHourlyExpandedKey('');
+                                                        setShowPlannerStatusAnomalyModal(true);
+                                                    }}
+                                                    className="w-full px-3 py-2 rounded-xl border border-blue-200 bg-blue-50 hover:bg-blue-100 text-blue-700 text-sm font-medium flex items-center gap-2"
+                                                    title="Почасовая группировка операторов на смене"
+                                                >
+                                                    <FaIcon className="fas fa-table"></FaIcon>
+                                                    Почасовая группировка
                                                 </button>
                                             )}
 
@@ -11616,6 +11636,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         setPlannerStatusAnomalyFileName('');
                                                         setPlannerStatusAnomalyError('');
                                                         setPlannerStatusSpecialViewEnabled(false);
+                                                        setPlannerStatusModalSection('report');
                                                         setPlannerStatusModalFocus(null);
                                                         setPlannerStatusHourlyDayKey('');
                                                         setPlannerStatusHourlyExpandedKey('');
@@ -13570,6 +13591,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     open={!!showPlannerStatusAnomalyModal && user?.role !== 'operator'}
                     onClose={() => {
                         setShowPlannerStatusAnomalyModal(false);
+                        setPlannerStatusModalSection('report');
                         setPlannerStatusModalFocus(null);
                         setPlannerStatusHourlyDayKey('');
                         setPlannerStatusHourlyExpandedKey('');
@@ -13583,6 +13605,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         const parseErrorsPreview = Array.isArray(analysis?.parseErrorsPreview) ? analysis.parseErrorsPreview : [];
                         const expandedDays = plannerStatusAnomalyExpandedDays || {};
                         const onlyAnomalies = !!plannerStatusAnomalyOnly;
+                        const statusModalSection = plannerStatusModalSection === 'hourly' ? 'hourly' : 'report';
                         const modalFocus = plannerStatusModalFocus && typeof plannerStatusModalFocus === 'object' ? plannerStatusModalFocus : null;
                         const focusedDayKey = String(modalFocus?.dateKey || '');
                         const focusedOperatorNameKey = plannerStatusNormalizeOperatorName(modalFocus?.operatorName || '');
@@ -13721,13 +13744,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         const rawStatusKey = plannerStatusNormalizeKey(
                                             activeStatus?.rawStateKey || activeStatus?.stateKey || activeStatus?.rawStateName || activeStatus?.stateName || ''
                                         );
+                                        const statusNameKey = plannerStatusNormalizeKey(statusName);
+                                        const isDisconnectedStatus = rawStatusKey === 'отключен' || rawStatusKey === 'отключена';
                                         return {
                                             operatorName: item.operatorName,
                                             statusName,
                                             statusNote: String(activeStatus?.stateNote || '').trim(),
-                                            isBreakStatus: rawStatusKey === 'перерыв'
+                                            isBreakStatus: rawStatusKey === 'перерыв' && statusNameKey !== 'перезвон',
+                                            isDisconnectedStatus
                                         };
                                     })
+                                    .filter(item => !item.isDisconnectedStatus)
                                     .sort((a, b) => a.operatorName.localeCompare(b.operatorName, 'ru'));
                                 return {
                                     hour,
@@ -13764,6 +13791,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <button
                                         onClick={() => {
                                             setShowPlannerStatusAnomalyModal(false);
+                                            setPlannerStatusModalSection('report');
                                             setPlannerStatusModalFocus(null);
                                             setPlannerStatusHourlyDayKey('');
                                             setPlannerStatusHourlyExpandedKey('');
@@ -13825,6 +13853,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </button>
                                     )}
                                     {hasAnalysis && (
+                                        <div className="inline-flex items-center rounded-lg border border-slate-200 bg-white p-1">
+                                            <button
+                                                type="button"
+                                                onClick={() => setPlannerStatusModalSection('report')}
+                                                className={`px-2.5 py-1.5 rounded-md text-xs font-medium ${statusModalSection === 'report' ? 'bg-violet-100 text-violet-800' : 'text-slate-600 hover:bg-slate-50'}`}
+                                                title="Показать отчет по статусам"
+                                            >
+                                                Отчет
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={() => setPlannerStatusModalSection('hourly')}
+                                                className={`px-2.5 py-1.5 rounded-md text-xs font-medium ${statusModalSection === 'hourly' ? 'bg-blue-100 text-blue-800' : 'text-slate-600 hover:bg-slate-50'}`}
+                                                title="Показать почасовую группировку"
+                                            >
+                                                Группировка
+                                            </button>
+                                        </div>
+                                    )}
+                                    {hasAnalysis && (
                                         focusedDayKey ? (
                                             <button
                                                 type="button"
@@ -13843,6 +13891,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 setPlannerStatusAnomalyAnalysis(null);
                                                 setPlannerStatusAnomalyError('');
                                                 setPlannerStatusAnomalyFileName('');
+                                                setPlannerStatusModalSection('report');
                                                 setPlannerStatusModalFocus(null);
                                                 setPlannerStatusHourlyDayKey('');
                                                 setPlannerStatusHourlyExpandedKey('');
@@ -13871,7 +13920,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                 {hasAnalysis && (
                                     <div className="space-y-4">
-                                        {focusedDayKey && (
+                                        {statusModalSection === 'report' && focusedDayKey && (
                                             <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-900">
                                                 <div className="font-semibold">Фокус по таймлайну</div>
                                                 <div className="text-xs mt-1">
@@ -13880,6 +13929,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </div>
                                             </div>
                                         )}
+                                        {statusModalSection === 'report' && (
                                         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                                             <div className="rounded-xl border bg-white p-3">
                                                 <div className="text-[11px] uppercase tracking-wide text-slate-500">Событий</div>
@@ -13910,8 +13960,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </div>
                                             </div>
                                         </div>
+                                        )}
 
-                                        {(invalidRowsPreview.length > 0 || parseErrorsPreview.length > 0) && (
+                                        {statusModalSection === 'report' && (invalidRowsPreview.length > 0 || parseErrorsPreview.length > 0) && (
                                             <div className="rounded-xl border border-amber-200 bg-amber-50 p-3">
                                                 <div className="text-sm font-semibold text-amber-900 mb-2">Предупреждения по CSV</div>
                                                 {invalidRowsPreview.length > 0 && (
@@ -13941,6 +13992,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </div>
                                         )}
 
+                                        {statusModalSection === 'report' && (
                                         <div className="rounded-xl border bg-white overflow-hidden">
                                             <div className="px-4 py-3 border-b bg-slate-50">
                                                 <div className="font-semibold text-slate-900">Итого по операторам (Без телефона)</div>
@@ -13987,12 +14039,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 )}
                                             </div>
                                         </div>
+                                        )}
 
+                                        {statusModalSection === 'hourly' && (
                                         <div className="rounded-xl border bg-white overflow-hidden">
                                             <div className="px-4 py-3 border-b bg-slate-50">
                                                 <div className="font-semibold text-slate-900">Почасовая группировка на смене</div>
                                                 <div className="text-xs text-slate-500 mt-0.5">
-                                                    Отдельная сводка по каждому часу. Статус «Перерыв» считается как «на смене».
+                                                    Отдельная сводка по каждому часу. Статус «Перерыв» считается как «на смене», статус «Отключен» не учитывается.
                                                 </div>
                                             </div>
                                             <div className="p-3 space-y-3">
@@ -14108,7 +14162,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 )}
                                             </div>
                                         </div>
+                                        )}
 
+                                        {statusModalSection === 'report' && (
                                         <div className="rounded-xl border bg-white overflow-hidden">
                                             <div className="px-4 py-3 border-b bg-slate-50">
                                                 <div className="font-semibold text-slate-900">Итоги по дням</div>
@@ -14438,6 +14494,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 })}
                                             </div>
                                         </div>
+                                        )}
                                     </div>
                                 )}
                             </>
