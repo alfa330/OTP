@@ -115,7 +115,7 @@ const calibrationScoreLabel = (value) => {
     if (v === 'Correct') return 'Корректно';
     if (v === 'N/A') return 'N/A';
     if (v === 'Incorrect') return 'Ошибка';
-    if (v === 'Deficiency') return 'Недочет';
+    if (v === 'Deficiency') return 'Недочёт';
     if (v === 'Error') return 'Критич. ошибка';
     return v || '—';
 };
@@ -1010,6 +1010,7 @@ const App = ({ user, initialSelection }) => {
     const isAdminRole = normalizedRole === 'admin';
     const isSupervisorRole = normalizedRole === 'sv' || normalizedRole === 'supervisor';
     const canUseCalibration = isAdminRole || isSupervisorRole;
+    const canManageCalibrationRooms = isAdminRole || isSupervisorRole;
     const [calls, setCalls] = useState([]);
     const [directions, setDirections] = useState([]);
     const [operators, setOperators] = useState([]);
@@ -1379,7 +1380,7 @@ const App = ({ user, initialSelection }) => {
                 setShowEvalModal(true);
                 setEvalModalMode('calibration_add_call');
             } else {
-                emitCallEvaluationToast('Комната создана. Выберите супервайзера, затем добавьте звонок.', 'info');
+                emitCallEvaluationToast('Комната создана. Загрузите операторов и добавьте звонок.', 'info');
             }
         }
     }, [fetchCalibrationRooms, fetchCalibrationRoomDetail, operators.length]);
@@ -1537,7 +1538,7 @@ const App = ({ user, initialSelection }) => {
         );
     }, [calibrationCall, calibrationCriteria.length]);
 
-    const isEtalonDirty = !!(isAdminRole && calibrationCall && calibrationCriteria.length) && calibrationCriteria.some((_, idx) => {
+    const isEtalonDirty = !!(canManageCalibrationRooms && calibrationCall && calibrationCriteria.length) && calibrationCriteria.some((_, idx) => {
         const srcScore = normalizeCalibrationScore(
             calibrationCall?.etalon_scores?.[idx] ?? calibrationCall?.scores?.[idx] ?? 'Correct'
         );
@@ -1548,9 +1549,21 @@ const App = ({ user, initialSelection }) => {
         const draftComment = String(etalonCommentsDraft[idx] ?? '');
         return draftScore !== srcScore || draftComment !== srcComment;
     });
+    const hasEtalonValidationError = !!(canManageCalibrationRooms && calibrationCriteria.length) && calibrationCriteria.some((criterion, idx) => {
+        const score = normalizeCalibrationScore(etalonScoresDraft[idx] ?? 'Correct');
+        const comment = String(etalonCommentsDraft[idx] ?? '').trim();
+        if (score === 'Error' || score === 'Incorrect') return !comment;
+        // In regular evaluation deficiency is treated as negative and usually commented.
+        if (score === 'Deficiency' && criterion?.deficiency) return !comment;
+        return false;
+    });
 
     const handleSaveEtalon = useCallback(async () => {
-        if (!isAdminRole || !calibrationCall?.id || !activeCalibrationRoomId) return;
+        if (!canManageCalibrationRooms || !calibrationCall?.id || !activeCalibrationRoomId) return;
+        if (hasEtalonValidationError) {
+            emitCallEvaluationToast('Заполните комментарии по ошибкам/недочетам в эталоне', 'error');
+            return;
+        }
         setIsSavingEtalon(true);
         try {
             const r = await authFetch(
@@ -1579,12 +1592,13 @@ const App = ({ user, initialSelection }) => {
             setIsSavingEtalon(false);
         }
     }, [
-        isAdminRole,
+        canManageCalibrationRooms,
         calibrationCall,
         activeCalibrationRoomId,
         userId,
         etalonScoresDraft,
         etalonCommentsDraft,
+        hasEtalonValidationError,
         fetchCalibrationRoomDetail,
         fetchCalibrationRooms
     ]);
@@ -1882,7 +1896,7 @@ const App = ({ user, initialSelection }) => {
                                 <div className="empty-state">
                                     <div className="empty-state-icon"><FaIcon className="fas fa-door-open" /></div>
                                     <h3>Нет комнат калибровки</h3>
-                                    <p>{isAdminRole ? 'Создайте первую комнату калибровки для выбранного месяца.' : 'Пока нет доступных комнат на выбранный месяц.'}</p>
+                                    <p>{canManageCalibrationRooms ? 'Создайте первую комнату калибровки для выбранного месяца.' : 'Пока нет доступных комнат на выбранный месяц.'}</p>
                                 </div>
                             ) : (
                                 <div className="calibration-cards">
@@ -1929,12 +1943,12 @@ const App = ({ user, initialSelection }) => {
                                                 </div>
                                             </div>
                                             <div style={{display:'flex', gap:8, flexWrap:'wrap'}}>
-                                                {isAdminRole && (
+                                                {canManageCalibrationRooms && (
                                                     <button
                                                         className="btn btn-primary btn-sm"
                                                         onClick={() => {
                                                             if (!operators.length) {
-                                                                emitCallEvaluationToast('Выберите супервайзера, чтобы загрузить операторов', 'error');
+                                                                emitCallEvaluationToast('Нет доступных операторов для добавления звонка', 'error');
                                                                 return;
                                                             }
                                                             setEditingEval(null);
@@ -2045,36 +2059,98 @@ const App = ({ user, initialSelection }) => {
                                                                     </span>
                                                                 </td>
                                                                 <td>
-                                                                    {isAdminRole ? (
-                                                                        <div style={{display:'flex', flexDirection:'column', gap:6}}>
-                                                                            <select
-                                                                                className="select"
-                                                                                value={normalizeCalibrationScore(etalonScoresDraft[row.criterion_index] ?? row.etalon?.score ?? row.benchmark?.score ?? 'Correct')}
-                                                                                onChange={(e) => {
-                                                                                    const next = [...etalonScoresDraft];
-                                                                                    next[row.criterion_index] = normalizeCalibrationScore(e.target.value);
-                                                                                    setEtalonScoresDraft(next);
-                                                                                }}
-                                                                            >
-                                                                                <option value="Correct">Корректно</option>
-                                                                                <option value="N/A">N/A</option>
-                                                                                <option value="Incorrect">Ошибка</option>
-                                                                                <option value="Deficiency">Недочет</option>
-                                                                                <option value="Error">Критич. ошибка</option>
-                                                                            </select>
-                                                                            <textarea
-                                                                                className="textarea"
-                                                                                rows={2}
-                                                                                style={{minWidth:170}}
-                                                                                value={etalonCommentsDraft[row.criterion_index] ?? ''}
-                                                                                onChange={(e) => {
-                                                                                    const next = [...etalonCommentsDraft];
-                                                                                    next[row.criterion_index] = e.target.value;
-                                                                                    setEtalonCommentsDraft(next);
-                                                                                }}
-                                                                                placeholder="Комментарий эталона (необязательно)"
-                                                                            />
-                                                                        </div>
+                                                                    {canManageCalibrationRooms ? (
+                                                                        (() => {
+                                                                            const criterionMeta = calibrationCriteria[row.criterion_index] || {};
+                                                                            const etalonScore = normalizeCalibrationScore(
+                                                                                etalonScoresDraft[row.criterion_index] ?? row.etalon?.score ?? row.benchmark?.score ?? 'Correct'
+                                                                            );
+                                                                            const etalonComment = etalonCommentsDraft[row.criterion_index] ?? '';
+                                                                            const isNeg = etalonScore === 'Error' || etalonScore === 'Incorrect' || etalonScore === 'Deficiency';
+                                                                            const isCommentRequired = isNeg;
+                                                                            return (
+                                                                                <div style={{display:'flex', flexDirection:'column', gap:6, minWidth: 210}}>
+                                                                                    <div className="score-toggles">
+                                                                                        <ScoreToggle
+                                                                                            label="Корректно"
+                                                                                            value="Correct"
+                                                                                            active={etalonScore === 'Correct'}
+                                                                                            onClick={() => {
+                                                                                                const next = [...etalonScoresDraft];
+                                                                                                next[row.criterion_index] = 'Correct';
+                                                                                                setEtalonScoresDraft(next);
+                                                                                            }}
+                                                                                        />
+                                                                                        <ScoreToggle
+                                                                                            label="N/A"
+                                                                                            value="na"
+                                                                                            active={etalonScore === 'N/A'}
+                                                                                            onClick={() => {
+                                                                                                const next = [...etalonScoresDraft];
+                                                                                                next[row.criterion_index] = 'N/A';
+                                                                                                setEtalonScoresDraft(next);
+                                                                                            }}
+                                                                                        />
+                                                                                        {!row.is_critical && (
+                                                                                            <>
+                                                                                                <ScoreToggle
+                                                                                                    label="Ошибка"
+                                                                                                    value="Incorrect"
+                                                                                                    active={etalonScore === 'Incorrect'}
+                                                                                                    onClick={() => {
+                                                                                                        const next = [...etalonScoresDraft];
+                                                                                                        next[row.criterion_index] = 'Incorrect';
+                                                                                                        setEtalonScoresDraft(next);
+                                                                                                    }}
+                                                                                                />
+                                                                                                {!!criterionMeta?.deficiency && (
+                                                                                                    <ScoreToggle
+                                                                                                        label="Недочёт"
+                                                                                                        value="Deficiency"
+                                                                                                        active={etalonScore === 'Deficiency'}
+                                                                                                        onClick={() => {
+                                                                                                            const next = [...etalonScoresDraft];
+                                                                                                            next[row.criterion_index] = 'Deficiency';
+                                                                                                            setEtalonScoresDraft(next);
+                                                                                                        }}
+                                                                                                    />
+                                                                                                )}
+                                                                                            </>
+                                                                                        )}
+                                                                                        {row.is_critical && (
+                                                                                            <ScoreToggle
+                                                                                                label="Критич. ошибка"
+                                                                                                value="Error"
+                                                                                                active={etalonScore === 'Error'}
+                                                                                                onClick={() => {
+                                                                                                    const next = [...etalonScoresDraft];
+                                                                                                    next[row.criterion_index] = 'Error';
+                                                                                                    setEtalonScoresDraft(next);
+                                                                                                }}
+                                                                                            />
+                                                                                        )}
+                                                                                    </div>
+                                                                                    {(isNeg || String(etalonComment || '').trim().length > 0) && (
+                                                                                        <div className="comment-area">
+                                                                                            <textarea
+                                                                                                className="textarea"
+                                                                                                rows={2}
+                                                                                                value={etalonComment}
+                                                                                                onChange={(e) => {
+                                                                                                    const next = [...etalonCommentsDraft];
+                                                                                                    next[row.criterion_index] = e.target.value;
+                                                                                                    setEtalonCommentsDraft(next);
+                                                                                                }}
+                                                                                                placeholder={isNeg ? `Укажите причину ошибки в критерии "${row.criterion_name}"` : 'Комментарий (необязательно)'}
+                                                                                            />
+                                                                                            {isCommentRequired && !String(etalonComment || '').trim() && (
+                                                                                                <div className="error-text">Комментарий обязателен</div>
+                                                                                            )}
+                                                                                        </div>
+                                                                                    )}
+                                                                                </div>
+                                                                            );
+                                                                        })()
                                                                     ) : (
                                                                         <>
                                                                             <div>{calibrationScoreLabel(row.etalon?.score ?? row.benchmark?.score)}</div>
@@ -2111,11 +2187,11 @@ const App = ({ user, initialSelection }) => {
                                                             Есть расхождение по критическому критерию: итоговый процент = 0%.
                                                         </span>
                                                     )}
-                                                    {isAdminRole && (
+                                                    {canManageCalibrationRooms && (
                                                         <button
                                                             className="btn btn-primary btn-sm"
                                                             onClick={handleSaveEtalon}
-                                                            disabled={!isEtalonDirty || isSavingEtalon}
+                                                            disabled={!isEtalonDirty || hasEtalonValidationError || isSavingEtalon}
                                                         >
                                                             {isSavingEtalon ? <><span className="spinner" /> Сохранение...</> : <><FaIcon className="fas fa-save" /> Сохранить эталон</>}
                                                         </button>
@@ -2132,7 +2208,7 @@ const App = ({ user, initialSelection }) => {
                                 {`${calibrationRooms.length} комнат · ${months.find(m=>m.value===selectedMonth)?.label || selectedMonth}`}
                             </span>
                             <div style={{display:'flex',gap:8}}>
-                                {isAdminRole && (
+                                {canManageCalibrationRooms && (
                                     <button
                                         className="btn btn-primary btn-sm"
                                         onClick={() => setShowCalibrationCreateModal(true)}
