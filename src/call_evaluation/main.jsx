@@ -1994,7 +1994,7 @@ const App = ({ user, initialSelection }) => {
                                                     onClick={handleExportCalibrationRoom}
                                                     disabled={isCalibrationExporting}
                                                 >
-                                                    {isCalibrationExporting ? <><span className="spinner" /> Выгрузка...</> : <><FaIcon className="fas fa-file-export" /> Выгрузить Excel</>}
+                                                    {isCalibrationExporting ? <><span className="spinner" /> Выгрузка...</> : <><FaIcon className="fas fa-file-excel" /> Выгрузить Excel</>}
                                                 </button>
                                                 {canManageCalibrationRooms && (
                                                     <button
