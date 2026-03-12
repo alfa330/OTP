@@ -114,7 +114,7 @@ def _is_allowed_origin(origin):
 CORS(app, resources={
     r"/api/*": {
         "origins": list(ALLOWED_ORIGINS) + [r"http://localhost:\d+", r"http://127\.0\.0\.1:\d+"],
-        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         "allow_headers": ["Content-Type", "X-API-Key", "X-User-Id", "Authorization", "X-Refresh-Token"],
         "supports_credentials": True,
         "max_age": 86400
