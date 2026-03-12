@@ -605,13 +605,10 @@ def _sanitize_evaluations_for_access(evaluations, reveal_sensitive):
 
 def _authorize_operator_scope(requester, requester_id, operator_id):
     role = requester[3]
-    if role == 'admin':
+    if role == 'admin' or role in ('sv', 'supervisor'):
         return True
     if role == 'operator':
         return requester_id == operator_id
-    if role in ('sv', 'supervisor'):
-        operator = db.get_user(id=operator_id)
-        return bool(operator and operator[3] == 'operator' and operator[6] == requester_id)
     return False
 
 
