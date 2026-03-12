@@ -1031,6 +1031,7 @@ const App = ({ user, initialSelection }) => {
     const [activeSection, setActiveSection] = useState('journal');
     const [calibrationRooms, setCalibrationRooms] = useState([]);
     const [isCalibrationLoading, setIsCalibrationLoading] = useState(false);
+    const [isCalibrationExporting, setIsCalibrationExporting] = useState(false);
     const [activeCalibrationRoomId, setActiveCalibrationRoomId] = useState(null);
     const [activeCalibrationCallId, setActiveCalibrationCallId] = useState(null);
     const [calibrationDetail, setCalibrationDetail] = useState(null);
@@ -1410,6 +1411,51 @@ const App = ({ user, initialSelection }) => {
             setOpeningCalibrationCallId((prev) => (Number(prev) === Number(callId) ? null : prev));
         }
     }, [activeCalibrationRoomId, activeCalibrationCallId, openingCalibrationCallId, fetchCalibrationRoomDetail]);
+
+    const handleExportCalibrationRoom = useCallback(async () => {
+        if (!activeCalibrationRoomId || !userId || isCalibrationExporting) return;
+        setIsCalibrationExporting(true);
+        try {
+            const r = await authFetch(
+                `${API_BASE_URL}/api/call_calibration/rooms/${activeCalibrationRoomId}/export_excel`,
+                { headers: { 'X-User-Id': userId } }
+            );
+            if (!r.ok) {
+                const d = await readJsonSafe(r);
+                throw new Error(d?.error || 'Не удалось выгрузить результаты калибровки');
+            }
+
+            const blob = await r.blob();
+            const contentDisposition = r.headers.get('content-disposition') || '';
+            let filename = `calibration_room_${activeCalibrationRoomId}.xlsx`;
+            const utf8NameMatch = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i);
+            const plainNameMatch = contentDisposition.match(/filename=\"?([^\";]+)\"?/i);
+            if (utf8NameMatch?.[1]) {
+                try {
+                    filename = decodeURIComponent(utf8NameMatch[1]);
+                } catch {
+                    filename = utf8NameMatch[1];
+                }
+            } else if (plainNameMatch?.[1]) {
+                filename = plainNameMatch[1];
+            }
+
+            const objectUrl = window.URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = objectUrl;
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            window.URL.revokeObjectURL(objectUrl);
+
+            emitCallEvaluationToast('Результаты калибровки выгружены в Excel', 'success');
+        } catch (e) {
+            emitCallEvaluationToast('Ошибка выгрузки: ' + e.message, 'error');
+        } finally {
+            setIsCalibrationExporting(false);
+        }
+    }, [activeCalibrationRoomId, userId, isCalibrationExporting]);
 
     const handleEvaluateCall = (data) => {
         setCalls(prev => {
@@ -1943,6 +1989,13 @@ const App = ({ user, initialSelection }) => {
                                                 </div>
                                             </div>
                                             <div style={{display:'flex', gap:8, flexWrap:'wrap'}}>
+                                                <button
+                                                    className="btn btn-secondary btn-sm"
+                                                    onClick={handleExportCalibrationRoom}
+                                                    disabled={isCalibrationExporting}
+                                                >
+                                                    {isCalibrationExporting ? <><span className="spinner" /> Выгрузка...</> : <><FaIcon className="fas fa-file-export" /> Выгрузить Excel</>}
+                                                </button>
                                                 {canManageCalibrationRooms && (
                                                     <button
                                                         className="btn btn-primary btn-sm"

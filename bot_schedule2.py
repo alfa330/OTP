@@ -3624,6 +3624,315 @@ def get_call_calibration_room(room_id):
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 
+@app.route('/api/call_calibration/rooms/<int:room_id>/export_excel', methods=['GET'])
+@require_api_key
+def export_call_calibration_room_excel(room_id):
+    try:
+        requester_id = getattr(g, 'user_id', None)
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "Requester not found"}), 404
+        role = requester[3]
+        if role != 'admin' and not _is_supervisor_role(role):
+            return jsonify({"error": "Forbidden: only admin and supervisors can export calibration room"}), 403
+
+        def _fmt_dt(value):
+            if value is None:
+                return '—'
+            if hasattr(value, 'strftime'):
+                return value.strftime('%Y-%m-%d %H:%M:%S')
+            return str(value)
+
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    r.id,
+                    r.month,
+                    r.room_title,
+                    r.created_at,
+                    adm.id AS creator_id,
+                    adm.name AS creator_name
+                FROM calibration_rooms r
+                JOIN users adm ON adm.id = r.created_by_admin_id
+                WHERE r.id = %s
+            """, (room_id,))
+            room_row = cursor.fetchone()
+            if not room_row:
+                return jsonify({"error": "Calibration room not found"}), 404
+
+            if _is_supervisor_role(role):
+                is_creator = int(room_row[4] or 0) == int(requester_id)
+                cursor.execute("""
+                    SELECT id
+                    FROM calibration_room_members
+                    WHERE room_id = %s AND supervisor_id = %s
+                """, (room_id, requester_id))
+                joined = bool(cursor.fetchone()) or bool(is_creator)
+                if not joined:
+                    return jsonify({"error": "Join the room first"}), 403
+
+            cursor.execute("""
+                SELECT
+                    c.id,
+                    c.operator_id,
+                    op.name AS operator_name,
+                    c.phone_number,
+                    c.appeal_date,
+                    c.score,
+                    d.name AS direction_name,
+                    c.scores,
+                    c.criterion_comments,
+                    c.etalon_scores,
+                    c.etalon_criterion_comments,
+                    c.created_at,
+                    c.updated_at,
+                    d.criteria
+                FROM calibration_room_calls c
+                JOIN users op ON op.id = c.operator_id
+                LEFT JOIN directions d ON d.id = c.direction_id
+                WHERE c.room_id = %s
+                ORDER BY c.created_at DESC, c.id DESC
+            """, (room_id,))
+            call_rows = cursor.fetchall()
+
+            call_ids = [int(row[0]) for row in call_rows]
+            evaluations_by_call = {}
+            if call_ids:
+                cursor.execute("""
+                    SELECT
+                        e.room_call_id,
+                        e.evaluator_id,
+                        u.name AS evaluator_name,
+                        e.score,
+                        e.comment,
+                        e.scores,
+                        e.criterion_comments
+                    FROM calibration_room_call_evaluations e
+                    JOIN users u ON u.id = e.evaluator_id
+                    WHERE e.room_call_id = ANY(%s)
+                    ORDER BY e.room_call_id, u.name
+                """, (call_ids,))
+                for ev in cursor.fetchall():
+                    room_call_id = int(ev[0])
+                    evaluations_by_call.setdefault(room_call_id, []).append({
+                        "id": None,
+                        "evaluator_id": ev[1],
+                        "evaluator_name": ev[2],
+                        "score": float(ev[3]) if ev[3] is not None else 0.0,
+                        "comment": ev[4],
+                        "scores": ev[5] if isinstance(ev[5], list) else [],
+                        "criterion_comments": ev[6] if isinstance(ev[6], list) else [],
+                    })
+
+        wb = Workbook()
+        ws_summary = wb.active
+        ws_summary.title = 'Сводка'
+        ws_details = wb.create_sheet('Критерии')
+
+        header_fill = PatternFill(start_color='1F4E78', end_color='1F4E78', fill_type='solid')
+        header_font = Font(color='FFFFFF', bold=True)
+        wrap_alignment = Alignment(vertical='top', wrap_text=True)
+        thin_border = Border(
+            left=Side(style='thin', color='DDDDDD'),
+            right=Side(style='thin', color='DDDDDD'),
+            top=Side(style='thin', color='DDDDDD'),
+            bottom=Side(style='thin', color='DDDDDD'),
+        )
+
+        ws_summary.append(['Параметр', 'Значение'])
+        ws_summary.append(['Комната ID', room_row[0]])
+        ws_summary.append(['Название комнаты', room_row[2] or f'Комната #{room_row[0]}'])
+        ws_summary.append(['Месяц', room_row[1] or '—'])
+        ws_summary.append(['Создал', room_row[5] or '—'])
+        ws_summary.append(['Создано', _fmt_dt(room_row[3])])
+        ws_summary.append(['Количество звонков', len(call_rows)])
+        ws_summary.append([])
+
+        summary_headers = [
+            'Звонок ID',
+            'Оператор',
+            'Телефон',
+            'Дата обращения',
+            'Направление',
+            f'Оценка автора ({room_row[5] or "—"})',
+            'Текущий эталон',
+            'Оценивших',
+            'Общий % калибровки',
+            'Критич. расхождение'
+        ]
+        ws_summary.append(summary_headers)
+        summary_header_row = ws_summary.max_row
+
+        details_headers = [
+            'Звонок ID',
+            'Оператор',
+            'Критерий',
+            'Критичный',
+            '% калибровки',
+            'Эталон',
+            'Комментарий эталона',
+            f'Оценка автора ({room_row[5] or "—"})',
+            'Комментарий автора',
+            'Оценки супервайзеров'
+        ]
+        ws_details.append(details_headers)
+        details_header_row = ws_details.max_row
+
+        for call_row in call_rows:
+            call_id = int(call_row[0])
+            operator_name = call_row[2] or '—'
+            phone_number = call_row[3] or '—'
+            appeal_date = _fmt_dt(call_row[4])
+            admin_total = float(call_row[5]) if call_row[5] is not None else 0.0
+            direction_name = call_row[6] or '—'
+            admin_scores = call_row[7] if isinstance(call_row[7], list) else []
+            admin_comments = call_row[8] if isinstance(call_row[8], list) else []
+            etalon_scores_raw = call_row[9] if isinstance(call_row[9], list) else []
+            etalon_comments_raw = call_row[10] if isinstance(call_row[10], list) else []
+            direction_criteria = call_row[13] if isinstance(call_row[13], list) else []
+
+            etalon_scores = etalon_scores_raw if etalon_scores_raw else admin_scores
+            etalon_comments = etalon_comments_raw if etalon_comments_raw else admin_comments
+            etalon_total, _ = _compute_total_score_from_criteria(direction_criteria, etalon_scores)
+
+            evaluations = evaluations_by_call.get(call_id, [])
+            eval_name_by_id = {int(ev.get('evaluator_id')): ev.get('evaluator_name') or 'Супервайзер' for ev in evaluations}
+            results = _build_calibration_results(
+                direction_criteria,
+                etalon_scores,
+                etalon_comments,
+                evaluations,
+                admin_scores=admin_scores,
+                admin_comments=admin_comments
+            )
+            overall_percent = results.get('overall_percent')
+            overall_percent_text = '—' if overall_percent is None else f"{overall_percent:.1f}%"
+            critical_mismatch = bool(results.get('critical_mismatch'))
+
+            ws_summary.append([
+                call_id,
+                operator_name,
+                phone_number,
+                appeal_date,
+                direction_name,
+                round(admin_total, 2),
+                round(float(etalon_total or 0.0), 2),
+                int(results.get('evaluated_count') or 0),
+                overall_percent_text,
+                'Да' if critical_mismatch else 'Нет'
+            ])
+
+            criteria_rows = results.get('criteria_rows') or []
+            if not criteria_rows:
+                ws_details.append([
+                    call_id,
+                    operator_name,
+                    'Нет критериев',
+                    '',
+                    '',
+                    '',
+                    '',
+                    '',
+                    '',
+                    ''
+                ])
+            else:
+                for criterion_row in criteria_rows:
+                    sv_values = []
+                    for cell in criterion_row.get('by_evaluator') or []:
+                        evaluator_id = int(cell.get('evaluator_id') or 0)
+                        evaluator_name = eval_name_by_id.get(evaluator_id) or f"SV #{evaluator_id}"
+                        item = f"{evaluator_name}: {cell.get('score_label') or _calibration_label_score(cell.get('score'))}"
+                        if cell.get('is_match') is not None:
+                            item += ' (совпало)' if bool(cell.get('is_match')) else ' (не совпало)'
+                        if cell.get('comment'):
+                            item += f" | {cell.get('comment')}"
+                        sv_values.append(item)
+
+                    percent = criterion_row.get('percent')
+                    percent_text = '—' if percent is None else f"{float(percent):.1f}%"
+                    ws_details.append([
+                        call_id,
+                        operator_name,
+                        criterion_row.get('criterion_name') or '',
+                        'Да' if criterion_row.get('is_critical') else 'Нет',
+                        percent_text,
+                        criterion_row.get('etalon', {}).get('score_label') or _calibration_label_score(criterion_row.get('etalon', {}).get('score')),
+                        criterion_row.get('etalon', {}).get('comment') or '',
+                        criterion_row.get('admin', {}).get('score_label') or _calibration_label_score(criterion_row.get('admin', {}).get('score')),
+                        criterion_row.get('admin', {}).get('comment') or '',
+                        '\n'.join(sv_values) if sv_values else '—'
+                    ])
+
+            ws_details.append([
+                call_id,
+                operator_name,
+                'ИТОГ ПО ЗВОНКУ',
+                '',
+                '',
+                '',
+                '',
+                '',
+                '',
+                f"Общий %: {overall_percent_text}; Критич. расхождение: {'Да' if critical_mismatch else 'Нет'}"
+            ])
+            ws_details.append([])
+
+        for col in range(1, len(summary_headers) + 1):
+            cell = ws_summary.cell(row=summary_header_row, column=col)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+            cell.border = thin_border
+
+        for col in range(1, len(details_headers) + 1):
+            cell = ws_details.cell(row=details_header_row, column=col)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+            cell.border = thin_border
+
+        for row in ws_summary.iter_rows(min_row=summary_header_row + 1, max_row=ws_summary.max_row, min_col=1, max_col=len(summary_headers)):
+            for cell in row:
+                cell.border = thin_border
+                cell.alignment = wrap_alignment
+
+        for row in ws_details.iter_rows(min_row=details_header_row + 1, max_row=ws_details.max_row, min_col=1, max_col=len(details_headers)):
+            for cell in row:
+                cell.border = thin_border
+                cell.alignment = wrap_alignment
+
+        summary_widths = [12, 22, 18, 20, 20, 19, 14, 11, 19, 18]
+        for i, width in enumerate(summary_widths, start=1):
+            ws_summary.column_dimensions[get_column_letter(i)].width = width
+
+        details_widths = [12, 22, 36, 10, 15, 15, 28, 19, 28, 54]
+        for i, width in enumerate(details_widths, start=1):
+            ws_details.column_dimensions[get_column_letter(i)].width = width
+
+        ws_summary.freeze_panes = 'A10'
+        ws_details.freeze_panes = 'A2'
+
+        output = BytesIO()
+        wb.save(output)
+        output.seek(0)
+
+        safe_month = re.sub(r'[^0-9-]', '', str(room_row[1] or ''))
+        filename = f"calibration_room_{room_id}_{safe_month or 'export'}.xlsx"
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name=filename,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+    except Exception as e:
+        logging.exception("Error exporting calibration room")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
 @app.route('/api/call_calibration/rooms/<int:room_id>/calls/<int:call_id>/etalon', methods=['PATCH'])
 @require_api_key
 def update_call_calibration_etalon(room_id, call_id):
