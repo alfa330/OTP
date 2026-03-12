@@ -13675,31 +13675,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             });
                             setPlannerStatusHourlyExpandedKey('');
                         };
-                        const pickStatusInHour = (bars, startMin, endMin) => {
-                            const probeMin = startMin + 30;
-                            let probeCandidate = null;
-                            let fallback = null;
+                        const pickStatusAtMoment = (bars, pointMin) => {
+                            let active = null;
                             (Array.isArray(bars) ? bars : []).forEach(seg => {
                                 const segStart = Number(seg?.startMin ?? seg?.start ?? 0);
                                 const segEnd = Number(seg?.endMin ?? seg?.end ?? 0);
-                                if (segEnd <= segStart) return;
-                                const overlap = Math.max(0, Math.min(segEnd, endMin) - Math.max(segStart, startMin));
-                                if (overlap <= 0) return;
+                                if (!Number.isFinite(segStart) || !Number.isFinite(segEnd) || segEnd <= segStart) return;
+                                if (!(segStart <= pointMin && segEnd > pointMin)) return;
                                 const label = String(seg?.stateName || seg?.stateKey || 'Статус').trim() || 'Статус';
                                 const key = plannerStatusNormalizeKey(seg?.stateName || seg?.stateKey || label);
-                                const candidate = { label, key, segStart, segEnd, overlap };
-                                if (segStart <= probeMin && segEnd > probeMin) {
-                                    if (!probeCandidate || overlap > probeCandidate.overlap || (overlap === probeCandidate.overlap && segStart > probeCandidate.segStart)) {
-                                        probeCandidate = candidate;
-                                    }
-                                }
-                                if (!fallback || overlap > fallback.overlap || (overlap === fallback.overlap && segStart < fallback.segStart)) {
-                                    fallback = candidate;
-                                }
+                                const candidate = { label, key, segStart, segEnd };
+                                if (!active || segStart >= active.segStart) active = candidate;
                             });
-                            if (probeCandidate) return probeCandidate;
-                            if (fallback) return fallback;
-                            return { label: 'Нет статуса', key: 'нет статуса', segStart: null, segEnd: null, overlap: 0 };
+                            if (active) return active;
+                            return { label: 'Нет статуса', key: 'нет статуса', segStart: null, segEnd: null };
                         };
                         const sortByDirectionAndName = (a, b) => {
                             const directionCmp = String(a?.direction || '').localeCompare(String(b?.direction || ''), 'ru');
@@ -13709,27 +13698,28 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         const rows = (!showPlannerStatusGroupingModal || !hasAnalysis || !effectiveDayKey)
                             ? []
                             : Array.from({ length: 24 }).map((_, hour) => {
-                                const hourStart = hour * 60;
-                                const hourEnd = hourStart + 60;
+                                const hourMoment = hour * 60;
                                 const plannedOperators = [];
                                 const actualOperators = [];
                                 const directionMap = new Map();
                                 operatorsForGrouping.forEach(op => {
                                     const shiftParts = getShiftPartsForDate(op, effectiveDayKey);
                                     if (!shiftParts.length) return;
-                                    const shiftOverlapMin = shiftParts.reduce((sum, part) => (
-                                        sum + Math.max(0, Math.min(Number(part?.end || 0), hourEnd) - Math.max(Number(part?.start || 0), hourStart))
-                                    ), 0);
-                                    if (shiftOverlapMin <= 0) return;
+                                    const onShiftAtMoment = shiftParts.some(part => {
+                                        const partStart = Number(part?.start || 0);
+                                        const partEnd = Number(part?.end || 0);
+                                        return partStart <= hourMoment && partEnd > hourMoment;
+                                    });
+                                    if (!onShiftAtMoment) return;
                                     const operatorName = String(op?.name || op?.login || `Оператор ${op?.id || ''}`).trim();
                                     const operatorNameKey = plannerStatusNormalizeOperatorName(operatorName);
                                     const direction = String(op?.direction || op?.direction_name || 'Без направления').trim() || 'Без направления';
                                     const statusBars = importedStatusTimelineByOperatorDateKey.get(`${operatorNameKey}|${effectiveDayKey}`) || [];
-                                    const status = pickStatusInHour(statusBars, hourStart, hourEnd);
+                                    const status = pickStatusAtMoment(statusBars, hourMoment);
                                     const isActuallyOnShift = plannerImportedStatusCountsAsOnShift(status.key);
                                     const statusRangeLabel = (status.segStart == null || status.segEnd == null)
                                         ? '—'
-                                        : `${minutesToTime(Math.max(hourStart, status.segStart))} - ${minutesToTime(Math.min(hourEnd, status.segEnd))}`;
+                                        : `${minutesToTime(status.segStart)} - ${minutesToTime(status.segEnd)}`;
                                     const item = {
                                         operatorId: Number(op?.id || 0),
                                         operatorName: operatorName || `Оператор ${op?.id || ''}`,
@@ -13737,7 +13727,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         statusLabel: status.label || 'Нет статуса',
                                         statusKey: status.key || 'нет статуса',
                                         statusRangeLabel,
-                                        shiftOverlapMin,
                                         isActuallyOnShift
                                     };
                                     plannedOperators.push(item);
@@ -13758,7 +13747,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     .sort((a, b) => String(a?.direction || '').localeCompare(String(b?.direction || ''), 'ru'));
                                 return {
                                     hour,
-                                    hourLabel: `${plannerStatusPad2(hour)}:00 - ${plannerStatusPad2((hour + 1) % 24)}:00`,
+                                    hourLabel: `${plannerStatusPad2(hour)}:00`,
                                     plannedCount: plannedOperators.length,
                                     actualCount: actualOperators.length,
                                     delta: actualOperators.length - plannedOperators.length,
@@ -13785,6 +13774,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <FaIcon className="fas fa-users text-blue-600"></FaIcon>
                                             Почасовая группировка смен
                                         </h3>
+                                        <div className="text-xs text-slate-500 mt-1">
+                                            Расчет идет по моменту времени ровно в HH:00 (например 09:00, 10:00), а не по часовому интервалу.
+                                        </div>
                                         <div className="text-xs text-slate-500 mt-1">
                                             «Нет статуса» и «Отключен/Отключена» не входят в факт. «Перерыв» и «Перезвон» учитываются как на смене.
                                         </div>
@@ -13959,7 +13951,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         <span className={`px-1.5 py-0.5 rounded border whitespace-nowrap ${tone.pill}`}>{item?.statusLabel || 'Нет статуса'}</span>
                                                                     </div>
                                                                     <div className="mt-1 text-slate-600">
-                                                                        <span className="tabular-nums">Статус в часе: {item?.statusRangeLabel || '—'}</span>
+                                                                        <span className="tabular-nums">Статус на момент: {item?.statusRangeLabel || '—'}</span>
                                                                         {!item?.isActuallyOnShift && <span className="ml-2 text-rose-700 font-medium">Не на линии</span>}
                                                                     </div>
                                                                 </div>
