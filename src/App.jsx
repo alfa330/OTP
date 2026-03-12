@@ -13751,7 +13751,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             statusName,
                                             statusNote: String(activeStatus?.stateNote || '').trim(),
                                             isBreakStatus: rawStatusKey === 'перерыв' && statusNameKey !== 'перезвон',
-                                            isDisconnectedStatus
+                                            isDisconnectedStatus 
                                         };
                                     })
                                     .filter(item => !item.isDisconnectedStatus)
