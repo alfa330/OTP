@@ -704,20 +704,18 @@ def _build_calibration_results(criteria, etalon_scores, etalon_comments, evaluat
         is_critical = bool(criterion.get('isCritical'))
         admin_val = _normalize_calibration_score_value(admin_scores[idx] if idx < len(admin_scores) else 'Correct')
         etalon_val = _normalize_calibration_score_value(etalon_scores[idx] if idx < len(etalon_scores) else admin_val)
-        # Percent is based on admin <-> supervisors alignment.
-        # Etalon is displayed separately and must not affect calibration percent.
-        supervisor_match_count = 0
+        # Percent is based on overall agreement between all participants:
+        # admin + all supervisors. Etalon is displayed separately and does not
+        # affect calibration percent.
+        score_counts = {admin_val: 1}
         by_evaluator = []
 
         for evaluation in evaluations:
             ev_scores = evaluation.get('scores') if isinstance(evaluation.get('scores'), list) else []
             ev_comments = evaluation.get('criterion_comments') if isinstance(evaluation.get('criterion_comments'), list) else []
             ev_val = _normalize_calibration_score_value(ev_scores[idx] if idx < len(ev_scores) else 'Correct')
+            score_counts[ev_val] = int(score_counts.get(ev_val, 0)) + 1
             is_match = ev_val == admin_val
-            if is_match:
-                supervisor_match_count += 1
-            elif is_critical:
-                critical_mismatch = True
 
             by_evaluator.append({
                 "evaluator_id": evaluation.get('evaluator_id'),
@@ -729,10 +727,11 @@ def _build_calibration_results(criteria, etalon_scores, etalon_comments, evaluat
 
         percent = None
         if eval_count > 0:
-            matched_count_with_admin = 1 + supervisor_match_count
             participants_count = 1 + eval_count
-            percent = round((matched_count_with_admin * 100.0) / float(participants_count), 1)
-            if is_critical and supervisor_match_count < eval_count:
+            dominant_count = max(score_counts.values()) if score_counts else 0
+            percent = round((dominant_count * 100.0) / float(participants_count), 1)
+            if is_critical and dominant_count < participants_count:
+                critical_mismatch = True
                 percent = 0.0
 
         rows.append({
