@@ -5553,6 +5553,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [plannerStatusModalFocus, setPlannerStatusModalFocus] = useState(null);
             const [plannerStatusHourlyDayKey, setPlannerStatusHourlyDayKey] = useState('');
             const [plannerStatusHourlyExpandedKey, setPlannerStatusHourlyExpandedKey] = useState('');
+            const [plannerStatusGroupingDirectionKeys, setPlannerStatusGroupingDirectionKeys] = useState(['all']);
             const [showBreakRulesSettingsModal, setShowBreakRulesSettingsModal] = useState(false);
             const [plannerBreakRulesLoading, setPlannerBreakRulesLoading] = useState(false);
             const [plannerBreakRulesSaving, setPlannerBreakRulesSaving] = useState(false);
@@ -7525,6 +7526,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setPlannerStatusModalFocus(null);
                     setPlannerStatusHourlyDayKey('');
                     setPlannerStatusHourlyExpandedKey('');
+                    setPlannerStatusGroupingDirectionKeys(['all']);
                     setPlannerStatusSpecialViewEnabled(true);
                     const firstAnomalyDay = (analysis?.days || []).find(d => Number(d?.noPhoneAnomalyCount || 0) > 0)?.dateKey;
                     const firstDay = analysis?.days?.[0]?.dateKey;
@@ -7536,6 +7538,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setPlannerStatusModalFocus(null);
                     setPlannerStatusHourlyDayKey('');
                     setPlannerStatusHourlyExpandedKey('');
+                    setPlannerStatusGroupingDirectionKeys(['all']);
                     setPlannerStatusSpecialViewEnabled(false);
                     setPlannerStatusAnomalyExpandedDays({});
                     setPlannerStatusAnomalyError(error?.message || 'Не удалось обработать CSV');
@@ -11644,6 +11647,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         setShowPlannerStatusGroupingModal(false);
                                                         setPlannerStatusHourlyDayKey('');
                                                         setPlannerStatusHourlyExpandedKey('');
+                                                        setPlannerStatusGroupingDirectionKeys(['all']);
                                                         setPlannerStatusAnomalyExpandedDays({});
                                                     }}
                                                     className="w-full px-3 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-sm font-medium flex items-center gap-2"
@@ -13612,6 +13616,65 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             ? String(plannerStatusHourlyDayKey || '')
                             : (dayOptions[0] || '');
                         const effectiveDayLabel = effectiveDayKey ? plannerStatusFormatDayLabel(effectiveDayKey) : '—';
+                        const groupingDirectionOptions = (() => {
+                            const byKey = new Map();
+                            (Array.isArray(filteredOperators) ? filteredOperators : []).forEach(op => {
+                                const directionLabel = String(op?.direction || op?.direction_name || 'Без направления').trim() || 'Без направления';
+                                const directionKey = plannerNormalizeDirectionKey(directionLabel);
+                                if (!directionKey || byKey.has(directionKey)) return;
+                                byKey.set(directionKey, directionLabel);
+                            });
+                            return Array.from(byKey.entries())
+                                .map(([key, label]) => ({ key, label }))
+                                .sort((a, b) => String(a?.label || '').localeCompare(String(b?.label || ''), 'ru'));
+                        })();
+                        const availableGroupingDirectionKeys = new Set(groupingDirectionOptions.map(item => item.key));
+                        const normalizedGroupingDirectionSelection = Array.from(new Set(
+                            (Array.isArray(plannerStatusGroupingDirectionKeys) ? plannerStatusGroupingDirectionKeys : ['all'])
+                                .map(v => plannerNormalizeDirectionKey(v))
+                                .filter(Boolean)
+                        ));
+                        const effectiveGroupingDirectionKeys = normalizedGroupingDirectionSelection.includes('all')
+                            ? ['all']
+                            : (() => {
+                                const valid = normalizedGroupingDirectionSelection.filter(key => availableGroupingDirectionKeys.has(key));
+                                return valid.length > 0 ? valid : ['all'];
+                            })();
+                        const effectiveGroupingDirectionSet = effectiveGroupingDirectionKeys.includes('all')
+                            ? null
+                            : new Set(effectiveGroupingDirectionKeys);
+                        const operatorsForGrouping = (Array.isArray(filteredOperators) ? filteredOperators : []).filter(op => {
+                            if (!effectiveGroupingDirectionSet) return true;
+                            const directionLabel = String(op?.direction || op?.direction_name || 'Без направления').trim() || 'Без направления';
+                            const directionKey = plannerNormalizeDirectionKey(directionLabel);
+                            return effectiveGroupingDirectionSet.has(directionKey);
+                        });
+                        const toggleGroupingDirectionKey = (directionKeyRaw) => {
+                            const directionKey = plannerNormalizeDirectionKey(directionKeyRaw);
+                            if (!directionKey || directionKey === 'all') {
+                                setPlannerStatusGroupingDirectionKeys(['all']);
+                                setPlannerStatusHourlyExpandedKey('');
+                                return;
+                            }
+                            setPlannerStatusGroupingDirectionKeys(prev => {
+                                const current = Array.from(new Set(
+                                    (Array.isArray(prev) ? prev : ['all'])
+                                        .map(v => plannerNormalizeDirectionKey(v))
+                                        .filter(Boolean)
+                                ));
+                                let next = current;
+                                if (current.includes('all')) {
+                                    next = [directionKey];
+                                } else if (current.includes(directionKey)) {
+                                    next = current.filter(key => key !== directionKey);
+                                } else {
+                                    next = [...current, directionKey];
+                                }
+                                if (next.length === 0) next = ['all'];
+                                return Array.from(new Set(next));
+                            });
+                            setPlannerStatusHourlyExpandedKey('');
+                        };
                         const pickStatusInHour = (bars, startMin, endMin) => {
                             const probeMin = startMin + 30;
                             let probeCandidate = null;
@@ -13651,7 +13714,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 const plannedOperators = [];
                                 const actualOperators = [];
                                 const directionMap = new Map();
-                                (Array.isArray(filteredOperators) ? filteredOperators : []).forEach(op => {
+                                operatorsForGrouping.forEach(op => {
                                     const shiftParts = getShiftPartsForDate(op, effectiveDayKey);
                                     if (!shiftParts.length) return;
                                     const shiftOverlapMin = shiftParts.reduce((sum, part) => (
@@ -13745,24 +13808,52 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                 {hasAnalysis && (
                                     <div className="space-y-4">
-                                        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 flex flex-wrap items-end gap-3">
-                                            <label className="text-xs text-slate-600">
-                                                День
-                                                <select
-                                                    value={effectiveDayKey}
-                                                    onChange={(e) => {
-                                                        setPlannerStatusHourlyDayKey(String(e.target.value || ''));
-                                                        setPlannerStatusHourlyExpandedKey('');
-                                                    }}
-                                                    className="mt-1 block min-w-[220px] px-3 py-2 rounded-lg border border-slate-300 bg-white text-sm text-slate-700"
-                                                >
-                                                    {dayOptions.map(dayKey => (
-                                                        <option key={`group-day-${dayKey}`} value={dayKey}>{plannerStatusFormatDayLabel(dayKey)}</option>
-                                                    ))}
-                                                </select>
-                                            </label>
-                                            <div className="ml-auto text-xs text-slate-600">
-                                                День отчета: <strong className="text-slate-900">{effectiveDayLabel}</strong>
+                                        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-3">
+                                            <div className="flex flex-wrap items-end gap-3">
+                                                <label className="text-xs text-slate-600">
+                                                    День
+                                                    <select
+                                                        value={effectiveDayKey}
+                                                        onChange={(e) => {
+                                                            setPlannerStatusHourlyDayKey(String(e.target.value || ''));
+                                                            setPlannerStatusHourlyExpandedKey('');
+                                                        }}
+                                                        className="mt-1 block min-w-[220px] px-3 py-2 rounded-lg border border-slate-300 bg-white text-sm text-slate-700"
+                                                    >
+                                                        {dayOptions.map(dayKey => (
+                                                            <option key={`group-day-${dayKey}`} value={dayKey}>{plannerStatusFormatDayLabel(dayKey)}</option>
+                                                        ))}
+                                                    </select>
+                                                </label>
+                                                <div className="ml-auto text-xs text-slate-600">
+                                                    День отчета: <strong className="text-slate-900">{effectiveDayLabel}</strong>
+                                                    <span className="ml-3">Операторов: <strong className="text-slate-900">{operatorsForGrouping.length}</strong></span>
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <div className="text-xs text-slate-600">Направления (мультивыбор)</div>
+                                                <div className="mt-1 flex flex-wrap gap-1.5">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => toggleGroupingDirectionKey('all')}
+                                                        className={`px-2.5 py-1 rounded-lg border text-xs font-medium ${!effectiveGroupingDirectionSet ? 'border-blue-300 bg-blue-100 text-blue-800' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'}`}
+                                                    >
+                                                        Все
+                                                    </button>
+                                                    {groupingDirectionOptions.map(directionItem => {
+                                                        const isActive = !!effectiveGroupingDirectionSet && effectiveGroupingDirectionSet.has(directionItem.key);
+                                                        return (
+                                                            <button
+                                                                key={`group-direction-${directionItem.key}`}
+                                                                type="button"
+                                                                onClick={() => toggleGroupingDirectionKey(directionItem.key)}
+                                                                className={`px-2.5 py-1 rounded-lg border text-xs font-medium ${isActive ? 'border-blue-300 bg-blue-100 text-blue-800' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'}`}
+                                                            >
+                                                                {directionItem.label}
+                                                            </button>
+                                                        );
+                                                    })}
+                                                </div>
                                             </div>
                                         </div>
 
