@@ -496,7 +496,7 @@ def _base64url_decode(value: str) -> bytes:
 
 
 def _is_privileged_role(role: str) -> bool:
-    return role in ('admin', 'sv')
+    return role in ('admin', 'sv', 'supervisor')
 
 
 def _mask_phone_number(phone_number):
@@ -609,7 +609,7 @@ def _authorize_operator_scope(requester, requester_id, operator_id):
         return True
     if role == 'operator':
         return requester_id == operator_id
-    if role == 'sv':
+    if role in ('sv', 'supervisor'):
         operator = db.get_user(id=operator_id)
         return bool(operator and operator[3] == 'operator' and operator[6] == requester_id)
     return False
@@ -621,10 +621,143 @@ def _ensure_call_access_for_requester(call_operator_id, requester, requester_id)
         return True
     if role == 'operator':
         return requester_id == call_operator_id
-    if role == 'sv':
+    if role in ('sv', 'supervisor'):
         operator = db.get_user(id=call_operator_id)
         return bool(operator and operator[3] == 'operator' and operator[6] == requester_id)
     return False
+
+
+def _is_supervisor_role(role: str) -> bool:
+    return role in ('sv', 'supervisor')
+
+
+def _normalize_calibration_score_value(value):
+    raw = str(value or '').strip().lower()
+    mapping = {
+        'correct': 'Correct',
+        'ok': 'Correct',
+        'n/a': 'N/A',
+        'na': 'N/A',
+        'n\\a': 'N/A',
+        'incorrect': 'Incorrect',
+        'deficiency': 'Deficiency',
+        'error': 'Error'
+    }
+    return mapping.get(raw, str(value or 'Correct').strip() or 'Correct')
+
+
+def _calibration_label_score(value):
+    normalized = _normalize_calibration_score_value(value)
+    labels = {
+        'Correct': 'Корректно',
+        'N/A': 'N/A',
+        'Incorrect': 'Ошибка',
+        'Deficiency': 'Недочет',
+        'Error': 'Критич. ошибка'
+    }
+    return labels.get(normalized, normalized)
+
+
+def _compute_total_score_from_criteria(criteria, scores):
+    criteria = criteria if isinstance(criteria, list) else []
+    scores = scores if isinstance(scores, list) else []
+    has_critical_error = False
+    total = 0.0
+
+    for idx, criterion in enumerate(criteria):
+        criterion = criterion if isinstance(criterion, dict) else {}
+        score_value = _normalize_calibration_score_value(scores[idx] if idx < len(scores) else 'Correct')
+        is_critical = bool(criterion.get('isCritical'))
+        if is_critical:
+            if score_value == 'Error':
+                has_critical_error = True
+            continue
+        try:
+            weight = float(criterion.get('weight') or 0)
+        except Exception:
+            weight = 0.0
+        if score_value in ('Correct', 'N/A'):
+            total += weight
+        elif score_value == 'Deficiency':
+            deficiency = criterion.get('deficiency') if isinstance(criterion.get('deficiency'), dict) else {}
+            try:
+                total += float(deficiency.get('weight') or 0)
+            except Exception:
+                pass
+
+    if has_critical_error:
+        return 0.0, True
+    return round(float(total), 2), False
+
+
+def _build_calibration_results(criteria, admin_scores, admin_comments, evaluations):
+    criteria = criteria if isinstance(criteria, list) else []
+    admin_scores = admin_scores if isinstance(admin_scores, list) else []
+    admin_comments = admin_comments if isinstance(admin_comments, list) else []
+    evaluations = evaluations if isinstance(evaluations, list) else []
+
+    eval_count = len(evaluations)
+    critical_mismatch = False
+    rows = []
+
+    for idx, criterion in enumerate(criteria):
+        criterion = criterion if isinstance(criterion, dict) else {}
+        is_critical = bool(criterion.get('isCritical'))
+        admin_val = _normalize_calibration_score_value(admin_scores[idx] if idx < len(admin_scores) else 'Correct')
+        match_count = 0
+        by_evaluator = []
+
+        for evaluation in evaluations:
+            ev_scores = evaluation.get('scores') if isinstance(evaluation.get('scores'), list) else []
+            ev_comments = evaluation.get('criterion_comments') if isinstance(evaluation.get('criterion_comments'), list) else []
+            ev_val = _normalize_calibration_score_value(ev_scores[idx] if idx < len(ev_scores) else 'Correct')
+            is_match = ev_val == admin_val
+            if is_match:
+                match_count += 1
+            elif is_critical:
+                critical_mismatch = True
+
+            by_evaluator.append({
+                "evaluator_id": evaluation.get('evaluator_id'),
+                "score": ev_val,
+                "score_label": _calibration_label_score(ev_val),
+                "comment": (ev_comments[idx] if idx < len(ev_comments) else None) or None,
+                "is_match": bool(is_match)
+            })
+
+        percent = None
+        if eval_count > 0:
+            percent = round((match_count * 100.0) / float(eval_count), 1)
+            if is_critical and match_count < eval_count:
+                percent = 0.0
+
+        rows.append({
+            "criterion_index": idx,
+            "criterion_name": criterion.get('name') or f"Критерий {idx + 1}",
+            "is_critical": is_critical,
+            "percent": percent,
+            "benchmark": {
+                "score": admin_val,
+                "score_label": _calibration_label_score(admin_val),
+                "comment": (admin_comments[idx] if idx < len(admin_comments) else None) or None
+            },
+            "by_evaluator": by_evaluator
+        })
+
+    overall_percent = None
+    if rows and eval_count > 0:
+        perc_values = [r.get('percent') for r in rows if r.get('percent') is not None]
+        if perc_values:
+            overall_percent = round(sum(perc_values) / float(len(perc_values)), 1)
+    if critical_mismatch and overall_percent is not None:
+        overall_percent = 0.0
+
+    return {
+        "criteria_rows": rows,
+        "evaluated_count": eval_count,
+        "critical_mismatch": critical_mismatch,
+        "overall_percent": overall_percent
+    }
 
 
 TASK_ALLOWED_TAGS = {'task', 'problem', 'suggestion'}
@@ -2825,6 +2958,530 @@ def get_call_evaluations():
         })
     except Exception as e:
         logging.error(f"Error fetching evaluations: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
+@app.route('/api/call_calibration/rooms', methods=['GET'])
+@require_api_key
+def list_call_calibration_rooms():
+    try:
+        requester_id = getattr(g, 'user_id', None)
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "Requester not found"}), 404
+        role = requester[3]
+        if role != 'admin' and not _is_supervisor_role(role):
+            return jsonify({"error": "Forbidden: only admin and supervisors can access calibration rooms"}), 403
+
+        month = (request.args.get('month') or '').strip()
+        if month and not re.match(r'^\d{4}-\d{2}$', month):
+            return jsonify({"error": "Invalid month format. Use YYYY-MM"}), 400
+
+        with db._get_cursor() as cursor:
+            params = [requester_id, requester_id]
+            query = """
+                SELECT
+                    r.id,
+                    r.month,
+                    r.phone_number,
+                    r.appeal_date,
+                    r.score,
+                    r.created_at,
+                    op.id AS operator_id,
+                    op.name AS operator_name,
+                    d.id AS direction_id,
+                    d.name AS direction_name,
+                    adm.id AS admin_id,
+                    adm.name AS admin_name,
+                    m.id AS member_id,
+                    me.id AS my_eval_id,
+                    (
+                        SELECT COUNT(*)
+                        FROM calibration_room_evaluations ce
+                        WHERE ce.room_id = r.id
+                    ) AS evaluated_count
+                FROM calibration_rooms r
+                JOIN users op ON op.id = r.operator_id
+                LEFT JOIN directions d ON d.id = r.direction_id
+                JOIN users adm ON adm.id = r.created_by_admin_id
+                LEFT JOIN calibration_room_members m
+                    ON m.room_id = r.id
+                   AND m.supervisor_id = %s
+                LEFT JOIN calibration_room_evaluations me
+                    ON me.room_id = r.id
+                   AND me.evaluator_id = %s
+                WHERE 1=1
+            """
+            if month:
+                query += " AND r.month = %s"
+                params.append(month)
+            query += " ORDER BY r.created_at DESC"
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+
+        rooms = []
+        for row in rows:
+            rooms.append({
+                "id": row[0],
+                "month": row[1],
+                "phone_number": row[2],
+                "appeal_date": row[3].strftime('%Y-%m-%d %H:%M:%S') if row[3] and hasattr(row[3], "strftime") else None,
+                "score": float(row[4]) if row[4] is not None else 0.0,
+                "created_at": row[5].strftime('%Y-%m-%d %H:%M:%S') if row[5] and hasattr(row[5], "strftime") else None,
+                "operator": {"id": row[6], "name": row[7]},
+                "direction": {"id": row[8], "name": row[9]},
+                "benchmark_admin": {"id": row[10], "name": row[11]},
+                "joined": True if role == 'admin' else bool(row[12]),
+                "my_evaluated": bool(row[13]),
+                "evaluated_count": int(row[14] or 0),
+            })
+
+        return jsonify({"status": "success", "rooms": rooms}), 200
+    except Exception as e:
+        logging.exception("Error listing calibration rooms")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
+@app.route('/api/call_calibration/rooms', methods=['POST'])
+@require_api_key
+def create_call_calibration_room():
+    try:
+        requester_id = getattr(g, 'user_id', None)
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "Requester not found"}), 404
+        if requester[3] != 'admin':
+            return jsonify({"error": "Only admin can create calibration rooms"}), 403
+
+        data = request.form or {}
+        required_fields = ['operator_id', 'phone_number', 'appeal_date', 'month', 'direction', 'scores', 'criterion_comments']
+        missing = [f for f in required_fields if f not in data]
+        if missing:
+            return jsonify({"error": f"Missing required fields: {', '.join(missing)}"}), 400
+
+        try:
+            operator_id = int(data.get('operator_id'))
+            direction_id = int(data.get('direction'))
+        except Exception:
+            return jsonify({"error": "operator_id and direction must be integers"}), 400
+
+        month = str(data.get('month') or '').strip()
+        if not re.match(r'^\d{4}-\d{2}$', month):
+            return jsonify({"error": "Invalid month format. Use YYYY-MM"}), 400
+
+        phone_number = str(data.get('phone_number') or '').strip()
+        if len(phone_number) < 5:
+            return jsonify({"error": "Invalid phone number"}), 400
+
+        appeal_date_raw = str(data.get('appeal_date') or '').strip()
+        try:
+            appeal_date = datetime.fromisoformat(appeal_date_raw.replace('Z', '+00:00'))
+        except Exception:
+            return jsonify({"error": "Invalid appeal_date format. Use ISO datetime"}), 400
+
+        try:
+            scores = json.loads(data.get('scores', '[]'))
+            criterion_comments = json.loads(data.get('criterion_comments', '[]'))
+        except Exception:
+            return jsonify({"error": "scores and criterion_comments must be valid JSON arrays"}), 400
+
+        if not isinstance(scores, list) or not isinstance(criterion_comments, list):
+            return jsonify({"error": "scores and criterion_comments must be arrays"}), 400
+
+        operator = db.get_user(id=operator_id)
+        if not operator or operator[3] != 'operator':
+            return jsonify({"error": "Operator not found"}), 404
+
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id, criteria, has_file_upload
+                FROM directions
+                WHERE id = %s AND is_active = TRUE
+            """, (direction_id,))
+            direction = cursor.fetchone()
+            if not direction:
+                return jsonify({"error": "Direction not found"}), 404
+
+            criteria = direction[1] if isinstance(direction[1], list) else []
+            has_file_upload = bool(direction[2])
+
+            normalized_scores = []
+            normalized_comments = []
+            for idx in range(len(criteria)):
+                src_score = scores[idx] if idx < len(scores) else 'Correct'
+                src_comment = criterion_comments[idx] if idx < len(criterion_comments) else ''
+                normalized_scores.append(_normalize_calibration_score_value(src_score))
+                normalized_comments.append(str(src_comment or ''))
+
+            total_score, _ = _compute_total_score_from_criteria(criteria, normalized_scores)
+            comment = str(data.get('comment') or '').strip()
+            if not comment:
+                comment = '; '.join(
+                    f"{(criteria[i] or {}).get('name', f'Критерий {i + 1}')}: {text.strip()}"
+                    for i, text in enumerate(normalized_comments)
+                    if str(text or '').strip()
+                )
+
+            audio_path = None
+            if has_file_upload:
+                file = request.files.get('audio_file')
+                if not file or not file.filename:
+                    return jsonify({"error": "Audio file is required for this direction"}), 400
+                audio_data = file.read()
+                if not audio_data:
+                    return jsonify({"error": "Audio file is empty"}), 400
+                bucket_name = os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET')
+                if not bucket_name:
+                    return jsonify({"error": "GOOGLE_CLOUD_STORAGE_BUCKET is not configured"}), 500
+                upload_folder = os.getenv('UPLOAD_FOLDER', 'Uploads/')
+                filename = secure_filename(f"{uuid.uuid4()}.mp3")
+                blob_path = f"{upload_folder}{filename}"
+                gcs_client = get_gcs_client()
+                bucket = gcs_client.bucket(bucket_name)
+                blob = bucket.blob(blob_path)
+                blob.upload_from_string(audio_data, content_type='audio/mpeg')
+                audio_path = f"{bucket_name}/{blob_path}"
+
+            cursor.execute("""
+                INSERT INTO calibration_rooms (
+                    created_by_admin_id,
+                    operator_id,
+                    month,
+                    phone_number,
+                    appeal_date,
+                    direction_id,
+                    score,
+                    comment,
+                    audio_path,
+                    scores,
+                    criterion_comments
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
+                RETURNING id
+            """, (
+                requester_id,
+                operator_id,
+                month,
+                phone_number,
+                appeal_date,
+                direction_id,
+                total_score,
+                comment,
+                audio_path,
+                json.dumps(normalized_scores, ensure_ascii=False),
+                json.dumps(normalized_comments, ensure_ascii=False),
+            ))
+            room_id = cursor.fetchone()[0]
+
+        return jsonify({"status": "success", "room_id": room_id}), 201
+    except Exception as e:
+        logging.exception("Error creating calibration room")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
+@app.route('/api/call_calibration/rooms/<int:room_id>/join', methods=['POST'])
+@require_api_key
+def join_call_calibration_room(room_id):
+    try:
+        requester_id = getattr(g, 'user_id', None)
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "Requester not found"}), 404
+        if not _is_supervisor_role(requester[3]):
+            return jsonify({"error": "Only supervisors can join calibration rooms"}), 403
+
+        with db._get_cursor() as cursor:
+            cursor.execute("SELECT id FROM calibration_rooms WHERE id = %s", (room_id,))
+            if not cursor.fetchone():
+                return jsonify({"error": "Calibration room not found"}), 404
+
+            cursor.execute("""
+                INSERT INTO calibration_room_members (room_id, supervisor_id)
+                VALUES (%s, %s)
+                ON CONFLICT (room_id, supervisor_id) DO NOTHING
+            """, (room_id, requester_id))
+
+        return jsonify({"status": "success"}), 200
+    except Exception as e:
+        logging.exception("Error joining calibration room")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
+@app.route('/api/call_calibration/rooms/<int:room_id>', methods=['GET'])
+@require_api_key
+def get_call_calibration_room(room_id):
+    try:
+        requester_id = getattr(g, 'user_id', None)
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "Requester not found"}), 404
+        role = requester[3]
+        if role != 'admin' and not _is_supervisor_role(role):
+            return jsonify({"error": "Forbidden: only admin and supervisors can access calibration room"}), 403
+
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    r.id,
+                    r.month,
+                    r.phone_number,
+                    r.appeal_date,
+                    r.score,
+                    r.comment,
+                    r.audio_path,
+                    r.scores,
+                    r.criterion_comments,
+                    r.created_at,
+                    op.id AS operator_id,
+                    op.name AS operator_name,
+                    d.id AS direction_id,
+                    d.name AS direction_name,
+                    d.criteria AS direction_criteria,
+                    d.has_file_upload AS direction_has_file_upload,
+                    adm.id AS admin_id,
+                    adm.name AS admin_name
+                FROM calibration_rooms r
+                JOIN users op ON op.id = r.operator_id
+                LEFT JOIN directions d ON d.id = r.direction_id
+                JOIN users adm ON adm.id = r.created_by_admin_id
+                WHERE r.id = %s
+            """, (room_id,))
+            row = cursor.fetchone()
+            if not row:
+                return jsonify({"error": "Calibration room not found"}), 404
+
+            if _is_supervisor_role(role):
+                cursor.execute("""
+                    SELECT id FROM calibration_room_members
+                    WHERE room_id = %s AND supervisor_id = %s
+                """, (room_id, requester_id))
+                joined = bool(cursor.fetchone())
+                if not joined:
+                    return jsonify({"error": "Join the room first"}), 403
+            else:
+                joined = True
+
+            cursor.execute("""
+                SELECT id, score, comment, scores, criterion_comments, created_at, updated_at
+                FROM calibration_room_evaluations
+                WHERE room_id = %s AND evaluator_id = %s
+            """, (room_id, requester_id))
+            my_eval_row = cursor.fetchone()
+
+            can_view_results = role == 'admin' or bool(my_eval_row)
+            evaluation_rows = []
+            evaluator_columns = []
+            if can_view_results:
+                cursor.execute("""
+                    SELECT
+                        e.id,
+                        e.evaluator_id,
+                        u.name AS evaluator_name,
+                        e.score,
+                        e.comment,
+                        e.scores,
+                        e.criterion_comments,
+                        e.created_at,
+                        e.updated_at
+                    FROM calibration_room_evaluations e
+                    JOIN users u ON u.id = e.evaluator_id
+                    WHERE e.room_id = %s
+                    ORDER BY u.name
+                """, (room_id,))
+                fetched = cursor.fetchall()
+                for e in fetched:
+                    payload = {
+                        "id": e[0],
+                        "evaluator_id": e[1],
+                        "evaluator_name": e[2],
+                        "score": float(e[3]) if e[3] is not None else 0.0,
+                        "comment": e[4],
+                        "scores": e[5] if isinstance(e[5], list) else [],
+                        "criterion_comments": e[6] if isinstance(e[6], list) else [],
+                        "created_at": e[7].strftime('%Y-%m-%d %H:%M:%S') if e[7] and hasattr(e[7], "strftime") else None,
+                        "updated_at": e[8].strftime('%Y-%m-%d %H:%M:%S') if e[8] and hasattr(e[8], "strftime") else None,
+                    }
+                    evaluation_rows.append(payload)
+                    evaluator_columns.append({"id": payload["evaluator_id"], "name": payload["evaluator_name"]})
+
+            room_audio_url = None
+            room_audio_path = row[6]
+            if room_audio_path:
+                try:
+                    path_parts = str(room_audio_path).split('/', 1)
+                    if len(path_parts) == 2:
+                        bucket_name, blob_path = path_parts
+                        bucket = get_gcs_client().bucket(bucket_name)
+                        blob = bucket.blob(blob_path)
+                        if blob.exists():
+                            room_audio_url = blob.generate_signed_url(
+                                version="v4",
+                                expiration=timedelta(minutes=15),
+                                method="GET",
+                                response_type='audio/mpeg'
+                            )
+                except Exception as e:
+                    logging.error("Error generating calibration room audio URL: %s", e)
+
+        direction_criteria = row[14] if isinstance(row[14], list) else []
+        room_scores = row[7] if isinstance(row[7], list) else []
+        room_comments = row[8] if isinstance(row[8], list) else []
+        results = _build_calibration_results(direction_criteria, room_scores, room_comments, evaluation_rows) if can_view_results else None
+
+        my_evaluation = None
+        if my_eval_row:
+            my_evaluation = {
+                "id": my_eval_row[0],
+                "score": float(my_eval_row[1]) if my_eval_row[1] is not None else 0.0,
+                "comment": my_eval_row[2],
+                "scores": my_eval_row[3] if isinstance(my_eval_row[3], list) else [],
+                "criterion_comments": my_eval_row[4] if isinstance(my_eval_row[4], list) else [],
+                "created_at": my_eval_row[5].strftime('%Y-%m-%d %H:%M:%S') if my_eval_row[5] and hasattr(my_eval_row[5], "strftime") else None,
+                "updated_at": my_eval_row[6].strftime('%Y-%m-%d %H:%M:%S') if my_eval_row[6] and hasattr(my_eval_row[6], "strftime") else None,
+            }
+
+        room_payload = {
+            "id": row[0],
+            "month": row[1],
+            "phone_number": row[2],
+            "appeal_date": row[3].strftime('%Y-%m-%d %H:%M:%S') if row[3] and hasattr(row[3], "strftime") else None,
+            "score": float(row[4]) if row[4] is not None else 0.0,
+            "comment": row[5],
+            "audio_url": room_audio_url,
+            "created_at": row[9].strftime('%Y-%m-%d %H:%M:%S') if row[9] and hasattr(row[9], "strftime") else None,
+            "scores": room_scores,
+            "criterion_comments": room_comments,
+            "operator": {"id": row[10], "name": row[11]},
+            "direction": {
+                "id": row[12],
+                "name": row[13],
+                "criteria": direction_criteria,
+                "hasFileUpload": bool(row[15]) if row[15] is not None else True
+            },
+            "benchmark_admin": {"id": row[16], "name": row[17]}
+        }
+
+        return jsonify({
+            "status": "success",
+            "room": room_payload,
+            "joined": joined,
+            "can_evaluate": bool(_is_supervisor_role(role) and not my_eval_row),
+            "can_view_results": bool(can_view_results),
+            "my_evaluation": my_evaluation,
+            "results": results,
+            "evaluators": evaluator_columns
+        }), 200
+    except Exception as e:
+        logging.exception("Error getting calibration room")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
+@app.route('/api/call_calibration/rooms/<int:room_id>/evaluate', methods=['POST'])
+@require_api_key
+def evaluate_call_calibration_room(room_id):
+    try:
+        requester_id = getattr(g, 'user_id', None)
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "Requester not found"}), 404
+        if not _is_supervisor_role(requester[3]):
+            return jsonify({"error": "Only supervisors can submit calibration results"}), 403
+
+        data = request.get_json() or {}
+        scores = data.get('scores')
+        criterion_comments = data.get('criterion_comments')
+        comment = str(data.get('comment') or '').strip()
+        if not isinstance(scores, list) or not isinstance(criterion_comments, list):
+            return jsonify({"error": "scores and criterion_comments must be arrays"}), 400
+
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT d.criteria
+                FROM calibration_rooms r
+                LEFT JOIN directions d ON d.id = r.direction_id
+                WHERE r.id = %s
+            """, (room_id,))
+            row = cursor.fetchone()
+            if not row:
+                return jsonify({"error": "Calibration room not found"}), 404
+            criteria = row[0] if isinstance(row[0], list) else []
+
+            cursor.execute("""
+                SELECT id
+                FROM calibration_room_members
+                WHERE room_id = %s AND supervisor_id = %s
+            """, (room_id, requester_id))
+            if not cursor.fetchone():
+                return jsonify({"error": "Join the room first"}), 403
+
+            normalized_scores = []
+            normalized_comments = []
+            for idx in range(len(criteria)):
+                src_score = scores[idx] if idx < len(scores) else 'Correct'
+                src_comment = criterion_comments[idx] if idx < len(criterion_comments) else ''
+                normalized_scores.append(_normalize_calibration_score_value(src_score))
+                normalized_comments.append(str(src_comment or ''))
+
+            total_score, _ = _compute_total_score_from_criteria(criteria, normalized_scores)
+            if not comment:
+                comment = '; '.join(
+                    f"{(criteria[i] or {}).get('name', f'Критерий {i + 1}')}: {text.strip()}"
+                    for i, text in enumerate(normalized_comments)
+                    if str(text or '').strip()
+                )
+
+            cursor.execute("""
+                INSERT INTO calibration_room_evaluations (
+                    room_id,
+                    evaluator_id,
+                    score,
+                    comment,
+                    scores,
+                    criterion_comments,
+                    created_at,
+                    updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT (room_id, evaluator_id)
+                DO UPDATE SET
+                    score = EXCLUDED.score,
+                    comment = EXCLUDED.comment,
+                    scores = EXCLUDED.scores,
+                    criterion_comments = EXCLUDED.criterion_comments,
+                    updated_at = CURRENT_TIMESTAMP
+                RETURNING id
+            """, (
+                room_id,
+                requester_id,
+                total_score,
+                comment,
+                json.dumps(normalized_scores, ensure_ascii=False),
+                json.dumps(normalized_comments, ensure_ascii=False),
+            ))
+            evaluation_id = cursor.fetchone()[0]
+
+        return jsonify({
+            "status": "success",
+            "evaluation_id": evaluation_id,
+            "score": total_score
+        }), 200
+    except Exception as e:
+        logging.exception("Error submitting calibration evaluation")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
     
 @app.route('/api/ai/monthly_feedback', methods=['POST'])
