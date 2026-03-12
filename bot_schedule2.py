@@ -3069,13 +3069,14 @@ def list_call_calibration_rooms():
         for row in rows:
             calls_count = int(row[7] or 0)
             my_evaluated_calls = int(row[10] or 0)
+            is_creator = bool(row[4] and int(row[4]) == int(requester_id))
             rooms.append({
                 "id": row[0],
                 "month": row[1],
                 "room_title": row[2] or f"Комната #{row[0]}",
                 "created_at": row[3].strftime('%Y-%m-%d %H:%M:%S') if row[3] and hasattr(row[3], "strftime") else None,
                 "benchmark_admin": {"id": row[4], "name": row[5]},
-                "joined": True if role == 'admin' else bool(row[6]),
+                "joined": True if role == 'admin' else bool(row[6] or is_creator),
                 "calls_count": calls_count,
                 "evaluated_count": int(row[8] or 0),
                 "evaluation_rows_count": int(row[9] or 0),
@@ -3100,8 +3101,8 @@ def create_call_calibration_room():
         requester = db.get_user(id=requester_id)
         if not requester:
             return jsonify({"error": "Requester not found"}), 404
-        if requester[3] != 'admin':
-            return jsonify({"error": "Only admin can create calibration rooms"}), 403
+        if requester[3] != 'admin' and not _is_supervisor_role(requester[3]):
+            return jsonify({"error": "Only admin and supervisors can create calibration rooms"}), 403
 
         data = request.form if request.form else (request.get_json(silent=True) or {})
         month = str(data.get('month') or '').strip()
@@ -3147,8 +3148,9 @@ def add_call_to_calibration_room(room_id):
         requester = db.get_user(id=requester_id)
         if not requester:
             return jsonify({"error": "Requester not found"}), 404
-        if requester[3] != 'admin':
-            return jsonify({"error": "Only admin can add calls to calibration room"}), 403
+        requester_role = requester[3]
+        if requester_role != 'admin' and not _is_supervisor_role(requester_role):
+            return jsonify({"error": "Only admin and supervisors can add calls to calibration room"}), 403
 
         data = request.form if request.form else (request.get_json(silent=True) or {})
         required_fields = ['operator_id', 'phone_number', 'appeal_date', 'direction', 'scores', 'criterion_comments']
@@ -3190,16 +3192,28 @@ def add_call_to_calibration_room(room_id):
         operator = db.get_user(id=operator_id)
         if not operator or operator[3] != 'operator':
             return jsonify({"error": "Operator not found"}), 404
+        if not _authorize_operator_scope(requester, requester_id, operator_id):
+            return jsonify({"error": "Forbidden: you cannot add calls for this operator"}), 403
 
         with db._get_cursor() as cursor:
             cursor.execute("""
-                SELECT id, month
+                SELECT id, month, created_by_admin_id
                 FROM calibration_rooms
                 WHERE id = %s
             """, (room_id,))
             room_row = cursor.fetchone()
             if not room_row:
                 return jsonify({"error": "Calibration room not found"}), 404
+
+            room_creator_id = room_row[2]
+            if _is_supervisor_role(requester_role) and int(room_creator_id or 0) != int(requester_id):
+                cursor.execute("""
+                    SELECT id
+                    FROM calibration_room_members
+                    WHERE room_id = %s AND supervisor_id = %s
+                """, (room_id, requester_id))
+                if not cursor.fetchone():
+                    return jsonify({"error": "Join the room first"}), 403
 
             room_month = str(room_row[1] or '').strip()
             if room_month and month and room_month != month:
@@ -3374,11 +3388,12 @@ def get_call_calibration_room(room_id):
                 return jsonify({"error": "Calibration room not found"}), 404
 
             if _is_supervisor_role(role):
+                is_creator = int(room_row[4] or 0) == int(requester_id)
                 cursor.execute("""
                     SELECT id FROM calibration_room_members
                     WHERE room_id = %s AND supervisor_id = %s
                 """, (room_id, requester_id))
-                joined = bool(cursor.fetchone())
+                joined = bool(cursor.fetchone()) or bool(is_creator)
                 if not joined:
                     return jsonify({"error": "Join the room first"}), 403
             else:
@@ -3620,8 +3635,9 @@ def update_call_calibration_etalon(room_id, call_id):
         requester = db.get_user(id=requester_id)
         if not requester:
             return jsonify({"error": "Requester not found"}), 404
-        if requester[3] != 'admin':
-            return jsonify({"error": "Only admin can update etalon"}), 403
+        requester_role = requester[3]
+        if requester_role != 'admin' and not _is_supervisor_role(requester_role):
+            return jsonify({"error": "Only admin and supervisors can update etalon"}), 403
 
         data = request.get_json() or {}
         scores = data.get('scores')
@@ -3631,8 +3647,9 @@ def update_call_calibration_etalon(room_id, call_id):
 
         with db._get_cursor() as cursor:
             cursor.execute("""
-                SELECT d.criteria
+                SELECT d.criteria, c.operator_id, r.created_by_admin_id
                 FROM calibration_room_calls c
+                JOIN calibration_rooms r ON r.id = c.room_id
                 LEFT JOIN directions d ON d.id = c.direction_id
                 WHERE c.id = %s AND c.room_id = %s
             """, (call_id, room_id))
@@ -3640,6 +3657,20 @@ def update_call_calibration_etalon(room_id, call_id):
             if not call_row:
                 return jsonify({"error": "Calibration call not found"}), 404
             criteria = call_row[0] if isinstance(call_row[0], list) else []
+            call_operator_id = int(call_row[1]) if call_row[1] is not None else None
+            room_creator_id = int(call_row[2]) if call_row[2] is not None else None
+
+            if _is_supervisor_role(requester_role):
+                if call_operator_id is None or not _authorize_operator_scope(requester, requester_id, call_operator_id):
+                    return jsonify({"error": "Forbidden: you cannot update etalon for this operator"}), 403
+                if int(requester_id) != room_creator_id:
+                    cursor.execute("""
+                        SELECT id
+                        FROM calibration_room_members
+                        WHERE room_id = %s AND supervisor_id = %s
+                    """, (room_id, requester_id))
+                    if not cursor.fetchone():
+                        return jsonify({"error": "Join the room first"}), 403
 
             normalized_scores = []
             normalized_comments = []
@@ -3711,23 +3742,26 @@ def evaluate_call_calibration_room(room_id):
 
         with db._get_cursor() as cursor:
             cursor.execute("""
-                SELECT id
+                SELECT created_by_admin_id
                 FROM calibration_rooms
                 WHERE id = %s
             """, (room_id,))
-            if not cursor.fetchone():
+            room_row = cursor.fetchone()
+            if not room_row:
                 return jsonify({"error": "Calibration room not found"}), 404
 
-            cursor.execute("""
-                SELECT id
-                FROM calibration_room_members
-                WHERE room_id = %s AND supervisor_id = %s
-            """, (room_id, requester_id))
-            if not cursor.fetchone():
-                return jsonify({"error": "Join the room first"}), 403
+            room_creator_id = int(room_row[0]) if room_row[0] is not None else None
+            if int(requester_id) != int(room_creator_id or 0):
+                cursor.execute("""
+                    SELECT id
+                    FROM calibration_room_members
+                    WHERE room_id = %s AND supervisor_id = %s
+                """, (room_id, requester_id))
+                if not cursor.fetchone():
+                    return jsonify({"error": "Join the room first"}), 403
 
             cursor.execute("""
-                SELECT d.criteria
+                SELECT c.operator_id, d.criteria
                 FROM calibration_room_calls c
                 LEFT JOIN directions d ON d.id = c.direction_id
                 WHERE c.id = %s AND c.room_id = %s
@@ -3735,7 +3769,10 @@ def evaluate_call_calibration_room(room_id):
             call_row = cursor.fetchone()
             if not call_row:
                 return jsonify({"error": "Calibration call not found"}), 404
-            criteria = call_row[0] if isinstance(call_row[0], list) else []
+            call_operator_id = int(call_row[0]) if call_row[0] is not None else None
+            criteria = call_row[1] if isinstance(call_row[1], list) else []
+            if call_operator_id is None or not _authorize_operator_scope(requester, requester_id, call_operator_id):
+                return jsonify({"error": "Forbidden: you cannot evaluate this operator"}), 403
 
             normalized_scores = []
             normalized_comments = []
