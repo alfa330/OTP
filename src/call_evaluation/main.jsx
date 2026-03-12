@@ -1035,10 +1035,15 @@ const App = ({ user, initialSelection }) => {
     const [calibrationDetail, setCalibrationDetail] = useState(null);
     const [showCalibrationEvalModal, setShowCalibrationEvalModal] = useState(false);
     const [showCalibrationCreateModal, setShowCalibrationCreateModal] = useState(false);
+    const [openingCalibrationRoomId, setOpeningCalibrationRoomId] = useState(null);
+    const [openingCalibrationCallId, setOpeningCalibrationCallId] = useState(null);
     const [showVersionsModal, setShowVersionsModal] = useState(false);
     const [versionHistory, setVersionHistory] = useState([]);
     const operatorsCacheRef = useRef(new Map());
     const callsCacheRef = useRef(new Map());
+    const calibrationJoinInFlightRef = useRef(new Map());
+    const calibrationDetailInFlightRef = useRef(new Map());
+    const calibrationDetailCacheRef = useRef(new Map());
     const MAX_EVALS = 20;
     const normalizeStatus = (status) => String(status ?? '').trim().toLowerCase();
     const isFiredStatus = (status) => {
@@ -1214,6 +1219,11 @@ const App = ({ user, initialSelection }) => {
 
     useEffect(() => { fetchEvaluations(); }, [fetchEvaluations]);
     useEffect(() => { setFromDate(null); setToDate(null); }, [selectedMonth]);
+    useEffect(() => {
+        calibrationDetailCacheRef.current.clear();
+        calibrationDetailInFlightRef.current.clear();
+        calibrationJoinInFlightRef.current.clear();
+    }, [selectedMonth, userId]);
 
     const fetchCalibrationRooms = useCallback(async () => {
         if (!userId || !canUseCalibration) return;
@@ -1239,9 +1249,49 @@ const App = ({ user, initialSelection }) => {
         }
     }, [userId, canUseCalibration, selectedMonth, activeCalibrationRoomId]);
 
-    const fetchCalibrationRoomDetail = useCallback(async (roomId, callId = null) => {
+    const applyCalibrationDetailPayload = useCallback((roomId, d) => {
+        const selectedCallPayload = d?.selected_call
+            ? { ...(d.selected_call || {}), my_evaluation: d.my_evaluation || null }
+            : null;
+        setCalibrationDetail({
+            room: d?.room || null,
+            calls: d?.calls || [],
+            selected_call: selectedCallPayload,
+            selected_call_id: d?.selected_call_id || null,
+            can_evaluate: !!d?.can_evaluate,
+            can_view_results: !!d?.can_view_results,
+            joined: !!d?.joined,
+            results: d?.results || null,
+            evaluators: d?.evaluators || []
+        });
+        setActiveCalibrationRoomId(roomId);
+        setActiveCalibrationCallId(d?.selected_call_id || null);
+    }, []);
+
+    const fetchCalibrationRoomDetail = useCallback(async (roomId, callId = null, { force = false } = {}) => {
         if (!userId || !roomId) return null;
-        try {
+        const detailKey = `${roomId}:${callId || ''}`;
+
+        if (!force) {
+            const cached = calibrationDetailCacheRef.current.get(detailKey);
+            if (cached) {
+                applyCalibrationDetailPayload(roomId, cached);
+                return cached;
+            }
+        }
+
+        const inFlight = calibrationDetailInFlightRef.current.get(detailKey);
+        if (inFlight) {
+            try {
+                const data = await inFlight;
+                if (data) applyCalibrationDetailPayload(roomId, data);
+                return data;
+            } catch {
+                return null;
+            }
+        }
+
+        const requestPromise = (async () => {
             const params = new URLSearchParams();
             if (callId) params.append('call_id', String(callId));
             const url = params.toString()
@@ -1252,28 +1302,25 @@ const App = ({ user, initialSelection }) => {
             });
             const d = await r.json();
             if (!r.ok || d.status !== 'success') throw new Error(d.error || 'Не удалось загрузить комнату');
-            const selectedCallPayload = d.selected_call
-                ? { ...(d.selected_call || {}), my_evaluation: d.my_evaluation || null }
-                : null;
-            setCalibrationDetail({
-                room: d.room || null,
-                calls: d.calls || [],
-                selected_call: selectedCallPayload,
-                selected_call_id: d.selected_call_id || null,
-                can_evaluate: !!d.can_evaluate,
-                can_view_results: !!d.can_view_results,
-                joined: !!d.joined,
-                results: d.results || null,
-                evaluators: d.evaluators || []
-            });
-            setActiveCalibrationRoomId(roomId);
-            setActiveCalibrationCallId(d.selected_call_id || null);
+            return d;
+        })();
+
+        calibrationDetailInFlightRef.current.set(detailKey, requestPromise);
+        try {
+            const d = await requestPromise;
+            calibrationDetailCacheRef.current.set(detailKey, d);
+            if (d?.selected_call_id) {
+                calibrationDetailCacheRef.current.set(`${roomId}:${d.selected_call_id}`, d);
+            }
+            applyCalibrationDetailPayload(roomId, d);
             return d;
         } catch (e) {
             emitCallEvaluationToast('Ошибка загрузки комнаты: ' + e.message, 'error');
             return null;
+        } finally {
+            calibrationDetailInFlightRef.current.delete(detailKey);
         }
-    }, [userId]);
+    }, [userId, applyCalibrationDetailPayload]);
 
     useEffect(() => {
         if (activeSection !== 'calibration') return;
@@ -1282,24 +1329,45 @@ const App = ({ user, initialSelection }) => {
 
     const handleOpenCalibrationRoom = useCallback(async (room, callId = null) => {
         if (!room?.id || !userId) return;
+        if (openingCalibrationRoomId === room.id) return;
+        if (Number(activeCalibrationRoomId) === Number(room.id) && !callId) return;
         try {
+            setOpeningCalibrationRoomId(room.id);
+            let joinedNow = false;
             if (isSupervisorRole && !room.joined) {
-                const jr = await authFetch(`${API_BASE_URL}/api/call_calibration/rooms/${room.id}/join`, {
-                    method: 'POST',
-                    headers: { 'X-User-Id': userId }
-                });
-                const jd = await jr.json();
-                if (!jr.ok || jd.status !== 'success') throw new Error(jd.error || 'Не удалось войти в комнату');
+                let joinPromise = calibrationJoinInFlightRef.current.get(room.id);
+                if (!joinPromise) {
+                    joinPromise = (async () => {
+                        const jr = await authFetch(`${API_BASE_URL}/api/call_calibration/rooms/${room.id}/join`, {
+                            method: 'POST',
+                            headers: { 'X-User-Id': userId }
+                        });
+                        const jd = await jr.json();
+                        if (!jr.ok || jd.status !== 'success') {
+                            throw new Error(jd.error || 'Не удалось войти в комнату');
+                        }
+                        return true;
+                    })();
+                    calibrationJoinInFlightRef.current.set(room.id, joinPromise);
+                }
+                await joinPromise;
+                calibrationJoinInFlightRef.current.delete(room.id);
+                joinedNow = true;
+                setCalibrationRooms(prev => prev.map(x => (Number(x.id) === Number(room.id) ? { ...x, joined: true } : x)));
             }
             await fetchCalibrationRoomDetail(room.id, callId);
-            await fetchCalibrationRooms();
+            if (joinedNow) fetchCalibrationRooms();
         } catch (e) {
             emitCallEvaluationToast('Ошибка: ' + e.message, 'error');
+            calibrationJoinInFlightRef.current.delete(room.id);
+        } finally {
+            setOpeningCalibrationRoomId((prev) => (Number(prev) === Number(room.id) ? null : prev));
         }
-    }, [userId, isSupervisorRole, fetchCalibrationRoomDetail, fetchCalibrationRooms]);
+    }, [userId, isSupervisorRole, fetchCalibrationRoomDetail, fetchCalibrationRooms, activeCalibrationRoomId, openingCalibrationRoomId]);
 
     const handleCalibrationRoomCreated = useCallback(async (roomId) => {
         setActiveSection('calibration');
+        calibrationDetailCacheRef.current.clear();
         await fetchCalibrationRooms();
         if (roomId) {
             await fetchCalibrationRoomDetail(roomId);
@@ -1315,20 +1383,29 @@ const App = ({ user, initialSelection }) => {
 
     const handleCalibrationCallCreated = useCallback(async (roomCallId) => {
         if (!activeCalibrationRoomId) return;
-        await fetchCalibrationRoomDetail(activeCalibrationRoomId, roomCallId || null);
+        calibrationDetailCacheRef.current.clear();
+        await fetchCalibrationRoomDetail(activeCalibrationRoomId, roomCallId || null, { force: true });
         await fetchCalibrationRooms();
     }, [activeCalibrationRoomId, fetchCalibrationRoomDetail, fetchCalibrationRooms]);
 
     const handleCalibrationEvaluationSaved = useCallback(async () => {
         if (!activeCalibrationRoomId) return;
-        await fetchCalibrationRoomDetail(activeCalibrationRoomId, activeCalibrationCallId || null);
+        calibrationDetailCacheRef.current.clear();
+        await fetchCalibrationRoomDetail(activeCalibrationRoomId, activeCalibrationCallId || null, { force: true });
         await fetchCalibrationRooms();
     }, [activeCalibrationRoomId, activeCalibrationCallId, fetchCalibrationRoomDetail, fetchCalibrationRooms]);
 
     const handleOpenCalibrationCall = useCallback(async (callId) => {
         if (!activeCalibrationRoomId || !callId) return;
-        await fetchCalibrationRoomDetail(activeCalibrationRoomId, callId);
-    }, [activeCalibrationRoomId, fetchCalibrationRoomDetail]);
+        if (Number(callId) === Number(activeCalibrationCallId)) return;
+        if (Number(openingCalibrationCallId) === Number(callId)) return;
+        try {
+            setOpeningCalibrationCallId(callId);
+            await fetchCalibrationRoomDetail(activeCalibrationRoomId, callId);
+        } finally {
+            setOpeningCalibrationCallId((prev) => (Number(prev) === Number(callId) ? null : prev));
+        }
+    }, [activeCalibrationRoomId, activeCalibrationCallId, openingCalibrationCallId, fetchCalibrationRoomDetail]);
 
     const handleEvaluateCall = (data) => {
         setCalls(prev => {
@@ -1735,13 +1812,19 @@ const App = ({ user, initialSelection }) => {
                                 <div className="calibration-cards">
                                     {calibrationRooms.map((room) => {
                                         const isActive = room.id === activeCalibrationRoomId;
+                                        const isOpening = Number(openingCalibrationRoomId) === Number(room.id);
                                         return (
-                                            <button key={room.id} className={`calibration-card ${isActive ? 'active' : ''}`} onClick={() => handleOpenCalibrationRoom(room)}>
+                                            <button
+                                                key={room.id}
+                                                className={`calibration-card ${isActive ? 'active' : ''}`}
+                                                onClick={() => handleOpenCalibrationRoom(room)}
+                                                disabled={isOpening}
+                                            >
                                                 <div className="calibration-card-head">
                                                     <span className="version-badge">Комната #{room.id}</span>
-                                                    <span className={`badge ${room.my_evaluated ? 'badge-green' : room.joined ? 'badge-amber' : 'badge-blue'}`}>
+                                                    <span className={`badge ${isOpening ? 'badge-blue' : room.my_evaluated ? 'badge-green' : room.joined ? 'badge-amber' : 'badge-blue'}`}>
                                                         <span className="badge-dot" />
-                                                        {room.my_evaluated ? 'Оценено' : room.joined ? 'В комнате' : 'Не вошел'}
+                                                        {isOpening ? 'Загрузка...' : room.my_evaluated ? 'Оценено' : room.joined ? 'В комнате' : 'Не вошел'}
                                                     </span>
                                                 </div>
                                                 <div className="calibration-card-title">{room.room_title || `Комната #${room.id}`}</div>
@@ -1801,15 +1884,21 @@ const App = ({ user, initialSelection }) => {
                                                 <div className="calibration-cards" style={{padding:'0 0 8px'}}>
                                                     {calibrationCalls.map((call) => {
                                                         const isActiveCall = Number(call.id) === Number(activeCalibrationCallId);
+                                                        const isOpeningCall = Number(openingCalibrationCallId) === Number(call.id);
                                                         return (
                                                             <button
                                                                 key={call.id}
                                                                 className={`calibration-card ${isActiveCall ? 'active' : ''}`}
                                                                 onClick={() => handleOpenCalibrationCall(call.id)}
+                                                                disabled={isOpeningCall}
                                                             >
                                                                 <div className="calibration-card-head">
                                                                     <span className="version-badge">Звонок #{call.id}</span>
-                                                                    {call.my_evaluated && <span className="badge badge-green"><span className="badge-dot" /> Оценен вами</span>}
+                                                                    {isOpeningCall
+                                                                        ? <span className="badge badge-blue"><span className="badge-dot" /> Загрузка...</span>
+                                                                        : call.my_evaluated
+                                                                            ? <span className="badge badge-green"><span className="badge-dot" /> Оценен вами</span>
+                                                                            : null}
                                                                 </div>
                                                                 <div className="calibration-card-title">{call.operator?.name || '—'}</div>
                                                                 <div className="calibration-card-meta">
