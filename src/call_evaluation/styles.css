@@ -196,6 +196,88 @@
             gap: 12px;
         }
         .panel-title { font-size: 14px; font-weight: 600; color: var(--text); }
+        .panel-title-wrap { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .section-switch { display: inline-flex; gap: 6px; align-items: center; }
+
+        .calibration-cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+            gap: 12px;
+            padding: 14px 16px 8px;
+        }
+        .calibration-card {
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: var(--surface);
+            text-align: left;
+            padding: 12px;
+            cursor: pointer;
+            transition: border-color var(--transition), box-shadow var(--transition), transform var(--transition);
+        }
+        .calibration-card:hover {
+            border-color: var(--accent);
+            box-shadow: var(--shadow);
+            transform: translateY(-1px);
+        }
+        .calibration-card.active {
+            border-color: var(--accent);
+            background: var(--accent-light);
+        }
+        .calibration-card-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+        .calibration-card-title { font-size: 14px; font-weight: 600; color: var(--text); margin-bottom: 6px; }
+        .calibration-card-meta { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-2); }
+        .calibration-detail { border-top: 1px solid var(--border); margin-top: 6px; }
+        .calibration-detail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+        .calibration-lock-note {
+            padding: 12px;
+            border: 1px dashed var(--border-strong);
+            border-radius: var(--radius);
+            background: var(--surface-2);
+            color: var(--text-2);
+            font-size: 13px;
+            margin-top: 10px;
+        }
+        .calibration-critical-tag {
+            display: inline-flex;
+            margin-left: 8px;
+            padding: 1px 6px;
+            border-radius: 999px;
+            background: var(--red-light);
+            color: var(--red);
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+        }
+        .calibration-percent {
+            font-family: var(--font-mono);
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .calibration-percent.ok { color: var(--green); }
+        .calibration-percent.warn { color: var(--amber); }
+        .calibration-cell-comment {
+            margin-top: 2px;
+            font-size: 11px;
+            color: var(--text-2);
+            line-height: 1.35;
+            white-space: pre-wrap;
+        }
+        .calibration-summary {
+            margin-top: 10px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+            font-size: 13px;
+        }
+        .calibration-critical-note { color: var(--red); font-size: 12px; }
 
         /* ── Stats bar ── */
         .stats-bar {

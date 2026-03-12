@@ -100,6 +100,26 @@ const parseToHtml = (text) => {
     return html;
 };
 
+const normalizeCalibrationScore = (value) => {
+    const raw = String(value ?? '').trim().toLowerCase();
+    if (raw === 'correct') return 'Correct';
+    if (raw === 'n/a' || raw === 'na' || raw === 'n\\a') return 'N/A';
+    if (raw === 'incorrect') return 'Incorrect';
+    if (raw === 'deficiency') return 'Deficiency';
+    if (raw === 'error') return 'Error';
+    return String(value ?? '').trim() || 'Correct';
+};
+
+const calibrationScoreLabel = (value) => {
+    const v = normalizeCalibrationScore(value);
+    if (v === 'Correct') return 'Корректно';
+    if (v === 'N/A') return 'N/A';
+    if (v === 'Incorrect') return 'Ошибка';
+    if (v === 'Deficiency') return 'Недочет';
+    if (v === 'Error') return 'Критич. ошибка';
+    return v || '—';
+};
+
 // ─── Score Toggle Button ───────────────────────────────
 const ScoreToggle = ({ label, value, active, onClick }) => (
     <button
@@ -323,7 +343,7 @@ const DateRangePicker = ({ minDate, maxDate, setFromDate, setToDate }) => {
 };
 
 // ─── Evaluation Modal ──────────────────────────────────
-const EvaluationModal = ({ isOpen, onClose, onSubmit, directions, operator, selectedMonth, userId, userName, existingEvaluation }) => {
+const EvaluationModal = ({ isOpen, onClose, onSubmit, directions, operator, selectedMonth, userId, userName, existingEvaluation, submitMode = 'journal', onCalibrationRoomCreated = null }) => {
     const [callFile, setCallFile] = useState(null);
     const [audioUrl, setAudioUrl] = useState(null);
     const [audioError, setAudioError] = useState(null);
@@ -341,6 +361,7 @@ const EvaluationModal = ({ isOpen, onClose, onSubmit, directions, operator, sele
     const [actualDuration, setActualDuration] = useState(null);
     const [durationMismatch, setDurationMismatch] = useState(false);
     const isLocked = !!(existingEvaluation?.isReevaluation || existingEvaluation?.is_imported);
+    const isCalibrationCreateMode = submitMode === 'calibration_create';
 
     const currentDir = directions?.find(d => d.id === selectedDirId) || directions?.[0] || null;
     const criteria = currentDir?.criteria || [];
@@ -483,7 +504,7 @@ const EvaluationModal = ({ isOpen, onClose, onSubmit, directions, operator, sele
         return sum;
     }, 0);
 
-    const isSubmitDisabled = !currentDir || !criteria.length ||
+    const isSubmitDisabled = !operator || !currentDir || !criteria.length ||
         (currentDir?.hasFileUpload && !callFile && !audioUrl) ||
         scores.some((s,i) => (s==='Error'||s==='Incorrect') && !comments[i]?.trim()) ||
         durationMismatch;
@@ -506,6 +527,26 @@ const EvaluationModal = ({ isOpen, onClose, onSubmit, directions, operator, sele
         if (existingEvaluation?.isReevaluation) { fd.append('previous_version_id', existingEvaluation.id); fd.append('is_correction', true); }
         if (callFile) fd.append('audio_file', callFile);
         try {
+            if (isCalibrationCreateMode) {
+                const payload = new FormData();
+                payload.append('operator_id', String(operator?.id || ''));
+                payload.append('phone_number', phoneNumber);
+                payload.append('score', String(totalScore));
+                payload.append('comment', fd.get('comment') || '');
+                payload.append('month', assignedMonth);
+                payload.append('scores', JSON.stringify(scores));
+                payload.append('criterion_comments', JSON.stringify(comments));
+                payload.append('direction', String(currentDir?.id ?? operator?.direction_id ?? ''));
+                if (ad) payload.append('appeal_date', ad);
+                if (callFile) payload.append('audio_file', callFile);
+                const r = await authFetch(`${API_BASE_URL}/api/call_calibration/rooms`, { method:'POST', headers:{'X-User-Id':userId}, body: payload });
+                const res = await r.json();
+                if (!r.ok || res.status !== 'success') throw new Error(res.error || 'Не удалось создать комнату');
+                onCalibrationRoomCreated?.(res.room_id);
+                emitCallEvaluationToast('Комната калибровки создана', 'success');
+                onClose();
+                return;
+            }
             const r = await authFetch(`${API_BASE_URL}/api/call_evaluation`, { method:'POST', headers:{'X-User-Id':userId}, body: fd });
             const res = await r.json();
             if (res.status === 'success') {
@@ -527,7 +568,9 @@ const EvaluationModal = ({ isOpen, onClose, onSubmit, directions, operator, sele
     };
 
     if (!isOpen) return null;
-    const title = existingEvaluation?.isReevaluation ? 'Переоценка' : existingEvaluation?.isDraft ? 'Редактирование черновика' : 'Новая оценка';
+    const title = isCalibrationCreateMode
+        ? 'Новая комната калибровки'
+        : (existingEvaluation?.isReevaluation ? 'Переоценка' : existingEvaluation?.isDraft ? 'Редактирование черновика' : 'Новая оценка');
 
     return (
         <div className="modal-backdrop">
@@ -651,7 +694,11 @@ const EvaluationModal = ({ isOpen, onClose, onSubmit, directions, operator, sele
                     )}
                     <button className="btn btn-secondary" onClick={onClose}>Отмена</button>
                     <button className="btn btn-primary" onClick={() => handleSubmit(false)} disabled={isSubmitDisabled || isSubmitting}>
-                        {isSubmitting ? <><span className="spinner" /> Отправка...</> : <><FaIcon className="fas fa-check" /> Отправить</>}
+                        {isSubmitting ? (
+                            <><span className="spinner" /> {isCalibrationCreateMode ? 'Создание...' : 'Отправка...'}</>
+                        ) : (
+                            <><FaIcon className="fas fa-check" /> {isCalibrationCreateMode ? 'Создать комнату' : 'Отправить'}</>
+                        )}
                     </button>
                 </div>
             </div>
@@ -670,11 +717,154 @@ const EvaluationModal = ({ isOpen, onClose, onSubmit, directions, operator, sele
     );
 };
 
+const CalibrationReviewModal = ({ isOpen, onClose, room, userId, onSubmitted }) => {
+    const [scores, setScores] = useState([]);
+    const [comments, setComments] = useState([]);
+    const [commentVisible, setCommentVisible] = useState([]);
+    const [isSubmitting, setIsSubmitting] = useState(false);
+    const [infoIndex, setInfoIndex] = useState(null);
+
+    const criteria = room?.direction?.criteria || [];
+
+    useEffect(() => {
+        if (!isOpen || !room) return;
+        const myScores = room?.my_evaluation?.scores;
+        const myComments = room?.my_evaluation?.criterion_comments;
+        const nextScores = Array.from({ length: criteria.length }, (_, i) => normalizeCalibrationScore(myScores?.[i] ?? 'Correct'));
+        const nextComments = Array.from({ length: criteria.length }, (_, i) => String(myComments?.[i] ?? ''));
+        setScores(nextScores);
+        setComments(nextComments);
+        setCommentVisible(nextComments.map(x => !!x?.trim()));
+    }, [isOpen, room, criteria.length]);
+
+    const hasCriticalError = criteria.some((c, i) => c?.isCritical && scores[i] === 'Error');
+    const totalScore = hasCriticalError ? 0 : criteria.reduce((sum, c, i) => {
+        if (c?.isCritical) return sum;
+        if (scores[i] === 'Correct' || scores[i] === 'N/A') return sum + (Number(c?.weight) || 0);
+        if (scores[i] === 'Deficiency' && c?.deficiency?.weight != null) return sum + (Number(c?.deficiency?.weight) || 0);
+        return sum;
+    }, 0);
+    const isSubmitDisabled = !room?.id || !criteria.length || scores.some((s, i) => (s === 'Error' || s === 'Incorrect') && !comments[i]?.trim());
+
+    const submit = async () => {
+        if (isSubmitDisabled || !room?.id) return;
+        setIsSubmitting(true);
+        try {
+            const r = await authFetch(`${API_BASE_URL}/api/call_calibration/rooms/${room.id}/evaluate`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-User-Id': userId
+                },
+                body: JSON.stringify({
+                    scores,
+                    criterion_comments: comments,
+                    comment: criteria
+                        .map((c, i) => comments[i] ? `${c?.name || `Критерий ${i + 1}`}: ${comments[i]}` : '')
+                        .filter(Boolean)
+                        .join('; ')
+                })
+            });
+            const data = await r.json();
+            if (!r.ok || data.status !== 'success') throw new Error(data.error || 'Не удалось сохранить оценку');
+            emitCallEvaluationToast('Оценка калибровки сохранена', 'success');
+            onSubmitted?.();
+            onClose?.();
+        } catch (e) {
+            emitCallEvaluationToast('Ошибка: ' + e.message, 'error');
+        } finally {
+            setIsSubmitting(false);
+        }
+    };
+
+    if (!isOpen || !room) return null;
+
+    return (
+        <div className="modal-backdrop">
+            <div className="modal modal-wide" onClick={e => e.stopPropagation()}>
+                <div className="modal-header">
+                    <div>
+                        <h2>Оценка в калибровке</h2>
+                        <div className="modal-header-sub">Комната #{room.id} · Эталон: {Number(room?.score || 0).toFixed(1)}</div>
+                    </div>
+                    <button className="close-btn" onClick={onClose}><FaIcon className="fas fa-times" /></button>
+                </div>
+                <div className="modal-body">
+                    <div className="section-divider">Данные звонка</div>
+                    <div className="grid-2">
+                        <div className="field"><label className="label">Оператор</label><input className="input" type="text" value={room?.operator?.name || ''} readOnly /></div>
+                        <div className="field"><label className="label">Телефон</label><input className="input" type="text" value={room?.phone_number || ''} readOnly /></div>
+                    </div>
+                    <div className="field">
+                        <label className="label">Дата обращения</label>
+                        <input className="input" type="text" value={room?.appeal_date || ''} readOnly />
+                    </div>
+                    {room?.audio_url && (
+                        <div className="audio-wrap" style={{ maxWidth: 520 }}>
+                            <div className="audio-label">Аудиозапись</div>
+                            <audio controls><source src={room.audio_url} type="audio/mpeg" /></audio>
+                        </div>
+                    )}
+
+                    <div className="section-divider">Критерии оценивания</div>
+                    {!criteria.length ? (
+                        <div style={{padding:'12px',color:'var(--red)',fontSize:13}}>У направления нет критериев.</div>
+                    ) : (
+                        <div style={{maxHeight: 420, overflowY: 'auto', paddingRight: 4}}>
+                            {criteria.map((criterion, i) => (
+                                <CriterionCard
+                                    key={i}
+                                    criterion={criterion}
+                                    index={i}
+                                    score={scores[i] || 'Correct'}
+                                    comment={comments[i]}
+                                    commentVisible={commentVisible[i]}
+                                    onScoreChange={val => { const next=[...scores]; next[i]=val; setScores(next); }}
+                                    onCommentChange={val => { const next=[...comments]; next[i]=val; setComments(next); }}
+                                    onToggleComment={() => { const next=[...commentVisible]; next[i]=!next[i]; setCommentVisible(next); }}
+                                    onShowInfo={() => setInfoIndex(infoIndex===i ? null : i)}
+                                />
+                            ))}
+                        </div>
+                    )}
+
+                    <div className="score-summary" style={{marginTop:12, borderRadius:'var(--radius)', border:'1px solid var(--border)'}}>
+                        <span style={{fontSize:13, color:'var(--text-2)'}}>Итоговый балл</span>
+                        <span className="score-summary-val" style={{color: hasCriticalError ? 'var(--red)' : totalScore >= 70 ? 'var(--green)' : totalScore >= 50 ? 'var(--amber)' : 'var(--red)'}}>
+                            {hasCriticalError ? '0' : totalScore} / 100
+                        </span>
+                    </div>
+                </div>
+                <div className="modal-footer">
+                    <button className="btn btn-secondary" onClick={onClose}>Отмена</button>
+                    <button className="btn btn-primary" onClick={submit} disabled={isSubmitDisabled || isSubmitting}>
+                        {isSubmitting ? <><span className="spinner" /> Сохранение...</> : <><FaIcon className="fas fa-check" /> Отправить оценку</>}
+                    </button>
+                </div>
+            </div>
+
+            {infoIndex !== null && criteria[infoIndex] && (
+                <div className="info-panel" onClick={e => e.stopPropagation()}>
+                    <div className="info-panel-header">
+                        <span className="info-panel-title">{criteria[infoIndex].name}</span>
+                        <button className="close-btn" onClick={() => setInfoIndex(null)}><FaIcon className="fas fa-times" /></button>
+                    </div>
+                    <div className="info-panel-body" dangerouslySetInnerHTML={{__html: parseToHtml(String(criteria[infoIndex].value || 'Описание отсутствует'))}} />
+                </div>
+            )}
+        </div>
+    );
+};
+
 // ─── Main App ──────────────────────────────────────────
 const App = ({ user, initialSelection }) => {
     const userId = user?.id;
     const userRole = user?.role;
     const userName = user?.name;
+    const normalizedRole = String(userRole || '').toLowerCase();
+    const isAdminRole = normalizedRole === 'admin';
+    const isSupervisorRole = normalizedRole === 'sv' || normalizedRole === 'supervisor';
+    const canUseCalibration = isAdminRole || isSupervisorRole;
     const [calls, setCalls] = useState([]);
     const [directions, setDirections] = useState([]);
     const [operators, setOperators] = useState([]);
@@ -685,12 +875,19 @@ const App = ({ user, initialSelection }) => {
     const [expandedId, setExpandedId] = useState(null);
     const [editingEval, setEditingEval] = useState(null);
     const [showEvalModal, setShowEvalModal] = useState(false);
+    const [evalModalMode, setEvalModalMode] = useState('journal');
     const [isLoading, setIsLoading] = useState(false);
     const [loadingCallId, setLoadingCallId] = useState(null);
     const [operatorFromToken, setOperatorFromToken] = useState(null);
     const [fromDate, setFromDate] = useState(null);
     const [toDate, setToDate] = useState(null);
     const [viewMode, setViewMode] = useState('normal');
+    const [activeSection, setActiveSection] = useState('journal');
+    const [calibrationRooms, setCalibrationRooms] = useState([]);
+    const [isCalibrationLoading, setIsCalibrationLoading] = useState(false);
+    const [activeCalibrationRoomId, setActiveCalibrationRoomId] = useState(null);
+    const [calibrationDetail, setCalibrationDetail] = useState(null);
+    const [showCalibrationEvalModal, setShowCalibrationEvalModal] = useState(false);
     const [showVersionsModal, setShowVersionsModal] = useState(false);
     const [versionHistory, setVersionHistory] = useState([]);
     const operatorsCacheRef = useRef(new Map());
@@ -751,10 +948,10 @@ const App = ({ user, initialSelection }) => {
 
     // Supervisors
     useEffect(() => {
-        if (userRole !== 'admin' || !userId) return;
+        if (!isAdminRole || !userId) return;
         authFetch(`${API_BASE_URL}/api/admin/sv_list`, { headers:{'X-User-Id':userId} })
             .then(r=>r.json()).then(d=>{ if(d.status==='success') setSupervisors(d.sv_list||[]); }).catch(console.error);
-    }, [userRole, userId]);
+    }, [isAdminRole, userId]);
 
     useEffect(() => {
         if (!initialSelection) return;
@@ -801,7 +998,7 @@ const App = ({ user, initialSelection }) => {
     // Operators
     useEffect(() => {
         if (!userId) return;
-        const scopeId = userRole === 'admin' ? selectedSupervisor : userId;
+        const scopeId = isAdminRole ? selectedSupervisor : userId;
         if (!scopeId) {
             setOperators([]);
             return;
@@ -839,7 +1036,7 @@ const App = ({ user, initialSelection }) => {
             });
 
         return () => { isCancelled = true; };
-    }, [userId, userRole, selectedSupervisor, getOperatorsCacheKey]);
+    }, [userId, isAdminRole, selectedSupervisor, getOperatorsCacheKey]);
 
     // Evaluations fetch
     const fetchEvaluations = useCallback(async ({ force = false } = {}) => {
@@ -870,6 +1067,94 @@ const App = ({ user, initialSelection }) => {
 
     useEffect(() => { fetchEvaluations(); }, [fetchEvaluations]);
     useEffect(() => { setFromDate(null); setToDate(null); }, [selectedMonth]);
+
+    const fetchCalibrationRooms = useCallback(async () => {
+        if (!userId || !canUseCalibration) return;
+        setIsCalibrationLoading(true);
+        try {
+            const params = new URLSearchParams({ month: selectedMonth });
+            const r = await authFetch(`${API_BASE_URL}/api/call_calibration/rooms?${params.toString()}`, {
+                headers: { 'X-User-Id': userId }
+            });
+            const d = await r.json();
+            if (!r.ok || d.status !== 'success') throw new Error(d.error || 'Не удалось загрузить комнаты');
+            const nextRooms = d.rooms || [];
+            setCalibrationRooms(nextRooms);
+            if (activeCalibrationRoomId && !nextRooms.some(x => x.id === activeCalibrationRoomId)) {
+                setActiveCalibrationRoomId(null);
+                setCalibrationDetail(null);
+            }
+        } catch (e) {
+            emitCallEvaluationToast('Ошибка загрузки калибровки: ' + e.message, 'error');
+        } finally {
+            setIsCalibrationLoading(false);
+        }
+    }, [userId, canUseCalibration, selectedMonth, activeCalibrationRoomId]);
+
+    const fetchCalibrationRoomDetail = useCallback(async (roomId) => {
+        if (!userId || !roomId) return null;
+        try {
+            const r = await authFetch(`${API_BASE_URL}/api/call_calibration/rooms/${roomId}`, {
+                headers: { 'X-User-Id': userId }
+            });
+            const d = await r.json();
+            if (!r.ok || d.status !== 'success') throw new Error(d.error || 'Не удалось загрузить комнату');
+            const roomPayload = {
+                ...(d.room || {}),
+                my_evaluation: d.my_evaluation || null
+            };
+            setCalibrationDetail({
+                room: roomPayload,
+                can_evaluate: !!d.can_evaluate,
+                can_view_results: !!d.can_view_results,
+                joined: !!d.joined,
+                results: d.results || null,
+                evaluators: d.evaluators || []
+            });
+            setActiveCalibrationRoomId(roomId);
+            return d;
+        } catch (e) {
+            emitCallEvaluationToast('Ошибка загрузки комнаты: ' + e.message, 'error');
+            return null;
+        }
+    }, [userId]);
+
+    useEffect(() => {
+        if (activeSection !== 'calibration') return;
+        fetchCalibrationRooms();
+    }, [activeSection, fetchCalibrationRooms]);
+
+    const handleOpenCalibrationRoom = useCallback(async (room) => {
+        if (!room?.id || !userId) return;
+        try {
+            if (isSupervisorRole && !room.joined) {
+                const jr = await authFetch(`${API_BASE_URL}/api/call_calibration/rooms/${room.id}/join`, {
+                    method: 'POST',
+                    headers: { 'X-User-Id': userId }
+                });
+                const jd = await jr.json();
+                if (!jr.ok || jd.status !== 'success') throw new Error(jd.error || 'Не удалось войти в комнату');
+            }
+            await fetchCalibrationRoomDetail(room.id);
+            await fetchCalibrationRooms();
+        } catch (e) {
+            emitCallEvaluationToast('Ошибка: ' + e.message, 'error');
+        }
+    }, [userId, isSupervisorRole, fetchCalibrationRoomDetail, fetchCalibrationRooms]);
+
+    const handleCalibrationRoomCreated = useCallback(async (roomId) => {
+        await fetchCalibrationRooms();
+        if (roomId) {
+            await fetchCalibrationRoomDetail(roomId);
+            setActiveSection('calibration');
+        }
+    }, [fetchCalibrationRooms, fetchCalibrationRoomDetail]);
+
+    const handleCalibrationEvaluationSaved = useCallback(async () => {
+        if (!activeCalibrationRoomId) return;
+        await fetchCalibrationRoomDetail(activeCalibrationRoomId);
+        await fetchCalibrationRooms();
+    }, [activeCalibrationRoomId, fetchCalibrationRoomDetail, fetchCalibrationRooms]);
 
     const handleEvaluateCall = (data) => {
         setCalls(prev => {
@@ -906,7 +1191,7 @@ const App = ({ user, initialSelection }) => {
     const handleSelectCall = async (callId) => {
         const call = calls.find(c => c.id === callId);
         if (!call) return;
-        if (call.isDraft) { setEditingEval(call); setShowEvalModal(true); return; }
+        if (call.isDraft) { setEvalModalMode('journal'); setEditingEval(call); setShowEvalModal(true); return; }
         if (expandedId !== callId) {
             setLoadingCallId(callId);
             if (!call.audioUrl && call.directions?.[0]?.hasFileUpload) {
@@ -970,6 +1255,10 @@ const App = ({ user, initialSelection }) => {
         if (v >= 60) return 'score-mid';
         return 'score-low';
     };
+    const calibrationRoom = calibrationDetail?.room || null;
+    const calibrationResults = calibrationDetail?.results || null;
+    const calibrationRows = calibrationResults?.criteria_rows || [];
+    const calibrationEvaluators = calibrationDetail?.evaluators || [];
 
     return (
         <div className="app">
@@ -988,9 +1277,27 @@ const App = ({ user, initialSelection }) => {
             <div className="main-panel">
                 {/* Panel header with filters */}
                 <div className="panel-header">
-                    <span className="panel-title">Журнал оценок</span>
+                    <div className="panel-title-wrap">
+                        <span className="panel-title">{activeSection === 'journal' ? 'Журнал оценок' : 'Калибровка звонков'}</span>
+                        {canUseCalibration && (
+                            <div className="section-switch">
+                                <button
+                                    className={`btn btn-sm ${activeSection === 'journal' ? 'btn-primary' : 'btn-secondary'}`}
+                                    onClick={() => setActiveSection('journal')}
+                                >
+                                    Журнал
+                                </button>
+                                <button
+                                    className={`btn btn-sm ${activeSection === 'calibration' ? 'btn-primary' : 'btn-secondary'}`}
+                                    onClick={() => setActiveSection('calibration')}
+                                >
+                                    Калибровка
+                                </button>
+                            </div>
+                        )}
+                    </div>
                     <div className="filters">
-                        {userRole === 'admin' && (
+                        {isAdminRole && (
                             <div className="filter-group">
                                 <label className="label">Супервайзер</label>
                                 <select className="select" value={selectedSupervisor||''} style={selectedSupervisorIsFired ? { color:'var(--text-3)' } : undefined} onChange={e => { setSelectedSupervisor(parseInt(e.target.value)||null); setSelectedOperator(null); setCalls([]); setExpandedId(null); }}>
@@ -1016,13 +1323,15 @@ const App = ({ user, initialSelection }) => {
                                 {months.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
                             </select>
                         </div>
-                        {userRole === 'admin' && (() => {
+                        {isAdminRole && activeSection === 'journal' && (() => {
                             const lastDay = new Date(parseInt(selectedMonth.slice(0,4)), parseInt(selectedMonth.slice(5,7)), 0).getDate();
                             return <DateRangePicker minDate={`${selectedMonth}-01`} maxDate={`${selectedMonth}-${String(lastDay).padStart(2,'0')}`} setFromDate={setFromDate} setToDate={setToDate} />;
                         })()}
                     </div>
                 </div>
 
+                {activeSection === 'journal' ? (
+                    <>
                 {/* Stats bar */}
                 {selectedOperator && (
                     <div className="stats-bar">
@@ -1122,15 +1431,15 @@ const App = ({ user, initialSelection }) => {
                                                     <div style={{display:'flex',alignItems:'center',gap:6,flexShrink:0}} onClick={e=>e.stopPropagation()}>
                                                         {call.is_imported ? (
                                                             <>
-                                                                <button className="btn btn-green btn-sm" onClick={() => { setEditingEval(call); setShowEvalModal(true); }}><FaIcon className="fas fa-star" /> Оценить</button>
-                                                                {userRole==='admin' && <button className="btn btn-danger btn-sm" onClick={() => deleteImportedCall(call.id)}><FaIcon className="fas fa-trash" /></button>}
+                                                                <button className="btn btn-green btn-sm" onClick={() => { setEvalModalMode('journal'); setEditingEval(call); setShowEvalModal(true); }}><FaIcon className="fas fa-star" /> Оценить</button>
+                                                                {isAdminRole && <button className="btn btn-danger btn-sm" onClick={() => deleteImportedCall(call.id)}><FaIcon className="fas fa-trash" /></button>}
                                                             </>
                                                         ) : (
                                                             <>
-                                                                <SvRequestButton call={call} userId={userId} userRole={userRole} fetchEvaluations={fetchEvaluations} onReevaluate={() => { setEditingEval({...call,isReevaluation:true}); setShowEvalModal(true); }} />
-                                                                {userRole==='admin' && !call.isDraft && (
+                                                                <SvRequestButton call={call} userId={userId} userRole={isSupervisorRole ? 'sv' : userRole} fetchEvaluations={fetchEvaluations} onReevaluate={() => { setEvalModalMode('journal'); setEditingEval({...call,isReevaluation:true}); setShowEvalModal(true); }} />
+                                                                {isAdminRole && !call.isDraft && (
                                                                     <>
-                                                                        <button className="btn btn-secondary btn-sm" onClick={() => { setEditingEval({...call,isReevaluation:true}); setShowEvalModal(true); }}>
+                                                                        <button className="btn btn-secondary btn-sm" onClick={() => { setEvalModalMode('journal'); setEditingEval({...call,isReevaluation:true}); setShowEvalModal(true); }}>
                                                                             <FaIcon className="fas fa-redo" /> Переоценить
                                                                         </button>
                                                                         {call.isCorrection && (
@@ -1206,7 +1515,7 @@ const App = ({ user, initialSelection }) => {
                         {selectedOperator ? `${displayedCalls.length} записей · ${selectedOperator.name} · ${months.find(m=>m.value===selectedMonth)?.label}` : 'Выберите оператора'}
                     </span>
                     <div style={{display:'flex',gap:8}}>
-                        {userRole==='admin' && (viewMode==='extra'||hasExtra) && (
+                        {isAdminRole && (viewMode==='extra'||hasExtra) && (
                             <button className="btn btn-secondary btn-sm" onClick={() => setViewMode(v=>v==='normal'?'extra':'normal')}>
                                 <FaIcon className={`fas fa-${viewMode==='normal'?'filter':'list'}`} /> {viewMode==='normal' ? 'Доп. оценки' : 'Основные'}
                             </button>
@@ -1215,7 +1524,7 @@ const App = ({ user, initialSelection }) => {
                             <button
                                 className={`btn btn-primary btn-sm ${(!selectedOperator||isMaxReached) ? 'disabled' : ''}`}
                                 style={{opacity:(!selectedOperator||isMaxReached)?0.4:1,cursor:(!selectedOperator||isMaxReached)?'not-allowed':'pointer'}}
-                                onClick={() => { if (!selectedOperator||isMaxReached) return; setEditingEval(null); setShowEvalModal(true); }}
+                                onClick={() => { if (!selectedOperator||isMaxReached) return; setEvalModalMode('journal'); setEditingEval(null); setShowEvalModal(true); }}
                                 disabled={!selectedOperator||isMaxReached}
                             >
                                 <FaIcon className="fas fa-plus" /> Добавить оценку
@@ -1223,12 +1532,176 @@ const App = ({ user, initialSelection }) => {
                         )}
                     </div>
                 </div>
+                    </>
+                ) : (
+                    <>
+                        <div className="table-wrap">
+                            {isCalibrationLoading ? (
+                                <div className="calibration-cards">
+                                    {[...Array(4)].map((_, idx) => (
+                                        <div key={idx} className="calibration-card">
+                                            <div className="skeleton" style={{height:16,width:'45%',marginBottom:10}} />
+                                            <div className="skeleton" style={{height:14,width:'80%',marginBottom:6}} />
+                                            <div className="skeleton" style={{height:14,width:'70%',marginBottom:6}} />
+                                            <div className="skeleton" style={{height:14,width:'50%'}} />
+                                        </div>
+                                    ))}
+                                </div>
+                            ) : calibrationRooms.length === 0 ? (
+                                <div className="empty-state">
+                                    <div className="empty-state-icon"><FaIcon className="fas fa-door-open" /></div>
+                                    <h3>Нет комнат калибровки</h3>
+                                    <p>{isAdminRole ? 'Создайте первую комнату калибровки для выбранного оператора.' : 'Пока нет доступных комнат на выбранный месяц.'}</p>
+                                </div>
+                            ) : (
+                                <div className="calibration-cards">
+                                    {calibrationRooms.map((room) => {
+                                        const isActive = room.id === activeCalibrationRoomId;
+                                        return (
+                                            <button key={room.id} className={`calibration-card ${isActive ? 'active' : ''}`} onClick={() => handleOpenCalibrationRoom(room)}>
+                                                <div className="calibration-card-head">
+                                                    <span className="version-badge">Комната #{room.id}</span>
+                                                    <span className={`badge ${room.my_evaluated ? 'badge-green' : room.joined ? 'badge-amber' : 'badge-blue'}`}>
+                                                        <span className="badge-dot" />
+                                                        {room.my_evaluated ? 'Оценено' : room.joined ? 'В комнате' : 'Не вошел'}
+                                                    </span>
+                                                </div>
+                                                <div className="calibration-card-title">{room.operator?.name || '—'}</div>
+                                                <div className="calibration-card-meta">
+                                                    <span>Телефон: {room.phone_number || '—'}</span>
+                                                    <span>Эталон: {Number(room.score || 0).toFixed(1)}</span>
+                                                    <span>Оценили: {Number(room.evaluated_count || 0)}</span>
+                                                </div>
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                            )}
+
+                            {calibrationRoom && (
+                                <div className="calibration-detail">
+                                    <div className="expanded-content" style={{borderTop:'none',paddingTop:18}}>
+                                        <div className="calibration-detail-head">
+                                            <div>
+                                                <h4>Карточка звонка</h4>
+                                                <div className="expanded-meta">
+                                                    <div className="expanded-meta-item"><strong>Комната:</strong> #{calibrationRoom.id}</div>
+                                                    <div className="expanded-meta-item"><strong>Оператор:</strong> {calibrationRoom.operator?.name || '—'}</div>
+                                                    <div className="expanded-meta-item"><strong>Телефон:</strong> {calibrationRoom.phone_number || '—'}</div>
+                                                    <div className="expanded-meta-item"><strong>Дата:</strong> {fmtDate(calibrationRoom.appeal_date)}</div>
+                                                    <div className="expanded-meta-item"><strong>Эталон (админ):</strong> {Number(calibrationRoom.score || 0).toFixed(1)}</div>
+                                                </div>
+                                            </div>
+                                            {isSupervisorRole && calibrationDetail?.can_evaluate && (
+                                                <button className="btn btn-primary btn-sm" onClick={() => setShowCalibrationEvalModal(true)}>
+                                                    <FaIcon className="fas fa-star" /> Оценить звонок
+                                                </button>
+                                            )}
+                                        </div>
+                                        {calibrationRoom.audio_url && (
+                                            <div className="audio-wrap" style={{maxWidth:520}}>
+                                                <div className="audio-label">Аудиозапись</div>
+                                                <audio controls><source src={calibrationRoom.audio_url} type="audio/mpeg" /></audio>
+                                            </div>
+                                        )}
+
+                                        {!calibrationDetail?.can_view_results ? (
+                                            <div className="calibration-lock-note">
+                                                Результаты участников и проценты калибровки будут доступны после вашей оценки.
+                                            </div>
+                                        ) : (calibrationResults?.evaluated_count || 0) === 0 ? (
+                                            <div className="calibration-lock-note">Пока нет оценок супервайзеров для сравнения.</div>
+                                        ) : (
+                                            <>
+                                                <table className="crit-table calibration-result-table">
+                                                    <thead>
+                                                        <tr>
+                                                            <th>Критерий</th>
+                                                            <th>Процент калибровки</th>
+                                                            <th>Эталон</th>
+                                                            {calibrationEvaluators.map(ev => <th key={ev.id}>{ev.name}</th>)}
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        {calibrationRows.map((row) => (
+                                                            <tr key={row.criterion_index}>
+                                                                <td>
+                                                                    {row.criterion_name}
+                                                                    {row.is_critical && <span className="calibration-critical-tag">Критичный</span>}
+                                                                </td>
+                                                                <td>
+                                                                    <span className={`calibration-percent ${(row.percent ?? 0) >= 80 ? 'ok' : 'warn'}`}>
+                                                                        {row.percent == null ? '—' : `${Number(row.percent).toFixed(1)}%`}
+                                                                    </span>
+                                                                </td>
+                                                                <td>
+                                                                    <div>{calibrationScoreLabel(row.benchmark?.score)}</div>
+                                                                    {row.benchmark?.comment && <div className="calibration-cell-comment">{row.benchmark.comment}</div>}
+                                                                </td>
+                                                                {calibrationEvaluators.map(ev => {
+                                                                    const cell = row.by_evaluator?.find(x => Number(x.evaluator_id) === Number(ev.id));
+                                                                    return (
+                                                                        <td key={ev.id}>
+                                                                            {cell ? (
+                                                                                <>
+                                                                                    <div>{calibrationScoreLabel(cell.score)}</div>
+                                                                                    {cell.comment && <div className="calibration-cell-comment">{cell.comment}</div>}
+                                                                                </>
+                                                                            ) : '—'}
+                                                                        </td>
+                                                                    );
+                                                                })}
+                                                            </tr>
+                                                        ))}
+                                                    </tbody>
+                                                </table>
+                                                <div className="calibration-summary">
+                                                    <strong>Общий процент калибровки:</strong>{' '}
+                                                    {calibrationResults?.overall_percent == null ? '—' : `${Number(calibrationResults.overall_percent).toFixed(1)}%`}
+                                                    {calibrationResults?.critical_mismatch && (
+                                                        <span className="calibration-critical-note">
+                                                            Есть расхождение по критическому критерию: итоговый процент = 0%.
+                                                        </span>
+                                                    )}
+                                                </div>
+                                            </>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                        <div className="panel-footer">
+                            <span className="panel-footer-info">
+                                {`${calibrationRooms.length} комнат · ${months.find(m=>m.value===selectedMonth)?.label || selectedMonth}`}
+                            </span>
+                            <div style={{display:'flex',gap:8}}>
+                                {isAdminRole && (
+                                    <button
+                                        className="btn btn-primary btn-sm"
+                                        disabled={!selectedOperator}
+                                        onClick={() => {
+                                            if (!selectedOperator) {
+                                                emitCallEvaluationToast('Сначала выберите оператора', 'error');
+                                                return;
+                                            }
+                                            setEvalModalMode('calibration_create');
+                                            setEditingEval(null);
+                                            setShowEvalModal(true);
+                                        }}
+                                    >
+                                        <FaIcon className="fas fa-plus" /> Создать комнату
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+                    </>
+                )}
             </div>
 
             {/* Modals */}
             <EvaluationModal
                 isOpen={showEvalModal}
-                onClose={() => { setShowEvalModal(false); setEditingEval(null); }}
+                onClose={() => { setShowEvalModal(false); setEditingEval(null); setEvalModalMode('journal'); }}
                 onSubmit={handleEvaluateCall}
                 directions={directions}
                 operator={selectedOperator}
@@ -1236,6 +1709,15 @@ const App = ({ user, initialSelection }) => {
                 userId={userId}
                 userName={userName}
                 existingEvaluation={editingEval}
+                submitMode={evalModalMode}
+                onCalibrationRoomCreated={handleCalibrationRoomCreated}
+            />
+            <CalibrationReviewModal
+                isOpen={showCalibrationEvalModal}
+                onClose={() => setShowCalibrationEvalModal(false)}
+                room={calibrationRoom}
+                userId={userId}
+                onSubmitted={handleCalibrationEvaluationSaved}
             />
 
             {/* Version history modal */}

@@ -427,6 +427,48 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_imported_calls_phone_normalized ON imported_calls(phone_normalized);
             """)
 
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS calibration_rooms (
+                    id SERIAL PRIMARY KEY,
+                    created_by_admin_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    month VARCHAR(7) NOT NULL,
+                    phone_number VARCHAR(255) NOT NULL,
+                    appeal_date TIMESTAMP,
+                    direction_id INTEGER REFERENCES directions(id) ON DELETE SET NULL,
+                    score FLOAT NOT NULL DEFAULT 0,
+                    comment TEXT,
+                    audio_path TEXT,
+                    scores JSONB NOT NULL DEFAULT '[]',
+                    criterion_comments JSONB NOT NULL DEFAULT '[]',
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS calibration_room_members (
+                    id SERIAL PRIMARY KEY,
+                    room_id INTEGER NOT NULL REFERENCES calibration_rooms(id) ON DELETE CASCADE,
+                    supervisor_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    joined_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(room_id, supervisor_id)
+                );
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS calibration_room_evaluations (
+                    id SERIAL PRIMARY KEY,
+                    room_id INTEGER NOT NULL REFERENCES calibration_rooms(id) ON DELETE CASCADE,
+                    evaluator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    score FLOAT NOT NULL DEFAULT 0,
+                    comment TEXT,
+                    scores JSONB NOT NULL DEFAULT '[]',
+                    criterion_comments JSONB NOT NULL DEFAULT '[]',
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(room_id, evaluator_id)
+                );
+            """)
+
 
             #Trainings table
             cursor.execute("""
@@ -988,6 +1030,13 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
                 CREATE INDEX IF NOT EXISTS idx_task_status_history_task_id ON task_status_history(task_id);
                 CREATE INDEX IF NOT EXISTS idx_task_attachments_task_id ON task_attachments(task_id);
+                CREATE INDEX IF NOT EXISTS idx_calibration_rooms_month ON calibration_rooms(month);
+                CREATE INDEX IF NOT EXISTS idx_calibration_rooms_operator_id ON calibration_rooms(operator_id);
+                CREATE INDEX IF NOT EXISTS idx_calibration_rooms_admin_id ON calibration_rooms(created_by_admin_id);
+                CREATE INDEX IF NOT EXISTS idx_calibration_rooms_created_at ON calibration_rooms(created_at);
+                CREATE INDEX IF NOT EXISTS idx_calibration_members_room_sv ON calibration_room_members(room_id, supervisor_id);
+                CREATE INDEX IF NOT EXISTS idx_calibration_eval_room_id ON calibration_room_evaluations(room_id);
+                CREATE INDEX IF NOT EXISTS idx_calibration_eval_evaluator_id ON calibration_room_evaluations(evaluator_id);
                 
                     -- Table for Baiga daily scores (points per operator per day)
                     CREATE TABLE IF NOT EXISTS baiga_daily_scores (
