@@ -350,6 +350,9 @@ const EvaluationModal = ({
     directions,
     operator,
     operators = [],
+    supervisors = [],
+    selectedSupervisorId = null,
+    isAdminRole = false,
     selectedMonth,
     userId,
     userName,
@@ -370,15 +373,20 @@ const EvaluationModal = ({
     const [assignedMonth, setAssignedMonth] = useState(selectedMonth);
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [selectedDirId, setSelectedDirId] = useState(null);
+    const [selectedCalibrationSupervisorId, setSelectedCalibrationSupervisorId] = useState(null);
     const [selectedCalibrationOperatorId, setSelectedCalibrationOperatorId] = useState(null);
+    const [calibrationOperators, setCalibrationOperators] = useState([]);
+    const [isCalibrationOperatorsLoading, setIsCalibrationOperatorsLoading] = useState(false);
     const [infoIndex, setInfoIndex] = useState(null);
     const [expectedDuration, setExpectedDuration] = useState(null);
     const [actualDuration, setActualDuration] = useState(null);
     const [durationMismatch, setDurationMismatch] = useState(false);
+    const calibrationOperatorsCacheRef = useRef(new Map());
     const isLocked = !!(existingEvaluation?.isReevaluation || existingEvaluation?.is_imported);
     const isCalibrationAddCallMode = submitMode === 'calibration_add_call';
+    const calibrationOperatorPool = isCalibrationAddCallMode ? calibrationOperators : operators;
     const activeOperator = isCalibrationAddCallMode
-        ? (operators.find(op => op.id === selectedCalibrationOperatorId) || null)
+        ? (calibrationOperatorPool.find(op => op.id === selectedCalibrationOperatorId) || null)
         : operator;
 
     const currentDir = directions?.find(d => d.id === selectedDirId) || directions?.[0] || null;
@@ -387,12 +395,81 @@ const EvaluationModal = ({
 
     useEffect(() => {
         if (!isOpen || !isCalibrationAddCallMode) return;
-        const preferredId = operator?.id || operators?.[0]?.id || null;
-        const hasCurrent = selectedCalibrationOperatorId && operators.some(op => op.id === selectedCalibrationOperatorId);
+        if (isAdminRole) {
+            const preferredSupervisorId = selectedSupervisorId || supervisors?.[0]?.id || null;
+            setSelectedCalibrationSupervisorId((prev) => {
+                const hasCurrent = prev && supervisors.some((sv) => Number(sv.id) === Number(prev));
+                return hasCurrent ? prev : preferredSupervisorId;
+            });
+            if (selectedSupervisorId && Number(preferredSupervisorId) === Number(selectedSupervisorId) && Array.isArray(operators)) {
+                calibrationOperatorsCacheRef.current.set(String(selectedSupervisorId), operators);
+                setCalibrationOperators(operators);
+            }
+        } else {
+            setSelectedCalibrationSupervisorId(userId || null);
+            setCalibrationOperators(Array.isArray(operators) ? operators : []);
+        }
+    }, [
+        isOpen,
+        isCalibrationAddCallMode,
+        isAdminRole,
+        selectedSupervisorId,
+        supervisors,
+        operators,
+        userId
+    ]);
+
+    useEffect(() => {
+        if (!isOpen || !isCalibrationAddCallMode || !isAdminRole) return;
+        if (!selectedCalibrationSupervisorId || !userId) {
+            setCalibrationOperators([]);
+            return;
+        }
+
+        const cacheKey = String(selectedCalibrationSupervisorId);
+        const cached = calibrationOperatorsCacheRef.current.get(cacheKey);
+        if (cached) {
+            setCalibrationOperators(cached);
+            return;
+        }
+
+        let cancelled = false;
+        setIsCalibrationOperatorsLoading(true);
+        authFetch(`${API_BASE_URL}/api/sv/data?id=${selectedCalibrationSupervisorId}`, { headers: { 'X-User-Id': userId } })
+            .then(r => r.json())
+            .then((d) => {
+                if (cancelled) return;
+                const nextOperators = d.status === 'success' ? (d.operators || []) : [];
+                calibrationOperatorsCacheRef.current.set(cacheKey, nextOperators);
+                setCalibrationOperators(nextOperators);
+            })
+            .catch(() => {
+                if (!cancelled) setCalibrationOperators([]);
+            })
+            .finally(() => {
+                if (!cancelled) setIsCalibrationOperatorsLoading(false);
+            });
+
+        return () => { cancelled = true; };
+    }, [
+        isOpen,
+        isCalibrationAddCallMode,
+        isAdminRole,
+        selectedCalibrationSupervisorId,
+        userId
+    ]);
+
+    useEffect(() => {
+        if (!isOpen || !isCalibrationAddCallMode) return;
+        const operatorIdFromProp = operator?.id && calibrationOperatorPool.some(op => op.id === operator.id)
+            ? operator.id
+            : null;
+        const preferredId = operatorIdFromProp || calibrationOperatorPool?.[0]?.id || null;
+        const hasCurrent = selectedCalibrationOperatorId && calibrationOperatorPool.some(op => op.id === selectedCalibrationOperatorId);
         if (!hasCurrent) {
             setSelectedCalibrationOperatorId(preferredId);
         }
-    }, [isOpen, isCalibrationAddCallMode, operator?.id, operators, selectedCalibrationOperatorId]);
+    }, [isOpen, isCalibrationAddCallMode, operator?.id, calibrationOperatorPool, selectedCalibrationOperatorId]);
 
     const MIN_TOL = 3, PCT_TOL = 0.15;
     const fmtSec = (s) => {
@@ -404,7 +481,7 @@ const EvaluationModal = ({
     useEffect(() => {
         if (!isOpen || !directions?.length) return;
         const modalOperator = isCalibrationAddCallMode
-            ? (activeOperator || operator || operators?.[0] || null)
+            ? (activeOperator || operator || calibrationOperatorPool?.[0] || null)
             : operator;
         if (isCalibrationAddCallMode && modalOperator?.id && selectedCalibrationOperatorId !== modalOperator.id) {
             setSelectedCalibrationOperatorId(modalOperator.id);
@@ -459,7 +536,7 @@ const EvaluationModal = ({
         directions,
         selectedMonth,
         operator,
-        operators,
+        calibrationOperatorPool,
         activeOperator,
         isCalibrationAddCallMode,
         selectedCalibrationOperatorId
@@ -628,16 +705,36 @@ const EvaluationModal = ({
                     <button className="close-btn" onClick={onClose}><FaIcon className="fas fa-times" /></button>
                 </div>
                 <div className="modal-body">
+                    {isCalibrationAddCallMode && isAdminRole && (
+                        <div className="field" style={{ marginBottom: 16 }}>
+                            <label className="label">Супервайзер</label>
+                            <select
+                                className="select"
+                                value={selectedCalibrationSupervisorId || ''}
+                                onChange={(e) => {
+                                    const nextId = parseInt(e.target.value, 10) || null;
+                                    setSelectedCalibrationSupervisorId(nextId);
+                                    setSelectedCalibrationOperatorId(null);
+                                }}
+                            >
+                                <option value="">Выбрать супервайзера</option>
+                                {supervisors.map((sv) => (
+                                    <option key={sv.id} value={sv.id}>{sv.name}</option>
+                                ))}
+                            </select>
+                        </div>
+                    )}
                     {isCalibrationAddCallMode && (
                         <div className="field" style={{ marginBottom: 16 }}>
                             <label className="label">Оператор</label>
                             <select
                                 className="select"
                                 value={selectedCalibrationOperatorId || ''}
+                                disabled={isCalibrationOperatorsLoading}
                                 onChange={(e) => {
                                     const nextId = parseInt(e.target.value, 10) || null;
                                     setSelectedCalibrationOperatorId(nextId);
-                                    const op = operators.find(x => x.id === nextId) || null;
+                                    const op = calibrationOperatorPool.find(x => x.id === nextId) || null;
                                     const defaultDir = directions.find(d => d.id === op?.direction_id) || directions?.[0] || null;
                                     if (defaultDir) {
                                         setSelectedDirId(defaultDir.id);
@@ -647,8 +744,10 @@ const EvaluationModal = ({
                                     }
                                 }}
                             >
-                                <option value="">Выбрать оператора</option>
-                                {operators.map(op => (
+                                <option value="">
+                                    {isCalibrationOperatorsLoading ? 'Загрузка операторов...' : 'Выбрать оператора'}
+                                </option>
+                                {calibrationOperatorPool.map(op => (
                                     <option key={op.id} value={op.id}>{op.name}</option>
                                 ))}
                             </select>
@@ -2000,7 +2099,11 @@ const App = ({ user, initialSelection }) => {
                                                     <button
                                                         className="btn btn-primary btn-sm"
                                                         onClick={() => {
-                                                            if (!operators.length) {
+                                                            if (isAdminRole && !supervisors.length) {
+                                                                emitCallEvaluationToast('Нет доступных супервайзеров для добавления звонка', 'error');
+                                                                return;
+                                                            }
+                                                            if (!isAdminRole && !operators.length) {
                                                                 emitCallEvaluationToast('Нет доступных операторов для добавления звонка', 'error');
                                                                 return;
                                                             }
@@ -2283,6 +2386,9 @@ const App = ({ user, initialSelection }) => {
                 directions={directions}
                 operator={selectedOperator}
                 operators={operators}
+                supervisors={supervisors}
+                selectedSupervisorId={selectedSupervisor}
+                isAdminRole={isAdminRole}
                 selectedMonth={selectedMonth}
                 userId={userId}
                 userName={userName}
