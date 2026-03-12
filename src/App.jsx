@@ -13766,6 +13766,104 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         const selectedList = selectedRow
                             ? (expandedScope === 'planned' ? selectedRow.plannedOperators : selectedRow.actualOperators)
                             : [];
+                        const selectedDirectionLabels = !effectiveGroupingDirectionSet
+                            ? ['Все направления']
+                            : groupingDirectionOptions
+                                .filter(item => effectiveGroupingDirectionSet.has(item.key))
+                                .map(item => item.label);
+                        const exportGroupingToExcel = () => {
+                            if (!rows.length) {
+                                emitAppToast('Нет данных для экспорта', 'warning');
+                                return;
+                            }
+                            const escapeXml = (value) => String(value ?? '')
+                                .replace(/&/g, '&amp;')
+                                .replace(/</g, '&lt;')
+                                .replace(/>/g, '&gt;')
+                                .replace(/"/g, '&quot;')
+                                .replace(/'/g, '&apos;');
+                            const cell = (value, type = 'String') => `<Cell><Data ss:Type="${type}">${escapeXml(value)}</Data></Cell>`;
+                            const rowXml = (cells) => `<Row>${cells.join('')}</Row>`;
+                            const summaryRowsXml = [];
+                            summaryRowsXml.push(rowXml([cell('Дата отчета'), cell(effectiveDayLabel)]));
+                            summaryRowsXml.push(rowXml([cell('Направления'), cell(selectedDirectionLabels.join(', '))]));
+                            summaryRowsXml.push(rowXml([cell('')]));
+                            summaryRowsXml.push(rowXml([cell('Точка времени'), cell('План'), cell('Факт'), cell('Δ')]));
+                            rows.forEach(r => {
+                                summaryRowsXml.push(rowXml([
+                                    cell(r.hourLabel),
+                                    cell(Number(r.plannedCount || 0), 'Number'),
+                                    cell(Number(r.actualCount || 0), 'Number'),
+                                    cell(Number(r.delta || 0), 'Number')
+                                ]));
+                            });
+
+                            const detailsRowsXml = [];
+                            detailsRowsXml.push(rowXml([
+                                cell('Дата'),
+                                cell('Точка времени'),
+                                cell('Срез'),
+                                cell('Оператор'),
+                                cell('Направление'),
+                                cell('Статус на момент'),
+                                cell('Интервал статуса'),
+                                cell('На линии')
+                            ]));
+                            rows.forEach(r => {
+                                (r.plannedOperators || []).forEach(item => {
+                                    detailsRowsXml.push(rowXml([
+                                        cell(effectiveDayLabel),
+                                        cell(r.hourLabel),
+                                        cell('План'),
+                                        cell(item?.operatorName || ''),
+                                        cell(item?.direction || ''),
+                                        cell(item?.statusLabel || ''),
+                                        cell(item?.statusRangeLabel || ''),
+                                        cell(item?.isActuallyOnShift ? 'Да' : 'Нет')
+                                    ]));
+                                });
+                                (r.actualOperators || []).forEach(item => {
+                                    detailsRowsXml.push(rowXml([
+                                        cell(effectiveDayLabel),
+                                        cell(r.hourLabel),
+                                        cell('Факт'),
+                                        cell(item?.operatorName || ''),
+                                        cell(item?.direction || ''),
+                                        cell(item?.statusLabel || ''),
+                                        cell(item?.statusRangeLabel || ''),
+                                        cell(item?.isActuallyOnShift ? 'Да' : 'Нет')
+                                    ]));
+                                });
+                            });
+
+                            const workbookXml = `<?xml version="1.0"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+ xmlns:o="urn:schemas-microsoft-com:office:office"
+ xmlns:x="urn:schemas-microsoft-com:office:excel"
+ xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"
+ xmlns:html="http://www.w3.org/TR/REC-html40">
+ <Worksheet ss:Name="Свод">
+  <Table>
+   ${summaryRowsXml.join('')}
+  </Table>
+ </Worksheet>
+ <Worksheet ss:Name="Операторы">
+  <Table>
+   ${detailsRowsXml.join('')}
+  </Table>
+ </Worksheet>
+</Workbook>`;
+                            const blob = new Blob([workbookXml], { type: 'application/vnd.ms-excel;charset=utf-8;' });
+                            const url = window.URL.createObjectURL(blob);
+                            const a = document.createElement('a');
+                            a.href = url;
+                            a.download = `grouping_snapshot_${effectiveDayKey || 'day'}.xls`;
+                            document.body.appendChild(a);
+                            a.click();
+                            a.remove();
+                            window.URL.revokeObjectURL(url);
+                        };
                         return (
                             <>
                                 <div className="flex items-start justify-between gap-3 mb-4 pb-3 border-b border-slate-200">
@@ -13817,6 +13915,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         ))}
                                                     </select>
                                                 </label>
+                                                <button
+                                                    type="button"
+                                                    onClick={exportGroupingToExcel}
+                                                    disabled={!rows.length}
+                                                    className="px-3 py-2 rounded-lg border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                                                    title="Выгрузить текущую группировку в Excel"
+                                                >
+                                                    <FaIcon className="fas fa-file-excel"></FaIcon>
+                                                    Выгрузить Excel
+                                                </button>
                                                 <div className="ml-auto text-xs text-slate-600">
                                                     День отчета: <strong className="text-slate-900">{effectiveDayLabel}</strong>
                                                     <span className="ml-3">Операторов: <strong className="text-slate-900">{operatorsForGrouping.length}</strong></span>
