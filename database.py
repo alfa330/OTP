@@ -448,7 +448,7 @@ class Database:
             cursor.execute("""
                 ALTER TABLE calibration_rooms
                 ADD COLUMN IF NOT EXISTS room_title TEXT;
-            """)
+            """) 
             cursor.execute("""
                 ALTER TABLE calibration_rooms
                 ALTER COLUMN operator_id DROP NOT NULL;
