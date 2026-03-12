@@ -1088,7 +1088,7 @@ def _build_cors_preflight_response():
         response.headers["Vary"] = "Origin"
 
     response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-API-Key, X-User-Id, Authorization, X-Refresh-Token"
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
     response.headers["Access-Control-Max-Age"] = "86400"
     return response
 
@@ -1105,7 +1105,7 @@ def after_request(response):
         response.headers['Vary'] = 'Origin'
 
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key, X-User-Id, Authorization, X-Refresh-Token'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS, DELETE, PUT'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS, DELETE, PUT, PATCH'
 
     pending_tokens = getattr(g, 'pending_auth_tokens', None)
     if pending_tokens:
