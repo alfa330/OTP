@@ -13766,108 +13766,118 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </div>
                                         </div>
 
-                                        <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
-                                            <table className="w-full text-sm">
-                                                <thead className="bg-slate-50 border-b text-xs uppercase tracking-wide text-slate-500">
-                                                    <tr>
-                                                        <th className="text-left px-3 py-2">Час</th>
-                                                        <th className="text-right px-3 py-2">План</th>
-                                                        <th className="text-right px-3 py-2">Факт</th>
-                                                        <th className="text-right px-3 py-2">Δ</th>
-                                                    </tr>
-                                                </thead>
-                                                <tbody>
-                                                    {rows.map(row => {
-                                                        const isPlanActive = !!selectedRow && selectedRow.hour === row.hour && expandedScope === 'planned';
-                                                        const isFactActive = !!selectedRow && selectedRow.hour === row.hour && expandedScope === 'actual';
-                                                        return (
-                                                            <tr key={`group-row-${row.hour}`} className="border-b last:border-b-0">
-                                                                <td className="px-3 py-2 font-medium text-slate-800 tabular-nums">{row.hourLabel}</td>
-                                                                <td className="px-3 py-2 text-right">
-                                                                    <button
-                                                                        type="button"
-                                                                        onClick={() => togglePlannerStatusHourlyExpanded(effectiveDayKey, row.hour, 'planned')}
-                                                                        className={`px-2 py-0.5 rounded border text-xs tabular-nums ${isPlanActive ? 'border-blue-300 bg-blue-100 text-blue-800 font-semibold' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'}`}
-                                                                    >
-                                                                        {row.plannedCount}
-                                                                    </button>
-                                                                </td>
-                                                                <td className="px-3 py-2 text-right">
-                                                                    <button
-                                                                        type="button"
-                                                                        onClick={() => togglePlannerStatusHourlyExpanded(effectiveDayKey, row.hour, 'actual')}
-                                                                        className={`px-2 py-0.5 rounded border text-xs tabular-nums ${isFactActive ? 'border-emerald-300 bg-emerald-100 text-emerald-800 font-semibold' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'}`}
-                                                                    >
-                                                                        {row.actualCount}
-                                                                    </button>
-                                                                </td>
-                                                                <td className={`px-3 py-2 text-right tabular-nums ${row.delta < 0 ? 'text-rose-700 font-semibold' : row.delta > 0 ? 'text-emerald-700 font-semibold' : 'text-slate-500'}`}>
-                                                                    {row.delta > 0 ? `+${row.delta}` : row.delta}
-                                                                </td>
-                                                            </tr>
-                                                        );
-                                                    })}
-                                                </tbody>
-                                            </table>
-                                        </div>
-
-                                        {selectedRow && (
-                                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                                                <div className="rounded-lg border border-slate-200 bg-white overflow-hidden">
-                                                    <div className="px-3 py-2 border-b bg-slate-50 text-sm font-semibold text-slate-800">
-                                                        По направлениям ({selectedRow.hourLabel})
-                                                    </div>
-                                                    <table className="w-full text-xs">
-                                                        <thead className="border-b text-slate-500 uppercase tracking-wide">
-                                                            <tr>
-                                                                <th className="text-left px-3 py-2">Направление</th>
-                                                                <th className="text-right px-3 py-2">План</th>
-                                                                <th className="text-right px-3 py-2">Факт</th>
-                                                                <th className="text-right px-3 py-2">Δ</th>
-                                                            </tr>
-                                                        </thead>
-                                                        <tbody>
-                                                            {selectedRow.directionRows.map((dirRow, idx) => (
-                                                                <tr key={`group-dir-${idx}-${dirRow.direction}`} className="border-b last:border-b-0">
-                                                                    <td className="px-3 py-1.5 text-slate-700">{dirRow.direction || 'Без направления'}</td>
-                                                                    <td className="px-3 py-1.5 text-right tabular-nums text-slate-700">{dirRow.plannedCount}</td>
-                                                                    <td className="px-3 py-1.5 text-right tabular-nums text-slate-700">{dirRow.actualCount}</td>
-                                                                    <td className={`px-3 py-1.5 text-right tabular-nums ${dirRow.delta < 0 ? 'text-rose-700 font-semibold' : dirRow.delta > 0 ? 'text-emerald-700 font-semibold' : 'text-slate-500'}`}>
-                                                                        {dirRow.delta > 0 ? `+${dirRow.delta}` : dirRow.delta}
+                                        <div className="grid grid-cols-1 xl:grid-cols-12 gap-3">
+                                            <div className="xl:col-span-7 rounded-xl border border-slate-200 bg-white overflow-hidden">
+                                                <table className="w-full text-sm">
+                                                    <thead className="bg-slate-50 border-b text-xs uppercase tracking-wide text-slate-500">
+                                                        <tr>
+                                                            <th className="text-left px-3 py-2">Час</th>
+                                                            <th className="text-right px-3 py-2">План</th>
+                                                            <th className="text-right px-3 py-2">Факт</th>
+                                                            <th className="text-right px-3 py-2">Δ</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        {rows.map(row => {
+                                                            const isPlanActive = !!selectedRow && selectedRow.hour === row.hour && expandedScope === 'planned';
+                                                            const isFactActive = !!selectedRow && selectedRow.hour === row.hour && expandedScope === 'actual';
+                                                            return (
+                                                                <tr key={`group-row-${row.hour}`} className="border-b last:border-b-0">
+                                                                    <td className="px-3 py-2 font-medium text-slate-800 tabular-nums">{row.hourLabel}</td>
+                                                                    <td className="px-3 py-2 text-right">
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() => togglePlannerStatusHourlyExpanded(effectiveDayKey, row.hour, 'planned')}
+                                                                            className={`px-2 py-0.5 rounded border text-xs tabular-nums ${isPlanActive ? 'border-blue-300 bg-blue-100 text-blue-800 font-semibold' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'}`}
+                                                                        >
+                                                                            {row.plannedCount}
+                                                                        </button>
+                                                                    </td>
+                                                                    <td className="px-3 py-2 text-right">
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() => togglePlannerStatusHourlyExpanded(effectiveDayKey, row.hour, 'actual')}
+                                                                            className={`px-2 py-0.5 rounded border text-xs tabular-nums ${isFactActive ? 'border-emerald-300 bg-emerald-100 text-emerald-800 font-semibold' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'}`}
+                                                                        >
+                                                                            {row.actualCount}
+                                                                        </button>
+                                                                    </td>
+                                                                    <td className={`px-3 py-2 text-right tabular-nums ${row.delta < 0 ? 'text-rose-700 font-semibold' : row.delta > 0 ? 'text-emerald-700 font-semibold' : 'text-slate-500'}`}>
+                                                                        {row.delta > 0 ? `+${row.delta}` : row.delta}
                                                                     </td>
                                                                 </tr>
-                                                            ))}
-                                                        </tbody>
-                                                    </table>
-                                                </div>
-                                                <div className="rounded-lg border border-slate-200 bg-white p-3 space-y-2">
-                                                    <div className="text-sm font-semibold text-slate-800">
-                                                        {expandedScope === 'planned' ? 'Операторы по плану' : 'Операторы по факту'}: {selectedList.length}
-                                                    </div>
-                                                    {selectedList.length === 0 && (
-                                                        <div className="text-xs text-slate-500">Нет данных для выбранного значения.</div>
-                                                    )}
-                                                    {selectedList.map((item, idx) => {
-                                                        const tone = getPlannerImportedStatusTone(item?.statusLabel || item?.statusKey || '');
-                                                        return (
-                                                            <div key={`group-op-${idx}-${item?.operatorId || item?.operatorName}`} className="rounded-md border border-slate-200 px-2 py-1.5 text-xs">
-                                                                <div className="flex items-start justify-between gap-2">
-                                                                    <div className="min-w-0">
-                                                                        <div className="font-semibold text-slate-900 truncate">{item?.operatorName || '—'}</div>
-                                                                        <div className="text-slate-500 truncate">{item?.direction || 'Без направления'}</div>
-                                                                    </div>
-                                                                    <span className={`px-1.5 py-0.5 rounded border whitespace-nowrap ${tone.pill}`}>{item?.statusLabel || 'Нет статуса'}</span>
-                                                                </div>
-                                                                <div className="mt-1 text-slate-600">
-                                                                    <span className="tabular-nums">Статус в часе: {item?.statusRangeLabel || '—'}</span>
-                                                                    {!item?.isActuallyOnShift && <span className="ml-2 text-rose-700 font-medium">Не на линии</span>}
-                                                                </div>
-                                                            </div>
-                                                        );
-                                                    })}
-                                                </div>
+                                                            );
+                                                        })}
+                                                    </tbody>
+                                                </table>
                                             </div>
-                                        )}
+
+                                            <div className="xl:col-span-5 rounded-lg border border-slate-200 bg-white p-3 space-y-3">
+                                                {!selectedRow && (
+                                                    <div className="text-sm text-slate-500">
+                                                        Нажмите на сумму в колонке «План» или «Факт», детали появятся справа.
+                                                    </div>
+                                                )}
+                                                {selectedRow && (
+                                                    <>
+                                                        <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-800">
+                                                            {selectedRow.hourLabel} • {expandedScope === 'planned' ? 'План' : 'Факт'}
+                                                        </div>
+                                                        <div className="rounded-lg border border-slate-200 bg-white overflow-hidden">
+                                                            <div className="px-3 py-2 border-b bg-slate-50 text-sm font-semibold text-slate-800">
+                                                                По направлениям
+                                                            </div>
+                                                            <table className="w-full text-xs">
+                                                                <thead className="border-b text-slate-500 uppercase tracking-wide">
+                                                                    <tr>
+                                                                        <th className="text-left px-3 py-2">Направление</th>
+                                                                        <th className="text-right px-3 py-2">План</th>
+                                                                        <th className="text-right px-3 py-2">Факт</th>
+                                                                        <th className="text-right px-3 py-2">Δ</th>
+                                                                    </tr>
+                                                                </thead>
+                                                                <tbody>
+                                                                    {selectedRow.directionRows.map((dirRow, idx) => (
+                                                                        <tr key={`group-dir-${idx}-${dirRow.direction}`} className="border-b last:border-b-0">
+                                                                            <td className="px-3 py-1.5 text-slate-700">{dirRow.direction || 'Без направления'}</td>
+                                                                            <td className="px-3 py-1.5 text-right tabular-nums text-slate-700">{dirRow.plannedCount}</td>
+                                                                            <td className="px-3 py-1.5 text-right tabular-nums text-slate-700">{dirRow.actualCount}</td>
+                                                                            <td className={`px-3 py-1.5 text-right tabular-nums ${dirRow.delta < 0 ? 'text-rose-700 font-semibold' : dirRow.delta > 0 ? 'text-emerald-700 font-semibold' : 'text-slate-500'}`}>
+                                                                                {dirRow.delta > 0 ? `+${dirRow.delta}` : dirRow.delta}
+                                                                            </td>
+                                                                        </tr>
+                                                                    ))}
+                                                                </tbody>
+                                                            </table>
+                                                        </div>
+                                                        <div className="text-sm font-semibold text-slate-800">
+                                                            {expandedScope === 'planned' ? 'Операторы по плану' : 'Операторы по факту'}: {selectedList.length}
+                                                        </div>
+                                                        {selectedList.length === 0 && (
+                                                            <div className="text-xs text-slate-500">Нет данных для выбранного значения.</div>
+                                                        )}
+                                                        {selectedList.map((item, idx) => {
+                                                            const tone = getPlannerImportedStatusTone(item?.statusLabel || item?.statusKey || '');
+                                                            return (
+                                                                <div key={`group-op-${idx}-${item?.operatorId || item?.operatorName}`} className="rounded-md border border-slate-200 px-2 py-1.5 text-xs">
+                                                                    <div className="flex items-start justify-between gap-2">
+                                                                        <div className="min-w-0">
+                                                                            <div className="font-semibold text-slate-900 truncate">{item?.operatorName || '—'}</div>
+                                                                            <div className="text-slate-500 truncate">{item?.direction || 'Без направления'}</div>
+                                                                        </div>
+                                                                        <span className={`px-1.5 py-0.5 rounded border whitespace-nowrap ${tone.pill}`}>{item?.statusLabel || 'Нет статуса'}</span>
+                                                                    </div>
+                                                                    <div className="mt-1 text-slate-600">
+                                                                        <span className="tabular-nums">Статус в часе: {item?.statusRangeLabel || '—'}</span>
+                                                                        {!item?.isActuallyOnShift && <span className="ml-2 text-rose-700 font-medium">Не на линии</span>}
+                                                                    </div>
+                                                                </div>
+                                                            );
+                                                        })}
+                                                    </>
+                                                )}
+                                            </div>
+                                        </div>
                                     </div>
                                 )}
                             </>
