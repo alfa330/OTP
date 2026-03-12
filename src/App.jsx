@@ -4793,6 +4793,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
             const PLANNER_IMPORTED_WORK_STATUS_KEYS = new Set(['готов', 'занят', 'занята', 'авто', 'перезвон']);
             const PLANNER_IMPORTED_BREAK_STATUS_KEYS = new Set(['перерыв']);
+            const PLANNER_IMPORTED_NOT_ON_SHIFT_STATUS_KEYS = new Set(['нет статуса', 'отключен', 'отключена', 'отключено']);
+            const plannerImportedStatusCountsAsOnShift = (statusKeyRaw) => {
+            const key = plannerStatusNormalizeKey(statusKeyRaw);
+            if (!key) return false;
+            return !PLANNER_IMPORTED_NOT_ON_SHIFT_STATUS_KEYS.has(key);
+            };
             const plannerIntervalsTotalMinutes = (arr = []) => (
             (arr || []).reduce((sum, it) => sum + Math.max(0, Number(it?.end || 0) - Number(it?.start || 0)), 0)
             );
@@ -5535,6 +5541,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [excelTransferState, setExcelTransferState] = useState({ importing: false, exporting: false });
             const [excelImportReport, setExcelImportReport] = useState(null);
             const [showPlannerStatusAnomalyModal, setShowPlannerStatusAnomalyModal] = useState(false);
+            const [showPlannerStatusGroupingModal, setShowPlannerStatusGroupingModal] = useState(false);
             const [plannerStatusAnomalyLoading, setPlannerStatusAnomalyLoading] = useState(false);
             const [plannerStatusAnomalyError, setPlannerStatusAnomalyError] = useState('');
             const [plannerStatusAnomalyFileName, setPlannerStatusAnomalyFileName] = useState('');
@@ -5544,7 +5551,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [plannerStatusTimelineZoom, setPlannerStatusTimelineZoom] = useState(1);
             const [plannerStatusSpecialViewEnabled, setPlannerStatusSpecialViewEnabled] = useState(false);
             const [plannerStatusModalFocus, setPlannerStatusModalFocus] = useState(null);
-            const [plannerStatusModalSection, setPlannerStatusModalSection] = useState('report');
             const [plannerStatusHourlyDayKey, setPlannerStatusHourlyDayKey] = useState('');
             const [plannerStatusHourlyExpandedKey, setPlannerStatusHourlyExpandedKey] = useState('');
             const [showBreakRulesSettingsModal, setShowBreakRulesSettingsModal] = useState(false);
@@ -7484,8 +7490,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (!dayKey) return;
                 setPlannerStatusAnomalyExpandedDays(prev => ({ ...prev, [dayKey]: !prev?.[dayKey] }));
             };
-            const togglePlannerStatusHourlyExpanded = (dateKey, hour) => {
-                const key = `${String(dateKey || '')}|${Number(hour)}`;
+            const togglePlannerStatusHourlyExpanded = (dateKey, hour, scope = 'actual') => {
+                const normalizedScope = scope === 'planned' ? 'planned' : 'actual';
+                const key = `${String(dateKey || '')}|${Number(hour)}|${normalizedScope}`;
                 setPlannerStatusHourlyExpandedKey(prev => (prev === key ? '' : key));
             };
 
@@ -7495,7 +7502,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     dateKey: String(dateKey),
                     operatorName: String(op?.name || '').trim()
                 });
-                setPlannerStatusModalSection('report');
                 setPlannerStatusHourlyDayKey(String(dateKey));
                 setPlannerStatusHourlyExpandedKey('');
                 setPlannerStatusAnomalyExpandedDays({ [String(dateKey)]: true });
@@ -7516,7 +7522,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const analysis = analyzePlannerStatusTransitionsCsv(csvText);
                     setPlannerStatusAnomalyFileName(file.name || '');
                     setPlannerStatusAnomalyAnalysis(analysis);
-                    setPlannerStatusModalSection('report');
                     setPlannerStatusModalFocus(null);
                     setPlannerStatusHourlyDayKey('');
                     setPlannerStatusHourlyExpandedKey('');
@@ -7528,7 +7533,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 } catch (error) {
                     console.error('Error analyzing status anomaly csv:', error);
                     setPlannerStatusAnomalyAnalysis(null);
-                    setPlannerStatusModalSection('report');
                     setPlannerStatusModalFocus(null);
                     setPlannerStatusHourlyDayKey('');
                     setPlannerStatusHourlyExpandedKey('');
@@ -11542,7 +11546,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <button
                                                     onClick={() => {
                                                         setShowPlannerTopActionsMenu(false);
-                                                        setPlannerStatusModalSection('report');
                                                         setShowPlannerStatusAnomalyModal(true);
                                                     }}
                                                     className="w-full px-3 py-2 rounded-xl border border-violet-200 bg-violet-50 hover:bg-violet-100 text-violet-700 text-sm font-medium flex items-center gap-2"
@@ -11555,9 +11558,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <button
                                                     onClick={() => {
                                                         setShowPlannerTopActionsMenu(false);
-                                                        setPlannerStatusModalSection('hourly');
+                                                        setPlannerStatusHourlyDayKey(prev => prev || (plannerStatusAnomalyAnalysis?.days?.[0]?.dateKey ? String(plannerStatusAnomalyAnalysis.days[0].dateKey) : ''));
                                                         setPlannerStatusHourlyExpandedKey('');
-                                                        setShowPlannerStatusAnomalyModal(true);
+                                                        setShowPlannerStatusGroupingModal(true);
                                                     }}
                                                     className="w-full px-3 py-2 rounded-xl border border-blue-200 bg-blue-50 hover:bg-blue-100 text-blue-700 text-sm font-medium flex items-center gap-2"
                                                     title="Почасовая группировка операторов на смене"
@@ -11636,8 +11639,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         setPlannerStatusAnomalyFileName('');
                                                         setPlannerStatusAnomalyError('');
                                                         setPlannerStatusSpecialViewEnabled(false);
-                                                        setPlannerStatusModalSection('report');
                                                         setPlannerStatusModalFocus(null);
+                                                        setShowPlannerStatusAnomalyModal(false);
+                                                        setShowPlannerStatusGroupingModal(false);
                                                         setPlannerStatusHourlyDayKey('');
                                                         setPlannerStatusHourlyExpandedKey('');
                                                         setPlannerStatusAnomalyExpandedDays({});
@@ -13588,13 +13592,293 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 </SimpleModal>
 
                 <SimpleModal
+                    open={!!showPlannerStatusGroupingModal && user?.role !== 'operator'}
+                    onClose={() => {
+                        setShowPlannerStatusGroupingModal(false);
+                        setPlannerStatusHourlyExpandedKey('');
+                    }}
+                    panelClassName="w-[calc(100vw-2rem)] max-w-[1180px]"
+                >
+                    {(() => {
+                        const analysis = plannerStatusAnomalyAnalysis;
+                        const hasAnalysis = !!analysis;
+                        const dayOptions = hasAnalysis
+                            ? (Array.isArray(analysis?.days) ? analysis.days : [])
+                                .map(day => String(day?.dateKey || ''))
+                                .filter(Boolean)
+                                .sort((a, b) => b.localeCompare(a))
+                            : [];
+                        const effectiveDayKey = dayOptions.includes(String(plannerStatusHourlyDayKey || ''))
+                            ? String(plannerStatusHourlyDayKey || '')
+                            : (dayOptions[0] || '');
+                        const effectiveDayLabel = effectiveDayKey ? plannerStatusFormatDayLabel(effectiveDayKey) : '—';
+                        const pickStatusInHour = (bars, startMin, endMin) => {
+                            const probeMin = startMin + 30;
+                            let probeCandidate = null;
+                            let fallback = null;
+                            (Array.isArray(bars) ? bars : []).forEach(seg => {
+                                const segStart = Number(seg?.startMin ?? seg?.start ?? 0);
+                                const segEnd = Number(seg?.endMin ?? seg?.end ?? 0);
+                                if (segEnd <= segStart) return;
+                                const overlap = Math.max(0, Math.min(segEnd, endMin) - Math.max(segStart, startMin));
+                                if (overlap <= 0) return;
+                                const label = String(seg?.stateName || seg?.stateKey || 'Статус').trim() || 'Статус';
+                                const key = plannerStatusNormalizeKey(seg?.stateName || seg?.stateKey || label);
+                                const candidate = { label, key, segStart, segEnd, overlap };
+                                if (segStart <= probeMin && segEnd > probeMin) {
+                                    if (!probeCandidate || overlap > probeCandidate.overlap || (overlap === probeCandidate.overlap && segStart > probeCandidate.segStart)) {
+                                        probeCandidate = candidate;
+                                    }
+                                }
+                                if (!fallback || overlap > fallback.overlap || (overlap === fallback.overlap && segStart < fallback.segStart)) {
+                                    fallback = candidate;
+                                }
+                            });
+                            if (probeCandidate) return probeCandidate;
+                            if (fallback) return fallback;
+                            return { label: 'Нет статуса', key: 'нет статуса', segStart: null, segEnd: null, overlap: 0 };
+                        };
+                        const sortByDirectionAndName = (a, b) => {
+                            const directionCmp = String(a?.direction || '').localeCompare(String(b?.direction || ''), 'ru');
+                            if (directionCmp !== 0) return directionCmp;
+                            return String(a?.operatorName || '').localeCompare(String(b?.operatorName || ''), 'ru');
+                        };
+                        const rows = (!showPlannerStatusGroupingModal || !hasAnalysis || !effectiveDayKey)
+                            ? []
+                            : Array.from({ length: 24 }).map((_, hour) => {
+                                const hourStart = hour * 60;
+                                const hourEnd = hourStart + 60;
+                                const plannedOperators = [];
+                                const actualOperators = [];
+                                const directionMap = new Map();
+                                (Array.isArray(filteredOperators) ? filteredOperators : []).forEach(op => {
+                                    const shiftParts = getShiftPartsForDate(op, effectiveDayKey);
+                                    if (!shiftParts.length) return;
+                                    const shiftOverlapMin = shiftParts.reduce((sum, part) => (
+                                        sum + Math.max(0, Math.min(Number(part?.end || 0), hourEnd) - Math.max(Number(part?.start || 0), hourStart))
+                                    ), 0);
+                                    if (shiftOverlapMin <= 0) return;
+                                    const operatorName = String(op?.name || op?.login || `Оператор ${op?.id || ''}`).trim();
+                                    const operatorNameKey = plannerStatusNormalizeOperatorName(operatorName);
+                                    const direction = String(op?.direction || op?.direction_name || 'Без направления').trim() || 'Без направления';
+                                    const statusBars = importedStatusTimelineByOperatorDateKey.get(`${operatorNameKey}|${effectiveDayKey}`) || [];
+                                    const status = pickStatusInHour(statusBars, hourStart, hourEnd);
+                                    const isActuallyOnShift = plannerImportedStatusCountsAsOnShift(status.key);
+                                    const statusRangeLabel = (status.segStart == null || status.segEnd == null)
+                                        ? '—'
+                                        : `${minutesToTime(Math.max(hourStart, status.segStart))} - ${minutesToTime(Math.min(hourEnd, status.segEnd))}`;
+                                    const item = {
+                                        operatorId: Number(op?.id || 0),
+                                        operatorName: operatorName || `Оператор ${op?.id || ''}`,
+                                        direction,
+                                        statusLabel: status.label || 'Нет статуса',
+                                        statusKey: status.key || 'нет статуса',
+                                        statusRangeLabel,
+                                        shiftOverlapMin,
+                                        isActuallyOnShift
+                                    };
+                                    plannedOperators.push(item);
+                                    if (!directionMap.has(direction)) {
+                                        directionMap.set(direction, { direction, plannedCount: 0, actualCount: 0 });
+                                    }
+                                    const dirBucket = directionMap.get(direction);
+                                    dirBucket.plannedCount += 1;
+                                    if (isActuallyOnShift) {
+                                        actualOperators.push(item);
+                                        dirBucket.actualCount += 1;
+                                    }
+                                });
+                                plannedOperators.sort(sortByDirectionAndName);
+                                actualOperators.sort(sortByDirectionAndName);
+                                const directionRows = Array.from(directionMap.values())
+                                    .map(row => ({ ...row, delta: row.actualCount - row.plannedCount }))
+                                    .sort((a, b) => String(a?.direction || '').localeCompare(String(b?.direction || ''), 'ru'));
+                                return {
+                                    hour,
+                                    hourLabel: `${plannerStatusPad2(hour)}:00 - ${plannerStatusPad2((hour + 1) % 24)}:00`,
+                                    plannedCount: plannedOperators.length,
+                                    actualCount: actualOperators.length,
+                                    delta: actualOperators.length - plannedOperators.length,
+                                    plannedOperators,
+                                    actualOperators,
+                                    directionRows
+                                };
+                            });
+                        const expandedParts = String(plannerStatusHourlyExpandedKey || '').split('|');
+                        const expandedDateKey = String(expandedParts[0] || '');
+                        const expandedHour = Number(expandedParts[1]);
+                        const expandedScope = expandedParts[2] === 'planned' ? 'planned' : 'actual';
+                        const selectedRow = (expandedDateKey === effectiveDayKey && Number.isFinite(expandedHour))
+                            ? (rows.find(row => row.hour === expandedHour) || null)
+                            : null;
+                        const selectedList = selectedRow
+                            ? (expandedScope === 'planned' ? selectedRow.plannedOperators : selectedRow.actualOperators)
+                            : [];
+                        return (
+                            <>
+                                <div className="flex items-start justify-between gap-3 mb-4 pb-3 border-b border-slate-200">
+                                    <div>
+                                        <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                                            <FaIcon className="fas fa-users text-blue-600"></FaIcon>
+                                            Почасовая группировка смен
+                                        </h3>
+                                        <div className="text-xs text-slate-500 mt-1">
+                                            «Нет статуса» и «Отключен/Отключена» не входят в факт. «Перерыв» и «Перезвон» учитываются как на смене.
+                                        </div>
+                                    </div>
+                                    <button
+                                        onClick={() => {
+                                            setShowPlannerStatusGroupingModal(false);
+                                            setPlannerStatusHourlyExpandedKey('');
+                                        }}
+                                        className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors"
+                                    >
+                                        <FaIcon className="fas fa-times"></FaIcon>
+                                    </button>
+                                </div>
+
+                                {!hasAnalysis && (
+                                    <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
+                                        Сначала загрузите CSV статусов.
+                                    </div>
+                                )}
+
+                                {hasAnalysis && (
+                                    <div className="space-y-4">
+                                        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 flex flex-wrap items-end gap-3">
+                                            <label className="text-xs text-slate-600">
+                                                День
+                                                <select
+                                                    value={effectiveDayKey}
+                                                    onChange={(e) => {
+                                                        setPlannerStatusHourlyDayKey(String(e.target.value || ''));
+                                                        setPlannerStatusHourlyExpandedKey('');
+                                                    }}
+                                                    className="mt-1 block min-w-[220px] px-3 py-2 rounded-lg border border-slate-300 bg-white text-sm text-slate-700"
+                                                >
+                                                    {dayOptions.map(dayKey => (
+                                                        <option key={`group-day-${dayKey}`} value={dayKey}>{plannerStatusFormatDayLabel(dayKey)}</option>
+                                                    ))}
+                                                </select>
+                                            </label>
+                                            <div className="ml-auto text-xs text-slate-600">
+                                                День отчета: <strong className="text-slate-900">{effectiveDayLabel}</strong>
+                                            </div>
+                                        </div>
+
+                                        <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
+                                            <table className="w-full text-sm">
+                                                <thead className="bg-slate-50 border-b text-xs uppercase tracking-wide text-slate-500">
+                                                    <tr>
+                                                        <th className="text-left px-3 py-2">Час</th>
+                                                        <th className="text-right px-3 py-2">План</th>
+                                                        <th className="text-right px-3 py-2">Факт</th>
+                                                        <th className="text-right px-3 py-2">Δ</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {rows.map(row => {
+                                                        const isPlanActive = !!selectedRow && selectedRow.hour === row.hour && expandedScope === 'planned';
+                                                        const isFactActive = !!selectedRow && selectedRow.hour === row.hour && expandedScope === 'actual';
+                                                        return (
+                                                            <tr key={`group-row-${row.hour}`} className="border-b last:border-b-0">
+                                                                <td className="px-3 py-2 font-medium text-slate-800 tabular-nums">{row.hourLabel}</td>
+                                                                <td className="px-3 py-2 text-right">
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => togglePlannerStatusHourlyExpanded(effectiveDayKey, row.hour, 'planned')}
+                                                                        className={`px-2 py-0.5 rounded border text-xs tabular-nums ${isPlanActive ? 'border-blue-300 bg-blue-100 text-blue-800 font-semibold' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'}`}
+                                                                    >
+                                                                        {row.plannedCount}
+                                                                    </button>
+                                                                </td>
+                                                                <td className="px-3 py-2 text-right">
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => togglePlannerStatusHourlyExpanded(effectiveDayKey, row.hour, 'actual')}
+                                                                        className={`px-2 py-0.5 rounded border text-xs tabular-nums ${isFactActive ? 'border-emerald-300 bg-emerald-100 text-emerald-800 font-semibold' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'}`}
+                                                                    >
+                                                                        {row.actualCount}
+                                                                    </button>
+                                                                </td>
+                                                                <td className={`px-3 py-2 text-right tabular-nums ${row.delta < 0 ? 'text-rose-700 font-semibold' : row.delta > 0 ? 'text-emerald-700 font-semibold' : 'text-slate-500'}`}>
+                                                                    {row.delta > 0 ? `+${row.delta}` : row.delta}
+                                                                </td>
+                                                            </tr>
+                                                        );
+                                                    })}
+                                                </tbody>
+                                            </table>
+                                        </div>
+
+                                        {selectedRow && (
+                                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                                                <div className="rounded-lg border border-slate-200 bg-white overflow-hidden">
+                                                    <div className="px-3 py-2 border-b bg-slate-50 text-sm font-semibold text-slate-800">
+                                                        По направлениям ({selectedRow.hourLabel})
+                                                    </div>
+                                                    <table className="w-full text-xs">
+                                                        <thead className="border-b text-slate-500 uppercase tracking-wide">
+                                                            <tr>
+                                                                <th className="text-left px-3 py-2">Направление</th>
+                                                                <th className="text-right px-3 py-2">План</th>
+                                                                <th className="text-right px-3 py-2">Факт</th>
+                                                                <th className="text-right px-3 py-2">Δ</th>
+                                                            </tr>
+                                                        </thead>
+                                                        <tbody>
+                                                            {selectedRow.directionRows.map((dirRow, idx) => (
+                                                                <tr key={`group-dir-${idx}-${dirRow.direction}`} className="border-b last:border-b-0">
+                                                                    <td className="px-3 py-1.5 text-slate-700">{dirRow.direction || 'Без направления'}</td>
+                                                                    <td className="px-3 py-1.5 text-right tabular-nums text-slate-700">{dirRow.plannedCount}</td>
+                                                                    <td className="px-3 py-1.5 text-right tabular-nums text-slate-700">{dirRow.actualCount}</td>
+                                                                    <td className={`px-3 py-1.5 text-right tabular-nums ${dirRow.delta < 0 ? 'text-rose-700 font-semibold' : dirRow.delta > 0 ? 'text-emerald-700 font-semibold' : 'text-slate-500'}`}>
+                                                                        {dirRow.delta > 0 ? `+${dirRow.delta}` : dirRow.delta}
+                                                                    </td>
+                                                                </tr>
+                                                            ))}
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                                <div className="rounded-lg border border-slate-200 bg-white p-3 space-y-2">
+                                                    <div className="text-sm font-semibold text-slate-800">
+                                                        {expandedScope === 'planned' ? 'Операторы по плану' : 'Операторы по факту'}: {selectedList.length}
+                                                    </div>
+                                                    {selectedList.length === 0 && (
+                                                        <div className="text-xs text-slate-500">Нет данных для выбранного значения.</div>
+                                                    )}
+                                                    {selectedList.map((item, idx) => {
+                                                        const tone = getPlannerImportedStatusTone(item?.statusLabel || item?.statusKey || '');
+                                                        return (
+                                                            <div key={`group-op-${idx}-${item?.operatorId || item?.operatorName}`} className="rounded-md border border-slate-200 px-2 py-1.5 text-xs">
+                                                                <div className="flex items-start justify-between gap-2">
+                                                                    <div className="min-w-0">
+                                                                        <div className="font-semibold text-slate-900 truncate">{item?.operatorName || '—'}</div>
+                                                                        <div className="text-slate-500 truncate">{item?.direction || 'Без направления'}</div>
+                                                                    </div>
+                                                                    <span className={`px-1.5 py-0.5 rounded border whitespace-nowrap ${tone.pill}`}>{item?.statusLabel || 'Нет статуса'}</span>
+                                                                </div>
+                                                                <div className="mt-1 text-slate-600">
+                                                                    <span className="tabular-nums">Статус в часе: {item?.statusRangeLabel || '—'}</span>
+                                                                    {!item?.isActuallyOnShift && <span className="ml-2 text-rose-700 font-medium">Не на линии</span>}
+                                                                </div>
+                                                            </div>
+                                                        );
+                                                    })}
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </>
+                        );
+                    })()}
+                </SimpleModal>
+                <SimpleModal
                     open={!!showPlannerStatusAnomalyModal && user?.role !== 'operator'}
                     onClose={() => {
                         setShowPlannerStatusAnomalyModal(false);
-                        setPlannerStatusModalSection('report');
                         setPlannerStatusModalFocus(null);
-                        setPlannerStatusHourlyDayKey('');
-                        setPlannerStatusHourlyExpandedKey('');
                     }}
                     panelClassName="w-[calc(100vw-2rem)] max-w-[1400px]"
                 >
@@ -13605,7 +13889,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         const parseErrorsPreview = Array.isArray(analysis?.parseErrorsPreview) ? analysis.parseErrorsPreview : [];
                         const expandedDays = plannerStatusAnomalyExpandedDays || {};
                         const onlyAnomalies = !!plannerStatusAnomalyOnly;
-                        const statusModalSection = plannerStatusModalSection === 'hourly' ? 'hourly' : 'report';
+                        const statusModalSection = 'report';
                         const modalFocus = plannerStatusModalFocus && typeof plannerStatusModalFocus === 'object' ? plannerStatusModalFocus : null;
                         const focusedDayKey = String(modalFocus?.dateKey || '');
                         const focusedOperatorNameKey = plannerStatusNormalizeOperatorName(modalFocus?.operatorName || '');
@@ -13696,77 +13980,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         const anomalyOperatorsCount = overallByOperatorPrepared.filter(op => Number(op?.noPhoneAnomalyCount || 0) > 0).length;
                         const overallNoPhoneSec = overallByOperatorPrepared.reduce((sum, op) => sum + Number(op?.noPhoneSec || 0), 0);
                         const overallNoPhoneAnomalies = overallByOperatorPrepared.reduce((sum, op) => sum + Number(op?.noPhoneAnomalyCount || 0), 0);
-                        const hourlyDayOptions = dayList;
-                        const effectiveHourlyDayKey = (() => {
-                            const dayKeyCandidate = String(plannerStatusHourlyDayKey || '');
-                            if (dayKeyCandidate && hourlyDayOptions.some(day => String(day?.dateKey || '') === dayKeyCandidate)) {
-                                return dayKeyCandidate;
-                            }
-                            return String(hourlyDayOptions?.[0]?.dateKey || '');
-                        })();
-                        const hourlySelectedDay = hourlyDayOptions.find(day => String(day?.dateKey || '') === effectiveHourlyDayKey) || null;
-                        const buildHourlyRowsForDay = (dayObj) => {
-                            if (!dayObj) return [];
-                            const sourceOperators = (dayObj.operators || []).filter(op => {
-                                if (focusedOperatorNameKey && plannerStatusNormalizeOperatorName(op?.operatorName) !== focusedOperatorNameKey) return false;
-                                return true;
-                            });
-                            const preparedOperators = sourceOperators
-                                .map(op => {
-                                    const matchedPlannerOperator = plannerOperatorByNameKey.get(normalizeImportedOperatorName(op?.operatorName));
-                                    if (!matchedPlannerOperator) return null;
-                                    const shiftParts = getShiftPartsForDate(matchedPlannerOperator, dayObj.dateKey)
-                                        .map(p => ({ start: Number(p?.start || 0), end: Number(p?.end || 0) }))
-                                        .filter(p => p.end > p.start);
-                                    if (shiftParts.length === 0) return null;
-                                    const timelineBars = (Array.isArray(op?.timeline) ? op.timeline : [])
-                                        .map(seg => {
-                                            const mins = importedSegmentToDayMinutes(seg, dayObj.dateKey);
-                                            if (!mins) return null;
-                                            return { ...seg, startMin: mins.start, endMin: mins.end };
-                                        })
-                                        .filter(Boolean)
-                                        .sort((a, b) => (a.startMin - b.startMin) || (a.endMin - b.endMin));
-                                    return {
-                                        operatorName: String(op?.operatorName || '—'),
-                                        shiftParts,
-                                        timelineBars
-                                    };
-                                })
-                                .filter(Boolean);
-                            return Array.from({ length: 24 }).map((_, hour) => {
-                                const calcMinute = hour * 60;
-                                const operators = preparedOperators
-                                    .filter(item => item.shiftParts.some(p => calcMinute >= p.start && calcMinute < p.end))
-                                    .map(item => {
-                                        const activeStatus = item.timelineBars.find(seg => calcMinute >= Number(seg?.startMin || 0) && calcMinute < Number(seg?.endMin || 0)) || null;
-                                        const statusName = String(activeStatus?.stateName || '').trim() || 'Нет статуса';
-                                        const rawStatusKey = plannerStatusNormalizeKey(
-                                            activeStatus?.rawStateKey || activeStatus?.stateKey || activeStatus?.rawStateName || activeStatus?.stateName || ''
-                                        );
-                                        const statusNameKey = plannerStatusNormalizeKey(statusName);
-                                        const isDisconnectedStatus = rawStatusKey === 'отключен' || rawStatusKey === 'отключена';
-                                        return {
-                                            operatorName: item.operatorName,
-                                            statusName,
-                                            statusNote: String(activeStatus?.stateNote || '').trim(),
-                                            isBreakStatus: rawStatusKey === 'перерыв' && statusNameKey !== 'перезвон',
-                                            isDisconnectedStatus 
-                                        };
-                                    })
-                                    .filter(item => !item.isDisconnectedStatus)
-                                    .sort((a, b) => a.operatorName.localeCompare(b.operatorName, 'ru'));
-                                return {
-                                    hour,
-                                    timeLabel: `${plannerStatusPad2(hour)}:00`,
-                                    count: operators.length,
-                                    breakCount: operators.filter(item => item.isBreakStatus).length,
-                                    operators
-                                };
-                            });
-                        };
-                        const hourlyRows = buildHourlyRowsForDay(hourlySelectedDay);
-                        const hourlySelectedRow = hourlyRows.find(row => `${effectiveHourlyDayKey}|${row.hour}` === plannerStatusHourlyExpandedKey) || null;
                         return (
                             <>
                                 <div className="flex items-start justify-between gap-3 mb-4 pb-3 border-b border-slate-200">
@@ -13791,7 +14004,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <button
                                         onClick={() => {
                                             setShowPlannerStatusAnomalyModal(false);
-                                            setPlannerStatusModalSection('report');
                                             setPlannerStatusModalFocus(null);
                                             setPlannerStatusHourlyDayKey('');
                                             setPlannerStatusHourlyExpandedKey('');
@@ -13853,26 +14065,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </button>
                                     )}
                                     {hasAnalysis && (
-                                        <div className="inline-flex items-center rounded-lg border border-slate-200 bg-white p-1">
-                                            <button
-                                                type="button"
-                                                onClick={() => setPlannerStatusModalSection('report')}
-                                                className={`px-2.5 py-1.5 rounded-md text-xs font-medium ${statusModalSection === 'report' ? 'bg-violet-100 text-violet-800' : 'text-slate-600 hover:bg-slate-50'}`}
-                                                title="Показать отчет по статусам"
-                                            >
-                                                Отчет
-                                            </button>
-                                            <button
-                                                type="button"
-                                                onClick={() => setPlannerStatusModalSection('hourly')}
-                                                className={`px-2.5 py-1.5 rounded-md text-xs font-medium ${statusModalSection === 'hourly' ? 'bg-blue-100 text-blue-800' : 'text-slate-600 hover:bg-slate-50'}`}
-                                                title="Показать почасовую группировку"
-                                            >
-                                                Группировка
-                                            </button>
-                                        </div>
-                                    )}
-                                    {hasAnalysis && (
                                         focusedDayKey ? (
                                             <button
                                                 type="button"
@@ -13891,7 +14083,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 setPlannerStatusAnomalyAnalysis(null);
                                                 setPlannerStatusAnomalyError('');
                                                 setPlannerStatusAnomalyFileName('');
-                                                setPlannerStatusModalSection('report');
                                                 setPlannerStatusModalFocus(null);
                                                 setPlannerStatusHourlyDayKey('');
                                                 setPlannerStatusHourlyExpandedKey('');
@@ -14036,129 +14227,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             ))}
                                                         </tbody>
                                                     </table>
-                                                )}
-                                            </div>
-                                        </div>
-                                        )}
-
-                                        {statusModalSection === 'hourly' && (
-                                        <div className="rounded-xl border bg-white overflow-hidden">
-                                            <div className="px-4 py-3 border-b bg-slate-50">
-                                                <div className="font-semibold text-slate-900">Почасовая группировка на смене</div>
-                                                <div className="text-xs text-slate-500 mt-0.5">
-                                                    Отдельная сводка по каждому часу. Статус «Перерыв» считается как «на смене», статус «Отключен» не учитывается.
-                                                </div>
-                                            </div>
-                                            <div className="p-3 space-y-3">
-                                                {hourlyDayOptions.length > 0 ? (
-                                                    <>
-                                                        <div className="flex flex-wrap gap-2">
-                                                            {hourlyDayOptions.map(day => {
-                                                                const isSelected = String(day?.dateKey || '') === effectiveHourlyDayKey;
-                                                                return (
-                                                                    <button
-                                                                        key={`hourly-day-tab-${day.dateKey}`}
-                                                                        type="button"
-                                                                        onClick={() => {
-                                                                            setPlannerStatusHourlyDayKey(String(day.dateKey || ''));
-                                                                            setPlannerStatusHourlyExpandedKey('');
-                                                                        }}
-                                                                        className={`px-2.5 py-1.5 rounded-md border text-xs font-medium ${isSelected ? 'border-blue-300 bg-blue-50 text-blue-700' : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'}`}
-                                                                    >
-                                                                        {plannerStatusFormatDayLabel(day.dateKey)}
-                                                                    </button>
-                                                                );
-                                                            })}
-                                                        </div>
-                                                        <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_320px] gap-3">
-                                                            <div className="border border-slate-200 rounded-lg overflow-hidden">
-                                                                <div className="max-h-72 overflow-auto">
-                                                                    <table className="w-full text-xs">
-                                                                        <thead className="sticky top-0 bg-white z-10">
-                                                                            <tr className="border-b text-[11px] uppercase tracking-wide text-slate-500">
-                                                                                <th className="text-left px-3 py-2">Время</th>
-                                                                                <th className="text-right px-3 py-2">На смене</th>
-                                                                                <th className="text-right px-3 py-2">На перерыве</th>
-                                                                            </tr>
-                                                                        </thead>
-                                                                        <tbody>
-                                                                            {hourlyRows.map((row) => {
-                                                                                const rowKey = `${effectiveHourlyDayKey}|${row.hour}`;
-                                                                                const isActive = plannerStatusHourlyExpandedKey === rowKey;
-                                                                                return (
-                                                                                    <tr key={`hourly-group-row-${row.hour}`} className={`border-b last:border-b-0 ${isActive ? 'bg-blue-50/60' : 'bg-white'}`}>
-                                                                                        <td className="px-3 py-2 tabular-nums text-slate-700">{row.timeLabel}</td>
-                                                                                        <td className="px-3 py-2 text-right tabular-nums">
-                                                                                            {row.count > 0 ? (
-                                                                                                <button
-                                                                                                    type="button"
-                                                                                                    onClick={() => togglePlannerStatusHourlyExpanded(effectiveHourlyDayKey, row.hour)}
-                                                                                                    className={`inline-flex items-center justify-center min-w-10 px-2 py-0.5 rounded border text-xs font-semibold ${isActive ? 'border-blue-300 bg-blue-100 text-blue-800' : 'border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100'}`}
-                                                                                                    title="Показать операторов и их статус на это время"
-                                                                                                >
-                                                                                                    {row.count}
-                                                                                                </button>
-                                                                                            ) : (
-                                                                                                <span className="text-slate-400">0</span>
-                                                                                            )}
-                                                                                        </td>
-                                                                                        <td className="px-3 py-2 text-right tabular-nums text-slate-600">
-                                                                                            {row.breakCount > 0 ? row.breakCount : '—'}
-                                                                                        </td>
-                                                                                    </tr>
-                                                                                );
-                                                                            })}
-                                                                        </tbody>
-                                                                    </table>
-                                                                </div>
-                                                            </div>
-                                                            <div className="border border-slate-200 rounded-lg bg-slate-50 p-3">
-                                                                <div className="text-xs uppercase tracking-wide text-slate-500">Детали часа</div>
-                                                                {hourlySelectedRow ? (
-                                                                    <>
-                                                                        <div className="mt-1 text-sm font-semibold text-slate-800">
-                                                                            {hourlySelectedRow.timeLabel} • операторов: {hourlySelectedRow.count}
-                                                                        </div>
-                                                                        <div className="mt-3 space-y-1.5 max-h-56 overflow-auto pr-1">
-                                                                            {hourlySelectedRow.operators.map((hourlyOp, hourlyOpIdx) => (
-                                                                                (() => {
-                                                                                    const tone = hourlyOp.statusName !== 'Нет статуса'
-                                                                                        ? getPlannerImportedStatusTone(hourlyOp.statusName)
-                                                                                        : null;
-                                                                                    return (
-                                                                                        <div key={`hourly-group-op-${hourlySelectedRow.hour}-${hourlyOpIdx}`} className="rounded border border-slate-200 bg-white px-2 py-1.5">
-                                                                                            <div className="text-xs font-medium text-slate-800">{hourlyOp.operatorName}</div>
-                                                                                            <div className="mt-1 flex flex-wrap gap-1">
-                                                                                                <span className={`px-1.5 py-0.5 rounded border text-[11px] ${tone ? tone.chip : 'border-slate-200 bg-slate-50 text-slate-600'}`}>
-                                                                                                    {hourlyOp.statusName}
-                                                                                                </span>
-                                                                                                {hourlyOp.isBreakStatus && (
-                                                                                                    <span className="px-1.5 py-0.5 rounded border border-amber-200 bg-amber-50 text-[11px] text-amber-800">
-                                                                                                        На перерыве
-                                                                                                    </span>
-                                                                                                )}
-                                                                                                {hourlyOp.statusNote && hourlyOp.isBreakStatus && (
-                                                                                                    <span className="px-1.5 py-0.5 rounded border border-slate-200 bg-white text-[11px] text-slate-600">
-                                                                                                        note: {hourlyOp.statusNote}
-                                                                                                    </span>
-                                                                                                )}
-                                                                                            </div>
-                                                                                        </div>
-                                                                                    );
-                                                                                })()
-                                                                            ))}
-                                                                        </div>
-                                                                    </>
-                                                                ) : (
-                                                                    <div className="mt-2 text-xs text-slate-500">
-                                                                        Нажмите на количество в столбце «На смене», чтобы открыть список операторов и их статус.
-                                                                    </div>
-                                                                )}
-                                                            </div>
-                                                        </div>
-                                                    </>
-                                                ) : (
-                                                    <div className="text-sm text-slate-500">Нет данных для почасовой группировки.</div>
                                                 )}
                                             </div>
                                         </div>
