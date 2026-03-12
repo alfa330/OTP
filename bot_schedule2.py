@@ -760,6 +760,29 @@ def _build_calibration_results(criteria, admin_scores, admin_comments, evaluatio
     }
 
 
+def _build_signed_audio_url(audio_path):
+    if not audio_path:
+        return None
+    try:
+        path_parts = str(audio_path).split('/', 1)
+        if len(path_parts) != 2:
+            return None
+        bucket_name, blob_path = path_parts
+        bucket = get_gcs_client().bucket(bucket_name)
+        blob = bucket.blob(blob_path)
+        if not blob.exists():
+            return None
+        return blob.generate_signed_url(
+            version="v4",
+            expiration=timedelta(minutes=15),
+            method="GET",
+            response_type='audio/mpeg'
+        )
+    except Exception as e:
+        logging.error("Error building signed audio URL: %s", e)
+        return None
+
+
 TASK_ALLOWED_TAGS = {'task', 'problem', 'suggestion'}
 TASK_ALLOWED_ACTIONS = {'in_progress', 'completed', 'accepted', 'returned', 'reopened'}
 TASK_MAX_FILES = 10
@@ -2986,33 +3009,40 @@ def list_call_calibration_rooms():
                 SELECT
                     r.id,
                     r.month,
-                    r.phone_number,
-                    r.appeal_date,
-                    r.score,
+                    r.room_title,
                     r.created_at,
-                    op.id AS operator_id,
-                    op.name AS operator_name,
-                    d.id AS direction_id,
-                    d.name AS direction_name,
                     adm.id AS admin_id,
                     adm.name AS admin_name,
                     m.id AS member_id,
-                    me.id AS my_eval_id,
-                    (
-                        SELECT COUNT(*)
-                        FROM calibration_room_evaluations ce
-                        WHERE ce.room_id = r.id
-                    ) AS evaluated_count
+                    COALESCE(stats.calls_count, 0) AS calls_count,
+                    COALESCE(stats.evaluators_count, 0) AS evaluators_count,
+                    COALESCE(stats.evaluations_count, 0) AS evaluations_count,
+                    COALESCE(my_stats.my_evaluated_calls, 0) AS my_evaluated_calls
                 FROM calibration_rooms r
-                JOIN users op ON op.id = r.operator_id
-                LEFT JOIN directions d ON d.id = r.direction_id
                 JOIN users adm ON adm.id = r.created_by_admin_id
                 LEFT JOIN calibration_room_members m
                     ON m.room_id = r.id
                    AND m.supervisor_id = %s
-                LEFT JOIN calibration_room_evaluations me
-                    ON me.room_id = r.id
-                   AND me.evaluator_id = %s
+                LEFT JOIN (
+                    SELECT
+                        c.room_id,
+                        COUNT(*) AS calls_count,
+                        COUNT(e.id) AS evaluations_count,
+                        COUNT(DISTINCT e.evaluator_id) AS evaluators_count
+                    FROM calibration_room_calls c
+                    LEFT JOIN calibration_room_call_evaluations e ON e.room_call_id = c.id
+                    GROUP BY c.room_id
+                ) stats ON stats.room_id = r.id
+                LEFT JOIN (
+                    SELECT
+                        c.room_id,
+                        COUNT(DISTINCT c.id) AS my_evaluated_calls
+                    FROM calibration_room_calls c
+                    JOIN calibration_room_call_evaluations e
+                      ON e.room_call_id = c.id
+                     AND e.evaluator_id = %s
+                    GROUP BY c.room_id
+                ) my_stats ON my_stats.room_id = r.id
                 WHERE 1=1
             """
             if month:
@@ -3024,19 +3054,20 @@ def list_call_calibration_rooms():
 
         rooms = []
         for row in rows:
+            calls_count = int(row[7] or 0)
+            my_evaluated_calls = int(row[10] or 0)
             rooms.append({
                 "id": row[0],
                 "month": row[1],
-                "phone_number": row[2],
-                "appeal_date": row[3].strftime('%Y-%m-%d %H:%M:%S') if row[3] and hasattr(row[3], "strftime") else None,
-                "score": float(row[4]) if row[4] is not None else 0.0,
-                "created_at": row[5].strftime('%Y-%m-%d %H:%M:%S') if row[5] and hasattr(row[5], "strftime") else None,
-                "operator": {"id": row[6], "name": row[7]},
-                "direction": {"id": row[8], "name": row[9]},
-                "benchmark_admin": {"id": row[10], "name": row[11]},
-                "joined": True if role == 'admin' else bool(row[12]),
-                "my_evaluated": bool(row[13]),
-                "evaluated_count": int(row[14] or 0),
+                "room_title": row[2] or f"Комната #{row[0]}",
+                "created_at": row[3].strftime('%Y-%m-%d %H:%M:%S') if row[3] and hasattr(row[3], "strftime") else None,
+                "benchmark_admin": {"id": row[4], "name": row[5]},
+                "joined": True if role == 'admin' else bool(row[6]),
+                "calls_count": calls_count,
+                "evaluated_count": int(row[8] or 0),
+                "evaluation_rows_count": int(row[9] or 0),
+                "my_evaluated_calls": my_evaluated_calls,
+                "my_evaluated": bool(calls_count > 0 and my_evaluated_calls >= calls_count),
             })
 
         return jsonify({"status": "success", "rooms": rooms}), 200
@@ -3059,8 +3090,55 @@ def create_call_calibration_room():
         if requester[3] != 'admin':
             return jsonify({"error": "Only admin can create calibration rooms"}), 403
 
-        data = request.form or {}
-        required_fields = ['operator_id', 'phone_number', 'appeal_date', 'month', 'direction', 'scores', 'criterion_comments']
+        data = request.form if request.form else (request.get_json(silent=True) or {})
+        month = str(data.get('month') or '').strip()
+        if not re.match(r'^\d{4}-\d{2}$', month):
+            return jsonify({"error": "Invalid month format. Use YYYY-MM"}), 400
+
+        room_title = str(data.get('room_title') or data.get('title') or '').strip() or None
+        if room_title and len(room_title) > 255:
+            return jsonify({"error": "room_title is too long (max 255)"}), 400
+
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO calibration_rooms (
+                    created_by_admin_id,
+                    month,
+                    room_title,
+                    created_at,
+                    updated_at
+                )
+                VALUES (%s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                RETURNING id
+            """, (
+                requester_id,
+                month,
+                room_title,
+            ))
+            room_id = cursor.fetchone()[0]
+
+        return jsonify({"status": "success", "room_id": room_id}), 201
+    except Exception as e:
+        logging.exception("Error creating calibration room")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
+@app.route('/api/call_calibration/rooms/<int:room_id>/calls', methods=['POST'])
+@require_api_key
+def add_call_to_calibration_room(room_id):
+    try:
+        requester_id = getattr(g, 'user_id', None)
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "Requester not found"}), 404
+        if requester[3] != 'admin':
+            return jsonify({"error": "Only admin can add calls to calibration room"}), 403
+
+        data = request.form if request.form else (request.get_json(silent=True) or {})
+        required_fields = ['operator_id', 'phone_number', 'appeal_date', 'direction', 'scores', 'criterion_comments']
         missing = [f for f in required_fields if f not in data]
         if missing:
             return jsonify({"error": f"Missing required fields: {', '.join(missing)}"}), 400
@@ -3072,7 +3150,7 @@ def create_call_calibration_room():
             return jsonify({"error": "operator_id and direction must be integers"}), 400
 
         month = str(data.get('month') or '').strip()
-        if not re.match(r'^\d{4}-\d{2}$', month):
+        if month and not re.match(r'^\d{4}-\d{2}$', month):
             return jsonify({"error": "Invalid month format. Use YYYY-MM"}), 400
 
         phone_number = str(data.get('phone_number') or '').strip()
@@ -3085,9 +3163,11 @@ def create_call_calibration_room():
         except Exception:
             return jsonify({"error": "Invalid appeal_date format. Use ISO datetime"}), 400
 
+        raw_scores = data.get('scores', '[]')
+        raw_comments = data.get('criterion_comments', '[]')
         try:
-            scores = json.loads(data.get('scores', '[]'))
-            criterion_comments = json.loads(data.get('criterion_comments', '[]'))
+            scores = json.loads(raw_scores) if isinstance(raw_scores, str) else raw_scores
+            criterion_comments = json.loads(raw_comments) if isinstance(raw_comments, str) else raw_comments
         except Exception:
             return jsonify({"error": "scores and criterion_comments must be valid JSON arrays"}), 400
 
@@ -3099,6 +3179,22 @@ def create_call_calibration_room():
             return jsonify({"error": "Operator not found"}), 404
 
         with db._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id, month
+                FROM calibration_rooms
+                WHERE id = %s
+            """, (room_id,))
+            room_row = cursor.fetchone()
+            if not room_row:
+                return jsonify({"error": "Calibration room not found"}), 404
+
+            room_month = str(room_row[1] or '').strip()
+            if room_month and month and room_month != month:
+                return jsonify({"error": "Call month must match room month"}), 400
+            month = room_month or month
+            if not month:
+                return jsonify({"error": "Calibration room month is missing"}), 400
+
             cursor.execute("""
                 SELECT id, criteria, has_file_upload
                 FROM directions
@@ -3149,7 +3245,8 @@ def create_call_calibration_room():
                 audio_path = f"{bucket_name}/{blob_path}"
 
             cursor.execute("""
-                INSERT INTO calibration_rooms (
+                INSERT INTO calibration_room_calls (
+                    room_id,
                     created_by_admin_id,
                     operator_id,
                     month,
@@ -3160,11 +3257,14 @@ def create_call_calibration_room():
                     comment,
                     audio_path,
                     scores,
-                    criterion_comments
+                    criterion_comments,
+                    created_at,
+                    updated_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 RETURNING id
             """, (
+                room_id,
                 requester_id,
                 operator_id,
                 month,
@@ -3177,11 +3277,11 @@ def create_call_calibration_room():
                 json.dumps(normalized_scores, ensure_ascii=False),
                 json.dumps(normalized_comments, ensure_ascii=False),
             ))
-            room_id = cursor.fetchone()[0]
+            room_call_id = cursor.fetchone()[0]
 
-        return jsonify({"status": "success", "room_id": room_id}), 201
+        return jsonify({"status": "success", "room_call_id": room_call_id, "score": total_score}), 201
     except Exception as e:
-        logging.exception("Error creating calibration room")
+        logging.exception("Error adding call to calibration room")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 
@@ -3231,35 +3331,29 @@ def get_call_calibration_room(room_id):
         if role != 'admin' and not _is_supervisor_role(role):
             return jsonify({"error": "Forbidden: only admin and supervisors can access calibration room"}), 403
 
+        requested_call_id = None
+        requested_call_id_raw = request.args.get('call_id')
+        if requested_call_id_raw not in (None, ''):
+            try:
+                requested_call_id = int(requested_call_id_raw)
+            except Exception:
+                return jsonify({"error": "Invalid call_id"}), 400
+
         with db._get_cursor() as cursor:
             cursor.execute("""
                 SELECT
                     r.id,
                     r.month,
-                    r.phone_number,
-                    r.appeal_date,
-                    r.score,
-                    r.comment,
-                    r.audio_path,
-                    r.scores,
-                    r.criterion_comments,
+                    r.room_title,
                     r.created_at,
-                    op.id AS operator_id,
-                    op.name AS operator_name,
-                    d.id AS direction_id,
-                    d.name AS direction_name,
-                    d.criteria AS direction_criteria,
-                    d.has_file_upload AS direction_has_file_upload,
                     adm.id AS admin_id,
                     adm.name AS admin_name
                 FROM calibration_rooms r
-                JOIN users op ON op.id = r.operator_id
-                LEFT JOIN directions d ON d.id = r.direction_id
                 JOIN users adm ON adm.id = r.created_by_admin_id
                 WHERE r.id = %s
             """, (room_id,))
-            row = cursor.fetchone()
-            if not row:
+            room_row = cursor.fetchone()
+            if not room_row:
                 return jsonify({"error": "Calibration room not found"}), 404
 
             if _is_supervisor_role(role):
@@ -3274,16 +3368,88 @@ def get_call_calibration_room(room_id):
                 joined = True
 
             cursor.execute("""
-                SELECT id, score, comment, scores, criterion_comments, created_at, updated_at
-                FROM calibration_room_evaluations
-                WHERE room_id = %s AND evaluator_id = %s
-            """, (room_id, requester_id))
-            my_eval_row = cursor.fetchone()
+                SELECT
+                    c.id,
+                    c.operator_id,
+                    op.name AS operator_name,
+                    c.phone_number,
+                    c.appeal_date,
+                    c.score,
+                    c.created_at,
+                    c.direction_id,
+                    d.name AS direction_name,
+                    (
+                        SELECT COUNT(*)
+                        FROM calibration_room_call_evaluations e
+                        WHERE e.room_call_id = c.id
+                    ) AS evaluated_count,
+                    EXISTS(
+                        SELECT 1
+                        FROM calibration_room_call_evaluations me
+                        WHERE me.room_call_id = c.id
+                          AND me.evaluator_id = %s
+                    ) AS my_evaluated
+                FROM calibration_room_calls c
+                JOIN users op ON op.id = c.operator_id
+                LEFT JOIN directions d ON d.id = c.direction_id
+                WHERE c.room_id = %s
+                ORDER BY c.created_at DESC, c.id DESC
+            """, (requester_id, room_id))
+            call_rows = cursor.fetchall()
+
+            selected_call_id = None
+            available_call_ids = {int(c[0]) for c in call_rows}
+            if requested_call_id is not None:
+                if requested_call_id not in available_call_ids:
+                    return jsonify({"error": "Calibration call not found in room"}), 404
+                selected_call_id = requested_call_id
+            elif call_rows:
+                selected_call_id = int(call_rows[0][0])
+
+            selected_call_row = None
+            if selected_call_id is not None:
+                cursor.execute("""
+                    SELECT
+                        c.id,
+                        c.room_id,
+                        c.month,
+                        c.phone_number,
+                        c.appeal_date,
+                        c.score,
+                        c.comment,
+                        c.audio_path,
+                        c.scores,
+                        c.criterion_comments,
+                        c.created_at,
+                        c.updated_at,
+                        op.id AS operator_id,
+                        op.name AS operator_name,
+                        d.id AS direction_id,
+                        d.name AS direction_name,
+                        d.criteria AS direction_criteria,
+                        d.has_file_upload AS direction_has_file_upload
+                    FROM calibration_room_calls c
+                    JOIN users op ON op.id = c.operator_id
+                    LEFT JOIN directions d ON d.id = c.direction_id
+                    WHERE c.id = %s AND c.room_id = %s
+                """, (selected_call_id, room_id))
+                selected_call_row = cursor.fetchone()
+                if not selected_call_row:
+                    return jsonify({"error": "Calibration call not found"}), 404
+
+            my_eval_row = None
+            if selected_call_id is not None:
+                cursor.execute("""
+                    SELECT id, score, comment, scores, criterion_comments, created_at, updated_at
+                    FROM calibration_room_call_evaluations
+                    WHERE room_call_id = %s AND evaluator_id = %s
+                """, (selected_call_id, requester_id))
+                my_eval_row = cursor.fetchone()
 
             can_view_results = role == 'admin' or bool(my_eval_row)
             evaluation_rows = []
             evaluator_columns = []
-            if can_view_results:
+            if selected_call_id is not None and can_view_results:
                 cursor.execute("""
                     SELECT
                         e.id,
@@ -3295,11 +3461,11 @@ def get_call_calibration_room(room_id):
                         e.criterion_comments,
                         e.created_at,
                         e.updated_at
-                    FROM calibration_room_evaluations e
+                    FROM calibration_room_call_evaluations e
                     JOIN users u ON u.id = e.evaluator_id
-                    WHERE e.room_id = %s
+                    WHERE e.room_call_id = %s
                     ORDER BY u.name
-                """, (room_id,))
+                """, (selected_call_id,))
                 fetched = cursor.fetchall()
                 for e in fetched:
                     payload = {
@@ -3316,29 +3482,57 @@ def get_call_calibration_room(room_id):
                     evaluation_rows.append(payload)
                     evaluator_columns.append({"id": payload["evaluator_id"], "name": payload["evaluator_name"]})
 
-            room_audio_url = None
-            room_audio_path = row[6]
-            if room_audio_path:
-                try:
-                    path_parts = str(room_audio_path).split('/', 1)
-                    if len(path_parts) == 2:
-                        bucket_name, blob_path = path_parts
-                        bucket = get_gcs_client().bucket(bucket_name)
-                        blob = bucket.blob(blob_path)
-                        if blob.exists():
-                            room_audio_url = blob.generate_signed_url(
-                                version="v4",
-                                expiration=timedelta(minutes=15),
-                                method="GET",
-                                response_type='audio/mpeg'
-                            )
-                except Exception as e:
-                    logging.error("Error generating calibration room audio URL: %s", e)
+        room_payload = {
+            "id": room_row[0],
+            "month": room_row[1],
+            "room_title": room_row[2] or f"Комната #{room_row[0]}",
+            "created_at": room_row[3].strftime('%Y-%m-%d %H:%M:%S') if room_row[3] and hasattr(room_row[3], "strftime") else None,
+            "benchmark_admin": {"id": room_row[4], "name": room_row[5]}
+        }
 
-        direction_criteria = row[14] if isinstance(row[14], list) else []
-        room_scores = row[7] if isinstance(row[7], list) else []
-        room_comments = row[8] if isinstance(row[8], list) else []
-        results = _build_calibration_results(direction_criteria, room_scores, room_comments, evaluation_rows) if can_view_results else None
+        calls_payload = []
+        for call_row in call_rows:
+            calls_payload.append({
+                "id": call_row[0],
+                "operator": {"id": call_row[1], "name": call_row[2]},
+                "phone_number": call_row[3],
+                "appeal_date": call_row[4].strftime('%Y-%m-%d %H:%M:%S') if call_row[4] and hasattr(call_row[4], "strftime") else None,
+                "score": float(call_row[5]) if call_row[5] is not None else 0.0,
+                "created_at": call_row[6].strftime('%Y-%m-%d %H:%M:%S') if call_row[6] and hasattr(call_row[6], "strftime") else None,
+                "direction": {"id": call_row[7], "name": call_row[8]},
+                "evaluated_count": int(call_row[9] or 0),
+                "my_evaluated": bool(call_row[10]),
+            })
+
+        selected_call_payload = None
+        results = None
+        if selected_call_row:
+            direction_criteria = selected_call_row[16] if isinstance(selected_call_row[16], list) else []
+            benchmark_scores = selected_call_row[8] if isinstance(selected_call_row[8], list) else []
+            benchmark_comments = selected_call_row[9] if isinstance(selected_call_row[9], list) else []
+            selected_call_payload = {
+                "id": selected_call_row[0],
+                "room_id": selected_call_row[1],
+                "month": selected_call_row[2],
+                "phone_number": selected_call_row[3],
+                "appeal_date": selected_call_row[4].strftime('%Y-%m-%d %H:%M:%S') if selected_call_row[4] and hasattr(selected_call_row[4], "strftime") else None,
+                "score": float(selected_call_row[5]) if selected_call_row[5] is not None else 0.0,
+                "comment": selected_call_row[6],
+                "audio_url": _build_signed_audio_url(selected_call_row[7]),
+                "scores": benchmark_scores,
+                "criterion_comments": benchmark_comments,
+                "created_at": selected_call_row[10].strftime('%Y-%m-%d %H:%M:%S') if selected_call_row[10] and hasattr(selected_call_row[10], "strftime") else None,
+                "updated_at": selected_call_row[11].strftime('%Y-%m-%d %H:%M:%S') if selected_call_row[11] and hasattr(selected_call_row[11], "strftime") else None,
+                "operator": {"id": selected_call_row[12], "name": selected_call_row[13]},
+                "direction": {
+                    "id": selected_call_row[14],
+                    "name": selected_call_row[15],
+                    "criteria": direction_criteria,
+                    "hasFileUpload": bool(selected_call_row[17]) if selected_call_row[17] is not None else True
+                }
+            }
+            if can_view_results:
+                results = _build_calibration_results(direction_criteria, benchmark_scores, benchmark_comments, evaluation_rows)
 
         my_evaluation = None
         if my_eval_row:
@@ -3352,33 +3546,15 @@ def get_call_calibration_room(room_id):
                 "updated_at": my_eval_row[6].strftime('%Y-%m-%d %H:%M:%S') if my_eval_row[6] and hasattr(my_eval_row[6], "strftime") else None,
             }
 
-        room_payload = {
-            "id": row[0],
-            "month": row[1],
-            "phone_number": row[2],
-            "appeal_date": row[3].strftime('%Y-%m-%d %H:%M:%S') if row[3] and hasattr(row[3], "strftime") else None,
-            "score": float(row[4]) if row[4] is not None else 0.0,
-            "comment": row[5],
-            "audio_url": room_audio_url,
-            "created_at": row[9].strftime('%Y-%m-%d %H:%M:%S') if row[9] and hasattr(row[9], "strftime") else None,
-            "scores": room_scores,
-            "criterion_comments": room_comments,
-            "operator": {"id": row[10], "name": row[11]},
-            "direction": {
-                "id": row[12],
-                "name": row[13],
-                "criteria": direction_criteria,
-                "hasFileUpload": bool(row[15]) if row[15] is not None else True
-            },
-            "benchmark_admin": {"id": row[16], "name": row[17]}
-        }
-
         return jsonify({
             "status": "success",
             "room": room_payload,
+            "calls": calls_payload,
+            "selected_call_id": selected_call_id,
+            "selected_call": selected_call_payload,
             "joined": joined,
-            "can_evaluate": bool(_is_supervisor_role(role) and not my_eval_row),
-            "can_view_results": bool(can_view_results),
+            "can_evaluate": bool(_is_supervisor_role(role) and selected_call_id is not None and not my_eval_row),
+            "can_view_results": bool(can_view_results and selected_call_id is not None),
             "my_evaluation": my_evaluation,
             "results": results,
             "evaluators": evaluator_columns
@@ -3403,6 +3579,12 @@ def evaluate_call_calibration_room(room_id):
             return jsonify({"error": "Only supervisors can submit calibration results"}), 403
 
         data = request.get_json() or {}
+        call_id_raw = data.get('call_id')
+        try:
+            call_id = int(call_id_raw)
+        except Exception:
+            return jsonify({"error": "call_id is required and must be integer"}), 400
+
         scores = data.get('scores')
         criterion_comments = data.get('criterion_comments')
         comment = str(data.get('comment') or '').strip()
@@ -3411,15 +3593,12 @@ def evaluate_call_calibration_room(room_id):
 
         with db._get_cursor() as cursor:
             cursor.execute("""
-                SELECT d.criteria
-                FROM calibration_rooms r
-                LEFT JOIN directions d ON d.id = r.direction_id
-                WHERE r.id = %s
+                SELECT id
+                FROM calibration_rooms
+                WHERE id = %s
             """, (room_id,))
-            row = cursor.fetchone()
-            if not row:
+            if not cursor.fetchone():
                 return jsonify({"error": "Calibration room not found"}), 404
-            criteria = row[0] if isinstance(row[0], list) else []
 
             cursor.execute("""
                 SELECT id
@@ -3428,6 +3607,17 @@ def evaluate_call_calibration_room(room_id):
             """, (room_id, requester_id))
             if not cursor.fetchone():
                 return jsonify({"error": "Join the room first"}), 403
+
+            cursor.execute("""
+                SELECT d.criteria
+                FROM calibration_room_calls c
+                LEFT JOIN directions d ON d.id = c.direction_id
+                WHERE c.id = %s AND c.room_id = %s
+            """, (call_id, room_id))
+            call_row = cursor.fetchone()
+            if not call_row:
+                return jsonify({"error": "Calibration call not found"}), 404
+            criteria = call_row[0] if isinstance(call_row[0], list) else []
 
             normalized_scores = []
             normalized_comments = []
@@ -3446,8 +3636,8 @@ def evaluate_call_calibration_room(room_id):
                 )
 
             cursor.execute("""
-                INSERT INTO calibration_room_evaluations (
-                    room_id,
+                INSERT INTO calibration_room_call_evaluations (
+                    room_call_id,
                     evaluator_id,
                     score,
                     comment,
@@ -3457,7 +3647,7 @@ def evaluate_call_calibration_room(room_id):
                     updated_at
                 )
                 VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                ON CONFLICT (room_id, evaluator_id)
+                ON CONFLICT (room_call_id, evaluator_id)
                 DO UPDATE SET
                     score = EXCLUDED.score,
                     comment = EXCLUDED.comment,
@@ -3466,7 +3656,7 @@ def evaluate_call_calibration_room(room_id):
                     updated_at = CURRENT_TIMESTAMP
                 RETURNING id
             """, (
-                room_id,
+                call_id,
                 requester_id,
                 total_score,
                 comment,
@@ -3478,6 +3668,7 @@ def evaluate_call_calibration_room(room_id):
         return jsonify({
             "status": "success",
             "evaluation_id": evaluation_id,
+            "call_id": call_id,
             "score": total_score
         }), 200
     except Exception as e:

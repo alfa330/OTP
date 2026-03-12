@@ -446,12 +446,57 @@ class Database:
                 );
             """)
             cursor.execute("""
+                ALTER TABLE calibration_rooms
+                ADD COLUMN IF NOT EXISTS room_title TEXT;
+            """)
+            cursor.execute("""
+                ALTER TABLE calibration_rooms
+                ALTER COLUMN operator_id DROP NOT NULL;
+            """)
+            cursor.execute("""
+                ALTER TABLE calibration_rooms
+                ALTER COLUMN phone_number DROP NOT NULL;
+            """)
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS calibration_room_members (
                     id SERIAL PRIMARY KEY,
                     room_id INTEGER NOT NULL REFERENCES calibration_rooms(id) ON DELETE CASCADE,
                     supervisor_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                     joined_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(room_id, supervisor_id)
+                );
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS calibration_room_calls (
+                    id SERIAL PRIMARY KEY,
+                    room_id INTEGER NOT NULL REFERENCES calibration_rooms(id) ON DELETE CASCADE,
+                    created_by_admin_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    month VARCHAR(7) NOT NULL,
+                    phone_number VARCHAR(255) NOT NULL,
+                    appeal_date TIMESTAMP,
+                    direction_id INTEGER REFERENCES directions(id) ON DELETE SET NULL,
+                    score FLOAT NOT NULL DEFAULT 0,
+                    comment TEXT,
+                    audio_path TEXT,
+                    scores JSONB NOT NULL DEFAULT '[]',
+                    criterion_comments JSONB NOT NULL DEFAULT '[]',
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS calibration_room_call_evaluations (
+                    id SERIAL PRIMARY KEY,
+                    room_call_id INTEGER NOT NULL REFERENCES calibration_room_calls(id) ON DELETE CASCADE,
+                    evaluator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    score FLOAT NOT NULL DEFAULT 0,
+                    comment TEXT,
+                    scores JSONB NOT NULL DEFAULT '[]',
+                    criterion_comments JSONB NOT NULL DEFAULT '[]',
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(room_call_id, evaluator_id)
                 );
             """)
             cursor.execute("""
@@ -1035,6 +1080,11 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_calibration_rooms_admin_id ON calibration_rooms(created_by_admin_id);
                 CREATE INDEX IF NOT EXISTS idx_calibration_rooms_created_at ON calibration_rooms(created_at);
                 CREATE INDEX IF NOT EXISTS idx_calibration_members_room_sv ON calibration_room_members(room_id, supervisor_id);
+                CREATE INDEX IF NOT EXISTS idx_calibration_room_calls_room_id ON calibration_room_calls(room_id);
+                CREATE INDEX IF NOT EXISTS idx_calibration_room_calls_operator_id ON calibration_room_calls(operator_id);
+                CREATE INDEX IF NOT EXISTS idx_calibration_room_calls_month ON calibration_room_calls(month);
+                CREATE INDEX IF NOT EXISTS idx_calibration_call_evals_room_call_id ON calibration_room_call_evaluations(room_call_id);
+                CREATE INDEX IF NOT EXISTS idx_calibration_call_evals_evaluator_id ON calibration_room_call_evaluations(evaluator_id);
                 CREATE INDEX IF NOT EXISTS idx_calibration_eval_room_id ON calibration_room_evaluations(room_id);
                 CREATE INDEX IF NOT EXISTS idx_calibration_eval_evaluator_id ON calibration_room_evaluations(evaluator_id);
                 
