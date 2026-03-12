@@ -690,10 +690,12 @@ def _compute_total_score_from_criteria(criteria, scores):
     return round(float(total), 2), False
 
 
-def _build_calibration_results(criteria, admin_scores, admin_comments, evaluations):
+def _build_calibration_results(criteria, etalon_scores, etalon_comments, evaluations, admin_scores=None, admin_comments=None):
     criteria = criteria if isinstance(criteria, list) else []
-    admin_scores = admin_scores if isinstance(admin_scores, list) else []
-    admin_comments = admin_comments if isinstance(admin_comments, list) else []
+    etalon_scores = etalon_scores if isinstance(etalon_scores, list) else []
+    etalon_comments = etalon_comments if isinstance(etalon_comments, list) else []
+    admin_scores = admin_scores if isinstance(admin_scores, list) else etalon_scores
+    admin_comments = admin_comments if isinstance(admin_comments, list) else etalon_comments
     evaluations = evaluations if isinstance(evaluations, list) else []
 
     eval_count = len(evaluations)
@@ -704,6 +706,7 @@ def _build_calibration_results(criteria, admin_scores, admin_comments, evaluatio
         criterion = criterion if isinstance(criterion, dict) else {}
         is_critical = bool(criterion.get('isCritical'))
         admin_val = _normalize_calibration_score_value(admin_scores[idx] if idx < len(admin_scores) else 'Correct')
+        etalon_val = _normalize_calibration_score_value(etalon_scores[idx] if idx < len(etalon_scores) else admin_val)
         match_count = 0
         by_evaluator = []
 
@@ -711,7 +714,7 @@ def _build_calibration_results(criteria, admin_scores, admin_comments, evaluatio
             ev_scores = evaluation.get('scores') if isinstance(evaluation.get('scores'), list) else []
             ev_comments = evaluation.get('criterion_comments') if isinstance(evaluation.get('criterion_comments'), list) else []
             ev_val = _normalize_calibration_score_value(ev_scores[idx] if idx < len(ev_scores) else 'Correct')
-            is_match = ev_val == admin_val
+            is_match = ev_val == etalon_val
             if is_match:
                 match_count += 1
             elif is_critical:
@@ -736,10 +739,20 @@ def _build_calibration_results(criteria, admin_scores, admin_comments, evaluatio
             "criterion_name": criterion.get('name') or f"Критерий {idx + 1}",
             "is_critical": is_critical,
             "percent": percent,
-            "benchmark": {
+            "etalon": {
+                "score": etalon_val,
+                "score_label": _calibration_label_score(etalon_val),
+                "comment": (etalon_comments[idx] if idx < len(etalon_comments) else None) or None
+            },
+            "admin": {
                 "score": admin_val,
                 "score_label": _calibration_label_score(admin_val),
                 "comment": (admin_comments[idx] if idx < len(admin_comments) else None) or None
+            },
+            "benchmark": {
+                "score": etalon_val,
+                "score_label": _calibration_label_score(etalon_val),
+                "comment": (etalon_comments[idx] if idx < len(etalon_comments) else None) or None
             },
             "by_evaluator": by_evaluator
         })
@@ -3258,10 +3271,12 @@ def add_call_to_calibration_room(room_id):
                     audio_path,
                     scores,
                     criterion_comments,
+                    etalon_scores,
+                    etalon_criterion_comments,
                     created_at,
                     updated_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 RETURNING id
             """, (
                 room_id,
@@ -3274,6 +3289,8 @@ def add_call_to_calibration_room(room_id):
                 total_score,
                 comment,
                 audio_path,
+                json.dumps(normalized_scores, ensure_ascii=False),
+                json.dumps(normalized_comments, ensure_ascii=False),
                 json.dumps(normalized_scores, ensure_ascii=False),
                 json.dumps(normalized_comments, ensure_ascii=False),
             ))
@@ -3427,10 +3444,16 @@ def get_call_calibration_room(room_id):
                         d.id AS direction_id,
                         d.name AS direction_name,
                         d.criteria AS direction_criteria,
-                        d.has_file_upload AS direction_has_file_upload
+                        d.has_file_upload AS direction_has_file_upload,
+                        c.etalon_scores,
+                        c.etalon_criterion_comments,
+                        c.etalon_updated_at,
+                        eu.id AS etalon_updated_by,
+                        eu.name AS etalon_updated_by_name
                     FROM calibration_room_calls c
                     JOIN users op ON op.id = c.operator_id
                     LEFT JOIN directions d ON d.id = c.direction_id
+                    LEFT JOIN users eu ON eu.id = c.etalon_updated_by
                     WHERE c.id = %s AND c.room_id = %s
                 """, (selected_call_id, room_id))
                 selected_call_row = cursor.fetchone()
@@ -3508,8 +3531,13 @@ def get_call_calibration_room(room_id):
         results = None
         if selected_call_row:
             direction_criteria = selected_call_row[16] if isinstance(selected_call_row[16], list) else []
-            benchmark_scores = selected_call_row[8] if isinstance(selected_call_row[8], list) else []
-            benchmark_comments = selected_call_row[9] if isinstance(selected_call_row[9], list) else []
+            admin_scores = selected_call_row[8] if isinstance(selected_call_row[8], list) else []
+            admin_comments = selected_call_row[9] if isinstance(selected_call_row[9], list) else []
+            etalon_scores_raw = selected_call_row[18] if isinstance(selected_call_row[18], list) else []
+            etalon_comments_raw = selected_call_row[19] if isinstance(selected_call_row[19], list) else []
+            etalon_scores = etalon_scores_raw if etalon_scores_raw else admin_scores
+            etalon_comments = etalon_comments_raw if etalon_comments_raw else admin_comments
+            etalon_total, _ = _compute_total_score_from_criteria(direction_criteria, etalon_scores)
             selected_call_payload = {
                 "id": selected_call_row[0],
                 "room_id": selected_call_row[1],
@@ -3519,8 +3547,18 @@ def get_call_calibration_room(room_id):
                 "score": float(selected_call_row[5]) if selected_call_row[5] is not None else 0.0,
                 "comment": selected_call_row[6],
                 "audio_url": _build_signed_audio_url(selected_call_row[7]),
-                "scores": benchmark_scores,
-                "criterion_comments": benchmark_comments,
+                "scores": admin_scores,
+                "criterion_comments": admin_comments,
+                "admin_scores": admin_scores,
+                "admin_criterion_comments": admin_comments,
+                "etalon_scores": etalon_scores,
+                "etalon_criterion_comments": etalon_comments,
+                "etalon_score": etalon_total,
+                "etalon_updated_at": selected_call_row[20].strftime('%Y-%m-%d %H:%M:%S') if selected_call_row[20] and hasattr(selected_call_row[20], "strftime") else None,
+                "etalon_updated_by": {
+                    "id": selected_call_row[21],
+                    "name": selected_call_row[22]
+                } if selected_call_row[21] else None,
                 "created_at": selected_call_row[10].strftime('%Y-%m-%d %H:%M:%S') if selected_call_row[10] and hasattr(selected_call_row[10], "strftime") else None,
                 "updated_at": selected_call_row[11].strftime('%Y-%m-%d %H:%M:%S') if selected_call_row[11] and hasattr(selected_call_row[11], "strftime") else None,
                 "operator": {"id": selected_call_row[12], "name": selected_call_row[13]},
@@ -3532,7 +3570,14 @@ def get_call_calibration_room(room_id):
                 }
             }
             if can_view_results:
-                results = _build_calibration_results(direction_criteria, benchmark_scores, benchmark_comments, evaluation_rows)
+                results = _build_calibration_results(
+                    direction_criteria,
+                    etalon_scores,
+                    etalon_comments,
+                    evaluation_rows,
+                    admin_scores=admin_scores,
+                    admin_comments=admin_comments
+                )
 
         my_evaluation = None
         if my_eval_row:
@@ -3561,6 +3606,79 @@ def get_call_calibration_room(room_id):
         }), 200
     except Exception as e:
         logging.exception("Error getting calibration room")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
+@app.route('/api/call_calibration/rooms/<int:room_id>/calls/<int:call_id>/etalon', methods=['PATCH'])
+@require_api_key
+def update_call_calibration_etalon(room_id, call_id):
+    try:
+        requester_id = getattr(g, 'user_id', None)
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "Requester not found"}), 404
+        if requester[3] != 'admin':
+            return jsonify({"error": "Only admin can update etalon"}), 403
+
+        data = request.get_json() or {}
+        scores = data.get('scores')
+        criterion_comments = data.get('criterion_comments')
+        if not isinstance(scores, list) or not isinstance(criterion_comments, list):
+            return jsonify({"error": "scores and criterion_comments must be arrays"}), 400
+
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT d.criteria
+                FROM calibration_room_calls c
+                LEFT JOIN directions d ON d.id = c.direction_id
+                WHERE c.id = %s AND c.room_id = %s
+            """, (call_id, room_id))
+            call_row = cursor.fetchone()
+            if not call_row:
+                return jsonify({"error": "Calibration call not found"}), 404
+            criteria = call_row[0] if isinstance(call_row[0], list) else []
+
+            normalized_scores = []
+            normalized_comments = []
+            for idx in range(len(criteria)):
+                src_score = scores[idx] if idx < len(scores) else 'Correct'
+                src_comment = criterion_comments[idx] if idx < len(criterion_comments) else ''
+                normalized_scores.append(_normalize_calibration_score_value(src_score))
+                normalized_comments.append(str(src_comment or ''))
+
+            etalon_total, _ = _compute_total_score_from_criteria(criteria, normalized_scores)
+
+            cursor.execute("""
+                UPDATE calibration_room_calls
+                SET
+                    etalon_scores = %s::jsonb,
+                    etalon_criterion_comments = %s::jsonb,
+                    etalon_updated_by = %s,
+                    etalon_updated_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s AND room_id = %s
+                RETURNING id
+            """, (
+                json.dumps(normalized_scores, ensure_ascii=False),
+                json.dumps(normalized_comments, ensure_ascii=False),
+                requester_id,
+                call_id,
+                room_id
+            ))
+            updated = cursor.fetchone()
+            if not updated:
+                return jsonify({"error": "Calibration call not found"}), 404
+
+        return jsonify({
+            "status": "success",
+            "call_id": call_id,
+            "etalon_score": etalon_total
+        }), 200
+    except Exception as e:
+        logging.exception("Error updating calibration etalon")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 

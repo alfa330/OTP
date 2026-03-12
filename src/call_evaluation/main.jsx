@@ -1035,6 +1035,9 @@ const App = ({ user, initialSelection }) => {
     const [calibrationDetail, setCalibrationDetail] = useState(null);
     const [showCalibrationEvalModal, setShowCalibrationEvalModal] = useState(false);
     const [showCalibrationCreateModal, setShowCalibrationCreateModal] = useState(false);
+    const [etalonScoresDraft, setEtalonScoresDraft] = useState([]);
+    const [etalonCommentsDraft, setEtalonCommentsDraft] = useState([]);
+    const [isSavingEtalon, setIsSavingEtalon] = useState(false);
     const [openingCalibrationRoomId, setOpeningCalibrationRoomId] = useState(null);
     const [openingCalibrationCallId, setOpeningCalibrationCallId] = useState(null);
     const [showVersionsModal, setShowVersionsModal] = useState(false);
@@ -1512,6 +1515,79 @@ const App = ({ user, initialSelection }) => {
     const calibrationResults = calibrationDetail?.results || null;
     const calibrationRows = calibrationResults?.criteria_rows || [];
     const calibrationEvaluators = calibrationDetail?.evaluators || [];
+    const calibrationCriteria = calibrationCall?.direction?.criteria || [];
+
+    useEffect(() => {
+        if (!calibrationCall) {
+            setEtalonScoresDraft([]);
+            setEtalonCommentsDraft([]);
+            return;
+        }
+        const sourceScores = Array.isArray(calibrationCall?.etalon_scores) && calibrationCall.etalon_scores.length
+            ? calibrationCall.etalon_scores
+            : (Array.isArray(calibrationCall?.scores) ? calibrationCall.scores : []);
+        const sourceComments = Array.isArray(calibrationCall?.etalon_criterion_comments) && calibrationCall.etalon_criterion_comments.length
+            ? calibrationCall.etalon_criterion_comments
+            : (Array.isArray(calibrationCall?.criterion_comments) ? calibrationCall.criterion_comments : []);
+        setEtalonScoresDraft(
+            Array.from({ length: calibrationCriteria.length }, (_, i) => normalizeCalibrationScore(sourceScores[i] ?? 'Correct'))
+        );
+        setEtalonCommentsDraft(
+            Array.from({ length: calibrationCriteria.length }, (_, i) => String(sourceComments[i] ?? ''))
+        );
+    }, [calibrationCall, calibrationCriteria.length]);
+
+    const isEtalonDirty = !!(isAdminRole && calibrationCall && calibrationCriteria.length) && calibrationCriteria.some((_, idx) => {
+        const srcScore = normalizeCalibrationScore(
+            calibrationCall?.etalon_scores?.[idx] ?? calibrationCall?.scores?.[idx] ?? 'Correct'
+        );
+        const srcComment = String(
+            calibrationCall?.etalon_criterion_comments?.[idx] ?? calibrationCall?.criterion_comments?.[idx] ?? ''
+        );
+        const draftScore = normalizeCalibrationScore(etalonScoresDraft[idx] ?? 'Correct');
+        const draftComment = String(etalonCommentsDraft[idx] ?? '');
+        return draftScore !== srcScore || draftComment !== srcComment;
+    });
+
+    const handleSaveEtalon = useCallback(async () => {
+        if (!isAdminRole || !calibrationCall?.id || !activeCalibrationRoomId) return;
+        setIsSavingEtalon(true);
+        try {
+            const r = await authFetch(
+                `${API_BASE_URL}/api/call_calibration/rooms/${activeCalibrationRoomId}/calls/${calibrationCall.id}/etalon`,
+                {
+                    method: 'PATCH',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-User-Id': userId
+                    },
+                    body: JSON.stringify({
+                        scores: etalonScoresDraft,
+                        criterion_comments: etalonCommentsDraft
+                    })
+                }
+            );
+            const d = await r.json();
+            if (!r.ok || d.status !== 'success') throw new Error(d.error || 'Не удалось сохранить эталон');
+            emitCallEvaluationToast('Эталон обновлен', 'success');
+            calibrationDetailCacheRef.current.clear();
+            await fetchCalibrationRoomDetail(activeCalibrationRoomId, calibrationCall.id, { force: true });
+            await fetchCalibrationRooms();
+        } catch (e) {
+            emitCallEvaluationToast('Ошибка сохранения эталона: ' + e.message, 'error');
+        } finally {
+            setIsSavingEtalon(false);
+        }
+    }, [
+        isAdminRole,
+        calibrationCall,
+        activeCalibrationRoomId,
+        userId,
+        etalonScoresDraft,
+        etalonCommentsDraft,
+        fetchCalibrationRoomDetail,
+        fetchCalibrationRooms
+    ]);
 
     return (
         <div className="app">
@@ -1904,7 +1980,7 @@ const App = ({ user, initialSelection }) => {
                                                                 <div className="calibration-card-meta">
                                                                     <span>Телефон: {call.phone_number || '—'}</span>
                                                                     <span>Дата: {fmtDate(call.appeal_date)}</span>
-                                                                    <span>Эталон: {Number(call.score || 0).toFixed(1)}</span>
+                                                                    <span>Оценка админа: {Number(call.score || 0).toFixed(1)}</span>
                                                                 </div>
                                                             </button>
                                                         );
@@ -1921,7 +1997,8 @@ const App = ({ user, initialSelection }) => {
                                                     <div className="expanded-meta-item"><strong>Телефон:</strong> {calibrationCall.phone_number || '—'}</div>
                                                     <div className="expanded-meta-item"><strong>Дата:</strong> {fmtDate(calibrationCall.appeal_date)}</div>
                                                     <div className="expanded-meta-item"><strong>Направление:</strong> {calibrationCall.direction?.name || '—'}</div>
-                                                    <div className="expanded-meta-item"><strong>Эталон (админ):</strong> {Number(calibrationCall.score || 0).toFixed(1)}</div>
+                                                    <div className="expanded-meta-item"><strong>Оценка админа:</strong> {Number(calibrationCall.score || 0).toFixed(1)}</div>
+                                                    <div className="expanded-meta-item"><strong>Текущий эталон:</strong> {Number(calibrationCall.etalon_score || 0).toFixed(1)}</div>
                                                 </div>
                                                 {calibrationCall.audio_url && (
                                                     <div className="audio-wrap" style={{maxWidth:520}}>
@@ -1936,16 +2013,22 @@ const App = ({ user, initialSelection }) => {
                                             <div className="calibration-lock-note">
                                                 Результаты участников и проценты калибровки будут доступны после вашей оценки.
                                             </div>
-                                        ) : (calibrationResults?.evaluated_count || 0) === 0 ? (
-                                            <div className="calibration-lock-note">Пока нет оценок супервайзеров для сравнения.</div>
+                                        ) : calibrationRows.length === 0 ? (
+                                            <div className="calibration-lock-note">Для этого звонка нет критериев оценки.</div>
                                         ) : (
                                             <>
+                                                {(calibrationResults?.evaluated_count || 0) === 0 && (
+                                                    <div className="calibration-lock-note" style={{marginBottom: 10}}>
+                                                        Пока нет оценок супервайзеров для сравнения.
+                                                    </div>
+                                                )}
                                                 <table className="crit-table calibration-result-table">
                                                     <thead>
                                                         <tr>
                                                             <th>Критерий</th>
                                                             <th>Процент калибровки</th>
                                                             <th>Эталон</th>
+                                                            <th>Оценка админа ({calibrationRoom?.benchmark_admin?.name || 'Админ'})</th>
                                                             {calibrationEvaluators.map(ev => <th key={ev.id}>{ev.name}</th>)}
                                                         </tr>
                                                     </thead>
@@ -1962,8 +2045,46 @@ const App = ({ user, initialSelection }) => {
                                                                     </span>
                                                                 </td>
                                                                 <td>
-                                                                    <div>{calibrationScoreLabel(row.benchmark?.score)}</div>
-                                                                    {row.benchmark?.comment && <div className="calibration-cell-comment">{row.benchmark.comment}</div>}
+                                                                    {isAdminRole ? (
+                                                                        <div style={{display:'flex', flexDirection:'column', gap:6}}>
+                                                                            <select
+                                                                                className="select"
+                                                                                value={normalizeCalibrationScore(etalonScoresDraft[row.criterion_index] ?? row.etalon?.score ?? row.benchmark?.score ?? 'Correct')}
+                                                                                onChange={(e) => {
+                                                                                    const next = [...etalonScoresDraft];
+                                                                                    next[row.criterion_index] = normalizeCalibrationScore(e.target.value);
+                                                                                    setEtalonScoresDraft(next);
+                                                                                }}
+                                                                            >
+                                                                                <option value="Correct">Корректно</option>
+                                                                                <option value="N/A">N/A</option>
+                                                                                <option value="Incorrect">Ошибка</option>
+                                                                                <option value="Deficiency">Недочет</option>
+                                                                                <option value="Error">Критич. ошибка</option>
+                                                                            </select>
+                                                                            <textarea
+                                                                                className="textarea"
+                                                                                rows={2}
+                                                                                style={{minWidth:170}}
+                                                                                value={etalonCommentsDraft[row.criterion_index] ?? ''}
+                                                                                onChange={(e) => {
+                                                                                    const next = [...etalonCommentsDraft];
+                                                                                    next[row.criterion_index] = e.target.value;
+                                                                                    setEtalonCommentsDraft(next);
+                                                                                }}
+                                                                                placeholder="Комментарий эталона (необязательно)"
+                                                                            />
+                                                                        </div>
+                                                                    ) : (
+                                                                        <>
+                                                                            <div>{calibrationScoreLabel(row.etalon?.score ?? row.benchmark?.score)}</div>
+                                                                            {(row.etalon?.comment ?? row.benchmark?.comment) && <div className="calibration-cell-comment">{row.etalon?.comment ?? row.benchmark?.comment}</div>}
+                                                                        </>
+                                                                    )}
+                                                                </td>
+                                                                <td>
+                                                                    <div>{calibrationScoreLabel(row.admin?.score ?? row.benchmark?.score)}</div>
+                                                                    {(row.admin?.comment ?? row.benchmark?.comment) && <div className="calibration-cell-comment">{row.admin?.comment ?? row.benchmark?.comment}</div>}
                                                                 </td>
                                                                 {calibrationEvaluators.map(ev => {
                                                                     const cell = row.by_evaluator?.find(x => Number(x.evaluator_id) === Number(ev.id));
@@ -1989,6 +2110,15 @@ const App = ({ user, initialSelection }) => {
                                                         <span className="calibration-critical-note">
                                                             Есть расхождение по критическому критерию: итоговый процент = 0%.
                                                         </span>
+                                                    )}
+                                                    {isAdminRole && (
+                                                        <button
+                                                            className="btn btn-primary btn-sm"
+                                                            onClick={handleSaveEtalon}
+                                                            disabled={!isEtalonDirty || isSavingEtalon}
+                                                        >
+                                                            {isSavingEtalon ? <><span className="spinner" /> Сохранение...</> : <><FaIcon className="fas fa-save" /> Сохранить эталон</>}
+                                                        </button>
                                                     )}
                                                 </div>
                                             </>
