@@ -704,16 +704,18 @@ def _build_calibration_results(criteria, etalon_scores, etalon_comments, evaluat
         is_critical = bool(criterion.get('isCritical'))
         admin_val = _normalize_calibration_score_value(admin_scores[idx] if idx < len(admin_scores) else 'Correct')
         etalon_val = _normalize_calibration_score_value(etalon_scores[idx] if idx < len(etalon_scores) else admin_val)
-        match_count = 0
+        # Percent is based on admin <-> supervisors alignment.
+        # Etalon is displayed separately and must not affect calibration percent.
+        supervisor_match_count = 0
         by_evaluator = []
 
         for evaluation in evaluations:
             ev_scores = evaluation.get('scores') if isinstance(evaluation.get('scores'), list) else []
             ev_comments = evaluation.get('criterion_comments') if isinstance(evaluation.get('criterion_comments'), list) else []
             ev_val = _normalize_calibration_score_value(ev_scores[idx] if idx < len(ev_scores) else 'Correct')
-            is_match = ev_val == etalon_val
+            is_match = ev_val == admin_val
             if is_match:
-                match_count += 1
+                supervisor_match_count += 1
             elif is_critical:
                 critical_mismatch = True
 
@@ -727,8 +729,10 @@ def _build_calibration_results(criteria, etalon_scores, etalon_comments, evaluat
 
         percent = None
         if eval_count > 0:
-            percent = round((match_count * 100.0) / float(eval_count), 1)
-            if is_critical and match_count < eval_count:
+            matched_count_with_admin = 1 + supervisor_match_count
+            participants_count = 1 + eval_count
+            percent = round((matched_count_with_admin * 100.0) / float(participants_count), 1)
+            if is_critical and supervisor_match_count < eval_count:
                 percent = 0.0
 
         rows.append({
