@@ -174,11 +174,24 @@
       direction: ltr;
       overflow-y: auto;
       overflow-x: hidden;
+      position: relative;
+      z-index: 1;
       -ms-overflow-style: none;
       scrollbar-width: none;
     }
     .sidebar-menu-scroll.sidebar-menu-overflow-visible {
       overflow: visible;
+    }
+    .sidebar-footer-menu {
+      position: relative;
+      z-index: 6;
+      isolation: isolate;
+      background: linear-gradient(
+        to bottom,
+        rgba(30, 64, 175, 0.9),
+        rgba(30, 58, 138, 0.96)
+      );
+      border-radius: 0.75rem;
     }
     .sidebar-menu-scroll::-webkit-scrollbar {
       width: 0;
