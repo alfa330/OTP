@@ -1627,6 +1627,27 @@ const App = ({ user, initialSelection }) => {
         } catch(e) { emitCallEvaluationToast('Ошибка: ' + e.message, 'error'); }
     };
 
+    const handleDeleteCalibrationRoom = async (e, roomId) => {
+        e.stopPropagation();
+        if (!confirm('Удалить комнату калибровки? Все данные комнаты будут удалены.')) return;
+        try {
+            const r = await authFetch(`${API_BASE_URL}/api/call_calibration/rooms/${roomId}`, {
+                method: 'DELETE',
+                headers: { 'X-User-Id': userId }
+            });
+            const data = await r.json();
+            if (!r.ok) throw new Error(data.error || 'Ошибка удаления');
+            setCalibrationRooms(prev => prev.filter(room => room.id !== roomId));
+            if (activeCalibrationRoomId === roomId) {
+                setActiveCalibrationRoomId(null);
+                setCalibrationDetail(null);
+            }
+            emitCallEvaluationToast('Комната удалена', 'success');
+        } catch (e) {
+            emitCallEvaluationToast('Ошибка: ' + e.message, 'error');
+        }
+    };
+
     const callsByMonth = calls.filter(c => c.assignedMonth === selectedMonth);
     let displayedCalls = callsByMonth;
     if (viewMode === 'normal') displayedCalls = displayedCalls.filter(c => (!fromDate||c.date>=fromDate) && (!toDate||c.date<=toDate));
@@ -2061,6 +2082,13 @@ const App = ({ user, initialSelection }) => {
                                                         <span className="badge-dot" />
                                                         {isOpening ? 'Загрузка...' : room.my_evaluated ? 'Оценено' : room.joined ? 'В комнате' : 'Не вошел'}
                                                     </span>
+                                                    {isAdminRole && (
+                                                        <button
+                                                            className="calibration-card-delete"
+                                                            onClick={(e) => handleDeleteCalibrationRoom(e, room.id)}
+                                                            title="Удалить комнату"
+                                                        >✕</button>
+                                                    )}
                                                 </div>
                                                 <div className="calibration-card-title">{room.room_title || `Комната #${room.id}`}</div>
                                                 <div className="calibration-card-meta">

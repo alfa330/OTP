@@ -3137,6 +3137,34 @@ def create_call_calibration_room():
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 
+@app.route('/api/call_calibration/rooms/<int:room_id>', methods=['DELETE', 'OPTIONS'])
+@require_api_key
+def delete_calibration_room(room_id):
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+    try:
+        requester_id = getattr(g, 'user_id', None)
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "Requester not found"}), 404
+        if requester[3] != 'admin':
+            return jsonify({"error": "Only admin can delete calibration rooms"}), 403
+
+        with db._get_cursor() as cursor:
+            cursor.execute("SELECT id FROM calibration_rooms WHERE id = %s", (room_id,))
+            if not cursor.fetchone():
+                return jsonify({"error": "Комната не найдена"}), 404
+            cursor.execute("DELETE FROM calibration_rooms WHERE id = %s", (room_id,))
+
+        return jsonify({"status": "success"}), 200
+    except Exception as e:
+        logging.exception("Error deleting calibration room")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
 @app.route('/api/call_calibration/rooms/<int:room_id>/calls', methods=['POST'])
 @require_api_key
 def add_call_to_calibration_room(room_id):
