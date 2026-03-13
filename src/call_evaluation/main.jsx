@@ -1139,6 +1139,9 @@ const App = ({ user, initialSelection }) => {
     const [etalonScoresDraft, setEtalonScoresDraft] = useState([]);
     const [etalonCommentsDraft, setEtalonCommentsDraft] = useState([]);
     const [isSavingEtalon, setIsSavingEtalon] = useState(false);
+    const [showCalibrationHistoryModal, setShowCalibrationHistoryModal] = useState(false);
+    const [calibrationHistory, setCalibrationHistory] = useState([]);
+    const [isCalibrationHistoryLoading, setIsCalibrationHistoryLoading] = useState(false);
     const [openingCalibrationRoomId, setOpeningCalibrationRoomId] = useState(null);
     const [openingCalibrationCallId, setOpeningCalibrationCallId] = useState(null);
     const [showVersionsModal, setShowVersionsModal] = useState(false);
@@ -1648,6 +1651,51 @@ const App = ({ user, initialSelection }) => {
         }
     };
 
+    const handleDeleteCalibrationCall = async (e, callId) => {
+        e.stopPropagation();
+        if (!confirm('Удалить звонок из комнаты калибровки? Все оценки по этому звонку будут удалены.')) return;
+        try {
+            const r = await authFetch(`${API_BASE_URL}/api/call_calibration/rooms/${activeCalibrationRoomId}/calls/${callId}`, {
+                method: 'DELETE',
+                headers: { 'X-User-Id': userId }
+            });
+            const data = await r.json();
+            if (!r.ok) throw new Error(data.error || 'Ошибка удаления');
+            calibrationDetailCacheRef.current.clear();
+            setCalibrationDetail(prev => {
+                if (!prev) return prev;
+                const nextCalls = (prev.calls || []).filter(c => c.id !== callId);
+                const nextSelectedCall = prev.selected_call_id === callId ? null : prev.selected_call;
+                const nextSelectedCallId = prev.selected_call_id === callId ? null : prev.selected_call_id;
+                return { ...prev, calls: nextCalls, selected_call: nextSelectedCall, selected_call_id: nextSelectedCallId };
+            });
+            if (activeCalibrationCallId === callId) setActiveCalibrationCallId(null);
+            await fetchCalibrationRooms();
+            emitCallEvaluationToast('Звонок удалён', 'success');
+        } catch (e) {
+            emitCallEvaluationToast('Ошибка: ' + e.message, 'error');
+        }
+    };
+
+    const handleOpenCalibrationHistory = async () => {
+        if (!activeCalibrationRoomId) return;
+        setShowCalibrationHistoryModal(true);
+        setIsCalibrationHistoryLoading(true);
+        try {
+            const r = await authFetch(`${API_BASE_URL}/api/call_calibration/rooms/${activeCalibrationRoomId}/history`, {
+                headers: { 'X-User-Id': userId }
+            });
+            const data = await r.json();
+            if (!r.ok) throw new Error(data.error || 'Ошибка загрузки истории');
+            setCalibrationHistory(data.events || []);
+        } catch (e) {
+            emitCallEvaluationToast('Ошибка: ' + e.message, 'error');
+            setShowCalibrationHistoryModal(false);
+        } finally {
+            setIsCalibrationHistoryLoading(false);
+        }
+    };
+
     const callsByMonth = calls.filter(c => c.assignedMonth === selectedMonth);
     let displayedCalls = callsByMonth;
     if (viewMode === 'normal') displayedCalls = displayedCalls.filter(c => (!fromDate||c.date>=fromDate) && (!toDate||c.date<=toDate));
@@ -2087,7 +2135,7 @@ const App = ({ user, initialSelection }) => {
                                                             className="calibration-card-delete"
                                                             onClick={(e) => handleDeleteCalibrationRoom(e, room.id)}
                                                             title="Удалить комнату"
-                                                        >✕</button>
+                                                        ><FaIcon className="fas fa-trash" /></button>
                                                     )}
                                                 </div>
                                                 <div className="calibration-card-title">{room.room_title || `Комната #${room.id}`}</div>
@@ -2122,6 +2170,12 @@ const App = ({ user, initialSelection }) => {
                                                     disabled={isCalibrationExporting}
                                                 >
                                                     {isCalibrationExporting ? <><span className="spinner" /> Выгрузка...</> : <><FaIcon className="fas fa-file-excel" /> Выгрузить Excel</>}
+                                                </button>
+                                                <button
+                                                    className="btn btn-secondary btn-sm"
+                                                    onClick={handleOpenCalibrationHistory}
+                                                >
+                                                    <FaIcon className="fas fa-history" /> История
                                                 </button>
                                                 {canManageCalibrationRooms && (
                                                     <button
@@ -2173,6 +2227,13 @@ const App = ({ user, initialSelection }) => {
                                                                         : call.my_evaluated
                                                                             ? <span className="badge badge-green"><span className="badge-dot" /> Оценен вами</span>
                                                                             : null}
+                                                                    {isAdminRole && (
+                                                                        <button
+                                                                            className="calibration-card-delete"
+                                                                            onClick={(e) => handleDeleteCalibrationCall(e, call.id)}
+                                                                            title="Удалить звонок"
+                                                                        ><FaIcon className="fas fa-trash" /></button>
+                                                                    )}
                                                                 </div>
                                                                 <div className="calibration-card-title">{call.operator?.name || '—'}</div>
                                                                 <div className="calibration-card-meta">
@@ -2439,6 +2500,45 @@ const App = ({ user, initialSelection }) => {
                 userId={userId}
                 onSubmitted={handleCalibrationEvaluationSaved}
             />
+
+            {/* Calibration room history modal */}
+            {showCalibrationHistoryModal && (
+                <div className="modal-backdrop" onClick={() => setShowCalibrationHistoryModal(false)}>
+                    <div className="modal" style={{maxWidth: 600}} onClick={e => e.stopPropagation()}>
+                        <div className="modal-header">
+                            <div>
+                                <h2>История комнаты</h2>
+                                <div className="modal-header-sub">{calibrationRoom?.room_title || `Комната #${activeCalibrationRoomId}`}</div>
+                            </div>
+                            <button className="close-btn" onClick={() => setShowCalibrationHistoryModal(false)}><FaIcon className="fas fa-times" /></button>
+                        </div>
+                        <div className="modal-body">
+                            {isCalibrationHistoryLoading ? (
+                                <div style={{textAlign:'center', padding:'32px 0', color:'var(--text-2)'}}>
+                                    <span className="spinner" /> Загрузка...
+                                </div>
+                            ) : calibrationHistory.length === 0 ? (
+                                <div style={{textAlign:'center', padding:'32px 0', color:'var(--text-2)'}}>Событий не найдено</div>
+                            ) : (
+                                <div className="calibration-history-list">
+                                    {calibrationHistory.map((ev, i) => (
+                                        <div key={i} className="calibration-history-item">
+                                            <div className="calibration-history-dot" data-type={ev.type} />
+                                            <div className="calibration-history-content">
+                                                <div className="calibration-history-desc">{ev.description}</div>
+                                                <div className="calibration-history-meta">
+                                                    <span className="calibration-history-actor">{ev.actor}</span>
+                                                    <span className="calibration-history-time">{ev.timestamp}</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* Version history modal */}
             {showVersionsModal && (
