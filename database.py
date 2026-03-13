@@ -7714,7 +7714,22 @@ class Database:
                 *(current_requested_intervals or [])
             ])
 
-            affected_offsets = [0, 1] if spans_next_day else [0]
+            # Detect if the swap involves shifts from the previous day
+            # (e.g., user selects day N with time 00:00-02:00 which is actually
+            # the tail of an overnight shift 17:00-02:00 that started on day N-1).
+            # In the window, such shifts have negative absolute minute values.
+            all_save_intervals = list(requester_remaining_intervals or []) + list(target_next_intervals or [])
+            spans_prev_day = any(int(seg.get('start', 0)) < 0 for seg in all_save_intervals)
+
+            if spans_prev_day and spans_next_day:
+                affected_offsets = [-1, 0, 1]
+            elif spans_prev_day:
+                affected_offsets = [-1, 0]
+            elif spans_next_day:
+                affected_offsets = [0, 1]
+            else:
+                affected_offsets = [0]
+
             requester_save_day_map = self._swap_serialize_intervals_to_day_map(
                 requester_remaining_intervals,
                 swap_date_obj,
@@ -7726,7 +7741,10 @@ class Database:
                 allowed_day_offsets=affected_offsets
             )
 
-            affected_dates = [swap_date_obj]
+            affected_dates = []
+            if spans_prev_day:
+                affected_dates.append(prev_date_obj)
+            affected_dates.append(swap_date_obj)
             if spans_next_day:
                 affected_dates.append(next_date_obj)
 
