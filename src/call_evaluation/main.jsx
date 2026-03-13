@@ -1139,6 +1139,8 @@ const App = ({ user, initialSelection }) => {
     const [etalonScoresDraft, setEtalonScoresDraft] = useState([]);
     const [etalonCommentsDraft, setEtalonCommentsDraft] = useState([]);
     const [isSavingEtalon, setIsSavingEtalon] = useState(false);
+    const [generalCommentDraft, setGeneralCommentDraft] = useState('');
+    const [isSavingGeneralComment, setIsSavingGeneralComment] = useState(false);
     const [showCalibrationHistoryModal, setShowCalibrationHistoryModal] = useState(false);
     const [calibrationHistory, setCalibrationHistory] = useState([]);
     const [isCalibrationHistoryLoading, setIsCalibrationHistoryLoading] = useState(false);
@@ -1748,6 +1750,7 @@ const App = ({ user, initialSelection }) => {
         if (!calibrationCall) {
             setEtalonScoresDraft([]);
             setEtalonCommentsDraft([]);
+            setGeneralCommentDraft('');
             return;
         }
         const sourceScores = Array.isArray(calibrationCall?.etalon_scores) && calibrationCall.etalon_scores.length
@@ -1762,6 +1765,7 @@ const App = ({ user, initialSelection }) => {
         setEtalonCommentsDraft(
             Array.from({ length: calibrationCriteria.length }, (_, i) => String(sourceComments[i] ?? ''))
         );
+        setGeneralCommentDraft(calibrationCall?.general_comment ?? '');
     }, [calibrationCall, calibrationCriteria.length]);
 
     const isEtalonDirty = !!(canManageCalibrationRooms && calibrationCall && calibrationCriteria.length) && calibrationCriteria.some((_, idx) => {
@@ -1828,6 +1832,33 @@ const App = ({ user, initialSelection }) => {
         fetchCalibrationRoomDetail,
         fetchCalibrationRooms
     ]);
+
+    const isGeneralCommentDirty = canManageCalibrationRooms && calibrationCall &&
+        (generalCommentDraft ?? '') !== (calibrationCall?.general_comment ?? '');
+
+    const handleSaveGeneralComment = useCallback(async () => {
+        if (!calibrationCall?.id || !activeCalibrationRoomId) return;
+        setIsSavingGeneralComment(true);
+        try {
+            const r = await authFetch(
+                `${API_BASE_URL}/api/call_calibration/rooms/${activeCalibrationRoomId}/calls/${calibrationCall.id}/general_comment`,
+                {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json', 'X-User-Id': userId },
+                    body: JSON.stringify({ general_comment: generalCommentDraft.trim() })
+                }
+            );
+            const d = await r.json();
+            if (!r.ok || d.status !== 'success') throw new Error(d.error || 'Не удалось сохранить комментарий');
+            emitCallEvaluationToast('Общий комментарий сохранён', 'success');
+            calibrationDetailCacheRef.current.clear();
+            await fetchCalibrationRoomDetail(activeCalibrationRoomId, calibrationCall.id, { force: true });
+        } catch (e) {
+            emitCallEvaluationToast('Ошибка сохранения: ' + e.message, 'error');
+        } finally {
+            setIsSavingGeneralComment(false);
+        }
+    }, [calibrationCall, activeCalibrationRoomId, userId, generalCommentDraft, fetchCalibrationRoomDetail]);
 
     return (
         <div className="app">
@@ -2452,6 +2483,42 @@ const App = ({ user, initialSelection }) => {
                                                         >
                                                             {isSavingEtalon ? <><span className="spinner" /> Сохранение...</> : <><FaIcon className="fas fa-save" /> Сохранить эталон</>}
                                                         </button>
+                                                    )}
+                                                </div>
+                                                <div className="calibration-general-comments">
+                                                    <div className="calibration-general-comments-title">Общий комментарий</div>
+                                                    {canManageCalibrationRooms ? (
+                                                        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                                            <textarea
+                                                                className="textarea"
+                                                                rows={2}
+                                                                placeholder="Введите общий комментарий к звонку..."
+                                                                value={generalCommentDraft}
+                                                                onChange={e => setGeneralCommentDraft(e.target.value)}
+                                                                style={{ resize: 'vertical', minHeight: 52, fontSize: 13 }}
+                                                            />
+                                                            {isGeneralCommentDirty && (
+                                                                <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                                                                    <button
+                                                                        className="btn btn-primary btn-sm"
+                                                                        onClick={handleSaveGeneralComment}
+                                                                        disabled={isSavingGeneralComment}
+                                                                    >
+                                                                        {isSavingGeneralComment ? <><span className="spinner" /> Сохранение...</> : <><FaIcon className="fas fa-save" /> Сохранить</>}
+                                                                    </button>
+                                                                </div>
+                                                            )}
+                                                            {calibrationCall?.general_comment_updated_by && (
+                                                                <div style={{ fontSize: 11, color: 'var(--text-2)' }}>
+                                                                    Обновил: {calibrationCall.general_comment_updated_by.name}
+                                                                    {calibrationCall.general_comment_updated_at ? ` · ${calibrationCall.general_comment_updated_at}` : ''}
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    ) : (
+                                                        calibrationCall?.general_comment
+                                                            ? <div className="calibration-general-comment-text">{calibrationCall.general_comment}</div>
+                                                            : <div style={{ fontSize: 13, color: 'var(--text-2)' }}>—</div>
                                                     )}
                                                 </div>
                                             </>

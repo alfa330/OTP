@@ -547,7 +547,10 @@ class Database:
                     ADD COLUMN IF NOT EXISTS etalon_scores JSONB NOT NULL DEFAULT '[]',
                     ADD COLUMN IF NOT EXISTS etalon_criterion_comments JSONB NOT NULL DEFAULT '[]',
                     ADD COLUMN IF NOT EXISTS etalon_updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
-                    ADD COLUMN IF NOT EXISTS etalon_updated_at TIMESTAMP;
+                    ADD COLUMN IF NOT EXISTS etalon_updated_at TIMESTAMP,
+                    ADD COLUMN IF NOT EXISTS general_comment TEXT,
+                    ADD COLUMN IF NOT EXISTS general_comment_updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    ADD COLUMN IF NOT EXISTS general_comment_updated_at TIMESTAMP;
             """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS calibration_room_call_evaluations (
