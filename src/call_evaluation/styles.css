@@ -295,6 +295,11 @@
             font-size: 13px;
         }
         .calibration-critical-note { color: var(--red); font-size: 12px; }
+        .calibration-general-comments { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+        .calibration-general-comments-title { font-size: 12px; font-weight: 600; color: var(--text-2); margin-bottom: 2px; }
+        .calibration-general-comment-item { display: flex; gap: 6px; font-size: 13px; }
+        .calibration-general-comment-name { font-weight: 600; color: var(--text-1); white-space: nowrap; }
+        .calibration-general-comment-text { color: var(--text-2); }
 
         /* ── Stats bar ── */
         .stats-bar {
@@ -521,7 +526,7 @@
         }
         .score-toggle:hover { border-color: var(--border-strong); background: var(--bg); }
         .score-toggle.active-correct { background: var(--green-light); color: var(--green); border-color: #bbf7d0; }
-        .score-toggle.active-na { background: var(--surface-2); color: var(--text-2); border-color: var(--border-strong); }
+        .score-toggle.active-na { background: #fef9c3; color: #a16207; border-color: #fde047; }
         .score-toggle.active-error { background: var(--red-light); color: var(--red); border-color: #fca5a5; }
         .score-toggle.active-incorrect { background: var(--red-light); color: var(--red); border-color: #fca5a5; }
         .score-toggle.active-deficiency { background: var(--amber-light); color: var(--amber); border-color: #fde68a; }

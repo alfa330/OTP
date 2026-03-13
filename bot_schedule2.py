@@ -3526,11 +3526,16 @@ def get_call_calibration_room(room_id):
                         c.etalon_criterion_comments,
                         c.etalon_updated_at,
                         eu.id AS etalon_updated_by,
-                        eu.name AS etalon_updated_by_name
+                        eu.name AS etalon_updated_by_name,
+                        c.general_comment,
+                        c.general_comment_updated_at,
+                        gu.id AS general_comment_updated_by_id,
+                        gu.name AS general_comment_updated_by_name
                     FROM calibration_room_calls c
                     JOIN users op ON op.id = c.operator_id
                     LEFT JOIN directions d ON d.id = c.direction_id
                     LEFT JOIN users eu ON eu.id = c.etalon_updated_by
+                    LEFT JOIN users gu ON gu.id = c.general_comment_updated_by
                     WHERE c.id = %s AND c.room_id = %s
                 """, (selected_call_id, room_id))
                 selected_call_row = cursor.fetchone()
@@ -3636,6 +3641,12 @@ def get_call_calibration_room(room_id):
                     "id": selected_call_row[21],
                     "name": selected_call_row[22]
                 } if selected_call_row[21] else None,
+                "general_comment": selected_call_row[23] or '',
+                "general_comment_updated_at": selected_call_row[24].strftime('%Y-%m-%d %H:%M:%S') if selected_call_row[24] and hasattr(selected_call_row[24], "strftime") else None,
+                "general_comment_updated_by": {
+                    "id": selected_call_row[25],
+                    "name": selected_call_row[26]
+                } if selected_call_row[25] else None,
                 "created_at": selected_call_row[10].strftime('%Y-%m-%d %H:%M:%S') if selected_call_row[10] and hasattr(selected_call_row[10], "strftime") else None,
                 "updated_at": selected_call_row[11].strftime('%Y-%m-%d %H:%M:%S') if selected_call_row[11] and hasattr(selected_call_row[11], "strftime") else None,
                 "operator": {"id": selected_call_row[12], "name": selected_call_row[13]},
@@ -4081,6 +4092,67 @@ def update_call_calibration_etalon(room_id, call_id):
         }), 200
     except Exception as e:
         logging.exception("Error updating calibration etalon")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
+@app.route('/api/call_calibration/rooms/<int:room_id>/calls/<int:call_id>/general_comment', methods=['PATCH'])
+@require_api_key
+def update_call_calibration_general_comment(room_id, call_id):
+    try:
+        requester_id = getattr(g, 'user_id', None)
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "Requester not found"}), 404
+        requester_role = requester[3]
+        if requester_role != 'admin' and not _is_supervisor_role(requester_role):
+            return jsonify({"error": "Only admin and supervisors can update general comment"}), 403
+
+        data = request.get_json() or {}
+        general_comment = str(data.get('general_comment') or '').strip()
+
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT c.operator_id, r.created_by_admin_id
+                FROM calibration_room_calls c
+                JOIN calibration_rooms r ON r.id = c.room_id
+                WHERE c.id = %s AND c.room_id = %s
+            """, (call_id, room_id))
+            call_row = cursor.fetchone()
+            if not call_row:
+                return jsonify({"error": "Calibration call not found"}), 404
+
+            if _is_supervisor_role(requester_role):
+                call_operator_id = int(call_row[0]) if call_row[0] is not None else None
+                room_creator_id = int(call_row[1]) if call_row[1] is not None else None
+                if call_operator_id is None or not _authorize_operator_scope(requester, requester_id, call_operator_id):
+                    return jsonify({"error": "Forbidden: you cannot update comment for this operator"}), 403
+                if int(requester_id) != room_creator_id:
+                    cursor.execute("""
+                        SELECT id FROM calibration_room_members
+                        WHERE room_id = %s AND supervisor_id = %s
+                    """, (room_id, requester_id))
+                    if not cursor.fetchone():
+                        return jsonify({"error": "Join the room first"}), 403
+
+            cursor.execute("""
+                UPDATE calibration_room_calls
+                SET
+                    general_comment = %s,
+                    general_comment_updated_by = %s,
+                    general_comment_updated_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s AND room_id = %s
+                RETURNING id
+            """, (general_comment or None, requester_id, call_id, room_id))
+            if not cursor.fetchone():
+                return jsonify({"error": "Calibration call not found"}), 404
+
+        return jsonify({"status": "success", "call_id": call_id}), 200
+    except Exception as e:
+        logging.exception("Error updating calibration general comment")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 
