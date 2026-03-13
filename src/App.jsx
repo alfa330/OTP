@@ -17878,6 +17878,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
             const sidebarAccountRef = useRef(null);
             const sidebarEmployeesRef = useRef(null);
+            const sidebarMenuScrollRef = useRef(null);
+            const [employeesDropdownPos, setEmployeesDropdownPos] = useState({ top: 0, left: 0 });
             const [modalError, setModalError] = useState("");
             const [isClosing, setIsClosing] = useState(false);
             const [isEmployeesClosing, setIsEmployeesClosing] = useState(false);
@@ -18277,6 +18279,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             document.addEventListener("mousedown", handleClickOutside);
             return () => document.removeEventListener("mousedown", handleClickOutside);
             }, [showSidebarAccountDropdown, showSidebarEmployeesDropdown]);
+
+            useEffect(() => {
+                const updatePos = () => {
+                    const rect = sidebarEmployeesRef.current?.getBoundingClientRect();
+                    if (rect) setEmployeesDropdownPos({ top: rect.top, left: rect.right + 8 });
+                };
+                if (showSidebarEmployeesDropdown || isEmployeesClosing) {
+                    updatePos();
+                    const el = sidebarMenuScrollRef.current;
+                    el?.addEventListener('scroll', updatePos);
+                    return () => el?.removeEventListener('scroll', updatePos);
+                }
+            }, [showSidebarEmployeesDropdown, isEmployeesClosing]);
 
             function TrainingModal({ isOpen, onClose, onSave, initialData = {} }) {
                 const [date, setDate] = useState(initialData.date || "");
@@ -22538,7 +22553,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 <img src="https://iili.io/Kfw7PQp.png" alt="Site Icon" className="w-10 h-10 object-contain"/>
                               </span>
                             </h1>
-                            <ul className={`space-y-2 flex-1 min-h-0 sidebar-menu-scroll`}>
+                            <ul ref={sidebarMenuScrollRef} className={`space-y-2 flex-1 min-h-0 sidebar-menu-scroll`}>
                                 {user.role === 'admin' && (
                                     <>
                                         <li className="relative" ref={sidebarEmployeesRef}>
@@ -22554,14 +22569,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <FaIcon className="fas fa-chevron-right ml-auto opacity-0 transform translate-x-2 transition-all duration-300 group-hover:opacity-100 group-hover:translate-x-0 sidebar-text"></FaIcon>
                                             </button>
 
-                                            {(showSidebarEmployeesDropdown || isEmployeesClosing) && (() => {
-                                                const rect = sidebarEmployeesRef.current?.getBoundingClientRect();
-                                                return (
+                                            {(showSidebarEmployeesDropdown || isEmployeesClosing) && (
                                                 <div
                                                     className={`origin-top bg-white/95 text-black backdrop-blur-sm rounded-md shadow-lg border border-gray-200
                                                     w-56
                                                     ${showSidebarEmployeesDropdown && !isEmployeesClosing ? "animate-dropdown" : "animate-dropdown-reverse"}`}
-                                                    style={{ position: 'fixed', top: rect ? rect.top : 0, left: rect ? rect.right + 8 : 0, zIndex: 9999 }}
+                                                    style={{ position: 'fixed', top: employeesDropdownPos.top, left: employeesDropdownPos.left, zIndex: 9999 }}
                                                 >
                                                     <button
                                                         onClick={() => { setView('sv_list'); setMobileMenuOpen(false); handleToggleEmployeesDropdown(true); }}
@@ -22588,8 +22601,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         <FaIcon className="fas fa-book mr-2"></FaIcon> Тренеры
                                                     </button>
                                                 </div>
-                                                );
-                                            })()}
+                                            )}
                                         </li>
                                         <li>
                                             <button onClick={() => { setView('admin_sessions'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'admin_sessions' ? 'bg-blue-700' : ''}`}>
