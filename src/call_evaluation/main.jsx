@@ -2201,7 +2201,7 @@ const App = ({ user, initialSelection }) => {
                                                 {calibrationCall.audio_url && (
                                                     <div className="audio-wrap" style={{maxWidth:520}}>
                                                         <div className="audio-label">Аудиозапись</div>
-                                                        <audio controls><source src={calibrationCall.audio_url} type="audio/mpeg" /></audio>
+                                                        <audio key={calibrationCall.id} controls><source src={calibrationCall.audio_url} type="audio/mpeg" /></audio>
                                                     </div>
                                                 )}
                                             </>
