@@ -3344,6 +3344,40 @@ def add_call_to_calibration_room(room_id):
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 
+@app.route('/api/call_calibration/rooms/<int:room_id>/calls/<int:call_id>', methods=['DELETE', 'OPTIONS'])
+@require_api_key
+def delete_call_from_calibration_room(room_id, call_id):
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+    try:
+        requester_id = getattr(g, 'user_id', None)
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "Requester not found"}), 404
+        if requester[3] != 'admin':
+            return jsonify({"error": "Only admin can delete calls from calibration room"}), 403
+
+        with db._get_cursor() as cursor:
+            cursor.execute(
+                "SELECT id FROM calibration_room_calls WHERE id = %s AND room_id = %s",
+                (call_id, room_id)
+            )
+            if not cursor.fetchone():
+                return jsonify({"error": "Звонок не найден"}), 404
+            cursor.execute(
+                "DELETE FROM calibration_room_calls WHERE id = %s AND room_id = %s",
+                (call_id, room_id)
+            )
+
+        return jsonify({"status": "success"}), 200
+    except Exception as e:
+        logging.exception("Error deleting call from calibration room")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
 @app.route('/api/call_calibration/rooms/<int:room_id>/join', methods=['POST'])
 @require_api_key
 def join_call_calibration_room(room_id):
@@ -4166,7 +4200,132 @@ def evaluate_call_calibration_room(room_id):
     except Exception as e:
         logging.exception("Error submitting calibration evaluation")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
-    
+
+
+@app.route('/api/call_calibration/rooms/<int:room_id>/history', methods=['GET', 'OPTIONS'])
+@require_api_key
+def get_calibration_room_history(room_id):
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+    try:
+        requester_id = getattr(g, 'user_id', None)
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "Requester not found"}), 404
+        role = requester[3]
+        if role != 'admin' and not _is_supervisor_role(role):
+            return jsonify({"error": "Forbidden"}), 403
+
+        events = []
+
+        with db._get_cursor() as cursor:
+            # Verify room exists and requester has access
+            cursor.execute("""
+                SELECT r.id, r.created_at, r.room_title, u.name AS creator_name
+                FROM calibration_rooms r
+                JOIN users u ON u.id = r.created_by_admin_id
+                WHERE r.id = %s
+            """, (room_id,))
+            room_row = cursor.fetchone()
+            if not room_row:
+                return jsonify({"error": "Room not found"}), 404
+
+            # Room creation
+            events.append({
+                "type": "room_created",
+                "timestamp": room_row[1].strftime('%Y-%m-%d %H:%M:%S') if room_row[1] else None,
+                "actor": room_row[3],
+                "description": f"Комната создана: «{room_row[2] or f'Комната #{room_row[0]}'}»"
+            })
+
+            # Member joins
+            cursor.execute("""
+                SELECT m.joined_at, u.name
+                FROM calibration_room_members m
+                JOIN users u ON u.id = m.supervisor_id
+                WHERE m.room_id = %s
+                ORDER BY m.joined_at
+            """, (room_id,))
+            for row in cursor.fetchall():
+                events.append({
+                    "type": "member_joined",
+                    "timestamp": row[0].strftime('%Y-%m-%d %H:%M:%S') if row[0] else None,
+                    "actor": row[1],
+                    "description": f"Вошёл в комнату"
+                })
+
+            # Calls added
+            cursor.execute("""
+                SELECT c.id, c.created_at, adm.name AS adder_name, op.name AS operator_name, c.phone_number
+                FROM calibration_room_calls c
+                JOIN users adm ON adm.id = c.created_by_admin_id
+                JOIN users op ON op.id = c.operator_id
+                WHERE c.room_id = %s
+                ORDER BY c.created_at
+            """, (room_id,))
+            for row in cursor.fetchall():
+                events.append({
+                    "type": "call_added",
+                    "timestamp": row[1].strftime('%Y-%m-%d %H:%M:%S') if row[1] else None,
+                    "actor": row[2],
+                    "description": f"Добавлен звонок #{row[0]}: оператор {row[3]}, тел. {row[4]}"
+                })
+
+            # Etalon updates
+            cursor.execute("""
+                SELECT c.id, c.etalon_updated_at, u.name, op.name AS operator_name
+                FROM calibration_room_calls c
+                JOIN users u ON u.id = c.etalon_updated_by
+                JOIN users op ON op.id = c.operator_id
+                WHERE c.room_id = %s AND c.etalon_updated_at IS NOT NULL
+                ORDER BY c.etalon_updated_at
+            """, (room_id,))
+            for row in cursor.fetchall():
+                events.append({
+                    "type": "etalon_updated",
+                    "timestamp": row[1].strftime('%Y-%m-%d %H:%M:%S') if row[1] else None,
+                    "actor": row[2],
+                    "description": f"Обновлён эталон для звонка #{row[0]} (оператор {row[3]})"
+                })
+
+            # Evaluations submitted / updated
+            cursor.execute("""
+                SELECT e.id, e.created_at, e.updated_at, u.name AS evaluator_name,
+                       c.id AS call_id, op.name AS operator_name
+                FROM calibration_room_call_evaluations e
+                JOIN users u ON u.id = e.evaluator_id
+                JOIN calibration_room_calls c ON c.id = e.room_call_id
+                JOIN users op ON op.id = c.operator_id
+                WHERE c.room_id = %s
+                ORDER BY e.created_at
+            """, (room_id,))
+            for row in cursor.fetchall():
+                events.append({
+                    "type": "evaluated",
+                    "timestamp": row[1].strftime('%Y-%m-%d %H:%M:%S') if row[1] else None,
+                    "actor": row[3],
+                    "description": f"Оценил звонок #{row[4]} (оператор {row[5]})"
+                })
+                created_ts = row[1].strftime('%Y-%m-%d %H:%M:%S') if row[1] else None
+                updated_ts = row[2].strftime('%Y-%m-%d %H:%M:%S') if row[2] else None
+                if updated_ts and updated_ts != created_ts:
+                    events.append({
+                        "type": "evaluation_updated",
+                        "timestamp": updated_ts,
+                        "actor": row[3],
+                        "description": f"Изменил оценку звонка #{row[4]} (оператор {row[5]})"
+                    })
+
+        events.sort(key=lambda x: x["timestamp"] or "")
+        return jsonify({"status": "success", "events": events}), 200
+    except Exception as e:
+        logging.exception("Error getting calibration room history")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
 @app.route('/api/ai/monthly_feedback', methods=['POST'])
 @require_api_key
 def ai_monthly_feedback():

@@ -234,6 +234,21 @@
         .calibration-card-delete:hover { background: var(--red-light); }
         .calibration-card-title { font-size: 14px; font-weight: 600; color: var(--text); margin-bottom: 6px; }
         .calibration-card-meta { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-2); }
+        .calibration-history-list { display: flex; flex-direction: column; gap: 0; }
+        .calibration-history-item { display: flex; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+        .calibration-history-item:last-child { border-bottom: none; }
+        .calibration-history-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); flex-shrink: 0; margin-top: 5px; }
+        .calibration-history-dot[data-type="room_created"] { background: var(--accent); }
+        .calibration-history-dot[data-type="member_joined"] { background: var(--green); }
+        .calibration-history-dot[data-type="call_added"] { background: var(--amber); }
+        .calibration-history-dot[data-type="etalon_updated"] { background: #8b5cf6; }
+        .calibration-history-dot[data-type="evaluated"] { background: var(--green); }
+        .calibration-history-dot[data-type="evaluation_updated"] { background: var(--amber); }
+        .calibration-history-content { flex: 1; min-width: 0; }
+        .calibration-history-desc { font-size: 13px; color: var(--text); margin-bottom: 3px; }
+        .calibration-history-meta { display: flex; gap: 10px; font-size: 12px; color: var(--text-2); }
+        .calibration-history-actor { font-weight: 500; }
+        .calibration-history-time { font-family: var(--font-mono); }
         .calibration-detail { border-top: 1px solid var(--border); margin-top: 6px; }
         .calibration-detail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
         .calibration-lock-note {
