@@ -1434,6 +1434,18 @@ const App = ({ user, initialSelection }) => {
         fetchCalibrationRooms();
     }, [activeSection, fetchCalibrationRooms]);
 
+    useEffect(() => {
+        window.__callEvaluationFocus = () => {
+            callsCacheRef.current.clear();
+            fetchEvaluations({ force: true });
+            if (activeSection === 'calibration') {
+                calibrationDetailCacheRef.current.clear();
+                fetchCalibrationRooms();
+            }
+        };
+        return () => { window.__callEvaluationFocus = null; };
+    }, [fetchEvaluations, fetchCalibrationRooms, activeSection]);
+
     const handleOpenCalibrationRoom = useCallback(async (room, callId = null) => {
         if (!room?.id || !userId) return;
         if (openingCalibrationRoomId === room.id) return;
@@ -2594,10 +2606,15 @@ if (isEmbedded) {
     const onMessage = (event) => {
         if (event.origin !== window.location.origin) return;
         const data = event.data || {};
-        if (data.type !== 'CALL_EVALUATION_INIT') return;
-        const nextState = { user: data.user || null, initialSelection: data.initialSelection || null };
-        writeEmbedState(nextState);
-        renderApp(nextState);
+        if (data.type === 'CALL_EVALUATION_INIT') {
+            const nextState = { user: data.user || null, initialSelection: data.initialSelection || null };
+            writeEmbedState(nextState);
+            renderApp(nextState);
+        } else if (data.type === 'CALL_EVALUATION_FOCUS') {
+            if (typeof window.__callEvaluationFocus === 'function') {
+                window.__callEvaluationFocus();
+            }
+        }
     };
 
     window.addEventListener('message', onMessage);

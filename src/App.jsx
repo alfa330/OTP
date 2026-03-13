@@ -17783,6 +17783,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const qrStreamRef = useRef(null);
             const qrScanTimerRef = useRef(null);
             const callEvaluationFrameRef = useRef(null);
+            const callEvaluationActivatedRef = useRef(false);
             // Images and state for gallery modal
             const devLetterImages = [
                 {
@@ -19394,6 +19395,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const frameWindow = callEvaluationFrameRef.current?.contentWindow;
                 if (!frameWindow) return;
                 frameWindow.postMessage(callEvaluationInitPayload, window.location.origin);
+                if (callEvaluationActivatedRef.current) {
+                    frameWindow.postMessage({ type: 'CALL_EVALUATION_FOCUS' }, window.location.origin);
+                }
+                callEvaluationActivatedRef.current = true;
             }, [view, callEvaluationFrameReady, callEvaluationInitPayload]);
             
             // Persist and restore calculatorType (for salary view)
@@ -22490,6 +22495,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     : 0;
             const callEvaluationIframeUrl = `${APP_BASE_URL}call_evaluation.html`;
             const isCallEvaluationView = view === 'call_evaluation' && (user.role === 'admin' || user.role === 'sv' || user.role === 'supervisor');
+            const canSeeCallEvaluation = user.role === 'admin' || user.role === 'sv' || user.role === 'supervisor';
 
             return (
                 <div className="flex h-screen overflow-hidden">
@@ -22888,8 +22894,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             </div>
                         </div>
                         )}
-                        {isCallEvaluationView && (
-                        <div className="w-full h-full px-2 md:px-3 py-3" style={{ backgroundColor: '#f7f7f5' }}>
+                        {canSeeCallEvaluation && (
+                        <div className="w-full h-full px-2 md:px-3 py-3" style={{ backgroundColor: '#f7f7f5', display: isCallEvaluationView ? undefined : 'none' }}>
                             <iframe
                                 ref={callEvaluationFrameRef}
                                 title="Оценки операторов"
