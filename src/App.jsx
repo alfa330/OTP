@@ -5634,6 +5634,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [expandedMyDayCards, setExpandedMyDayCards] = useState({});
             const [showOperatorMobileCalendar, setShowOperatorMobileCalendar] = useState(false);
             const [breakReminderEnabled, setBreakReminderEnabled] = useState(false);
+            const [breakReminderLeadMinutes, setBreakReminderLeadMinutes] = useState(5);
             const [swapRequestsLoading, setSwapRequestsLoading] = useState(false);
             const [swapRequestsError, setSwapRequestsError] = useState('');
             const [swapIncomingRequests, setSwapIncomingRequests] = useState([]);
@@ -6088,6 +6089,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     if (typeof parsed?.breakReminderEnabled === 'boolean') {
                         setBreakReminderEnabled(parsed.breakReminderEnabled);
                     }
+                    if (typeof parsed?.breakReminderLeadMinutes === 'number' && [1, 2, 3, 5, 10, 15].includes(parsed.breakReminderLeadMinutes)) {
+                        setBreakReminderLeadMinutes(parsed.breakReminderLeadMinutes);
+                    }
                     if (typeof parsed?.daySortMode === 'string' && ['default', 'shift_start_asc'].includes(parsed.daySortMode)) {
                         setDaySortMode(parsed.daySortMode);
                     }
@@ -6113,6 +6117,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             selectedDirections,
                             breakDirectionGroups,
                             breakReminderEnabled,
+                            breakReminderLeadMinutes,
                             daySortMode
                         })
                     );
@@ -6128,6 +6133,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 selectedDirections,
                 breakDirectionGroups,
                 breakReminderEnabled,
+                breakReminderLeadMinutes,
                 daySortMode
             ]);
 
@@ -9711,7 +9717,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                 const tick = () => {
                     const nowMs = Date.now();
-                    const remindWindowMs = 5 * 60 * 1000;
+                    const remindWindowMs = breakReminderLeadMinutes * 60 * 1000;
                     const notifiedMap = breakReminderNotifiedRef.current;
 
                     for (const [key, meta] of Array.from(notifiedMap.entries())) {
@@ -9736,7 +9742,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 tick();
                 const timer = setInterval(tick, 30000);
                 return () => clearInterval(timer);
-            }, [user?.role, breakReminderEnabled, breakReminderCandidates]);
+            }, [user?.role, breakReminderEnabled, breakReminderLeadMinutes, breakReminderCandidates]);
 
             if (isOperatorSelfSchedules) {
                 return (
@@ -9884,7 +9890,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             </div>
                                                             <div>
                                                                 <div className="text-sm font-semibold text-slate-900">Напоминание о перерыве</div>
-                                                                <div className="text-xs text-slate-500">За 5 минут до начала</div>
+                                                                <div className="text-xs text-slate-500">За {breakReminderLeadMinutes} мин до начала</div>
                                                             </div>
                                                         </div>
                                                         <button
@@ -9900,6 +9906,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         >
                                                             <span className={`inline-block h-5 w-5 rounded-full border border-slate-300 bg-white shadow-md transition-transform ${breakReminderEnabled ? 'translate-x-6' : 'translate-x-1'}`} />
                                                         </button>
+                                                    </div>
+                                                    <div className="mt-2.5 pl-[42px] flex items-center gap-2">
+                                                        <span className="text-xs text-slate-500 whitespace-nowrap">Предупреждать за</span>
+                                                        <div className="flex items-center gap-1">
+                                                            {[1, 2, 3, 5, 10, 15].map(m => (
+                                                                <button
+                                                                    key={m}
+                                                                    type="button"
+                                                                    onClick={() => setBreakReminderLeadMinutes(m)}
+                                                                    className={`px-2 py-0.5 rounded-md text-xs font-medium border transition-colors ${
+                                                                        breakReminderLeadMinutes === m
+                                                                            ? 'bg-amber-500 border-amber-500 text-white'
+                                                                            : 'bg-white border-slate-200 text-slate-600 hover:border-amber-300 hover:text-amber-700'
+                                                                    }`}
+                                                                >
+                                                                    {m}
+                                                                </button>
+                                                            ))}
+                                                        </div>
+                                                        <span className="text-xs text-slate-500">мин</span>
                                                     </div>
                                                     {breakReminderPermissionState && (
                                                         <div className="mt-2 text-[11px] text-slate-500 pl-[42px]">
