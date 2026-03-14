@@ -9735,7 +9735,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             if (isOperatorSelfSchedules) {
                 return (
                     <div className="px-2 sm:px-4 py-2 min-h-screen bg-slate-50">
-                        <div className="flex flex-col lg:flex-row items-stretch lg:items-start gap-3 lg:gap-4 mb-0 lg:h-[calc(100vh-1rem)]">
+                        <div className="flex flex-col lg:flex-row items-stretch lg:items-start gap-3 lg:gap-4 mb-0">
                             <div className="lg:hidden">
                                 <button
                                     type="button"
@@ -9759,7 +9759,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 <SmallCalendar currentDate={currentDate} onChange={(d) => setCurrentDate(d)} viewMode={viewMode} />
                             </div>
 
-                            <div className="flex-1 min-w-0 flex flex-col lg:h-full">
+                            <div className="flex-1 min-w-0 flex flex-col">
                                 <div className="flex flex-col gap-2 mb-3 pb-3 border-b border-slate-200">
                                     <div className="flex flex-wrap items-center justify-between gap-2">
                                         <div className="flex flex-wrap items-center gap-3">
@@ -9991,7 +9991,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </div>
                                 </div>
 
-                                <div className="flex-1 min-h-0 overflow-visible lg:overflow-auto">
+                                <div>
                                     {operatorSelfTab === 'schedule' && (
                                         <>
                                     {myScheduleLoading && (
