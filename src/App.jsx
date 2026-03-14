@@ -10069,13 +10069,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     {operatorSelfTab === 'schedule' && (
                                         <>
                                     {myScheduleLoading && (
-                                        <div className="bg-white rounded-xl border border-slate-200 p-6 text-slate-600 text-sm">
+                                        <div className="bg-white rounded-none sm:rounded-xl border-y sm:border border-slate-200 p-6 text-slate-600 text-sm">
                                             <FaIcon className="fas fa-spinner fa-spin mr-2"></FaIcon>Загрузка смен...
                                         </div>
                                     )}
 
                                     {!myScheduleLoading && myScheduleError && (
-                                        <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl p-4 text-sm">
+                                        <div className="bg-red-50 border-y sm:border border-red-200 text-red-700 rounded-none sm:rounded-xl p-4 text-sm">
                                             {myScheduleError}
                                         </div>
                                     )}
@@ -10083,8 +10083,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     {!myScheduleLoading && !myScheduleError && (
                                         <div className="space-y-3 pb-2">
                                             {viewMode === 'day' && myCurrentDayCard && (
-                                                <div className="grid grid-cols-1 xl:grid-cols-3 gap-3">
-                                                    <div className="xl:col-span-2 bg-white rounded-xl border border-slate-200 overflow-hidden">
+                                                <div className="grid grid-cols-1 xl:grid-cols-3 gap-0 sm:gap-3">
+                                                    <div className="xl:col-span-2 bg-white rounded-none sm:rounded-xl border-y sm:border border-slate-200 overflow-hidden mb-3 sm:mb-0">
                                                         <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between gap-2">
                                                             <div className="font-semibold text-slate-900 flex items-center gap-2">
                                                                 <FaIcon className="fas fa-chart-gantt text-blue-600"></FaIcon>
@@ -10186,7 +10186,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             </div>
                                                         </div>
                                                     </div>
-                                                    <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+                                                    <div className="bg-white rounded-none sm:rounded-xl border-y sm:border border-slate-200 overflow-hidden">
                                                         <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
                                                             <div className="font-semibold text-slate-900 flex items-center gap-2"><FaIcon className="fas fa-mug-hot text-amber-600"></FaIcon>Перерывы дня</div>
                                                             <div className="text-xs text-slate-500">{myCurrentDayBreaksList.length}</div>
@@ -10218,12 +10218,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </div>
                                             )}
                                             {myScheduleVisibleDays.length === 0 && (
-                                                <div className="bg-white rounded-xl border border-dashed border-slate-300 p-6 text-center text-slate-500">
+                                                <div className="bg-white rounded-none sm:rounded-xl border-y sm:border border-dashed border-slate-300 p-6 text-center text-slate-500">
                                                     Нет дней для отображения в выбранном периоде.
                                                 </div>
                                             )}
                                             {myScheduleVisibleDays.length > 0 && viewMode !== 'day' && (
-                                                <div className="flex items-center justify-between px-1">
+                                                <div className="flex items-center justify-between px-3 sm:px-1">
                                                     <div className="text-sm font-semibold text-slate-900">Дни периода</div>
                                                     <div className="text-xs text-slate-500">
                                                         {myScheduleVisibleDays.length} из {myScheduleDayCards.length}
@@ -10231,10 +10231,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </div>
                                             )}
                                             <div className={viewMode === 'month'
-                                                ? 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3'
+                                                ? 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-0 sm:gap-3'
                                                 : viewMode === 'week'
-                                                    ? 'grid grid-cols-1 lg:grid-cols-2 gap-3'
-                                                    : 'space-y-3'
+                                                    ? 'grid grid-cols-1 lg:grid-cols-2 gap-0 sm:gap-3'
+                                                    : 'space-y-0 sm:space-y-3'
                                             }>
                                             {myScheduleVisibleDays.map(dayCard => {
                                                 const dateObj = parseDateStr(dayCard.date);
@@ -10258,7 +10258,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 const extraShiftCount = hasShifts ? Math.max(0, shiftPreviewLabels.length - 1) : 0;
                                                 const tailShiftPreviewLabels = hasShifts ? shiftPreviewLabels.slice(1) : [];
                                                 return (
-                                                    <div key={`my-shifts-${dayCard.date}`} className={`bg-white rounded-xl border overflow-hidden shadow-sm flex ${isToday ? 'border-blue-300 ring-2 ring-blue-100' : 'border-slate-200'}`}>
+                                                    <div key={`my-shifts-${dayCard.date}`} className={`bg-white rounded-none sm:rounded-xl border-y sm:border overflow-hidden shadow-sm flex ${isToday ? 'border-blue-300 ring-2 ring-blue-100' : 'border-slate-200'}`}>
                                                         <div className={`w-1 flex-shrink-0 ${hasShifts ? 'bg-blue-500' : dayCard.isDayOff ? 'bg-sky-400' : scheduleStatus ? 'bg-amber-400' : 'bg-slate-200'}`}></div>
                                                         <div className="flex-1 min-w-0">
                                                         <button
@@ -10435,7 +10435,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 );
                                             })}
                                             </div>
-                                            <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4">
+                                            <div className="bg-white rounded-none sm:rounded-xl border-y sm:border border-slate-200 shadow-sm p-4">
                                                 <div className="flex flex-wrap items-start justify-between gap-2 mb-3">
                                                     <div>
                                                         <div className="flex items-center gap-1.5">
