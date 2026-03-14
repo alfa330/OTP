@@ -6069,9 +6069,10 @@ class Database:
                 as_of_date=as_of_date
             )
 
-    def get_operators_with_shifts(self, start_date=None, end_date=None):
+    def get_operators_with_shifts(self, start_date=None, end_date=None, direction_name=None):
         """
         Получить всех операторов со сменами и выходными днями за период.
+        Если direction_name задан — только операторы этого направления.
         Возвращает список операторов с их сменами и выходными.
         """
         start_date_obj = self._normalize_schedule_date(start_date) if start_date else None
@@ -6079,15 +6080,26 @@ class Database:
 
         with self._get_cursor() as cursor:
             self._sync_user_statuses_from_schedule_periods_tx(cursor)
-            cursor.execute("""
-                SELECT u.id, u.name, u.supervisor_id, s.name as supervisor_name,
-                       d.name as direction, u.status, u.rate
-                FROM users u
-                LEFT JOIN users s ON u.supervisor_id = s.id
-                LEFT JOIN directions d ON u.direction_id = d.id
-                WHERE u.role = 'operator'
-                ORDER BY d.name, u.name
-            """)
+            if direction_name:
+                cursor.execute("""
+                    SELECT u.id, u.name, u.supervisor_id, s.name as supervisor_name,
+                           d.name as direction, u.status, u.rate
+                    FROM users u
+                    LEFT JOIN users s ON u.supervisor_id = s.id
+                    LEFT JOIN directions d ON u.direction_id = d.id
+                    WHERE u.role = 'operator' AND LOWER(d.name) = LOWER(%s)
+                    ORDER BY u.name
+                """, (direction_name,))
+            else:
+                cursor.execute("""
+                    SELECT u.id, u.name, u.supervisor_id, s.name as supervisor_name,
+                           d.name as direction, u.status, u.rate
+                    FROM users u
+                    LEFT JOIN users s ON u.supervisor_id = s.id
+                    LEFT JOIN directions d ON u.direction_id = d.id
+                    WHERE u.role = 'operator'
+                    ORDER BY d.name, u.name
+                """)
             operators = cursor.fetchall()
             if not operators:
                 return []

@@ -5638,6 +5638,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [directionViewDate, setDirectionViewDate] = useState(() => todayDateStr(new Date()));
             const [directionDayCandidates, setDirectionDayCandidates] = useState([]);
             const [directionDayCandidatesLoading, setDirectionDayCandidatesLoading] = useState(false);
+            const [directionSchedWeekStart, setDirectionSchedWeekStart] = useState(() => {
+                const d = new Date(); d.setDate(d.getDate() - d.getDay() + 1); return todayDateStr(d);
+            });
+            const [directionSchedOperators, setDirectionSchedOperators] = useState([]);
+            const [directionSchedLoading, setDirectionSchedLoading] = useState(false);
+            const [directionSchedError, setDirectionSchedError] = useState('');
             const [swapRequestsLoading, setSwapRequestsLoading] = useState(false);
             const [swapRequestsError, setSwapRequestsError] = useState('');
             const [swapIncomingRequests, setSwapIncomingRequests] = useState([]);
@@ -9010,6 +9016,36 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return () => { cancelled = true; };
             }, [isOperatorSelfSchedules, user, operatorSelfTab, directionViewDate]);
             useEffect(() => {
+                if (!isOperatorSelfSchedules || !user || operatorSelfTab !== 'direction') return;
+                let cancelled = false;
+                const fetchDirectionSched = async () => {
+                    try {
+                        setDirectionSchedLoading(true);
+                        setDirectionSchedError('');
+                        const endDate = (() => {
+                            const d = new Date(directionSchedWeekStart + 'T00:00');
+                            d.setDate(d.getDate() + 6);
+                            return todayDateStr(d);
+                        })();
+                        const query = new URLSearchParams({ start_date: directionSchedWeekStart, end_date: endDate });
+                        const response = await fetch(`${API_BASE_URL}/api/work_schedules/direction?${query}`, {
+                            credentials: 'include',
+                            headers: withAccessTokenHeader()
+                        });
+                        const data = await response.json().catch(() => ({}));
+                        if (cancelled) return;
+                        if (!response.ok) { setDirectionSchedError(data?.error || 'Ошибка загрузки'); return; }
+                        setDirectionSchedOperators(Array.isArray(data?.operators) ? data.operators : []);
+                    } catch (e) {
+                        if (!cancelled) setDirectionSchedError('Ошибка соединения');
+                    } finally {
+                        if (!cancelled) setDirectionSchedLoading(false);
+                    }
+                };
+                fetchDirectionSched();
+                return () => { cancelled = true; };
+            }, [isOperatorSelfSchedules, user, operatorSelfTab, directionSchedWeekStart]);
+            useEffect(() => {
                 if (!isOperatorSelfSchedules || !user) return;
                 if (!swapTimeValidation.isValid) {
                     setSwapCandidates([]);
@@ -9821,6 +9857,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             {swapPendingIncomingCount}
                                                         </span>
                                                     )}
+                                                </button>
+                                                <button
+                                                    onClick={() => setOperatorSelfTab('direction')}
+                                                    className={`px-3.5 py-1.5 text-sm font-medium border-l border-slate-200 transition-colors ${operatorSelfTab === 'direction' ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-50'}`}
+                                                >
+                                                    Направление
                                                 </button>
                                             </div>
                                         </div>
@@ -11302,6 +11344,114 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </div>
                                         </div>
                                     )}
+                                    {operatorSelfTab === 'direction' && (() => {
+                                        const dirWeekDates = Array.from({ length: 7 }, (_, i) => {
+                                            const d = new Date(directionSchedWeekStart + 'T00:00');
+                                            d.setDate(d.getDate() + i);
+                                            return todayDateStr(d);
+                                        });
+                                        const shiftCell = (op, dateStr) => {
+                                            const shifts = op?.shifts?.[dateStr] ?? [];
+                                            const isDayOff = (op?.daysOff ?? []).includes(dateStr);
+                                            const isToday = dateStr === todayDateStr(new Date());
+                                            if (isDayOff && shifts.length === 0) return (
+                                                <div className={`h-full flex items-center justify-center rounded ${isToday ? 'bg-blue-50' : 'bg-sky-50'}`}>
+                                                    <span className="text-[10px] font-medium text-sky-600">Вых.</span>
+                                                </div>
+                                            );
+                                            if (shifts.length === 0) return (
+                                                <div className={`h-full flex items-center justify-center rounded ${isToday ? 'bg-blue-50' : ''}`}>
+                                                    <span className="text-[10px] text-slate-300">—</span>
+                                                </div>
+                                            );
+                                            return (
+                                                <div className={`h-full flex flex-col items-center justify-center gap-0.5 rounded ${isToday ? 'bg-blue-50' : ''}`}>
+                                                    {shifts.map((sh, si) => {
+                                                        const sMin = timeToMinutes(sh.start);
+                                                        const eMin = timeToMinutes(sh.end);
+                                                        const overnight = eMin <= sMin && sh.end !== '00:00';
+                                                        return (
+                                                            <span key={si} className={`px-1 py-0.5 rounded text-[10px] font-medium tabular-nums leading-tight ${overnight ? 'bg-orange-100 text-orange-800 border border-orange-200' : 'bg-emerald-100 text-emerald-800 border border-emerald-200'}`}>
+                                                                {sh.start}–{sh.end}{overnight ? '↑' : ''}
+                                                            </span>
+                                                        );
+                                                    })}
+                                                </div>
+                                            );
+                                        };
+                                        return (
+                                        <div className="space-y-3 pb-2">
+                                            <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+                                                <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 border-b border-slate-100">
+                                                    <div className="flex items-center gap-2 min-w-0">
+                                                        <div className="w-7 h-7 rounded-lg bg-indigo-50 border border-indigo-200 flex items-center justify-center flex-shrink-0">
+                                                            <FaIcon className="fas fa-users text-indigo-600 text-xs"></FaIcon>
+                                                        </div>
+                                                        <div className="min-w-0">
+                                                            <div className="text-sm font-semibold text-slate-900">Графики направления</div>
+                                                            <div className="text-xs text-slate-500">{directionSchedOperators.length > 0 ? `${directionSchedOperators[0]?.direction || ''} · ${directionSchedOperators.length} чел.` : 'Смены коллег по направлению'}</div>
+                                                        </div>
+                                                    </div>
+                                                    <div className="flex items-center gap-1.5">
+                                                        <button type="button" onClick={() => setDirectionSchedWeekStart(ws => { const d = new Date(ws + 'T00:00'); d.setDate(d.getDate() - 7); return todayDateStr(d); })} className="w-7 h-7 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 flex items-center justify-center text-slate-600 transition"><FaIcon className="fas fa-chevron-left text-xs"></FaIcon></button>
+                                                        <div className="text-xs font-medium text-slate-700 px-1 tabular-nums whitespace-nowrap">{formatDateRuShort(dirWeekDates[0])} – {formatDateRuShort(dirWeekDates[6])}</div>
+                                                        <button type="button" onClick={() => setDirectionSchedWeekStart(ws => { const d = new Date(ws + 'T00:00'); d.setDate(d.getDate() + 7); return todayDateStr(d); })} className="w-7 h-7 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 flex items-center justify-center text-slate-600 transition"><FaIcon className="fas fa-chevron-right text-xs"></FaIcon></button>
+                                                        <button type="button" onClick={() => { const d = new Date(); d.setDate(d.getDate() - d.getDay() + 1); setDirectionSchedWeekStart(todayDateStr(d)); }} className="px-2.5 py-1 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-medium text-slate-600 transition">Сегодня</button>
+                                                    </div>
+                                                </div>
+                                                {directionSchedLoading ? (
+                                                    <div className="flex items-center gap-2 p-4 text-sm text-slate-500">
+                                                        <FaIcon className="fas fa-spinner fa-spin"></FaIcon>
+                                                        <span>Загрузка графиков...</span>
+                                                    </div>
+                                                ) : directionSchedError ? (
+                                                    <div className="p-4 text-sm text-red-600">{directionSchedError}</div>
+                                                ) : (
+                                                    <div className="overflow-x-auto">
+                                                        <table className="w-full text-xs border-collapse" style={{ minWidth: 520 }}>
+                                                            <thead>
+                                                                <tr className="border-b border-slate-100 bg-slate-50">
+                                                                    <th className="text-left py-2 px-3 font-medium text-slate-600 sticky left-0 bg-slate-50 z-10 w-32 min-w-[8rem]">Сотрудник</th>
+                                                                    {dirWeekDates.map(d => {
+                                                                        const dt = new Date(d + 'T00:00');
+                                                                        const isToday = d === todayDateStr(new Date());
+                                                                        const dayNames = ['Вс','Пн','Вт','Ср','Чт','Пт','Сб'];
+                                                                        return (
+                                                                            <th key={d} className={`py-2 px-1 text-center font-medium ${isToday ? 'text-blue-600' : 'text-slate-500'}`} style={{ width: 'calc((100% - 8rem) / 7)' }}>
+                                                                                <div className={`text-[10px] uppercase tracking-wide ${isToday ? 'text-blue-500' : 'text-slate-400'}`}>{dayNames[dt.getDay()]}</div>
+                                                                                <div className={`font-semibold ${isToday ? 'text-blue-600' : 'text-slate-700'}`}>{dt.getDate()}</div>
+                                                                            </th>
+                                                                        );
+                                                                    })}
+                                                                </tr>
+                                                            </thead>
+                                                            <tbody>
+                                                                {directionSchedOperators.length === 0 ? (
+                                                                    <tr><td colSpan={8} className="py-6 text-center text-slate-400">Нет данных о графиках</td></tr>
+                                                                ) : directionSchedOperators.map(op => (
+                                                                    <tr key={op.id} className="border-b border-slate-100 hover:bg-slate-50/50 transition-colors">
+                                                                        <td className="py-1.5 px-3 sticky left-0 bg-white z-10">
+                                                                            <div className="font-medium text-slate-800 truncate max-w-[7.5rem]" title={op.name}>{op.name}</div>
+                                                                            {op.supervisor_name && <div className="text-[10px] text-slate-400 truncate max-w-[7.5rem]">{op.supervisor_name}</div>}
+                                                                        </td>
+                                                                        {dirWeekDates.map(d => (
+                                                                            <td key={d} className="py-1 px-0.5 h-10">{shiftCell(op, d)}</td>
+                                                                        ))}
+                                                                    </tr>
+                                                                ))}
+                                                            </tbody>
+                                                        </table>
+                                                    </div>
+                                                )}
+                                                <div className="flex items-center gap-3 px-4 py-2 border-t border-slate-100 bg-slate-50/50">
+                                                    <span className="inline-flex items-center gap-1 text-[10px] text-slate-500"><span className="w-2.5 h-2.5 rounded-sm bg-emerald-100 border border-emerald-200 inline-block"></span>Дневная</span>
+                                                    <span className="inline-flex items-center gap-1 text-[10px] text-slate-500"><span className="w-2.5 h-2.5 rounded-sm bg-orange-100 border border-orange-200 inline-block"></span>Ночная</span>
+                                                    <span className="inline-flex items-center gap-1 text-[10px] text-slate-500"><span className="w-2.5 h-2.5 rounded-sm bg-sky-50 border border-sky-200 inline-block"></span>Выходной</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        );
+                                    })()}
                                 </div>
                             </div>
                         </div>

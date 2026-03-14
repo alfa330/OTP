@@ -7816,6 +7816,40 @@ def get_my_work_schedules():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/work_schedules/direction', methods=['GET'])
+@require_api_key
+def get_direction_work_schedules():
+    """
+    Получить графики операторов своего направления за период.
+    Query params: start_date, end_date (YYYY-MM-DD)
+    Доступно только для операторов.
+    """
+    try:
+        requester_id, user_data, err = _work_schedule_operator_requester()
+        if err:
+            return jsonify({"error": err[0]}), err[1]
+
+        direction_name = user_data[4]  # d.name from get_user()
+        if not direction_name:
+            return jsonify({"operators": [], "direction": None}), 200
+
+        start_date = request.args.get('start_date')
+        end_date = request.args.get('end_date')
+
+        operators = db.get_operators_with_shifts(
+            start_date=start_date,
+            end_date=end_date,
+            direction_name=direction_name
+        )
+        return jsonify({"operators": operators, "direction": direction_name}), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error getting direction work schedules: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/api/work_schedules/shift_swap/candidates', methods=['GET'])
 @require_api_key
 def get_shift_swap_candidates():
