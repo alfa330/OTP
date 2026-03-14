@@ -9919,54 +9919,46 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         Нет предстоящих смен
                                                     </div>
                                                 ) : (
-                                                    <div className="space-y-2.5">
+                                                    <div className="space-y-2">
                                                         {myUpcomingShiftItems.slice(0, 3).map((item, idx) => {
                                                             const isToday = item.date === todayDateStr(new Date());
                                                             const isTomorrow = item.date === todayDateStr(new Date(Date.now() + 86400000));
                                                             const dateLabel = isToday ? 'Сегодня' : isTomorrow ? 'Завтра' : formatDateRuShort(item.date);
-                                                            const breakSummary = Array.isArray(item.breaks) && item.breaks.length > 0
-                                                                ? item.breaks.map(b => `${formatBreakMinuteWithDay(b.start)} — ${formatBreakMinuteWithDay(b.end)}`).join(' • ')
-                                                                : '';
+                                                            const breakTimes = Array.isArray(item.breaks) && item.breaks.length > 0
+                                                                ? item.breaks.map(b => `${formatBreakMinuteWithDay(b.start)}–${formatBreakMinuteWithDay(b.end)}`)
+                                                                : [];
                                                             return (
                                                                 <div
                                                                     key={`my-upcoming-${item.key}`}
-                                                                    className={`rounded-xl border px-3 py-2.5 ${idx === 0 ? 'border-blue-300 bg-blue-50/40 shadow-sm' : 'border-slate-200 bg-white'}`}
+                                                                    className={`rounded-xl border p-3 ${idx === 0 ? 'border-blue-300 bg-blue-50/40 shadow-sm' : 'border-slate-200 bg-white'}`}
                                                                 >
-                                                                    <div className="flex items-start justify-between gap-2">
-                                                                        <div className="min-w-0">
-                                                                            <div className="flex items-center gap-1.5">
-                                                                                <div className="text-xs font-semibold text-slate-900">{dateLabel}</div>
-                                                                                {idx === 0 && (
-                                                                                    <span className="rounded-full bg-blue-600 px-2 py-0.5 text-[10px] font-semibold text-white">
-                                                                                        Следующая
-                                                                                    </span>
-                                                                                )}
-                                                                            </div>
-                                                                            <div className="text-[11px] text-slate-500">{formatWeekdayRu(item.date, 'short')}</div>
+                                                                    <div className="flex items-center justify-between gap-2 mb-1">
+                                                                        <div className="flex items-center gap-1.5 flex-wrap min-w-0">
+                                                                            <span className="text-xs font-bold text-slate-900">{dateLabel}</span>
+                                                                            <span className="text-[11px] text-slate-400 capitalize">{formatWeekdayRu(item.date, 'short')}</span>
+                                                                            {idx === 0 && (
+                                                                                <span className="rounded-full bg-blue-600 px-1.5 py-0 leading-5 text-[10px] font-semibold text-white">Следующая</span>
+                                                                            )}
                                                                         </div>
-                                                                        <div className="whitespace-nowrap text-xs font-semibold text-slate-600 tabular-nums">
-                                                                            {(item.durationMin / 60).toFixed(2)} ч
-                                                                        </div>
+                                                                        <span className="text-xs font-bold text-slate-600 tabular-nums flex-shrink-0">{(item.durationMin / 60).toFixed(1)} ч</span>
                                                                     </div>
 
-                                                                    <div className="mt-2 text-base font-semibold leading-tight text-slate-900 tabular-nums sm:text-lg">
+                                                                    <div className="text-sm font-bold text-slate-900 tabular-nums leading-tight">
                                                                         {item.start} — {item.end}{item.isCrossing ? ' (+1)' : ''}
                                                                     </div>
 
-                                                                    <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-slate-600">
-                                                                        <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5">
-                                                                            Перерывы: {item.breakCount}
+                                                                    <div className="mt-1.5 flex items-center gap-2">
+                                                                        <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium border ${item.breakCount > 0 ? 'bg-amber-50 border-amber-200 text-amber-800' : 'bg-slate-50 border-slate-200 text-slate-500'}`}>
+                                                                            <FaIcon className="fas fa-mug-hot text-amber-500"></FaIcon>
+                                                                            {item.breakCount > 0 ? `${item.breakCount} пер. · ${formatMinutesOnly(item.breakMinutes)}` : 'Без перерывов'}
                                                                         </span>
-                                                                        {item.breakMinutes > 0 ? (
-                                                                            <span className="tabular-nums">{formatMinutesOnly(item.breakMinutes)}</span>
-                                                                        ) : (
-                                                                            <span className="text-slate-400">Без перерывов</span>
-                                                                        )}
                                                                     </div>
 
-                                                                    {breakSummary && (
-                                                                        <div className="mt-1.5 text-[11px] leading-relaxed text-slate-500 tabular-nums">
-                                                                            {breakSummary}
+                                                                    {breakTimes.length > 0 && (
+                                                                        <div className="mt-1.5 flex flex-wrap gap-1">
+                                                                            {breakTimes.map((t, i) => (
+                                                                                <span key={i} className="px-1.5 py-0.5 rounded bg-amber-50 border border-amber-100 text-[10px] text-amber-700 tabular-nums">{t}</span>
+                                                                            ))}
                                                                         </div>
                                                                     )}
                                                                 </div>
@@ -10317,15 +10309,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         <div className="pt-1">
                                                                             <div className="grid grid-cols-3 gap-2">
                                                                                 <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
-                                                                                    <div className="text-[11px] text-slate-500 uppercase tracking-wide">Работа</div>
+                                                                                    <div className="flex items-center gap-1 text-[11px] text-slate-500 uppercase tracking-wide mb-0.5">
+                                                                                        <FaIcon className="fas fa-briefcase text-slate-400"></FaIcon>
+                                                                                        Работа
+                                                                                    </div>
                                                                                     <div className="text-sm font-semibold text-slate-900 tabular-nums">{(dayWorkMin / 60).toFixed(2)} ч</div>
                                                                                 </div>
                                                                                 <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2">
-                                                                                    <div className="text-[11px] text-emerald-700 uppercase tracking-wide">Чистое</div>
+                                                                                    <div className="flex items-center gap-1 text-[11px] text-emerald-700 uppercase tracking-wide mb-0.5">
+                                                                                        <FaIcon className="fas fa-clock text-emerald-500"></FaIcon>
+                                                                                        Чистое
+                                                                                    </div>
                                                                                     <div className="text-sm font-semibold text-emerald-900 tabular-nums">{formatHoursMinutes(dayNetMin)}</div>
                                                                                 </div>
                                                                                 <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
-                                                                                    <div className="text-[11px] text-amber-700 uppercase tracking-wide">Перерывы</div>
+                                                                                    <div className="flex items-center gap-1 text-[11px] text-amber-700 uppercase tracking-wide mb-0.5">
+                                                                                        <FaIcon className="fas fa-mug-hot text-amber-500"></FaIcon>
+                                                                                        Перерывы
+                                                                                    </div>
                                                                                     <div className="text-sm font-semibold text-amber-900 tabular-nums">{formatMinutesOnly(dayBreakMin)}</div>
                                                                                     <div className="text-[11px] text-amber-700/80 mt-0.5">{dayBreakCount} шт.</div>
                                                                                 </div>
@@ -10341,54 +10342,69 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             })}
                                             </div>
                                             <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4">
-                                                <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+                                                <div className="flex flex-wrap items-start justify-between gap-2 mb-3">
                                                     <div>
-                                                        <div className="text-sm font-semibold text-slate-900">Сводка за период</div>
-                                                        <div className="text-xs text-slate-500">
-                                                            {visibleRange[0] ? formatDateRuShort(visibleRange[0]) : '—'}
-                                                            {visibleRange.length > 1 ? ` — ${formatDateRuShort(visibleRange[visibleRange.length - 1])}` : ''}
+                                                        <div className="flex items-center gap-1.5">
+                                                            <FaIcon className="fas fa-chart-gantt text-blue-500 text-sm"></FaIcon>
+                                                            <span className="text-sm font-semibold text-slate-900">Сводка за период</span>
+                                                            <span className="text-xs text-slate-400">
+                                                                {visibleRange[0] ? formatDateRuShort(visibleRange[0]) : '—'}
+                                                                {visibleRange.length > 1 ? ` — ${formatDateRuShort(visibleRange[visibleRange.length - 1])}` : ''}
+                                                            </span>
                                                         </div>
-                                                        <div className="mt-2 flex flex-wrap gap-1.5 text-xs">
-                                                            <span className="px-2 py-0.5 rounded-md bg-slate-50 border border-slate-200 text-slate-700">
+                                                        <div className="mt-1.5 flex flex-wrap gap-1 text-xs">
+                                                            <span className="px-2 py-0.5 rounded-md bg-slate-50 border border-slate-200 text-slate-600">
                                                                 {myScheduleData?.name || user?.name || 'Оператор'}
                                                             </span>
                                                             {(myScheduleData?.direction || user?.direction) && (
-                                                                <span className="px-2 py-0.5 rounded-md bg-slate-50 border border-slate-200 text-slate-700">
+                                                                <span className="px-2 py-0.5 rounded-md bg-slate-50 border border-slate-200 text-slate-600">
                                                                     {myScheduleData?.direction || user?.direction}
                                                                 </span>
                                                             )}
                                                             {(myScheduleData?.rate ?? null) !== null && (
-                                                                <span className="px-2 py-0.5 rounded-md bg-blue-50 border border-blue-200 text-blue-700">
+                                                                <span className="px-2 py-0.5 rounded-md bg-blue-50 border border-blue-200 text-blue-700 font-medium">
                                                                     Ставка: {myScheduleData?.rate}
                                                                 </span>
                                                             )}
                                                         </div>
                                                     </div>
-                                                    <div className="flex flex-wrap gap-1.5 text-xs">
-                                                        <span className="px-2 py-1 rounded-md bg-slate-50 border border-slate-200 text-slate-700">
-                                                            Показано дней: <span className="font-semibold tabular-nums">{myScheduleVisibleDays.length}</span>
+                                                    <div className="flex flex-wrap gap-1 text-xs">
+                                                        <span className="px-2 py-1 rounded-md bg-slate-50 border border-slate-200 text-slate-600">
+                                                            Дней: <span className="font-bold tabular-nums text-slate-900">{myScheduleVisibleDays.length}</span>
                                                         </span>
                                                         <span className="px-2 py-1 rounded-md bg-sky-50 border border-sky-200 text-sky-700">
-                                                            Выходных: <span className="font-semibold tabular-nums">{myScheduleSummary.daysOffCount}</span>
+                                                            Выходных: <span className="font-bold tabular-nums">{myScheduleSummary.daysOffCount}</span>
                                                         </span>
                                                     </div>
                                                 </div>
                                                 <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
-                                                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                                                        <div className="text-[11px] uppercase tracking-wide text-slate-500">Смен</div>
-                                                        <div className="text-lg font-bold text-slate-900 tabular-nums">{myScheduleSummary.shiftsCount}</div>
+                                                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5">
+                                                        <div className="flex items-center gap-1 text-[11px] uppercase tracking-wide text-slate-500 mb-1">
+                                                            <FaIcon className="fas fa-calendar-check text-slate-400"></FaIcon>
+                                                            Смен
+                                                        </div>
+                                                        <div className="text-xl font-bold text-slate-900 tabular-nums leading-none">{myScheduleSummary.shiftsCount}</div>
                                                     </div>
-                                                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                                                        <div className="text-[11px] uppercase tracking-wide text-slate-500">Рабочих дней</div>
-                                                        <div className="text-lg font-bold text-slate-900 tabular-nums">{myScheduleSummary.daysWithShifts}</div>
+                                                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5">
+                                                        <div className="flex items-center gap-1 text-[11px] uppercase tracking-wide text-slate-500 mb-1">
+                                                            <FaIcon className="fas fa-briefcase text-slate-400"></FaIcon>
+                                                            Рабочих дней
+                                                        </div>
+                                                        <div className="text-xl font-bold text-slate-900 tabular-nums leading-none">{myScheduleSummary.daysWithShifts}</div>
                                                     </div>
-                                                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                                                        <div className="text-[11px] uppercase tracking-wide text-slate-500">Часы</div>
-                                                        <div className="text-lg font-bold text-slate-900 tabular-nums">{(myScheduleSummary.totalWorkMin / 60).toFixed(2)}</div>
+                                                    <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2.5">
+                                                        <div className="flex items-center gap-1 text-[11px] uppercase tracking-wide text-blue-600 mb-1">
+                                                            <FaIcon className="fas fa-clock text-blue-400"></FaIcon>
+                                                            Часов
+                                                        </div>
+                                                        <div className="text-xl font-bold text-blue-900 tabular-nums leading-none">{(myScheduleSummary.totalWorkMin / 60).toFixed(1)}</div>
                                                     </div>
-                                                    <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
-                                                        <div className="text-[11px] uppercase tracking-wide text-amber-700">Перерывы</div>
-                                                        <div className="text-lg font-bold text-amber-900 tabular-nums">{formatMinutesOnly(myScheduleSummary.totalBreakMin)}</div>
+                                                    <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5">
+                                                        <div className="flex items-center gap-1 text-[11px] uppercase tracking-wide text-amber-700 mb-1">
+                                                            <FaIcon className="fas fa-mug-hot text-amber-500"></FaIcon>
+                                                            Перерывы
+                                                        </div>
+                                                        <div className="text-xl font-bold text-amber-900 tabular-nums leading-none">{formatMinutesOnly(myScheduleSummary.totalBreakMin)}</div>
                                                     </div>
                                                 </div>
                                             </div>
