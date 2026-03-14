@@ -5635,9 +5635,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [showOperatorMobileCalendar, setShowOperatorMobileCalendar] = useState(false);
             const [breakReminderEnabled, setBreakReminderEnabled] = useState(false);
             const [breakReminderLeadMinutes, setBreakReminderLeadMinutes] = useState(5);
-            const [directionViewDate, setDirectionViewDate] = useState(() => todayDateStr(new Date()));
-            const [directionDayCandidates, setDirectionDayCandidates] = useState([]);
-            const [directionDayCandidatesLoading, setDirectionDayCandidatesLoading] = useState(false);
             const [directionSchedWeekStart, setDirectionSchedWeekStart] = useState(() => {
                 const d = new Date(); d.setDate(d.getDate() - d.getDay() + 1); return todayDateStr(d);
             });
@@ -8987,35 +8984,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 loadSwapRequests({ silent: false });
             }, [isOperatorSelfSchedules, user, loadSwapRequests]);
             useEffect(() => {
-                if (!isOperatorSelfSchedules || !user || operatorSelfTab !== 'swaps') return;
-                if (!directionViewDate) return;
-                let cancelled = false;
-                const fetchDirectionSchedules = async () => {
-                    try {
-                        setDirectionDayCandidatesLoading(true);
-                        const query = new URLSearchParams({
-                            swap_date: directionViewDate,
-                            end_date: directionViewDate,
-                            start_time: '00:00',
-                            end_time: '23:59'
-                        });
-                        const response = await fetch(`${API_BASE_URL}/api/work_schedules/shift_swap/candidates?${query}`, {
-                            credentials: 'include',
-                            headers: withAccessTokenHeader()
-                        });
-                        const data = await response.json().catch(() => ({}));
-                        if (!response.ok || cancelled) return;
-                        setDirectionDayCandidates(Array.isArray(data?.candidates) ? data.candidates : []);
-                    } catch (e) {
-                        console.warn('Failed to load direction schedules:', e);
-                    } finally {
-                        if (!cancelled) setDirectionDayCandidatesLoading(false);
-                    }
-                };
-                fetchDirectionSchedules();
-                return () => { cancelled = true; };
-            }, [isOperatorSelfSchedules, user, operatorSelfTab, directionViewDate]);
-            useEffect(() => {
                 if (!isOperatorSelfSchedules || !user || operatorSelfTab !== 'direction') return;
                 let cancelled = false;
                 const fetchDirectionSched = async () => {
@@ -11104,115 +11072,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     {swapRequestsError}
                                                 </div>
                                             )}
-
-                                            <div className="bg-white rounded-none sm:rounded-xl border-y sm:border border-slate-200 shadow-sm overflow-hidden">
-                                                <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 border-b border-slate-100">
-                                                    <div className="flex items-center gap-2 min-w-0">
-                                                        <div className="w-7 h-7 rounded-lg bg-indigo-50 border border-indigo-200 flex items-center justify-center flex-shrink-0">
-                                                            <FaIcon className="fas fa-calendar-days text-indigo-600 text-xs"></FaIcon>
-                                                        </div>
-                                                        <div className="min-w-0">
-                                                            <div className="text-sm font-semibold text-slate-900">Графики направления</div>
-                                                            <div className="text-xs text-slate-500">Смены операторов вашего направления</div>
-                                                        </div>
-                                                    </div>
-                                                    <div className="flex items-center gap-1.5">
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => setDirectionViewDate(d => {
-                                                                const dt = new Date(d + 'T00:00');
-                                                                dt.setDate(dt.getDate() - 1);
-                                                                return dt.toISOString().slice(0, 10);
-                                                            })}
-                                                            className="w-7 h-7 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 flex items-center justify-center text-slate-600 transition flex-shrink-0"
-                                                        >
-                                                            <FaIcon className="fas fa-chevron-left text-xs"></FaIcon>
-                                                        </button>
-                                                        <input
-                                                            type="date"
-                                                            value={directionViewDate}
-                                                            onChange={e => setDirectionViewDate(e.target.value)}
-                                                            className="px-2 py-1 rounded-lg border border-slate-200 text-sm text-slate-700 bg-white"
-                                                        />
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => setDirectionViewDate(d => {
-                                                                const dt = new Date(d + 'T00:00');
-                                                                dt.setDate(dt.getDate() + 1);
-                                                                return dt.toISOString().slice(0, 10);
-                                                            })}
-                                                            className="w-7 h-7 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 flex items-center justify-center text-slate-600 transition flex-shrink-0"
-                                                        >
-                                                            <FaIcon className="fas fa-chevron-right text-xs"></FaIcon>
-                                                        </button>
-                                                    </div>
-                                                </div>
-                                                <div className="p-4">
-                                                    {directionDayCandidatesLoading ? (
-                                                        <div className="flex items-center gap-2 text-sm text-slate-500">
-                                                            <FaIcon className="fas fa-spinner fa-spin"></FaIcon>
-                                                            <span>Загрузка графиков...</span>
-                                                        </div>
-                                                    ) : directionDayCandidates.length === 0 ? (
-                                                        <div className="text-sm text-slate-400">Нет данных о графиках на выбранную дату.</div>
-                                                    ) : (
-                                                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2">
-                                                            {directionDayCandidates.map(op => {
-                                                                const opDayShifts = Array.isArray(op?.dayShifts) ? op.dayShifts : [];
-                                                                const opNextDayShifts = Array.isArray(op?.nextDayShifts) ? op.nextDayShifts : [];
-                                                                const opIsDayOff = !!(op?.isDayOff ?? op?.is_day_off);
-                                                                const opNextDayDate = String(op?.nextDayDate || '');
-                                                                const opIsNextDayOff = !!(op?.isNextDayOff ?? op?.is_next_day_off);
-                                                                return (
-                                                                    <div key={`dir-sched-${op?.id}`} className="rounded-lg border border-slate-200 bg-slate-50/50 p-2.5">
-                                                                        <div className="text-xs font-semibold text-slate-800 truncate">{op?.name || 'Оператор'}</div>
-                                                                        {op?.supervisorName && (
-                                                                            <div className="text-[11px] text-slate-500 truncate">{op.supervisorName}</div>
-                                                                        )}
-                                                                        <div className="mt-1.5 space-y-1">
-                                                                            <div className="flex flex-wrap items-center gap-1">
-                                                                                <span className="text-[10px] text-slate-400">{formatDateRuShort(directionViewDate)}</span>
-                                                                                {opDayShifts.length === 0 ? (
-                                                                                    <span className={`px-1.5 py-0.5 rounded text-[10px] border ${opIsDayOff ? 'border-sky-200 bg-sky-50 text-sky-700' : 'border-slate-200 bg-white text-slate-400'}`}>
-                                                                                        {opIsDayOff ? 'Выходной' : 'Нет смен'}
-                                                                                    </span>
-                                                                                ) : opDayShifts.map((seg, si) => {
-                                                                                    const s = String(seg?.start || '');
-                                                                                    const e = String(seg?.end || '');
-                                                                                    const crossing = (typeof seg?.continuesNextDay === 'boolean') ? !!seg.continuesNextDay : (timeToMinutes(e) <= timeToMinutes(s) && e !== '00:00');
-                                                                                    return (
-                                                                                        <span key={`dir-day-${op?.id}-${si}`} className="px-1.5 py-0.5 rounded border border-blue-200 bg-blue-50 text-[10px] font-medium text-blue-800 tabular-nums">
-                                                                                            {s}–{e}{crossing ? '+' : ''}
-                                                                                        </span>
-                                                                                    );
-                                                                                })}
-                                                                            </div>
-                                                                            {(opNextDayShifts.length > 0 || opIsNextDayOff) && (
-                                                                                <div className="flex flex-wrap items-center gap-1">
-                                                                                    <span className="text-[10px] text-slate-400">{opNextDayDate ? formatDateRuShort(opNextDayDate) : 'след.'}</span>
-                                                                                    {opNextDayShifts.length === 0 ? (
-                                                                                        <span className={`px-1.5 py-0.5 rounded text-[10px] border ${opIsNextDayOff ? 'border-sky-200 bg-sky-50 text-sky-700' : 'border-slate-200 bg-white text-slate-400'}`}>
-                                                                                            {opIsNextDayOff ? 'Выходной' : 'Нет смен'}
-                                                                                        </span>
-                                                                                    ) : opNextDayShifts.map((seg, si) => {
-                                                                                        const s = String(seg?.start || '');
-                                                                                        const e = String(seg?.end || '');
-                                                                                        return (
-                                                                                            <span key={`dir-next-${op?.id}-${si}`} className="px-1.5 py-0.5 rounded border border-violet-200 bg-violet-50 text-[10px] font-medium text-violet-800 tabular-nums">
-                                                                                                {s}–{e}
-                                                                                            </span>
-                                                                                        );
-                                                                                    })}
-                                                                                </div>
-                                                                            )}
-                                                                        </div>
-                                                                    </div>
-                                                                );
-                                                            })}
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            </div>
 
                                             <div className="grid grid-cols-1 xl:grid-cols-2 gap-0 sm:gap-3">
                                                 <div className="bg-white rounded-none sm:rounded-xl border-y sm:border border-slate-200 p-4 mb-3 sm:mb-0">
