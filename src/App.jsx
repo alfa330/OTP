@@ -5635,6 +5635,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [showOperatorMobileCalendar, setShowOperatorMobileCalendar] = useState(false);
             const [breakReminderEnabled, setBreakReminderEnabled] = useState(false);
             const [breakReminderLeadMinutes, setBreakReminderLeadMinutes] = useState(5);
+            const [directionViewDate, setDirectionViewDate] = useState(() => todayDateStr(new Date()));
+            const [directionDayCandidates, setDirectionDayCandidates] = useState([]);
+            const [directionDayCandidatesLoading, setDirectionDayCandidatesLoading] = useState(false);
             const [swapRequestsLoading, setSwapRequestsLoading] = useState(false);
             const [swapRequestsError, setSwapRequestsError] = useState('');
             const [swapIncomingRequests, setSwapIncomingRequests] = useState([]);
@@ -8978,6 +8981,34 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 loadSwapRequests({ silent: false });
             }, [isOperatorSelfSchedules, user, loadSwapRequests]);
             useEffect(() => {
+                if (!isOperatorSelfSchedules || !user || operatorSelfTab !== 'swaps') return;
+                if (!directionViewDate) return;
+                let cancelled = false;
+                const fetchDirectionSchedules = async () => {
+                    try {
+                        setDirectionDayCandidatesLoading(true);
+                        const query = new URLSearchParams({
+                            start_datetime: `${directionViewDate} 00:00`,
+                            end_datetime: `${directionViewDate} 23:59`
+                        });
+                        const response = await fetch(`${API_BASE_URL}/api/work_schedules/shift_swap/candidates?${query}`, {
+                            credentials: 'include',
+                            headers: withAccessTokenHeader()
+                        });
+                        if (!response.ok) return;
+                        const data = await response.json().catch(() => ({}));
+                        if (cancelled) return;
+                        setDirectionDayCandidates(Array.isArray(data?.candidates) ? data.candidates : []);
+                    } catch (e) {
+                        console.warn('Failed to load direction schedules:', e);
+                    } finally {
+                        if (!cancelled) setDirectionDayCandidatesLoading(false);
+                    }
+                };
+                fetchDirectionSchedules();
+                return () => { cancelled = true; };
+            }, [isOperatorSelfSchedules, user, operatorSelfTab, directionViewDate]);
+            useEffect(() => {
                 if (!isOperatorSelfSchedules || !user) return;
                 if (!swapTimeValidation.isValid) {
                     setSwapCandidates([]);
@@ -10434,45 +10465,32 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     )}
                                     {operatorSelfTab === 'swaps' && (
                                         <div className="space-y-3 pb-2">
-                                            {showSwapCreateModal && (
-                                                <div
-                                                    className="fixed inset-0 z-[80] bg-slate-900/55 sm:bg-slate-900/45 p-0 sm:p-4 overflow-hidden"
-                                                    onClick={(e) => {
-                                                        if (e.target === e.currentTarget) {
-                                                            setShowSwapCreateModal(false);
-                                                            setSwapCandidatesSearch('');
-                                                            setSwapDraftRequests([]);
-                                                        }
+                                            <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        setShowSwapCreateModal(v => !v);
+                                                        if (showSwapCreateModal) setSwapCandidatesSearch('');
                                                     }}
+                                                    className="w-full flex items-center justify-between px-4 py-3 hover:bg-slate-50 transition-colors text-left"
                                                 >
-                                                    <div className="min-h-full flex items-stretch sm:items-center justify-center">
-                                                        <div className="w-full sm:max-w-5xl bg-white h-[100dvh] sm:h-auto sm:max-h-[92vh] rounded-none sm:rounded-xl border-0 sm:border border-slate-200 p-3 sm:p-4 pb-[calc(0.75rem+env(safe-area-inset-bottom))] sm:pb-4 shadow-none sm:shadow-2xl overflow-y-auto overscroll-contain">
-                                                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-3 sticky top-0 z-10 bg-white/95 backdrop-blur pb-2 border-b border-slate-200">
-                                                    <div className="min-w-0">
-                                                        <div className="text-base font-semibold text-slate-900">Новый запрос на замену</div>
-                                                        <div className="text-xs text-slate-500">Укажите интервал и выберите кандидата без пересечений.</div>
-                                                    </div>
-                                                    <div className="flex items-center justify-between sm:justify-end gap-2">
-                                                        <div className="text-[11px] text-slate-400">
-                                                            Доступных дат со сменами: <span className="font-semibold tabular-nums">{mySwapSourceShiftDays.length}</span>
+                                                    <div className="flex items-center gap-2.5 min-w-0">
+                                                        <div className="w-7 h-7 rounded-lg bg-blue-50 border border-blue-200 flex items-center justify-center flex-shrink-0">
+                                                            <FaIcon className="fas fa-plus text-blue-600 text-xs"></FaIcon>
                                                         </div>
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => {
-                                                                setShowSwapCreateModal(false);
-                                                                setSwapCandidatesSearch('');
-                                                                setSwapDraftRequests([]);
-                                                            }}
-                                                            className="w-8 h-8 rounded-lg border border-slate-300 bg-white text-slate-600 hover:bg-slate-50 inline-flex items-center justify-center"
-                                                            title="Закрыть"
-                                                        >
-                                                            <FaIcon className="fas fa-xmark"></FaIcon>
-                                                        </button>
+                                                        <div className="min-w-0">
+                                                            <div className="text-sm font-semibold text-slate-900">Создать запрос на замену</div>
+                                                            <div className="text-xs text-slate-500">{swapDraftRequests.length > 0 ? `В очереди: ${swapDraftRequests.length} запр.` : `Доступных дат: ${mySwapSourceShiftDays.length}`}</div>
+                                                        </div>
+                                                        {swapDraftRequests.length > 0 && <span className="px-1.5 py-0.5 rounded-full bg-amber-500 text-white text-[10px] font-bold leading-none ml-2">{swapDraftRequests.length}</span>}
                                                     </div>
-                                                </div>
-                                                <div className="grid grid-cols-2 sm:grid-cols-2 gap-2 sm:gap-3 items-end lg:flex lg:flex-nowrap lg:items-end lg:gap-3">
-                                                    <label className="text-sm col-span-2 sm:col-span-1 lg:w-[290px] lg:flex-none">
-                                                        <div className="text-xs lg:text-sm text-slate-600 mb-1">Дата начала</div>
+                                                    <FaIcon className={`fas fa-chevron-${showSwapCreateModal ? 'up' : 'down'} text-xs text-slate-400 flex-shrink-0`}></FaIcon>
+                                                </button>
+                                                {showSwapCreateModal && (
+                                                <div className="border-t border-slate-100 p-4">
+                                                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 items-end">
+                                                    <label className="text-sm">
+                                                        <div className="text-xs text-slate-600 mb-1">Дата начала</div>
                                                         <select
                                                             value={swapForm.swapDate}
                                                             onChange={(e) => {
@@ -10484,7 +10502,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     targetOperatorId: ''
                                                                 }));
                                                             }}
-                                                            className="w-full px-3 py-2 lg:py-2.5 rounded-lg border border-slate-300 text-sm lg:text-base bg-white"
+                                                            className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm bg-white"
                                                         >
                                                             <option value="">Выберите дату смены</option>
                                                             {mySwapSourceShiftDays.map(dayKey => (
@@ -10494,10 +10512,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             ))}
                                                         </select>
                                                     </label>
-                                                    <div className="text-sm col-span-2 sm:col-span-1 lg:w-[320px] lg:flex-none">
+                                                    <div className="text-sm">
                                                         <div className="flex items-center justify-between gap-2 mb-1">
-                                                            <span className="text-xs lg:text-sm text-slate-600">Режим интервала</span>
-                                                            <span className="hidden lg:inline text-[11px] text-slate-500">
+                                                            <span className="text-xs text-slate-600">Режим интервала</span>
+                                                            <span className="text-[11px] text-slate-500">
                                                                 {swapForm.swapDate
                                                                     ? (swapEndsNextDay ? `Старт: ${formatDateRuShort(swapNextDayDate)}` : `Старт: ${formatDateRuShort(swapForm.swapDate)}`)
                                                                     : '—'}
@@ -10537,31 +10555,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     След. день
                                                                 </button>
                                                         </div>
-                                                        <div className="mt-1 text-[11px] text-slate-500 lg:hidden">
-                                                            {swapForm.swapDate
-                                                                ? (swapEndsNextDay
-                                                                    ? `Интервал начнется на ${formatDateRuShort(swapNextDayDate)}`
-                                                                    : `Интервал в пределах ${formatDateRuShort(swapForm.swapDate)}`)
-                                                                : 'Сначала выберите дату начала'}
-                                                        </div>
                                                     </div>
-                                                    <label className="text-sm lg:w-[140px] lg:flex-none">
+                                                    <label className="text-sm">
                                                         <div className="text-xs text-slate-600 mb-1">С</div>
                                                         <input
                                                             type="time"
                                                             value={swapForm.startTime}
                                                             onChange={(e) => setSwapForm(prev => ({ ...prev, startTime: e.target.value, targetOperatorId: '' }))}
-                                                            className="w-full px-3 py-2 lg:py-2.5 rounded-lg border border-slate-300 text-sm lg:text-base bg-white"
+                                                            className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm bg-white"
                                                             step={300}
                                                         />
                                                     </label>
-                                                    <label className="text-sm lg:w-[140px] lg:flex-none">
+                                                    <label className="text-sm">
                                                         <div className="text-xs text-slate-600 mb-1">По</div>
                                                         <input
                                                             type="time"
                                                             value={swapForm.endTime}
                                                             onChange={(e) => setSwapForm(prev => ({ ...prev, endTime: e.target.value, targetOperatorId: '' }))}
-                                                            className="w-full px-3 py-2 lg:py-2.5 rounded-lg border border-slate-300 text-sm lg:text-base bg-white"
+                                                            className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm bg-white"
                                                             step={300}
                                                         />
                                                     </label>
@@ -11035,16 +11046,124 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         </div>
                                                     )}
                                                 </div>
-                                            </div>
-                                                    </div>
                                                 </div>
-                                            )}
+                                                )}
+                                            </div>
 
                                             {swapRequestsError && (
                                                 <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl p-4 text-sm">
                                                     {swapRequestsError}
                                                 </div>
                                             )}
+
+                                            <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+                                                <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 border-b border-slate-100">
+                                                    <div className="flex items-center gap-2 min-w-0">
+                                                        <div className="w-7 h-7 rounded-lg bg-indigo-50 border border-indigo-200 flex items-center justify-center flex-shrink-0">
+                                                            <FaIcon className="fas fa-calendar-days text-indigo-600 text-xs"></FaIcon>
+                                                        </div>
+                                                        <div className="min-w-0">
+                                                            <div className="text-sm font-semibold text-slate-900">Графики направления</div>
+                                                            <div className="text-xs text-slate-500">Смены операторов вашего направления</div>
+                                                        </div>
+                                                    </div>
+                                                    <div className="flex items-center gap-1.5">
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setDirectionViewDate(d => {
+                                                                const dt = new Date(d + 'T00:00');
+                                                                dt.setDate(dt.getDate() - 1);
+                                                                return dt.toISOString().slice(0, 10);
+                                                            })}
+                                                            className="w-7 h-7 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 flex items-center justify-center text-slate-600 transition flex-shrink-0"
+                                                        >
+                                                            <FaIcon className="fas fa-chevron-left text-xs"></FaIcon>
+                                                        </button>
+                                                        <input
+                                                            type="date"
+                                                            value={directionViewDate}
+                                                            onChange={e => setDirectionViewDate(e.target.value)}
+                                                            className="px-2 py-1 rounded-lg border border-slate-200 text-sm text-slate-700 bg-white"
+                                                        />
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setDirectionViewDate(d => {
+                                                                const dt = new Date(d + 'T00:00');
+                                                                dt.setDate(dt.getDate() + 1);
+                                                                return dt.toISOString().slice(0, 10);
+                                                            })}
+                                                            className="w-7 h-7 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 flex items-center justify-center text-slate-600 transition flex-shrink-0"
+                                                        >
+                                                            <FaIcon className="fas fa-chevron-right text-xs"></FaIcon>
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                                <div className="p-4">
+                                                    {directionDayCandidatesLoading ? (
+                                                        <div className="flex items-center gap-2 text-sm text-slate-500">
+                                                            <FaIcon className="fas fa-spinner fa-spin"></FaIcon>
+                                                            <span>Загрузка графиков...</span>
+                                                        </div>
+                                                    ) : directionDayCandidates.length === 0 ? (
+                                                        <div className="text-sm text-slate-400">Нет данных о графиках на выбранную дату.</div>
+                                                    ) : (
+                                                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2">
+                                                            {directionDayCandidates.map(op => {
+                                                                const opDayShifts = Array.isArray(op?.dayShifts) ? op.dayShifts : [];
+                                                                const opNextDayShifts = Array.isArray(op?.nextDayShifts) ? op.nextDayShifts : [];
+                                                                const opIsDayOff = !!(op?.isDayOff ?? op?.is_day_off);
+                                                                const opNextDayDate = String(op?.nextDayDate || '');
+                                                                const opIsNextDayOff = !!(op?.isNextDayOff ?? op?.is_next_day_off);
+                                                                return (
+                                                                    <div key={`dir-sched-${op?.id}`} className="rounded-lg border border-slate-200 bg-slate-50/50 p-2.5">
+                                                                        <div className="text-xs font-semibold text-slate-800 truncate">{op?.name || 'Оператор'}</div>
+                                                                        {op?.supervisorName && (
+                                                                            <div className="text-[11px] text-slate-500 truncate">{op.supervisorName}</div>
+                                                                        )}
+                                                                        <div className="mt-1.5 space-y-1">
+                                                                            <div className="flex flex-wrap items-center gap-1">
+                                                                                <span className="text-[10px] text-slate-400">{formatDateRuShort(directionViewDate)}</span>
+                                                                                {opDayShifts.length === 0 ? (
+                                                                                    <span className={`px-1.5 py-0.5 rounded text-[10px] border ${opIsDayOff ? 'border-sky-200 bg-sky-50 text-sky-700' : 'border-slate-200 bg-white text-slate-400'}`}>
+                                                                                        {opIsDayOff ? 'Выходной' : 'Нет смен'}
+                                                                                    </span>
+                                                                                ) : opDayShifts.map((seg, si) => {
+                                                                                    const s = String(seg?.start || '');
+                                                                                    const e = String(seg?.end || '');
+                                                                                    const crossing = (typeof seg?.continuesNextDay === 'boolean') ? !!seg.continuesNextDay : (timeToMinutes(e) <= timeToMinutes(s) && e !== '00:00');
+                                                                                    return (
+                                                                                        <span key={`dir-day-${op?.id}-${si}`} className="px-1.5 py-0.5 rounded border border-blue-200 bg-blue-50 text-[10px] font-medium text-blue-800 tabular-nums">
+                                                                                            {s}–{e}{crossing ? '+' : ''}
+                                                                                        </span>
+                                                                                    );
+                                                                                })}
+                                                                            </div>
+                                                                            {(opNextDayShifts.length > 0 || opIsNextDayOff) && (
+                                                                                <div className="flex flex-wrap items-center gap-1">
+                                                                                    <span className="text-[10px] text-slate-400">{opNextDayDate ? formatDateRuShort(opNextDayDate) : 'след.'}</span>
+                                                                                    {opNextDayShifts.length === 0 ? (
+                                                                                        <span className={`px-1.5 py-0.5 rounded text-[10px] border ${opIsNextDayOff ? 'border-sky-200 bg-sky-50 text-sky-700' : 'border-slate-200 bg-white text-slate-400'}`}>
+                                                                                            {opIsNextDayOff ? 'Выходной' : 'Нет смен'}
+                                                                                        </span>
+                                                                                    ) : opNextDayShifts.map((seg, si) => {
+                                                                                        const s = String(seg?.start || '');
+                                                                                        const e = String(seg?.end || '');
+                                                                                        return (
+                                                                                            <span key={`dir-next-${op?.id}-${si}`} className="px-1.5 py-0.5 rounded border border-violet-200 bg-violet-50 text-[10px] font-medium text-violet-800 tabular-nums">
+                                                                                                {s}–{e}
+                                                                                            </span>
+                                                                                        );
+                                                                                    })}
+                                                                                </div>
+                                                                            )}
+                                                                        </div>
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </div>
 
                                             <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
                                                 <div className="bg-white rounded-xl border border-slate-200 p-4">
