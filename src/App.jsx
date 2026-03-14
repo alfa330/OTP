@@ -9862,7 +9862,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     onClick={() => setOperatorSelfTab('direction')}
                                                     className={`px-3.5 py-1.5 text-sm font-medium border-l border-slate-200 transition-colors ${operatorSelfTab === 'direction' ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-50'}`}
                                                 >
-                                                    Направление
+                                                    Смены коллег
                                                 </button>
                                             </div>
                                         </div>
@@ -11410,8 +11410,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <div className="overflow-x-auto">
                                                         <table className="w-full text-xs border-collapse" style={{ minWidth: 520 }}>
                                                             <thead>
-                                                                <tr className="border-b border-slate-100 bg-slate-50">
-                                                                    <th className="text-left py-2 px-3 font-medium text-slate-600 sticky left-0 bg-slate-50 z-10 w-32 min-w-[8rem]">Сотрудник</th>
+                                                                <tr className="border-b border-slate-100 bg-slate-50 sticky top-0 z-20">
+                                                                    <th className="text-left py-2 px-3 font-medium text-slate-600 sticky left-0 bg-slate-50 z-30 w-32 min-w-[8rem]">Сотрудник</th>
                                                                     {dirWeekDates.map(d => {
                                                                         const dt = new Date(d + 'T00:00');
                                                                         const isToday = d === todayDateStr(new Date());

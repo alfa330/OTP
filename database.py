@@ -6087,7 +6087,7 @@ class Database:
                     FROM users u
                     LEFT JOIN users s ON u.supervisor_id = s.id
                     LEFT JOIN directions d ON u.direction_id = d.id
-                    WHERE u.role = 'operator' AND LOWER(d.name) = LOWER(%s)
+                    WHERE u.role = 'operator' AND LOWER(d.name) = LOWER(%s) AND (u.status IS NULL OR u.status != 'fired')
                     ORDER BY u.name
                 """, (direction_name,))
             else:
