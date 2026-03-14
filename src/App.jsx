@@ -9799,13 +9799,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </div>
                                         </div>
                                         {operatorSelfTab === 'schedule' && (
-                                            <div className="flex items-center gap-1.5 self-stretch sm:self-auto">
-                                                <button onClick={() => paginatePlannerDates(-1)} className="h-9 w-9 flex items-center justify-center bg-white border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors text-slate-600 shadow-sm"><FaIcon className="fas fa-angle-left text-sm"></FaIcon></button>
-                                                <div className="min-w-[108px] px-3 py-1.5 rounded-lg bg-white border border-slate-200 text-center leading-tight shadow-sm">
+                                            <div className="flex items-center gap-1.5 w-full sm:w-auto">
+                                                <button onClick={() => paginatePlannerDates(-1)} className="h-9 w-9 flex-shrink-0 flex items-center justify-center bg-white border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors text-slate-600 shadow-sm"><FaIcon className="fas fa-angle-left text-sm"></FaIcon></button>
+                                                <div className="flex-1 sm:flex-none min-w-[108px] px-3 py-1.5 rounded-lg bg-white border border-slate-200 text-center leading-tight shadow-sm">
                                                     <div className="text-[11px] uppercase tracking-wide text-slate-500">{formatWeekdayRu(currentDate, 'short')}</div>
                                                     <div className="text-sm font-semibold text-slate-900">{formatDateRuDayMonth(currentDate)}</div>
                                                 </div>
-                                                <button onClick={() => paginatePlannerDates(1)} className="h-9 w-9 flex items-center justify-center bg-white border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors text-slate-600 shadow-sm"><FaIcon className="fas fa-angle-right text-sm"></FaIcon></button>
+                                                <button onClick={() => paginatePlannerDates(1)} className="h-9 w-9 flex-shrink-0 flex items-center justify-center bg-white border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors text-slate-600 shadow-sm"><FaIcon className="fas fa-angle-right text-sm"></FaIcon></button>
                                             </div>
                                         )}
                                     </div>
@@ -9854,7 +9854,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                 <div className="grid grid-cols-1 gap-3 mb-3">
                                     <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-3 sm:p-4">
-                                        <div className="lg:grid lg:grid-cols-2 lg:gap-4">
+                                        <div className="md:grid md:grid-cols-2 md:gap-4">
                                             <div className="space-y-3">
                                                 <div className={`rounded-xl border-l-4 p-3.5 ${myNowStatus.panelClass}`}>
                                                     <div className="flex items-center justify-between gap-2 mb-1.5">
@@ -9912,7 +9912,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </div>
                                             </div>
 
-                                            <div className="pt-0 lg:pt-1">
+                                            <div className="pt-4 border-t border-slate-100 md:pt-1 md:border-0">
                                                 <div className="mb-2 text-xs font-semibold text-slate-900">Ближайшие смены</div>
                                                 {myUpcomingShiftItems.length === 0 ? (
                                                     <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-3 py-2 text-xs text-slate-500">
@@ -10315,7 +10315,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     })}
                                                                     {dayCard.shifts.length > 0 && (
                                                                         <div className="pt-1">
-                                                                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                                                                            <div className="grid grid-cols-3 gap-2">
                                                                                 <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
                                                                                     <div className="text-[11px] text-slate-500 uppercase tracking-wide">Работа</div>
                                                                                     <div className="text-sm font-semibold text-slate-900 tabular-nums">{(dayWorkMin / 60).toFixed(2)} ч</div>
@@ -10373,7 +10373,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         </span>
                                                     </div>
                                                 </div>
-                                                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+                                                <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
                                                     <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
                                                         <div className="text-[11px] uppercase tracking-wide text-slate-500">Смен</div>
                                                         <div className="text-lg font-bold text-slate-900 tabular-nums">{myScheduleSummary.shiftsCount}</div>
