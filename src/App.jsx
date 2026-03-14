@@ -9919,36 +9919,42 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         Нет предстоящих смен
                                                     </div>
                                                 ) : (
-                                                    <div className="space-y-2">
+                                                    <div className="space-y-2.5">
                                                         {myUpcomingShiftItems.slice(0, 3).map((item, idx) => {
                                                             const isToday = item.date === todayDateStr(new Date());
                                                             const isTomorrow = item.date === todayDateStr(new Date(Date.now() + 86400000));
                                                             const dateLabel = isToday ? 'Сегодня' : isTomorrow ? 'Завтра' : formatDateRuShort(item.date);
                                                             const breakTimes = Array.isArray(item.breaks) && item.breaks.length > 0
-                                                                ? item.breaks.map(b => `${formatBreakMinuteWithDay(b.start)}–${formatBreakMinuteWithDay(b.end)}`)
+                                                                ? item.breaks.map(b => `${formatBreakMinuteWithDay(b.start)} — ${formatBreakMinuteWithDay(b.end)}`)
                                                                 : [];
                                                             return (
                                                                 <div
                                                                     key={`my-upcoming-${item.key}`}
-                                                                    className={`rounded-xl border p-3 ${idx === 0 ? 'border-blue-300 bg-blue-50/40 shadow-sm' : 'border-slate-200 bg-white'}`}
+                                                                    className={`rounded-xl border px-3 py-2.5 ${idx === 0 ? 'border-blue-300 bg-blue-50/40 shadow-sm' : 'border-slate-200 bg-white'}`}
                                                                 >
-                                                                    <div className="flex items-center justify-between gap-2 mb-1">
-                                                                        <div className="flex items-center gap-1.5 flex-wrap min-w-0">
-                                                                            <span className="text-xs font-bold text-slate-900">{dateLabel}</span>
-                                                                            <span className="text-[11px] text-slate-400 capitalize">{formatWeekdayRu(item.date, 'short')}</span>
-                                                                            {idx === 0 && (
-                                                                                <span className="rounded-full bg-blue-600 px-1.5 py-0 leading-5 text-[10px] font-semibold text-white">Следующая</span>
-                                                                            )}
+                                                                    <div className="flex items-start justify-between gap-2">
+                                                                        <div className="min-w-0">
+                                                                            <div className="flex items-center gap-1.5">
+                                                                                <div className="text-xs font-semibold text-slate-900">{dateLabel}</div>
+                                                                                {idx === 0 && (
+                                                                                    <span className="rounded-full bg-blue-600 px-2 py-0.5 text-[10px] font-semibold text-white">
+                                                                                        Следующая
+                                                                                    </span>
+                                                                                )}
+                                                                            </div>
+                                                                            <div className="text-[11px] text-slate-500">{formatWeekdayRu(item.date, 'short')}</div>
                                                                         </div>
-                                                                        <span className="text-xs font-bold text-slate-600 tabular-nums flex-shrink-0">{(item.durationMin / 60).toFixed(1)} ч</span>
+                                                                        <div className="whitespace-nowrap text-xs font-semibold text-slate-600 tabular-nums">
+                                                                            {(item.durationMin / 60).toFixed(2)} ч
+                                                                        </div>
                                                                     </div>
 
-                                                                    <div className="text-sm font-bold text-slate-900 tabular-nums leading-tight">
+                                                                    <div className="mt-2 text-base font-semibold leading-tight text-slate-900 tabular-nums sm:text-lg">
                                                                         {item.start} — {item.end}{item.isCrossing ? ' (+1)' : ''}
                                                                     </div>
 
-                                                                    <div className="mt-1.5 flex items-center gap-2">
-                                                                        <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium border ${item.breakCount > 0 ? 'bg-amber-50 border-amber-200 text-amber-800' : 'bg-slate-50 border-slate-200 text-slate-500'}`}>
+                                                                    <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
+                                                                        <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-medium ${item.breakCount > 0 ? 'border-amber-200 bg-amber-50 text-amber-800' : 'border-slate-200 bg-slate-100 text-slate-500'}`}>
                                                                             <FaIcon className="fas fa-mug-hot text-amber-500"></FaIcon>
                                                                             {item.breakCount > 0 ? `${item.breakCount} пер. · ${formatMinutesOnly(item.breakMinutes)}` : 'Без перерывов'}
                                                                         </span>
@@ -9957,7 +9963,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     {breakTimes.length > 0 && (
                                                                         <div className="mt-1.5 flex flex-wrap gap-1">
                                                                             {breakTimes.map((t, i) => (
-                                                                                <span key={i} className="px-1.5 py-0.5 rounded bg-amber-50 border border-amber-100 text-[10px] text-amber-700 tabular-nums">{t}</span>
+                                                                                <span key={i} className="px-2 py-0.5 rounded-md bg-amber-50 border border-amber-200 text-[11px] text-amber-700 tabular-nums">{t}</span>
                                                                             ))}
                                                                         </div>
                                                                     )}
