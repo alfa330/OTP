@@ -8975,19 +8975,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, [isOperatorSelfSchedules, user]);
             useEffect(() => {
                 if (!isOperatorSelfSchedules || !user) return;
-                let cancelled = false;
-                const run = async () => {
-                    if (cancelled) return;
-                    await loadSwapRequests({ silent: false });
-                };
-                run();
-                const timer = setInterval(() => {
-                    loadSwapRequests({ silent: true });
-                }, 45000);
-                return () => {
-                    cancelled = true;
-                    clearInterval(timer);
-                };
+                loadSwapRequests({ silent: false });
             }, [isOperatorSelfSchedules, user, loadSwapRequests]);
             useEffect(() => {
                 if (!isOperatorSelfSchedules || !user) return;
