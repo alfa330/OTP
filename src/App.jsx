@@ -274,7 +274,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 </div>
             );
         };
-                
+
         // SemiCircle Progress Component
         const SemiCircleProgress = ({ percentage, label, width = 150, height = 80 }) => {
             const canvasRef = useRef(null);
@@ -3476,18 +3476,25 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (selectedOperator) openEditOperator(selectedOperator);
             }
 
-            function renderCircles({ apiCount=0, csvCount=0, desiredForOp=0 }) {
-                const totalSlots = 18;
-                const green = Math.min(Number(apiCount || 0), totalSlots);
-                let desiredYellow = Math.min(Number(csvCount || 0), Number(desiredForOp || 0));
-                const remaining = Math.max(0, totalSlots - green);
-                const yellow = Math.min(desiredYellow, remaining);
-                const grey = Math.max(0, totalSlots - green - yellow);
-                const circles = [];
-                for (let i = 0; i < green; i++) circles.push(<span key={'g'+i} className={`w-3 h-3 rounded-full bg-green-500 border`} />);
-                for (let i = 0; i < yellow; i++) circles.push(<span key={'y'+i} className={`w-3 h-3 rounded-full bg-yellow-400 border`} />);
-                for (let i = 0; i < grey; i++) circles.push(<span key={'z'+i} className={`w-3 h-3 rounded-full bg-gray-300 border`} />);
-                return <div className="flex gap-1">{circles}</div>;
+            function renderProgressBar({ apiCount=0, csvCount=0, desiredForOp=0 }) {
+                const total = Math.max(Number(desiredForOp || 0), Number(apiCount || 0) + Number(csvCount || 0), 1);
+                const greenPct = Math.min((Number(apiCount || 0) / total) * 100, 100);
+                const yellowPct = Math.min((Number(csvCount || 0) / total) * 100, 100 - greenPct);
+                const isFull = (apiCount + csvCount) >= desiredForOp && desiredForOp > 0;
+                return (
+                    <div className="w-full">
+                        <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
+                            <span>{apiCount + csvCount} / {desiredForOp}</span>
+                            {isFull && <span className="text-green-600 font-medium">OK</span>}
+                        </div>
+                        <div className="w-full h-2 bg-gray-100 rounded-full overflow-hidden">
+                            <div className="h-full flex">
+                                {greenPct > 0 && <div className="bg-blue-500 h-full transition-all" style={{ width: greenPct + '%' }} />}
+                                {yellowPct > 0 && <div className="bg-amber-400 h-full transition-all" style={{ width: yellowPct + '%' }} />}
+                            </div>
+                        </div>
+                    </div>
+                );
             }
 
             function toggleSelectCall(callId) {
@@ -3768,191 +3775,214 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
 
             // --- Now render improved / more ergonomic UI layout ---
+            const totalCsvCalls = calls.length;
+            const totalMatchedOperators = Object.keys(operatorMap).filter(k => operatorMap[k]?.count > 0).length;
+            const totalInsufficientCount = insufficientOperators.length;
+            const hasActiveFilters = !selectedStatuses.includes('all') || !selectedDirections.includes('all') || !selectedHireMonths.includes('all') || onlyWithCsv;
+
             return (
-                <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
-                <div className="flex items-start justify-between gap-4 mb-4">
-                    <div>
-                    <h3 className="text-lg font-semibold">Деление звонков</h3>
-                    <div className="text-sm text-gray-500">Загружайте файлы и делите звонки.</div>
-                    </div>
+                <div className="bg-gray-50 min-h-[60vh]">
 
-                    <div className="flex items-center gap-2">
-                    <div className="text-xs text-gray-600">Операторов: <span className="font-medium">{svOperators.length}</span></div>
-                    <div className="text-xs text-gray-600">Направлений: <span className="font-medium">{directions.length}</span></div>
-                    <button onClick={() => { fetchDirections(); fetchSvOperators(selectedMonth); }} className="px-3 py-1 rounded border text-sm">Обновить</button>
-                    </div>
-                </div>
-
-                <div className="grid grid-cols-1 lg:grid-cols-4 gap-4 mb-4">
-                    {/* Left: Quick actions & files (larger) */}
-                    <div className="lg:col-span-2 space-y-3">
-                    <div className="p-4 bg-gray-50 rounded border">
-                        <label className="block text-sm font-medium text-gray-700">Загрузка файла</label>
-                        <div className="mt-2 flex items-center gap-3">
-                        <input ref={fileInputRef} type="file" accept=".csv,.xls,.xlsx" multiple onChange={handleFilesSelected} className="text-sm" />
-                        <button onClick={splitAll} disabled={files.length===0 || parsing || loadingOperators} className={`px-3 py-2 rounded text-white ${(parsing || loadingOperators) ? 'bg-gray-400' : 'bg-blue-600 hover:bg-blue-700'}`}>
-                            {(parsing || loadingOperators) ? 'Работа...' : 'Делить'}
-                        </button>
-                        <button onClick={() => { setFiles([]); setCalls([]); setOperatorMap({}); setSelectedOperator(null); setSelectedCalls(new Set()); setActiveRange(null); setOperatorParams({}); setSelectedOperatorsForShuffle(new Set()); setOperatorSearch(''); setDistributionTab('general'); if (fileInputRef.current) fileInputRef.current.value = null; }} className="px-3 py-2 rounded border">Сброс</button>
-                        </div>
-
-                        {files.length > 0 && (
-                        <div className="mt-3 text-sm text-gray-600 max-h-28 overflow-auto border rounded p-2 bg-white">
-                            <ul>
-                            {files.map((f,i) => <li key={i} className="py-0.5">{f.name} — {Math.round(f.size/1024)} KB</li>)}
-                            </ul>
-                        </div>
-                        )}
-
-                        <div className="mt-3 text-xs text-gray-500">Поддерживаются CSV файлы; Заголовки пропускаются автоматически.</div>
-                    </div>
-
-                    <div className="p-4 bg-white rounded border">
-                        <div className="flex items-center justify-between mb-2">
-                        <div className="text-sm font-medium">Диапазон длительности / выборка</div>
-                        <div className="text-xs text-gray-500">Визуальная подсказка</div>
-                        </div>
-
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        <div>
-                            <label className="block text-xs text-gray-700">Мин. длительность</label>
-                            <div className="mt-1"><DurationInput valueSec={minDurationSec} onChange={v=>setMinDurationSec(v)} ariaLabel="min duration" /></div>
-                        </div>
-
-                        <div>
-                            <label className="block text-xs text-gray-700">Вариация (+-)</label>
-                            <div className="mt-1"><DurationInput valueSec={variationSec} onChange={v=>setVariationSec(v)} ariaLabel="variation" /></div>
-                        </div>
-
-                        <div>
-                            <label className="block text-xs text-gray-700">Макс. длительность</label>
-                            <div className="mt-1"><DurationInput valueSec={maxDurationSec} onChange={v=>setMaxDurationSec(v)} ariaLabel="max duration" /></div>
-                        </div>
-
-                        <div>
-                            <label className="block text-xs text-gray-700">Выбрать звонки</label>
-                            <input type="number" min="0" value={sampleCount} onChange={e=>setSampleCount(e.target.value)} className="w-12 mt-1 p-1 border rounded" />
-                        </div>
-                        </div>
-
-                        <div className="mt-3 flex gap-2">
-                        <button onClick={() => { setMinDurationSec(null); setMaxDurationSec(null); setVariationSec(0); setSampleCount(3); setSelectedStatuses(['all']); setOnlyWithCsv(false); setSelectedDirections(['all']); setSelectedHireMonths(['all']); setExpandedHireYears({}); setSelectedOperatorsForShuffle(new Set()); setOperatorSearch(''); applyFilters(); }} className="px-3 py-2 rounded border">Сброс</button>
-                        </div>
-                    </div>
-
-                    </div>
-
-                    {/* Right: Filters column (compact) */}
-                    <div className="lg:col-span-2 space-y-3">
-                    <div className="p-4 bg-gray-50 rounded border">
-                        <div className="flex items-center justify-between mb-2">
-                        <div className="text-sm font-medium">Фильтры</div>
-                        <div className="text-xs text-gray-500">Мультивыбор</div>
-                        </div>
-
-                        <div className="grid grid-cols-1 gap-3">
-                        <div>
-                            <label className="block text-xs text-gray-700">Статусы операторов</label>
-                            <div className="mt-2 flex flex-wrap gap-2">
-                            <button onClick={()=>setSelectedStatuses(['all'])} className={`px-2 py-1 text-xs rounded border ${selectedStatuses.includes('all') ? 'bg-blue-600 text-white' : ''}`}>Все</button>
-                            {statusOptions.map(st => (
-                                <button
-                                    key={st}
-                                    onClick={() => toggleStatusSelection(st)}
-                                    className={`px-2 py-1 text-xs rounded border ${selectedStatuses.some(s => normalizeSvOperatorStatusFilterValue(s) === st) ? 'bg-blue-600 text-white' : ''}`}
-                                >
-                                    {getSvOperatorStatusFilterLabel(st)}
-                                </button>
-                            ))}
+                {/* ===== Top Header Bar ===== */}
+                <div className="bg-white border-b border-gray-200 px-6 py-4">
+                    <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-indigo-500 to-blue-600 flex items-center justify-center">
+                                <FaIcon className="fas fa-random text-white text-lg" />
+                            </div>
+                            <div>
+                                <h3 className="text-lg font-bold text-gray-900">Деление звонков</h3>
+                                <p className="text-xs text-gray-500">Загрузка, фильтрация и распределение звонков по операторам</p>
                             </div>
                         </div>
-
-                        <div>
-                            <label className="block text-xs text-gray-700">Направления</label>
-                            <div className="mt-2 flex flex-wrap gap-2">
-                            <button onClick={()=>setSelectedDirections(['all'])} className={`px-2 py-1 text-xs rounded border ${selectedDirections.includes('all') ? 'bg-blue-600 text-white' : ''}`}>Все</button>
-                            {directionOptions.map(d => (
-                                <button key={d.id} onClick={()=>toggleDirectionSelection(d.id)} className={`px-2 py-1 text-xs rounded border ${selectedDirections.includes(String(d.id)) ? 'bg-blue-600 text-white' : ''}`}>{d.name}</button>
-                            ))}
-                            </div>
-                        </div>
-
-                        <div>
-                            <label className="block text-xs text-gray-700">Дата найма (стаж): год → месяц</label>
-                            <div className="mt-2 space-y-2">
-                            <button
-                                onClick={() => setSelectedHireMonths(['all'])}
-                                className={`px-2 py-1 text-xs rounded border ${selectedHireMonths.includes('all') ? 'bg-blue-600 text-white' : ''}`}
-                            >
-                                Все месяцы
-                            </button>
-
-                            {hireMonthTree.length === 0 ? (
-                                <div className="text-xs text-gray-500">Нет доступных дат найма.</div>
-                            ) : (
-                                <div className="space-y-2">
-                                {hireMonthTree.map(item => (
-                                    <div key={item.year} className="border rounded bg-white">
-                                    <button
-                                        type="button"
-                                        onClick={() => toggleHireYear(item.year)}
-                                        className="w-full flex items-center justify-between px-3 py-2 text-xs font-medium text-gray-700"
-                                    >
-                                        <span>{item.year}</span>
-                                        <span>{expandedHireYears[item.year] ? '-' : '+'}</span>
-                                    </button>
-                                    {expandedHireYears[item.year] && (
-                                        <div className="px-3 pb-2 pt-1 border-t flex flex-wrap gap-2">
-                                        {item.months.map(month => (
-                                            <button
-                                            key={month.value}
-                                            type="button"
-                                            onClick={() => toggleHireMonthSelection(month.value)}
-                                            className={`px-2 py-1 text-xs rounded border ${selectedHireMonths.includes(month.value) ? 'bg-blue-600 text-white' : ''}`}
-                                            >
-                                            {month.label}
-                                            </button>
-                                        ))}
-                                        </div>
-                                    )}
-                                    </div>
-                                ))}
-                                </div>
-                            )}
-
-                            {!selectedHireMonths.includes('all') && (
-                                <div className="text-xs text-gray-500">Выбрано: {selectedHireMonthLabels}</div>
-                            )}
-                            </div>
-                        </div>
-
-                        <div>
-                            <label className="inline-flex items-center gap-2 text-xs text-gray-700">
-                            <input type="checkbox" checked={onlyWithCsv} onChange={e=>setOnlyWithCsv(e.target.checked)} />
-                            <span>Показывать только операторов с звонками в загруженных CSV</span>
-                            </label>
-                        </div>
-
-                        <div>
-                            <label className="block text-xs text-gray-700">Выберите месяц для подгрузки</label>
-                            <div className="flex gap-2 mt-1">
-                            <select value={selectedMonth} onChange={e=>setSelectedMonth(e.target.value)} className="p-2 border rounded flex-1">
+                        <div className="flex items-center gap-3">
+                            <select value={selectedMonth} onChange={e=>setSelectedMonth(e.target.value)} className="px-3 py-2 border border-gray-200 rounded-lg text-sm bg-white focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
                                 {getMonthOptions()}
                             </select>
-                            </div>
-                        </div>
-
+                            <button onClick={() => { fetchDirections(); fetchSvOperators(selectedMonth); }} className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors flex items-center gap-2">
+                                <FaIcon className="fa-solid fa-arrows-rotate text-gray-400" />
+                                Обновить
+                            </button>
                         </div>
                     </div>
 
-                    {/* Active range / hint */}
-                    {activeRange ? (
-                        <div className="p-3 rounded border bg-white text-sm text-gray-700">Ищем звонки с длительностью от <strong>{secondsToHms(activeRange.min)}</strong> {activeRange.max != null ? <>до <strong>{secondsToHms(activeRange.max)}</strong></> : 'и больше'} (с учётом вариации)</div>
-                    ) : (
-                        <div className="p-3 rounded border bg-white text-sm text-gray-500">Диапазон не задан — показываются все звонки (если оператор не имеет ручных настроек).</div>
-                    )}
+                    {/* Summary stats strip */}
+                    <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-3">
+                        <div className="flex items-center gap-3 px-4 py-2.5 bg-blue-50 rounded-lg">
+                            <FaIcon className="fa-solid fa-users text-blue-500" />
+                            <div><div className="text-xs text-blue-600">Операторов</div><div className="text-sm font-semibold text-blue-900">{svOperators.length}</div></div>
+                        </div>
+                        <div className="flex items-center gap-3 px-4 py-2.5 bg-emerald-50 rounded-lg">
+                            <FaIcon className="fa-solid fa-phone text-emerald-500" />
+                            <div><div className="text-xs text-emerald-600">Звонков в CSV</div><div className="text-sm font-semibold text-emerald-900">{totalCsvCalls}</div></div>
+                        </div>
+                        <div className="flex items-center gap-3 px-4 py-2.5 bg-violet-50 rounded-lg">
+                            <FaIcon className="fa-solid fa-user-check text-violet-500" />
+                            <div><div className="text-xs text-violet-600">С совпадениями</div><div className="text-sm font-semibold text-violet-900">{totalMatchedOperators}</div></div>
+                        </div>
+                        <div className={`flex items-center gap-3 px-4 py-2.5 rounded-lg ${totalInsufficientCount > 0 ? 'bg-amber-50' : 'bg-gray-50'}`}>
+                            <FaIcon className={`fa-solid fa-triangle-exclamation ${totalInsufficientCount > 0 ? 'text-amber-500' : 'text-gray-400'}`} />
+                            <div><div className={`text-xs ${totalInsufficientCount > 0 ? 'text-amber-600' : 'text-gray-500'}`}>Нехватка</div><div className={`text-sm font-semibold ${totalInsufficientCount > 0 ? 'text-amber-900' : 'text-gray-600'}`}>{totalInsufficientCount}</div></div>
+                        </div>
                     </div>
                 </div>
+
+                <div className="px-6 py-5 space-y-5">
+
+                {/* ===== Configuration Panel (collapsible) ===== */}
+                <details className="bg-white rounded-xl border border-gray-200 shadow-sm" open={calls.length === 0}>
+                    <summary className="flex items-center justify-between px-5 py-4 cursor-pointer select-none hover:bg-gray-50 transition-colors rounded-xl">
+                        <div className="flex items-center gap-3">
+                            <div className="w-8 h-8 rounded-lg bg-gray-100 flex items-center justify-center">
+                                <FaIcon className="fa-solid fa-sliders text-gray-500" />
+                            </div>
+                            <div>
+                                <span className="text-sm font-semibold text-gray-800">Настройки загрузки и фильтры</span>
+                                {hasActiveFilters && <span className="ml-2 px-2 py-0.5 text-xs bg-blue-100 text-blue-700 rounded-full font-medium">Фильтры активны</span>}
+                            </div>
+                        </div>
+                        <FaIcon className="fa-solid fa-chevron-down text-gray-400 text-sm" />
+                    </summary>
+
+                    <div className="px-5 pb-5 border-t border-gray-100">
+                        <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 mt-4">
+
+                            {/* Column 1: File upload */}
+                            <div className="space-y-4">
+                                <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Загрузка файлов</h4>
+                                <div className="border-2 border-dashed border-gray-200 rounded-xl p-4 hover:border-blue-300 transition-colors bg-gray-50/50">
+                                    <input ref={fileInputRef} type="file" accept=".csv,.xls,.xlsx" multiple onChange={handleFilesSelected} className="text-sm w-full file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-medium file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 file:cursor-pointer" />
+                                    <p className="mt-2 text-xs text-gray-400">CSV файлы. Заголовки пропускаются автоматически.</p>
+                                </div>
+
+                                {files.length > 0 && (
+                                    <div className="text-sm text-gray-600 max-h-24 overflow-auto space-y-1">
+                                        {files.map((f,i) => (
+                                            <div key={i} className="flex items-center gap-2 px-3 py-1.5 bg-white rounded-lg border text-xs">
+                                                <FaIcon className="fa-solid fa-file-csv text-green-500" />
+                                                <span className="truncate flex-1">{f.name}</span>
+                                                <span className="text-gray-400">{Math.round(f.size/1024)} KB</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+
+                                <div className="flex items-center gap-2">
+                                    <button onClick={splitAll} disabled={files.length===0 || parsing || loadingOperators} className={`flex-1 px-4 py-2.5 rounded-lg text-sm font-medium text-white transition-all ${(parsing || loadingOperators) ? 'bg-gray-300 cursor-not-allowed' : 'bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-700 hover:to-blue-600 shadow-sm'}`}>
+                                        {(parsing || loadingOperators) ? (<><FaIcon className="fa-solid fa-spinner fa-spin mr-2" />Обработка...</>) : (<><FaIcon className="fa-solid fa-play mr-2" />Загрузить и разделить</>)}
+                                    </button>
+                                    <button onClick={() => { setFiles([]); setCalls([]); setOperatorMap({}); setSelectedOperator(null); setSelectedCalls(new Set()); setActiveRange(null); setOperatorParams({}); setSelectedOperatorsForShuffle(new Set()); setOperatorSearch(''); setDistributionTab('general'); if (fileInputRef.current) fileInputRef.current.value = null; }} className="px-4 py-2.5 rounded-lg text-sm font-medium text-gray-600 bg-white border border-gray-200 hover:bg-gray-50 transition-colors">
+                                        Сброс
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* Column 2: Duration & sample settings */}
+                            <div className="space-y-4">
+                                <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Параметры выборки</h4>
+                                <div className="space-y-3">
+                                    <div>
+                                        <label className="block text-xs font-medium text-gray-600 mb-1">Мин. длительность</label>
+                                        <DurationInput valueSec={minDurationSec} onChange={v=>setMinDurationSec(v)} ariaLabel="min duration" />
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-medium text-gray-600 mb-1">Макс. длительность</label>
+                                        <DurationInput valueSec={maxDurationSec} onChange={v=>setMaxDurationSec(v)} ariaLabel="max duration" />
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-medium text-gray-600 mb-1">Вариация (+-)</label>
+                                        <DurationInput valueSec={variationSec} onChange={v=>setVariationSec(v)} ariaLabel="variation" />
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-medium text-gray-600 mb-1">Кол-во звонков на оператора</label>
+                                        <input type="number" min="0" value={sampleCount} onChange={e=>setSampleCount(e.target.value)} className="w-20 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500" />
+                                    </div>
+                                </div>
+
+                                {activeRange && (
+                                    <div className="px-3 py-2 bg-blue-50 rounded-lg text-xs text-blue-700">
+                                        Диапазон: <strong>{secondsToHms(activeRange.min)}</strong> {activeRange.max != null ? <> — <strong>{secondsToHms(activeRange.max)}</strong></> : '+'} (с вариацией)
+                                    </div>
+                                )}
+
+                                <button onClick={() => { setMinDurationSec(null); setMaxDurationSec(null); setVariationSec(0); setSampleCount(3); setSelectedStatuses(['all']); setOnlyWithCsv(false); setSelectedDirections(['all']); setSelectedHireMonths(['all']); setExpandedHireYears({}); setSelectedOperatorsForShuffle(new Set()); setOperatorSearch(''); applyFilters(); }} className="text-xs text-gray-500 hover:text-gray-700 underline">
+                                    Сбросить все настройки
+                                </button>
+                            </div>
+
+                            {/* Column 3: Filters */}
+                            <div className="space-y-4">
+                                <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Фильтры операторов</h4>
+
+                                {/* Statuses */}
+                                <div>
+                                    <label className="block text-xs font-medium text-gray-600 mb-2">Статус</label>
+                                    <div className="flex flex-wrap gap-1.5">
+                                        <button onClick={()=>setSelectedStatuses(['all'])} className={`px-2.5 py-1 text-xs rounded-lg border transition-colors ${selectedStatuses.includes('all') ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300'}`}>Все</button>
+                                        {statusOptions.map(st => (
+                                            <button key={st} onClick={() => toggleStatusSelection(st)} className={`px-2.5 py-1 text-xs rounded-lg border transition-colors ${selectedStatuses.some(s => normalizeSvOperatorStatusFilterValue(s) === st) ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300'}`}>
+                                                {getSvOperatorStatusFilterLabel(st)}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                {/* Directions */}
+                                <div>
+                                    <label className="block text-xs font-medium text-gray-600 mb-2">Направление</label>
+                                    <div className="flex flex-wrap gap-1.5">
+                                        <button onClick={()=>setSelectedDirections(['all'])} className={`px-2.5 py-1 text-xs rounded-lg border transition-colors ${selectedDirections.includes('all') ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300'}`}>Все</button>
+                                        {directionOptions.map(d => (
+                                            <button key={d.id} onClick={()=>toggleDirectionSelection(d.id)} className={`px-2.5 py-1 text-xs rounded-lg border transition-colors ${selectedDirections.includes(String(d.id)) ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300'}`}>{d.name}</button>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                {/* Hire date */}
+                                <div>
+                                    <label className="block text-xs font-medium text-gray-600 mb-2">Дата найма</label>
+                                    <div className="space-y-1.5">
+                                        <button onClick={() => setSelectedHireMonths(['all'])} className={`px-2.5 py-1 text-xs rounded-lg border transition-colors ${selectedHireMonths.includes('all') ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300'}`}>
+                                            Все
+                                        </button>
+                                        {hireMonthTree.length === 0 ? (
+                                            <p className="text-xs text-gray-400">Нет данных</p>
+                                        ) : (
+                                            <div className="space-y-1">
+                                                {hireMonthTree.map(item => (
+                                                    <div key={item.year} className="border border-gray-200 rounded-lg overflow-hidden">
+                                                        <button type="button" onClick={() => toggleHireYear(item.year)} className="w-full flex items-center justify-between px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 transition-colors">
+                                                            <span>{item.year}</span>
+                                                            <FaIcon className={`fa-solid fa-chevron-${expandedHireYears[item.year] ? 'up' : 'down'} text-gray-400 text-[10px]`} />
+                                                        </button>
+                                                        {expandedHireYears[item.year] && (
+                                                            <div className="px-3 pb-2 pt-1 border-t border-gray-100 flex flex-wrap gap-1">
+                                                                {item.months.map(month => (
+                                                                    <button key={month.value} type="button" onClick={() => toggleHireMonthSelection(month.value)} className={`px-2 py-0.5 text-xs rounded border transition-colors ${selectedHireMonths.includes(month.value) ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300'}`}>
+                                                                        {month.label}
+                                                                    </button>
+                                                                ))}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                        {!selectedHireMonths.includes('all') && (
+                                            <p className="text-xs text-gray-500">Выбрано: {selectedHireMonthLabels}</p>
+                                        )}
+                                    </div>
+                                </div>
+
+                                {/* Only with CSV */}
+                                <label className="flex items-center gap-2 text-xs text-gray-600 cursor-pointer select-none">
+                                    <input type="checkbox" checked={onlyWithCsv} onChange={e=>setOnlyWithCsv(e.target.checked)} className="rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+                                    Только операторы с звонками в CSV
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                </details>
 
                 <div className="mb-4 border-b border-gray-200">
                     <div className="inline-flex items-center gap-1 p-1 bg-gray-100 rounded-lg">
@@ -3975,66 +4005,38 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 {distributionTab === 'general' && (
                 <div className="space-y-4 mb-4">
                     {insufficientOperators.length > 0 && (
-                    <div className="p-3 bg-red-50 border border-red-200 rounded">
-                        <div className="flex items-center justify-between mb-2">
-                        <div className="text-sm font-medium text-red-700">Недостаточно звонков — сначала</div>
-                        <div className="text-xs text-red-600">{insufficientOperators.length} оператор(ов)</div>
+                    <div className="bg-white rounded-xl border border-red-200 shadow-sm overflow-hidden">
+                        <div className="flex items-center justify-between px-5 py-3 bg-red-50 border-b border-red-200">
+                            <div className="flex items-center gap-2">
+                                <FaIcon className="fa-solid fa-triangle-exclamation text-red-500 text-sm" />
+                                <span className="text-sm font-semibold text-red-700">Недостаточно звонков</span>
+                            </div>
+                            <span className="text-xs font-medium text-red-600 bg-red-100 px-2.5 py-0.5 rounded-full">{insufficientOperators.length} оп.</span>
                         </div>
-                        <ul className="space-y-2">
+                        <ul className="divide-y divide-gray-100">
                         {insufficientOperators.map((it, idx) => (
-                            <li
-                                key={(it.op ? (it.op.name || it.op.id) : it.csvName) + idx}
-                                className="flex items-center justify-between p-3 rounded-xl border bg-white shadow-sm hover:shadow-md transition-all duration-200"
-                                >
-                                <div className="flex-1">
-                                    <div className="font-semibold text-gray-800 flex items-center gap-2">
-                                    <FaIcon className="fa-solid fa-user text-blue-500 text-sm"></FaIcon>
-                                    {it.op ? (it.op.name || it.op.login || it.op.id) : it.csvName}
+                            <li key={(it.op ? (it.op.name || it.op.id) : it.csvName) + idx}
+                                className="flex items-center justify-between px-5 py-3 hover:bg-gray-50 transition-colors">
+                                <div className="flex-1 min-w-0">
+                                    <div className="font-medium text-gray-800 text-sm flex items-center gap-2">
+                                        <FaIcon className="fa-solid fa-user text-blue-400 text-xs" />
+                                        {it.op ? (it.op.name || it.op.login || it.op.id) : it.csvName}
                                     </div>
-
-                                    <div className="text-xs text-gray-500 flex items-center gap-1 mt-0.5">
-                                    <FaIcon className="fa-solid fa-diagram-project text-gray-400"></FaIcon>
-                                    {it.op ? (it.op.direction_name || it.op.direction || '') : 'CSV-only'}
-                                    </div>
-
-                                    <div className="text-xs text-red-600 mt-1 flex items-center gap-1">
-                                    <FaIcon className="fa-solid fa-triangle-exclamation text-red-500"></FaIcon>
-                                    НЕДОСТАТОЧНО ({it.csvCount} / {it.desired})
+                                    <div className="text-xs text-gray-500 mt-0.5">
+                                        {it.op ? (it.op.direction_name || it.op.direction || '—') : 'CSV-only'}
+                                        <span className="mx-1.5 text-gray-300">·</span>
+                                        <span className="text-red-600 font-medium">{it.csvCount} / {it.desired} звонков</span>
                                     </div>
                                 </div>
-
-                                <div className="flex items-center gap-2 text-xs">
-                                    {it.op && (
-                                    <div className="px-2 py-0.5 rounded-lg border border-blue-300 text-blue-600 font-medium flex items-center gap-1 bg-blue-50">
-                                        <FaIcon className="fa-solid fa-phone"></FaIcon>
-                                        Оценки: {it.op.call_count ?? 0}
-                                    </div>
-                                    )}
-
-                                    <div className="px-2 py-0.5 rounded-lg border border-green-300 text-green-600 font-medium flex items-center gap-1 bg-green-50">
-                                    <FaIcon className="fa-solid fa-check"></FaIcon>
-                                    Подходящие: {it.csvCount}
-                                    </div>
-
-                                    <button
-                                    onClick={() =>
-                                        openEditOperator(it.op ? (it.op.name || it.op.login || it.op.id) : it.csvName)
-                                    }
-                                    className="flex items-center gap-1 px-3 py-1 border rounded-lg text-sm bg-gray-50 hover:bg-gray-100 transition-colors"
-                                    >
-                                    <FaIcon className="fa-solid fa-gear text-gray-500"></FaIcon>
-                                    Настройки
+                                <div className="flex items-center gap-2 ml-4 flex-shrink-0">
+                                    {it.op && <span className="text-xs text-blue-600 bg-blue-50 border border-blue-100 px-2 py-0.5 rounded-md">Оценки: {it.op.call_count ?? 0}</span>}
+                                    <button onClick={() => openEditOperator(it.op ? (it.op.name || it.op.login || it.op.id) : it.csvName)}
+                                        className="text-xs px-2.5 py-1 border border-gray-200 rounded-lg bg-white hover:bg-gray-50 text-gray-600 transition-colors flex items-center gap-1">
+                                        <FaIcon className="fa-solid fa-gear text-gray-400" />Настройки
                                     </button>
-
-                                    <button
-                                    onClick={() => {
-                                        if (it.op) handleShowOperator(it.op.name || it.op.id);
-                                        else handleShowOperator(it.matchedKey || it.csvName);
-                                    }}
-                                    className="flex items-center gap-1 px-3 py-1 border rounded-lg text-sm bg-gray-50 hover:bg-gray-100 transition-colors"
-                                    >
-                                    <FaIcon className="fa-solid fa-eye text-gray-500"></FaIcon>
-                                    Просмотр
+                                    <button onClick={() => { if (it.op) handleShowOperator(it.op.name || it.op.id); else handleShowOperator(it.matchedKey || it.csvName); }}
+                                        className="text-xs px-2.5 py-1 border border-gray-200 rounded-lg bg-white hover:bg-gray-50 text-gray-600 transition-colors flex items-center gap-1">
+                                        <FaIcon className="fa-solid fa-eye text-gray-400" />Просмотр
                                     </button>
                                 </div>
                             </li>
@@ -4043,7 +4045,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     </div>
                     )}
 
-                    <h4 className="text-sm font-medium">Операторы (группировка: SV → Направления)</h4>
+                    <div className="flex items-center gap-2">
+                        <FaIcon className="fa-solid fa-layer-group text-gray-400 text-sm" />
+                        <h4 className="text-sm font-semibold text-gray-700">Операторы</h4>
+                        <span className="text-xs text-gray-400">SV → Направления</span>
+                    </div>
 
                     {loadingOperators ? (
                     <div className="text-sm text-gray-500">Загрузка операторов...</div>
@@ -4052,16 +4058,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     ) : (
                     <div className="space-y-3">
                         {Object.entries(groupedBySvThenDir).map(([svName, dirs]) => (
-                        <details key={svName} className="p-3 bg-white rounded shadow-sm border">
-                            <summary className="flex items-center justify-between cursor-pointer list-none">
-                            <div className="text-sm font-medium">{svName}</div>
-                            <div className="text-xs text-gray-500">{Object.values(dirs).reduce((s,arr)=>s+arr.length,0)} оператор(ов)</div>
+                        <details key={svName} className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+                            <summary className="flex items-center justify-between px-5 py-3.5 cursor-pointer select-none hover:bg-gray-50 transition-colors list-none">
+                            <div className="flex items-center gap-2">
+                                <FaIcon className="fa-solid fa-user-tie text-gray-400 text-sm" />
+                                <span className="text-sm font-semibold text-gray-800">{svName}</span>
+                            </div>
+                            <span className="text-xs text-gray-500 bg-gray-100 px-2.5 py-0.5 rounded-full">{Object.values(dirs).reduce((s,arr)=>s+arr.length,0)} оп.</span>
                             </summary>
 
-                            <div className="mt-3 space-y-2">
+                            <div className="border-t border-gray-100 divide-y divide-gray-50">
                             {Object.entries(dirs).map(([dirName, ops]) => (
-                                <div key={dirName} className="mb-2">
-                                <div className="text-xs font-semibold mb-1">{dirName}</div>
+                                <div key={dirName} className="px-5 py-3">
+                                <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">{dirName}</div>
                                 <ul className="space-y-1">
                                     {ops.map(op => {
                                     const displayName = op.name || op.login || op.operator_name || String(op.id || '—');
@@ -4114,7 +4123,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </div>
 
                                         {/* Средняя часть — визуальные кружки */}
-                                        <div className="mx-4 flex-shrink-0">{renderCircles({ apiCount, csvCount, desiredForOp: desired })}</div>
+                                        <div className="mx-4 flex-shrink-0">{renderProgressBar({ apiCount, csvCount, desiredForOp: desired })}</div>
 
                                         {/* Правая часть — счётчики и кнопки */}
                                         <div className="flex items-center gap-2 flex-wrap justify-end text-xs">
@@ -4156,31 +4165,40 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         ))}
 
                         {unmatchedCsvOperators.length > 0 && selectedDirections.includes('all') && (
-                        <div className="p-3 bg-gray-50 rounded border">
-                            <div className="flex items-center justify-between mb-2">
-                            <div className="text-sm font-medium">Операторы из CSV — не сопоставлены с API</div>
-                            <div className="text-xs text-gray-500">{unmatchedCsvOperators.length}</div>
+                        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+                            <div className="flex items-center justify-between px-5 py-3 bg-gray-50 border-b border-gray-200">
+                                <div className="flex items-center gap-2">
+                                    <FaIcon className="fa-solid fa-file-csv text-gray-400 text-sm" />
+                                    <span className="text-sm font-semibold text-gray-700">CSV-only (не сопоставлены с API)</span>
+                                </div>
+                                <span className="text-xs text-gray-500 bg-gray-100 px-2.5 py-0.5 rounded-full">{unmatchedCsvOperators.length}</span>
                             </div>
-                            <ul className="space-y-2">
+                            <ul className="divide-y divide-gray-100">
                             {unmatchedCsvOperators.map(k => {
                                 const csvOnly = Number(operatorMap[k]?.count || 0);
                                 const desired = operatorParams[k]?.sampleCount != null ? Number(operatorParams[k].sampleCount) : Number(sampleCount) || 0;
                                 const insufficient = csvOnly < desired;
                                 if (onlyWithCsv && csvOnly === 0) return null;
                                 return (
-                                <li key={k} className={`flex items-center justify-between p-3 border rounded ${insufficient ? 'border-red-400 bg-red-50' : 'bg-white'}`}>
-                                    <div className="flex-1">
-                                    <div className="font-medium">{k}</div>
-                                    <div className="text-xs text-gray-500">Кол-во совпадений: {csvOnly}</div>
-                                    {operatorMap[k]?.custom && (<span className="inline-flex items-center gap-1 text-xs bg-yellow-100 text-yellow-800 px-2 py-0.5 rounded mt-1">Custom</span>)}
-                                    {insufficient && <div className="text-xs text-red-600 mt-1">НЕДОСТАТОЧНО звонков ({csvOnly} / {desired}) — поменяйте настройки</div>}
+                                <li key={k} className={`flex items-center justify-between px-5 py-3 hover:bg-gray-50 transition-colors ${insufficient ? 'bg-red-50/40' : ''}`}>
+                                    <div className="flex-1 min-w-0">
+                                        <div className="font-medium text-sm text-gray-800 flex items-center gap-2">
+                                            <FaIcon className="fa-solid fa-user-slash text-gray-400 text-xs" />{k}
+                                            {operatorMap[k]?.custom && <span className="text-xs bg-yellow-100 text-yellow-800 px-1.5 py-0.5 rounded">Custom</span>}
+                                        </div>
+                                        <div className="text-xs text-gray-500 mt-0.5">
+                                            Совпадений: {csvOnly}
+                                            {insufficient && <span className="ml-2 text-red-600 font-medium">· нехватка ({csvOnly}/{desired})</span>}
+                                        </div>
                                     </div>
-
-                                    <div className="mx-4 flex-shrink-0">{renderCircles({ apiCount: 0, csvCount: csvOnly, desiredForOp: desired })}</div>
-
-                                    <div className="flex gap-2">
-                                    <button onClick={() => openEditOperator(k)} className="px-2 py-1 border rounded text-sm">Настройки</button>
-                                    <button onClick={() => { handleShowOperator(k); }} className="px-2 py-1 border rounded text-sm">Просмотр</button>
+                                    <div className="mx-4 flex-shrink-0">{renderProgressBar({ apiCount: 0, csvCount: csvOnly, desiredForOp: desired })}</div>
+                                    <div className="flex gap-2 flex-shrink-0">
+                                        <button onClick={() => openEditOperator(k)} className="text-xs px-2.5 py-1 border border-gray-200 rounded-lg bg-white hover:bg-gray-50 text-gray-600 transition-colors flex items-center gap-1">
+                                            <FaIcon className="fa-solid fa-gear text-gray-400" />Настройки
+                                        </button>
+                                        <button onClick={() => handleShowOperator(k)} className="text-xs px-2.5 py-1 border border-gray-200 rounded-lg bg-white hover:bg-gray-50 text-gray-600 transition-colors flex items-center gap-1">
+                                            <FaIcon className="fa-solid fa-eye text-gray-400" />Просмотр
+                                        </button>
                                     </div>
                                 </li>
                                 );
@@ -4195,48 +4213,59 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                 {distributionTab === 'by_operator' && (
                 <div className="space-y-4 mb-4">
-                    <div className="p-4 bg-gray-50 border rounded">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div className="text-sm font-medium">Выбор операторов для распределения</div>
-                        <div className="text-xs text-gray-600">
-                        Выбрано: <span className="font-semibold">{selectedOperatorsForShuffle.size}</span> / {operatorSelectionList.length}
+                    <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+                    {/* Header */}
+                    <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4 border-b border-gray-100">
+                        <div className="flex items-center gap-2">
+                            <FaIcon className="fa-solid fa-users text-indigo-400" />
+                            <span className="text-sm font-semibold text-gray-800">Выбор операторов для распределения</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <span className="text-xs text-gray-500">Выбрано:</span>
+                            <span className="text-sm font-bold text-indigo-700">{selectedOperatorsForShuffle.size}</span>
+                            <span className="text-xs text-gray-400">/ {operatorSelectionList.length}</span>
                         </div>
                     </div>
 
-                    <div className="mt-3 flex flex-wrap items-center gap-2">
-                        <input
-                        value={operatorSearch}
-                        onChange={e => setOperatorSearch(e.target.value)}
-                        placeholder="Поиск по оператору, SV или направлению"
-                        className="flex-1 min-w-[260px] p-2 border rounded text-sm"
-                        />
-                        <button onClick={selectAllVisibleOperatorsForShuffle} className="px-3 py-2 border rounded text-sm bg-white hover:bg-gray-50">Выбрать всех</button>
-                        <button onClick={clearSelectedOperatorsForShuffle} className="px-3 py-2 border rounded text-sm bg-white hover:bg-gray-50">Снять выбор</button>
+                    {/* Search + actions */}
+                    <div className="px-5 py-3 flex flex-wrap items-center gap-2 bg-gray-50 border-b border-gray-100">
+                        <div className="relative flex-1 min-w-[240px]">
+                            <FaIcon className="fa-solid fa-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-xs" />
+                            <input value={operatorSearch} onChange={e => setOperatorSearch(e.target.value)}
+                                placeholder="Поиск по оператору, SV или направлению"
+                                className="w-full pl-8 pr-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 bg-white" />
+                        </div>
+                        <button onClick={selectAllVisibleOperatorsForShuffle} className="px-3 py-2 border border-gray-200 rounded-lg text-sm bg-white hover:bg-gray-50 text-gray-700 transition-colors">Выбрать всех</button>
+                        <button onClick={clearSelectedOperatorsForShuffle} className="px-3 py-2 border border-gray-200 rounded-lg text-sm bg-white hover:bg-gray-50 text-gray-700 transition-colors">Снять выбор</button>
                     </div>
 
+                    {/* List */}
                     {operatorSelectionList.length === 0 ? (
-                        <div className="mt-3 text-sm text-gray-500">По текущим фильтрам операторы не найдены.</div>
+                        <div className="px-5 py-8 text-sm text-gray-400 text-center">По текущим фильтрам операторы не найдены.</div>
                     ) : (
-                        <ul className="mt-3 max-h-80 overflow-auto space-y-2">
+                        <ul className="max-h-80 overflow-auto divide-y divide-gray-100">
                         {operatorSelectionList.map(item => {
                             const isSelected = selectedOperatorLowerSet.has(normalizeName(item.name));
                             const selectedCallsCount = countSelectedCallsForOperator(item.name);
                             return (
-                            <li key={item.name} className={`flex items-center justify-between p-3 rounded-lg border ${isSelected ? 'border-blue-300 bg-blue-50/30' : 'bg-white'}`}>
-                                <div className="min-w-0 flex-1">
-                                <label className="flex items-center gap-2 cursor-pointer">
-                                    <input type="checkbox" checked={isSelected} onChange={() => toggleOperatorForShuffle(item.name)} />
-                                    <span className="font-medium truncate">{item.name}</span>
+                            <li key={item.name} className={`flex items-center justify-between px-5 py-3 hover:bg-gray-50 transition-colors ${isSelected ? 'bg-indigo-50/40' : ''}`}>
+                                <label className="flex items-center gap-3 cursor-pointer flex-1 min-w-0">
+                                    <input type="checkbox" checked={isSelected} onChange={() => toggleOperatorForShuffle(item.name)}
+                                        className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500" />
+                                    <div className="min-w-0">
+                                        <div className={`text-sm font-medium truncate ${isSelected ? 'text-indigo-800' : 'text-gray-800'}`}>{item.name}</div>
+                                        <div className="text-xs text-gray-500 truncate mt-0.5">
+                                            {item.supervisor || '—'} · {item.direction || '—'}{item.status ? ` · ${item.status}` : ''}
+                                        </div>
+                                    </div>
                                 </label>
-                                <div className="mt-1 text-xs text-gray-500 truncate">
-                                    {item.supervisor || '-'} | {item.direction || '-'} {item.status ? `| ${item.status}` : ''}
-                                </div>
-                                </div>
-                                <div className="flex items-center gap-2 text-xs">
-                                <span className="px-2 py-0.5 border rounded bg-white">Оценки: {item.apiCount}</span>
-                                <span className="px-2 py-0.5 border rounded bg-white">Подходящие: {item.csvCount}</span>
-                                <span className="px-2 py-0.5 border rounded bg-white">Выбрано звонков: {selectedCallsCount}</span>
-                                <button onClick={() => handleShowOperator(item.name)} className="px-2 py-1 border rounded bg-white hover:bg-gray-50">Звонки</button>
+                                <div className="flex items-center gap-2 text-xs ml-3 flex-shrink-0">
+                                    <span className="text-blue-600 bg-blue-50 border border-blue-100 px-2 py-0.5 rounded-md">Оценки: {item.apiCount}</span>
+                                    <span className="text-green-600 bg-green-50 border border-green-100 px-2 py-0.5 rounded-md">Подходящих: {item.csvCount}</span>
+                                    {selectedCallsCount > 0 && <span className="text-indigo-600 bg-indigo-50 border border-indigo-100 px-2 py-0.5 rounded-md">Отмечено: {selectedCallsCount}</span>}
+                                    <button onClick={() => handleShowOperator(item.name)} className="px-2.5 py-1 border border-gray-200 rounded-lg bg-white hover:bg-gray-50 text-gray-600 transition-colors flex items-center gap-1">
+                                        <FaIcon className="fa-solid fa-eye text-gray-400" />Звонки
+                                    </button>
                                 </div>
                             </li>
                             );
@@ -4244,69 +4273,80 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         </ul>
                     )}
 
-                    <div className="mt-3 text-xs text-gray-500">
-                        Если у выбранного оператора отмечены конкретные звонки, в распределение уйдут именно они; если не отмечены, применится обычная выборка по количеству.
+                    {/* Hint */}
+                    <div className="px-5 py-3 bg-blue-50/50 border-t border-blue-100">
+                        <p className="text-xs text-blue-600">
+                            <FaIcon className="fa-solid fa-circle-info mr-1.5" />
+                            Если у выбранного оператора отмечены звонки вручную, в распределение уйдут именно они. Иначе применится выборка по количеству.
+                        </p>
                     </div>
                     </div>
                 </div>
                 )}
 
-                {/* Selected operator panel (improved visuals) */}
+                {/* Selected operator panel */}
                 {selectedOperator && (
-                    <div className={"transition-all " + (pinnedOperator ? 'fixed right-6 bottom-6 w-[min(920px,96%)] max-h-[75vh] bg-white z-50 shadow-2xl rounded border overflow-auto p-6' : 'mt-6 p-6 border rounded-lg bg-white') }>
-                        <div className="flex items-center justify-between mb-4 px-2">
-                            <div>
-                            <h5 className="text-lg font-semibold truncate">Оператор: {selectedOperator}</h5>
-                            <div className="text-sm text-gray-500">Всего подходящих: {operatorMap[selectedOperator]?.count ?? (operatorView.operatorKey === selectedOperator ? operatorView.matching.length : 0)}</div>
-                            <div className="text-sm text-gray-500">Выбрано вручную: {countSelectedCallsForOperator(selectedOperator)}</div>
+                    <div className={"bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden transition-all " + (pinnedOperator ? 'fixed right-6 bottom-6 w-[min(960px,96vw)] max-h-[78vh] z-50 shadow-2xl flex flex-col' : 'mt-4')}>
+                        {/* Panel header */}
+                        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 bg-gray-50 flex-shrink-0">
+                            <div className="flex items-center gap-3 min-w-0">
+                                <div className="w-9 h-9 rounded-lg bg-blue-100 flex items-center justify-center flex-shrink-0">
+                                    <FaIcon className="fa-solid fa-user text-blue-600" />
+                                </div>
+                                <div className="min-w-0">
+                                    <h5 className="text-sm font-bold text-gray-900 truncate">{selectedOperator}</h5>
+                                    <div className="flex items-center gap-3 text-xs text-gray-500 mt-0.5">
+                                        <span>Подходящих: <strong>{operatorMap[selectedOperator]?.count ?? (operatorView.operatorKey === selectedOperator ? operatorView.matching.length : 0)}</strong></span>
+                                        <span className="text-gray-300">·</span>
+                                        <span>Выбрано: <strong className="text-blue-700">{countSelectedCallsForOperator(selectedOperator)}</strong></span>
+                                    </div>
+                                </div>
                             </div>
-
-                            <div className="flex items-center gap-3">
-
-                            <button onClick={handleAssign} className="px-4 py-2 bg-blue-600 text-white rounded text-sm">Экспорт</button>
-                            <button onClick={() => selectAllForOperator(selectedOperator)} className="px-3 py-2 border rounded text-sm">Выбрать все</button>
-                            <button onClick={() => clearSelectedCallsForOperator(selectedOperator)} className="px-3 py-2 border rounded text-sm">Снять выбор</button>
-
-                            <button title="Настройки оператора" onClick={handleOpenSettings} className="px-2 p-1 border rounded text-base bg-white hover:shadow" aria-label="Настройки">
-                                <FaIcon className="fa-solid fa-gear text-xl text-gray-700"></FaIcon>
-                            </button>
-
-                            <button title="Закрыть панель" onClick={handleClosePanel} className="px-3 p-1 border rounded text-base bg-white hover:shadow" aria-label="Закрыть">
-                                <FaIcon className="fa-solid fa-xmark text-xl text-gray-700"></FaIcon>
-                            </button>
+                            <div className="flex items-center gap-2 flex-shrink-0">
+                                <button onClick={() => selectAllForOperator(selectedOperator)} className="text-xs px-2.5 py-1.5 border border-gray-200 rounded-lg bg-white hover:bg-gray-50 text-gray-700 transition-colors">Выбрать все</button>
+                                <button onClick={() => clearSelectedCallsForOperator(selectedOperator)} className="text-xs px-2.5 py-1.5 border border-gray-200 rounded-lg bg-white hover:bg-gray-50 text-gray-700 transition-colors">Снять выбор</button>
+                                <button onClick={handleAssign} className="text-xs px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium transition-colors flex items-center gap-1.5">
+                                    <FaIcon className="fa-solid fa-file-export" />Экспорт
+                                </button>
+                                <button title="Настройки оператора" onClick={handleOpenSettings} className="w-8 h-8 flex items-center justify-center border border-gray-200 rounded-lg bg-white hover:bg-gray-50 transition-colors" aria-label="Настройки">
+                                    <FaIcon className="fa-solid fa-gear text-gray-500" />
+                                </button>
+                                <button title="Закрыть панель" onClick={handleClosePanel} className="w-8 h-8 flex items-center justify-center border border-gray-200 rounded-lg bg-white hover:bg-gray-50 transition-colors" aria-label="Закрыть">
+                                    <FaIcon className="fa-solid fa-xmark text-gray-500" />
+                                </button>
                             </div>
                         </div>
 
-                        <div className="max-h-[60vh] overflow-auto p-4">
+                        <div className="overflow-auto flex-1" style={{maxHeight: pinnedOperator ? undefined : '60vh'}}>
                         {/* Show matching (подходящие) */}
-                        <div className="mb-3">
-                        <div className="flex items-center justify-between mb-2">
-                            <div className="text-sm font-semibold">Подходящие</div>
-                            <div className="text-xs text-gray-500">{(operatorView.operatorKey === selectedOperator ? operatorView.matching.length : (operatorMap[selectedOperator]?.all || []).length)} звонков</div>
+                        <div className="mb-0">
+                        <div className="flex items-center justify-between px-5 py-2.5 bg-green-50 border-b border-green-100">
+                            <span className="text-xs font-semibold text-green-700 flex items-center gap-1.5"><FaIcon className="fa-solid fa-check-circle" />Подходящие</span>
+                            <span className="text-xs text-green-600">{(operatorView.operatorKey === selectedOperator ? operatorView.matching.length : (operatorMap[selectedOperator]?.all || []).length)} зв.</span>
                         </div>
 
-                        <table className="w-full text-base table-auto border-collapse mb-4">
-                            <thead className="bg-gray-100 sticky top-0">
+                        <table className="w-full text-sm table-auto border-collapse">
+                            <thead className="bg-gray-50 border-b border-gray-200 sticky top-0">
                             <tr>
-                                <th className="p-2 text-left">Выбор</th>
-                                <th className="p-2 text-left">#</th>
-                                <th className="p-2 text-left">ID</th>
-                                <th className="p-2 text-left">Дата/время</th>
-                                <th className="p-2 text-left">Телефон</th>
-                                <th className="p-2 text-left">Длит.</th>
+                                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500 w-8"></th>
+                                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500 w-8">#</th>
+                                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">ID</th>
+                                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">Дата/время</th>
+                                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">Телефон</th>
+                                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">Длит.</th>
                             </tr>
                             </thead>
-                            <tbody>
+                            <tbody className="divide-y divide-gray-100">
                             {(operatorView.operatorKey === selectedOperator ? operatorView.matching : (operatorMap[selectedOperator]?.all || [])).map((c, idx) => (
-                                <tr key={c.id} className="even:bg-white odd:bg-gray-50">
-                                <td className="p-3 align-top">
-                                    <input type="checkbox" checked={selectedCalls.has(c.id)} onChange={() => toggleSelectCall(c.id)} />
+                                <tr key={c.id} className={`hover:bg-blue-50/40 transition-colors ${selectedCalls.has(c.id) ? 'bg-blue-50' : ''}`}>
+                                <td className="px-4 py-2.5">
+                                    <input type="checkbox" checked={selectedCalls.has(c.id)} onChange={() => toggleSelectCall(c.id)} className="rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
                                 </td>
-                                <td className="p-3 align-top">{idx+1}</td>
-                                <td className="p-3 align-top">{c.id}</td>
-                                <td className="p-3 align-top">{c.datetime ? c.datetime.toLocaleString() : c.datetimeRaw}</td>
-                                <td className="p-3 align-top">{c.phone}</td>
-                                <td className="p-3 align-top">{secondsToHms(c.durationSec)}</td>
+                                <td className="px-4 py-2.5 text-gray-400 text-xs">{idx+1}</td>
+                                <td className="px-4 py-2.5 text-gray-700 font-mono text-xs">{c.id}</td>
+                                <td className="px-4 py-2.5 text-gray-600 text-xs">{c.datetime ? c.datetime.toLocaleString() : c.datetimeRaw}</td>
+                                <td className="px-4 py-2.5 text-gray-600 text-xs">{c.phone}</td>
+                                <td className="px-4 py-2.5 text-gray-700 font-medium text-xs">{secondsToHms(c.durationSec)}</td>
                                 </tr>
                             ))}
                             </tbody>
@@ -4314,107 +4354,114 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         </div>
 
                         {/* Show non-matching (не подходящие) */}
+                        {operatorView.operatorKey === selectedOperator && (
                         <div>
-                        <div className="flex items-center justify-between mb-2">
-                            <div className="text-sm font-semibold">Не подходящие</div>
-                            <div className="text-xs text-gray-500">{(operatorView.operatorKey === selectedOperator ? operatorView.nonMatching.length : 0)} звонков</div>
+                        <div className="flex items-center justify-between px-5 py-2.5 bg-gray-50 border-y border-gray-100">
+                            <span className="text-xs font-semibold text-gray-600 flex items-center gap-1.5"><FaIcon className="fa-solid fa-ban text-gray-400" />Не подходящие</span>
+                            <span className="text-xs text-gray-500">{operatorView.nonMatching.length} зв.</span>
                         </div>
 
-                        {operatorView.operatorKey === selectedOperator && operatorView.nonMatching.length === 0 && (
-                            <div className="text-sm text-gray-500">Нет дополнительных звонков из CSV для этого оператора.</div>
-                        )}
-
-                        {operatorView.operatorKey === selectedOperator && operatorView.nonMatching.length > 0 && (
-                            <table className="w-full text-base table-auto border-collapse">
-                            <thead className="bg-gray-100 sticky top-0">
+                        {operatorView.nonMatching.length === 0 ? (
+                            <div className="px-5 py-4 text-xs text-gray-400">Нет звонков вне диапазона.</div>
+                        ) : (
+                            <table className="w-full text-sm table-auto border-collapse">
+                            <thead className="bg-gray-50 border-b border-gray-200 sticky top-0">
                                 <tr>
-                                <th className="p-3 text-left">Выбор</th>
-                                <th className="p-3 text-left">#</th>
-                                <th className="p-3 text-left">ID</th>
-                                <th className="p-3 text-left">Дата/время</th>
-                                <th className="p-3 text-left">Телефон</th>
-                                <th className="p-3 text-left">Длит.</th>
-                                <th className="p-3 text-left">Причина</th>
+                                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500 w-8"></th>
+                                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500 w-8">#</th>
+                                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">ID</th>
+                                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">Дата/время</th>
+                                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">Телефон</th>
+                                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">Длит.</th>
+                                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">Причина</th>
                                 </tr>
                             </thead>
-                            <tbody>
+                            <tbody className="divide-y divide-gray-100">
                                 {operatorView.nonMatching.map((c, idx) => (
-                                <tr key={c.id} className="even:bg-white odd:bg-gray-50">
-                                    <td className="p-3 align-top">
-                                    <input type="checkbox" checked={selectedCalls.has(c.id)} onChange={() => toggleSelectCall(c.id)} />
-                                    </td>
-                                    <td className="p-3 align-top">{idx+1}</td>
-                                    <td className="p-3 align-top">{c.id}</td>
-                                    <td className="p-3 align-top">{c.datetime ? c.datetime.toLocaleString() : c.datetimeRaw}</td>
-                                    <td className="p-3 align-top">{c.phone}</td>
-                                    <td className="p-3 align-top">{secondsToHms(c.durationSec)}</td>
-                                    <td className="p-3 align-top text-sm text-gray-600">{activeRange ? ((c.durationSec < activeRange.min ? 'короче min' : (activeRange.max != null && c.durationSec > activeRange.max ? 'длиннее max' : 'не прошёл фильтр')) ) : 'Не подходит'}</td>
+                                <tr key={c.id} className="hover:bg-gray-50/70 transition-colors">
+                                    <td className="px-4 py-2.5"><input type="checkbox" checked={selectedCalls.has(c.id)} onChange={() => toggleSelectCall(c.id)} className="rounded border-gray-300 text-blue-600 focus:ring-blue-500" /></td>
+                                    <td className="px-4 py-2.5 text-gray-400 text-xs">{idx+1}</td>
+                                    <td className="px-4 py-2.5 text-gray-700 font-mono text-xs">{c.id}</td>
+                                    <td className="px-4 py-2.5 text-gray-600 text-xs">{c.datetime ? c.datetime.toLocaleString() : c.datetimeRaw}</td>
+                                    <td className="px-4 py-2.5 text-gray-600 text-xs">{c.phone}</td>
+                                    <td className="px-4 py-2.5 text-gray-700 font-medium text-xs">{secondsToHms(c.durationSec)}</td>
+                                    <td className="px-4 py-2.5 text-xs text-orange-600">{activeRange ? (c.durationSec < activeRange.min ? 'короче min' : (activeRange.max != null && c.durationSec > activeRange.max ? 'длиннее max' : 'не прошёл фильтр')) : 'Не подходит'}</td>
                                 </tr>
                                 ))}
                             </tbody>
                             </table>
                         )}
                         </div>
+                        )}
 
-                    </div>
+                        </div>
                     </div>
                 )}
 
-                {/* Operator edit modal (unchanged logic, updated visuals) */}
+                {/* Operator edit modal */}
                 {editingOperator && (
                     <div className="fixed inset-0 flex items-center justify-center z-50">
-                    <div className="absolute inset-0 bg-black opacity-30" onClick={() => setEditingOperator(null)}></div>
-                    <div className="bg-white w-full max-w-lg p-6 rounded shadow-lg relative z-10">
-                        <div className="flex items-center justify-between mb-4">
-                        <h4 className="font-medium">Параметры для оператора: {editingOperator}</h4>
-                        <div className="flex items-center gap-2">
-                            <button onClick={() => { resetOperatorParams(editingOperator); }} className="px-3 py-1 border rounded text-sm">Сброс</button>
-                            <button onClick={() => setEditingOperator(null)} className="px-3 py-1 border rounded text-sm">Закрыть</button>
-                        </div>
+                    <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setEditingOperator(null)} />
+                    <div className="bg-white w-full max-w-lg rounded-2xl shadow-2xl relative z-10 overflow-hidden">
+                        {/* Modal header */}
+                        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100 bg-gray-50">
+                            <div className="flex items-center gap-3">
+                                <div className="w-8 h-8 rounded-lg bg-blue-100 flex items-center justify-center">
+                                    <FaIcon className="fa-solid fa-gear text-blue-600 text-sm" />
+                                </div>
+                                <div>
+                                    <h4 className="text-sm font-bold text-gray-900">Параметры оператора</h4>
+                                    <p className="text-xs text-gray-500 truncate max-w-[240px]">{editingOperator}</p>
+                                </div>
+                            </div>
+                            <button onClick={() => setEditingOperator(null)} className="w-8 h-8 flex items-center justify-center border border-gray-200 rounded-lg bg-white hover:bg-gray-50 transition-colors">
+                                <FaIcon className="fa-solid fa-xmark text-gray-500" />
+                            </button>
                         </div>
 
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {/* Modal body */}
+                        <div className="px-6 py-5 space-y-4">
+                        <div className="grid grid-cols-2 gap-4">
                         <div>
-                            <label className="block text-sm font-medium text-gray-700">Мин. длительность (hh:mm:ss)</label>
-                            <div className="mt-1"><DurationInput valueSec={editingValues.min || 0} onChange={v=>setEditingValues(ev=>({...ev, min: v}))} ariaLabel="min duration" /></div>
+                            <label className="block text-xs font-semibold text-gray-600 mb-1.5">Мин. длительность</label>
+                            <DurationInput valueSec={editingValues.min || 0} onChange={v=>setEditingValues(ev=>({...ev, min: v}))} ariaLabel="min duration" />
                         </div>
-
                         <div>
-                            <label className="block text-sm font-medium text-gray-700">Макс. длительность (hh:mm:ss)</label>
-                            <div className="mt-1"><DurationInput valueSec={editingValues.max || 0} onChange={v=>setEditingValues(ev=>({...ev, max: v}))} ariaLabel="max duration" /></div>
+                            <label className="block text-xs font-semibold text-gray-600 mb-1.5">Макс. длительность</label>
+                            <DurationInput valueSec={editingValues.max || 0} onChange={v=>setEditingValues(ev=>({...ev, max: v}))} ariaLabel="max duration" />
                         </div>
-
                         <div>
-                            <label className="block text-sm font-medium text-gray-700">Вариация (+- hh:mm:ss)</label>
-                            <div className="mt-1"><DurationInput valueSec={editingValues.variation || 0} onChange={v=>setEditingValues(ev=>({...ev, variation: v}))} ariaLabel="variation" /></div>
+                            <label className="block text-xs font-semibold text-gray-600 mb-1.5">Вариация (+–)</label>
+                            <DurationInput valueSec={editingValues.variation || 0} onChange={v=>setEditingValues(ev=>({...ev, variation: v}))} ariaLabel="variation" />
                         </div>
-
                         <div>
-                            <label className="block text-sm font-medium text-gray-700">Сколько выбрать звонков (sampleCount)</label>
-                            <input className="w-40 mt-1 p-2 border rounded" type="number" min="0" value={editingValues.sampleCount} onChange={e=>setEditingValues(ev=>({...ev, sampleCount: e.target.value}))} />
+                            <label className="block text-xs font-semibold text-gray-600 mb-1.5">Кол-во звонков</label>
+                            <input className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500" type="number" min="0" value={editingValues.sampleCount} onChange={e=>setEditingValues(ev=>({...ev, sampleCount: e.target.value}))} />
+                        </div>
                         </div>
                         </div>
 
-                        <div className="mt-6 flex justify-end gap-2">
-                        <button onClick={() => { resetOperatorParams(editingOperator); }} className="px-4 py-2 border rounded">Сбросить</button>
-                        <button onClick={() => { saveOperatorParams(); }} className="px-4 py-2 bg-blue-600 text-white rounded">Сохранить и применить</button>
+                        {/* Modal footer */}
+                        <div className="px-6 py-4 border-t border-gray-100 bg-gray-50 flex items-center justify-between">
+                            <button onClick={() => resetOperatorParams(editingOperator)} className="text-sm text-gray-500 hover:text-gray-700 underline">Сбросить настройки</button>
+                            <button onClick={() => saveOperatorParams()} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors">Сохранить и применить</button>
                         </div>
                     </div>
                     </div>
                 )}
 
-                {/* ----- NEW: Shuffle footer (в самом низу) ----- */}
-                <div className="mt-6 pt-4 border-t flex items-center justify-between">
-                    <div className="text-sm text-gray-600">
+                {/* Shuffle footer */}
+                <div className="mt-4 pt-4 border-t border-gray-200 flex items-center justify-between gap-4">
+                    <div className="text-xs text-gray-500">
                     {distributionTab === 'by_operator'
-                        ? `Режим по оператору: выбрано операторов ${selectedOperatorsForShuffle.size}, вручную отмечено звонков ${selectedCalls.size}`
-                        : 'Готово к распределению: фильтры применены'}
+                        ? <><FaIcon className="fa-solid fa-users mr-1.5 text-gray-400" />Выбрано операторов: <strong>{selectedOperatorsForShuffle.size}</strong> · отмечено звонков: <strong>{selectedCalls.size}</strong></>
+                        : <><FaIcon className="fa-solid fa-circle-check mr-1.5 text-gray-400" />Готово к распределению</>}
                     </div>
-                    <div className="flex items-center gap-2">
-                    <button onClick={handlePrepareShuffle} className="px-4 py-2 bg-purple-600 text-white rounded">
-                        {distributionTab === 'by_operator' ? 'Распределить по выбранным операторам' : 'Распределить'}
+                    <button onClick={handlePrepareShuffle}
+                        className="px-5 py-2.5 bg-gradient-to-r from-purple-600 to-violet-600 hover:from-purple-700 hover:to-violet-700 text-white text-sm font-medium rounded-lg shadow-sm transition-all flex items-center gap-2">
+                        <FaIcon className="fa-solid fa-shuffle" />
+                        {distributionTab === 'by_operator' ? 'Распределить по выбранным' : 'Распределить'}
                     </button>
-                    </div>
                 </div>
 
                 {/* Shuffle preview modal */}
@@ -4600,6 +4647,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 </div>
                 )}
 
+                </div>
                 </div>
             );
             }
