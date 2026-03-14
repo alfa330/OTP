@@ -11407,10 +11407,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 ) : directionSchedError ? (
                                                     <div className="p-4 text-sm text-red-600">{directionSchedError}</div>
                                                 ) : (
-                                                    <div className="overflow-x-auto">
+                                                    <div className="overflow-auto" style={{ maxHeight: '65dvh' }}>
                                                         <table className="w-full text-xs border-collapse" style={{ minWidth: 520 }}>
-                                                            <thead>
-                                                                <tr className="border-b border-slate-100 bg-slate-50 sticky top-0 z-20">
+                                                            <thead className="sticky top-0 z-20">
+                                                                <tr className="border-b border-slate-100 bg-slate-50">
                                                                     <th className="text-left py-2 px-3 font-medium text-slate-600 sticky left-0 bg-slate-50 z-30 w-32 min-w-[8rem]">Сотрудник</th>
                                                                     {dirWeekDates.map(d => {
                                                                         const dt = new Date(d + 'T00:00');
