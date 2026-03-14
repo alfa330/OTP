@@ -9802,9 +9802,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             if (isOperatorSelfSchedules) {
                 return (
-                    <div className="px-2 sm:px-4 py-2 min-h-screen bg-slate-50">
+                    <div className="px-0 sm:px-4 py-2 min-h-screen bg-slate-50">
                         <div className="flex flex-col lg:flex-row items-stretch lg:items-start gap-3 lg:gap-4 mb-0">
-                            <div className="lg:hidden">
+                            <div className="lg:hidden mx-3 sm:mx-0">
                                 <button
                                     type="button"
                                     onClick={() => setShowOperatorMobileCalendar(v => !v)}
@@ -9828,7 +9828,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             </div>
 
                             <div className="flex-1 min-w-0 flex flex-col">
-                                <div className="flex flex-col gap-2 mb-3 pb-3 border-b border-slate-200">
+                                <div className="flex flex-col gap-2 mb-3 pb-3 border-b border-slate-200 px-3 sm:px-0">
                                     <div className="flex flex-wrap items-center justify-between gap-2">
                                         <div className="flex flex-wrap items-center gap-3">
                                             <h2 className="text-xl sm:text-2xl font-semibold flex items-center gap-2">
@@ -10507,8 +10507,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </>
                                     )}
                                     {operatorSelfTab === 'swaps' && (
-                                        <div className="space-y-3 pb-2">
-                                            <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+                                        <div className="space-y-0 sm:space-y-3 pb-2">
+                                            <div className="bg-white rounded-none sm:rounded-xl border-y sm:border border-slate-200 shadow-sm overflow-hidden mb-3 sm:mb-0">
                                                 <button
                                                     type="button"
                                                     onClick={() => {
@@ -11105,7 +11105,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </div>
                                             )}
 
-                                            <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+                                            <div className="bg-white rounded-none sm:rounded-xl border-y sm:border border-slate-200 shadow-sm overflow-hidden">
                                                 <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 border-b border-slate-100">
                                                     <div className="flex items-center gap-2 min-w-0">
                                                         <div className="w-7 h-7 rounded-lg bg-indigo-50 border border-indigo-200 flex items-center justify-center flex-shrink-0">
@@ -11214,8 +11214,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </div>
                                             </div>
 
-                                            <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
-                                                <div className="bg-white rounded-xl border border-slate-200 p-4">
+                                            <div className="grid grid-cols-1 xl:grid-cols-2 gap-0 sm:gap-3">
+                                                <div className="bg-white rounded-none sm:rounded-xl border-y sm:border border-slate-200 p-4 mb-3 sm:mb-0">
                                                     <div className="flex items-center justify-between gap-2 mb-3">
                                                         <div className="text-sm font-semibold text-slate-900">Входящие</div>
                                                         <div className="text-xs text-slate-500">
@@ -11293,7 +11293,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     )}
                                                 </div>
 
-                                                <div className="bg-white rounded-xl border border-slate-200 p-4">
+                                                <div className="bg-white rounded-none sm:rounded-xl border-y sm:border border-slate-200 p-4">
                                                     <div className="flex items-center justify-between gap-2 mb-3">
                                                         <div className="text-sm font-semibold text-slate-900">Исходящие</div>
                                                         <div className="text-xs text-slate-500">
@@ -11381,7 +11381,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         };
                                         return (
                                         <div className="space-y-3 pb-2">
-                                            <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+                                            <div className="bg-white rounded-none sm:rounded-xl border-y sm:border border-slate-200 shadow-sm overflow-hidden">
                                                 <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 border-b border-slate-100">
                                                     <div className="flex items-center gap-2 min-w-0">
                                                         <div className="w-7 h-7 rounded-lg bg-indigo-50 border border-indigo-200 flex items-center justify-center flex-shrink-0">
