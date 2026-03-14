@@ -9766,85 +9766,88 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             </div>
 
                             <div className="flex-1 min-w-0 flex flex-col lg:h-full">
-                                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-3">
-                                    <div className="flex flex-wrap gap-2 items-center">
-                                        <h2 className="text-xl sm:text-2xl font-semibold flex items-center gap-2 mr-0 sm:mr-1">
-                                            <FaIcon className="fas fa-calendar-user text-blue-600"></FaIcon>
-                                            Мои смены
-                                        </h2>
-                                        <div className="flex items-center gap-1 sm:ml-3">
-                                            <button
-                                                onClick={() => {
-                                                    setOperatorSelfTab('schedule');
-                                                    setShowSwapCreateModal(false);
-                                                    setSwapCandidatesSearch('');
-                                                    setSwapDraftRequests([]);
-                                                }}
-                                                className={`px-2.5 sm:px-3 py-1 rounded text-sm ${operatorSelfTab === 'schedule' ? 'bg-slate-800 text-white' : 'bg-white'}`}
-                                            >
-                                                Смены
-                                            </button>
-                                            <button
-                                                onClick={() => setOperatorSelfTab('swaps')}
-                                                className={`px-2.5 sm:px-3 py-1 rounded text-sm inline-flex items-center gap-1 ${operatorSelfTab === 'swaps' ? 'bg-slate-800 text-white' : 'bg-white'}`}
-                                            >
-                                                Замены
-                                                {swapPendingIncomingCount > 0 && (
-                                                    <span className={`px-1.5 py-0.5 rounded-full text-[11px] font-semibold ${operatorSelfTab === 'swaps' ? 'bg-white/20 text-white' : 'bg-amber-100 text-amber-800'}`}>
-                                                        {swapPendingIncomingCount}
-                                                    </span>
-                                                )}
-                                            </button>
-                                        </div>
-                                        {operatorSelfTab === 'schedule' && (
-                                            <>
-                                                <div className="flex items-center gap-1">
-                                                    <button onClick={() => setViewMode('day')} className={`px-2.5 sm:px-3 py-1 rounded text-sm ${viewMode === 'day' ? 'bg-slate-800 text-white' : 'bg-white'}`}>День</button>
-                                                    <button onClick={() => setViewMode('week')} className={`px-2.5 sm:px-3 py-1 rounded text-sm ${viewMode === 'week' ? 'bg-slate-800 text-white' : 'bg-white'}`}>Неделя</button>
-                                                    <button onClick={() => setViewMode('month')} className={`px-2.5 sm:px-3 py-1 rounded text-sm ${viewMode === 'month' ? 'bg-slate-800 text-white' : 'bg-white'}`}>Месяц</button>
-                                                </div>
+                                <div className="flex flex-col gap-2 mb-3 pb-3 border-b border-slate-200">
+                                    <div className="flex flex-wrap items-center justify-between gap-2">
+                                        <div className="flex flex-wrap items-center gap-3">
+                                            <h2 className="text-xl sm:text-2xl font-semibold flex items-center gap-2">
+                                                <FaIcon className="fas fa-calendar-user text-blue-600"></FaIcon>
+                                                Мои смены
+                                            </h2>
+                                            <div className="flex items-center rounded-lg border border-slate-200 bg-white overflow-hidden shadow-sm">
                                                 <button
-                                                    onClick={() => setCurrentDate(new Date())}
-                                                    className="sm:ml-2 px-3 py-1 rounded bg-white border border-slate-200 hover:bg-slate-50 text-sm"
-                                                >
-                                                    Сегодня
-                                                </button>
-                                            </>
-                                        )}
-                                        {operatorSelfTab === 'swaps' && (
-                                            <div className="sm:ml-2 flex items-center gap-2">
-                                                <button
-                                                    type="button"
                                                     onClick={() => {
+                                                        setOperatorSelfTab('schedule');
+                                                        setShowSwapCreateModal(false);
                                                         setSwapCandidatesSearch('');
                                                         setSwapDraftRequests([]);
-                                                        setSwapForm(prev => ({ ...prev, targetOperatorId: '', comment: '' }));
-                                                        setShowSwapCreateModal(true);
                                                     }}
-                                                    className="px-3 py-1 rounded bg-blue-600 hover:bg-blue-700 text-white text-sm inline-flex items-center gap-1"
+                                                    className={`px-3.5 py-1.5 text-sm font-medium transition-colors ${operatorSelfTab === 'schedule' ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-50'}`}
                                                 >
-                                                    <FaIcon className="fas fa-plus"></FaIcon>
-                                                    Новый запрос
+                                                    Смены
                                                 </button>
                                                 <button
-                                                    onClick={() => loadSwapRequests({ silent: false })}
-                                                    className="px-3 py-1 rounded bg-white border border-slate-200 hover:bg-slate-50 text-sm inline-flex items-center gap-1"
-                                                    disabled={swapRequestsLoading}
+                                                    onClick={() => setOperatorSelfTab('swaps')}
+                                                    className={`px-3.5 py-1.5 text-sm font-medium inline-flex items-center gap-1.5 border-l border-slate-200 transition-colors ${operatorSelfTab === 'swaps' ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-50'}`}
                                                 >
-                                                    {swapRequestsLoading ? <FaIcon className="fas fa-spinner fa-spin"></FaIcon> : <FaIcon className="fas fa-rotate"></FaIcon>}
-                                                    Обновить
+                                                    Замены
+                                                    {swapPendingIncomingCount > 0 && (
+                                                        <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold leading-none ${operatorSelfTab === 'swaps' ? 'bg-white/20 text-white' : 'bg-amber-500 text-white'}`}>
+                                                            {swapPendingIncomingCount}
+                                                        </span>
+                                                    )}
                                                 </button>
+                                            </div>
+                                        </div>
+                                        {operatorSelfTab === 'schedule' && (
+                                            <div className="flex items-center gap-1.5 self-stretch sm:self-auto">
+                                                <button onClick={() => paginatePlannerDates(-1)} className="h-9 w-9 flex items-center justify-center bg-white border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors text-slate-600 shadow-sm"><FaIcon className="fas fa-angle-left text-sm"></FaIcon></button>
+                                                <div className="min-w-[108px] px-3 py-1.5 rounded-lg bg-white border border-slate-200 text-center leading-tight shadow-sm">
+                                                    <div className="text-[11px] uppercase tracking-wide text-slate-500">{formatWeekdayRu(currentDate, 'short')}</div>
+                                                    <div className="text-sm font-semibold text-slate-900">{formatDateRuDayMonth(currentDate)}</div>
+                                                </div>
+                                                <button onClick={() => paginatePlannerDates(1)} className="h-9 w-9 flex items-center justify-center bg-white border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors text-slate-600 shadow-sm"><FaIcon className="fas fa-angle-right text-sm"></FaIcon></button>
                                             </div>
                                         )}
                                     </div>
                                     {operatorSelfTab === 'schedule' && (
-                                        <div className="flex gap-2 items-center self-stretch sm:self-auto justify-between sm:justify-start">
-                                            <button onClick={() => paginatePlannerDates(-1)} className="px-2 py-1 bg-white rounded"><FaIcon className="fas fa-angle-left"></FaIcon></button>
-                                            <div className="flex-1 sm:flex-none px-3 py-1.5 rounded-lg bg-white border border-slate-200 text-center leading-tight">
-                                                <div className="text-[11px] uppercase tracking-wide text-slate-500">{formatWeekdayRu(currentDate, 'short')}</div>
-                                                <div className="text-sm font-semibold text-slate-900">{formatDateRuDayMonth(currentDate)}</div>
+                                        <div className="flex flex-wrap items-center gap-2">
+                                            <div className="flex items-center rounded-lg border border-slate-200 bg-white overflow-hidden shadow-sm">
+                                                <button onClick={() => setViewMode('day')} className={`px-3 py-1.5 text-sm font-medium transition-colors ${viewMode === 'day' ? 'bg-slate-700 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>День</button>
+                                                <button onClick={() => setViewMode('week')} className={`px-3 py-1.5 text-sm font-medium border-x border-slate-200 transition-colors ${viewMode === 'week' ? 'bg-slate-700 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>Неделя</button>
+                                                <button onClick={() => setViewMode('month')} className={`px-3 py-1.5 text-sm font-medium transition-colors ${viewMode === 'month' ? 'bg-slate-700 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>Месяц</button>
                                             </div>
-                                            <button onClick={() => paginatePlannerDates(1)} className="px-2 py-1 bg-white rounded"><FaIcon className="fas fa-angle-right"></FaIcon></button>
+                                            <button
+                                                onClick={() => setCurrentDate(new Date())}
+                                                className="px-3 py-1.5 rounded-lg bg-white border border-slate-200 hover:bg-slate-50 text-sm font-medium text-slate-700 transition-colors shadow-sm inline-flex items-center gap-1.5"
+                                            >
+                                                <FaIcon className="fas fa-location-crosshairs text-blue-500 text-xs"></FaIcon>
+                                                Сегодня
+                                            </button>
+                                        </div>
+                                    )}
+                                    {operatorSelfTab === 'swaps' && (
+                                        <div className="flex items-center gap-2">
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    setSwapCandidatesSearch('');
+                                                    setSwapDraftRequests([]);
+                                                    setSwapForm(prev => ({ ...prev, targetOperatorId: '', comment: '' }));
+                                                    setShowSwapCreateModal(true);
+                                                }}
+                                                className="px-3.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium inline-flex items-center gap-1.5 transition-colors shadow-sm"
+                                            >
+                                                <FaIcon className="fas fa-plus text-xs"></FaIcon>
+                                                Новый запрос
+                                            </button>
+                                            <button
+                                                onClick={() => loadSwapRequests({ silent: false })}
+                                                className="px-3.5 py-1.5 rounded-lg bg-white border border-slate-200 hover:bg-slate-50 text-sm font-medium inline-flex items-center gap-1.5 transition-colors shadow-sm"
+                                                disabled={swapRequestsLoading}
+                                            >
+                                                {swapRequestsLoading ? <FaIcon className="fas fa-spinner fa-spin text-xs"></FaIcon> : <FaIcon className="fas fa-rotate text-xs text-slate-500"></FaIcon>}
+                                                Обновить
+                                            </button>
                                         </div>
                                     )}
                                 </div>
@@ -9853,14 +9856,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-3 sm:p-4">
                                         <div className="lg:grid lg:grid-cols-2 lg:gap-4">
                                             <div className="space-y-3">
-                                                <div className={`rounded-lg border p-3 ${myNowStatus.panelClass}`}>
-                                                    <div className="flex items-center justify-between gap-2">
-                                                        <div className="text-[11px] uppercase tracking-wide text-slate-600">Статус сейчас</div>
-                                                        <div className={`px-2 py-0.5 rounded-full text-xs font-semibold ${myNowStatus.badgeClass}`}>
+                                                <div className={`rounded-xl border-l-4 p-3.5 ${myNowStatus.panelClass}`}>
+                                                    <div className="flex items-center justify-between gap-2 mb-1.5">
+                                                        <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wide text-slate-600 font-medium">
+                                                            <FaIcon className="fas fa-circle-dot text-xs"></FaIcon>
+                                                            Статус сейчас
+                                                        </div>
+                                                        <div className={`px-2.5 py-0.5 rounded-full text-xs font-bold ${myNowStatus.badgeClass}`}>
                                                             {myNowStatus.label}
                                                         </div>
                                                     </div>
-                                                    <div className="mt-2 text-sm font-medium text-slate-900">
+                                                    <div className="text-base font-semibold text-slate-900 leading-snug">
                                                         {myNowStatus.hint}
                                                     </div>
                                                     {myNowStatus.subHint && (
@@ -9870,11 +9876,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     )}
                                                 </div>
 
-                                                <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                                                <div className="rounded-xl border border-slate-200 bg-white p-3.5">
                                                     <div className="flex items-center justify-between gap-3">
-                                                        <div className="min-w-0">
-                                                            <div className="text-sm font-semibold text-slate-900">Напоминание о перерыве</div>
-                                                            <div className="text-xs text-slate-500">За 5 минут до начала</div>
+                                                        <div className="min-w-0 flex items-center gap-2.5">
+                                                            <div className="w-8 h-8 rounded-lg bg-amber-50 border border-amber-200 flex items-center justify-center flex-shrink-0">
+                                                                <FaIcon className="fas fa-bell text-amber-600 text-xs"></FaIcon>
+                                                            </div>
+                                                            <div>
+                                                                <div className="text-sm font-semibold text-slate-900">Напоминание о перерыве</div>
+                                                                <div className="text-xs text-slate-500">За 5 минут до начала</div>
+                                                            </div>
                                                         </div>
                                                         <button
                                                             type="button"
@@ -9882,7 +9893,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             className={`relative inline-flex h-7 w-12 items-center rounded-full border shadow-sm transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 ${
                                                                 breakReminderEnabled
                                                                     ? 'bg-blue-600 border-blue-600 focus-visible:ring-blue-500'
-                                                                    : 'bg-slate-200 border-slate-400 ring-1 ring-slate-300 focus-visible:ring-slate-500'
+                                                                    : 'bg-slate-200 border-slate-300 focus-visible:ring-slate-500'
                                                             }`}
                                                             aria-pressed={breakReminderEnabled}
                                                             aria-label={breakReminderEnabled ? 'Выключить напоминания о перерыве' : 'Включить напоминания о перерыве'}
@@ -9890,12 +9901,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             <span className={`inline-block h-5 w-5 rounded-full border border-slate-300 bg-white shadow-md transition-transform ${breakReminderEnabled ? 'translate-x-6' : 'translate-x-1'}`} />
                                                         </button>
                                                     </div>
-                                                    <div className="mt-2 text-[11px] text-slate-500">
-                                                        {breakReminderPermissionState === 'granted' && 'Браузерные уведомления разрешены'}
-                                                        {breakReminderPermissionState === 'denied' && 'Браузерные уведомления запрещены (останутся только уведомления в приложении)'}
-                                                        {breakReminderPermissionState === 'default' && 'Разрешение на браузерные уведомления будет запрошено при включении'}
-                                                        {breakReminderPermissionState === 'unsupported' && 'Браузерные уведомления не поддерживаются'}
-                                                    </div>
+                                                    {breakReminderPermissionState && (
+                                                        <div className="mt-2 text-[11px] text-slate-500 pl-[42px]">
+                                                            {breakReminderPermissionState === 'granted' && <><FaIcon className="fas fa-check-circle text-emerald-500 mr-1"></FaIcon>Браузерные уведомления разрешены</>}
+                                                            {breakReminderPermissionState === 'denied' && <><FaIcon className="fas fa-times-circle text-red-400 mr-1"></FaIcon>Браузерные уведомления запрещены</>}
+                                                            {breakReminderPermissionState === 'default' && 'Разрешение будет запрошено при включении'}
+                                                            {breakReminderPermissionState === 'unsupported' && 'Уведомления не поддерживаются'}
+                                                        </div>
+                                                    )}
                                                 </div>
                                             </div>
 
@@ -10159,7 +10172,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 const extraShiftCount = hasShifts ? Math.max(0, shiftPreviewLabels.length - 1) : 0;
                                                 const tailShiftPreviewLabels = hasShifts ? shiftPreviewLabels.slice(1) : [];
                                                 return (
-                                                    <div key={`my-shifts-${dayCard.date}`} className={`bg-white rounded-xl border overflow-hidden shadow-sm ${isToday ? 'border-blue-300 ring-2 ring-blue-100' : 'border-slate-200'}`}>
+                                                    <div key={`my-shifts-${dayCard.date}`} className={`bg-white rounded-xl border overflow-hidden shadow-sm flex ${isToday ? 'border-blue-300 ring-2 ring-blue-100' : 'border-slate-200'}`}>
+                                                        <div className={`w-1 flex-shrink-0 ${hasShifts ? 'bg-blue-500' : dayCard.isDayOff ? 'bg-sky-400' : scheduleStatus ? 'bg-amber-400' : 'bg-slate-200'}`}></div>
+                                                        <div className="flex-1 min-w-0">
                                                         <button
                                                             type="button"
                                                             onClick={() => setExpandedMyDayCards(prev => ({ ...prev, [dayCard.date]: !prev?.[dayCard.date] }))}
@@ -10167,8 +10182,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         >
                                                             <div className="flex items-start justify-between gap-3">
                                                                 <div className="min-w-0">
-                                                                    <div className="flex flex-wrap items-center gap-2 mb-1.5">
-                                                                        <span className={`inline-flex items-center px-3 py-1 rounded-lg border font-semibold tabular-nums ${
+                                                                    <div className="flex items-baseline gap-1.5 mb-1">
+                                                                        <div className={`font-bold text-slate-900 ${viewMode === 'day' ? 'text-base' : 'text-sm'}`}>
+                                                                            {formatDateRuDayMonth(dayCard.date)}
+                                                                        </div>
+                                                                        <div className="text-xs text-slate-400 capitalize">{weekdayLabel}</div>
+                                                                    </div>
+                                                                    <div className="flex flex-wrap items-center gap-1.5">
+                                                                        <span className={`inline-flex items-center px-2.5 py-0.5 rounded-md border font-semibold tabular-nums ${
                                                                             viewMode === 'day' ? 'text-base' : 'text-sm'
                                                                         } ${
                                                                             hasShifts
@@ -10177,57 +10198,32 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                     ? (scheduleStatusTone?.pill || 'bg-amber-100 border-amber-200 text-amber-800')
                                                                                 : dayCard.isDayOff
                                                                                     ? 'bg-sky-50 border-sky-200 text-sky-700'
-                                                                                    : 'bg-slate-50 border-slate-200 text-slate-600'
+                                                                                    : 'bg-slate-50 border-slate-200 text-slate-500'
                                                                         }`}>
                                                                             {primaryShiftLabel}
                                                                         </span>
                                                                         {extraShiftCount > 0 && (
-                                                                            <span className="px-2 py-0.5 rounded-md bg-slate-100 text-xs text-slate-700">
-                                                                                +{extraShiftCount} смен
+                                                                            <span className="px-2 py-0.5 rounded-md bg-slate-100 text-xs text-slate-600 font-medium">
+                                                                                +{extraShiftCount}
                                                                             </span>
                                                                         )}
                                                                     </div>
-                                                                    <div className={`font-semibold text-slate-900 ${viewMode === 'day' ? 'text-base' : ''}`}>
-                                                                        {formatDateRuDayMonth(dayCard.date)}
-                                                                    </div>
-                                                                    <div className="text-xs text-slate-500 capitalize">{weekdayLabel}</div>
                                                                 </div>
-                                                                <div className="flex items-center gap-2">
+                                                                <div className="flex items-center gap-2 flex-shrink-0">
                                                                     <div className="flex flex-wrap items-center justify-end gap-1">
-                                                                        {isToday && <span className="px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 text-xs font-semibold">Сегодня</span>}
-                                                                        {scheduleStatus && <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${scheduleStatusTone?.pill || 'bg-amber-100 text-amber-800 border-amber-200'}`}>{scheduleStatus.label || 'Статус'}</span>}
-                                                                        {dayCard.isDayOff && <span className="px-2 py-0.5 rounded-full bg-sky-100 text-sky-700 text-xs font-semibold">Выходной</span>}
-                                                                        {!dayCard.isDayOff && dayCard.shifts.length > 0 && <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-xs font-semibold">{dayCard.shifts.length} смен</span>}
+                                                                        {isToday && <span className="px-2 py-0.5 rounded-full bg-blue-600 text-white text-[11px] font-semibold">Сегодня</span>}
+                                                                        {scheduleStatus && <span className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${scheduleStatusTone?.pill || 'bg-amber-100 text-amber-800 border-amber-200'}`}>{scheduleStatus.label || 'Статус'}</span>}
+                                                                        {dayCard.isDayOff && !scheduleStatus && <span className="px-2 py-0.5 rounded-full bg-sky-100 text-sky-700 text-[11px] font-semibold">Выходной</span>}
+                                                                        {!dayCard.isDayOff && hasShifts && dayWorkMin > 0 && (
+                                                                            <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 text-[11px] font-medium tabular-nums">
+                                                                                {(dayWorkMin / 60).toFixed(1)} ч
+                                                                            </span>
+                                                                        )}
                                                                     </div>
-                                                                    <div className="w-7 h-7 rounded-lg border border-slate-200 bg-white flex items-center justify-center text-slate-500">
+                                                                    <div className="w-7 h-7 rounded-lg border border-slate-200 bg-white flex items-center justify-center text-slate-400">
                                                                         <FaIcon className={`fas ${isExpanded ? 'fa-chevron-up' : 'fa-chevron-down'} text-xs`}></FaIcon>
                                                                     </div>
                                                                 </div>
-                                                            </div>
-
-                                                            <div className="mt-2 flex flex-wrap gap-1.5">
-                                                                {scheduleStatus && (
-                                                                    <span className={`px-2 py-1 rounded-md border text-xs ${scheduleStatusTone?.pill || 'bg-amber-100 text-amber-800 border-amber-200'}`}>
-                                                                        {scheduleStatus.startDate
-                                                                            ? `${scheduleStatus.startDate}${scheduleStatus.endDate ? ` — ${scheduleStatus.endDate}` : ''}`
-                                                                            : 'Статусный день'}
-                                                                    </span>
-                                                                )}
-                                                                {!dayCard.isDayOff && dayCard.shifts.length === 0 && (
-                                                                    <span className="px-2 py-1 rounded-md border border-dashed border-slate-300 bg-slate-50 text-xs text-slate-500">
-                                                                        Смен нет
-                                                                    </span>
-                                                                )}
-                                                                {dayCard.isDayOff && dayCard.shifts.length === 0 && (
-                                                                    <span className="px-2 py-1 rounded-md border border-sky-200 bg-sky-50 text-xs text-sky-700">
-                                                                        Выходной
-                                                                    </span>
-                                                                )}
-                                                                {dayCard.shifts.length > 0 && (
-                                                                    <span className="px-2 py-1 rounded-md border border-slate-200 bg-slate-50 text-xs text-slate-700">
-                                                                        {dayCard.shifts.length} смен за день
-                                                                    </span>
-                                                                )}
                                                             </div>
 
                                                             {tailShiftPreviewLabels.length > 0 && viewMode !== 'day' && (
@@ -10339,6 +10335,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 </div>
                                                             </div>
                                                         )}
+                                                        </div>
                                                     </div>
                                                 );
                                             })}
