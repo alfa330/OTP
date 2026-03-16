@@ -7674,7 +7674,6 @@ class Database:
             next_date_obj = swap_date_obj + timedelta(days=1)
             prev_date_str = prev_date_obj.strftime('%Y-%m-%d')
             next_date_str = next_date_obj.strftime('%Y-%m-%d')
-            spans_next_day = int(interval_end_min) > 1440
 
             requester_day_map = self._load_operator_shift_map_for_period_tx(
                 cursor=cursor,
@@ -7726,45 +7725,61 @@ class Database:
                 *(current_requested_intervals or [])
             ])
 
-            # Detect if the swap involves shifts from the previous day
-            # (e.g., user selects day N with time 00:00-02:00 which is actually
-            # the tail of an overnight shift 17:00-02:00 that started on day N-1).
-            # In the window, such shifts have negative absolute minute values.
-            all_save_intervals = list(requester_remaining_intervals or []) + list(target_next_intervals or [])
-            spans_prev_day = any(int(seg.get('start', 0)) < 0 for seg in all_save_intervals)
+            # Важно: swap может затронуть "соседние" дни даже если сам интервал
+            # заканчивается ровно в 00:00. Пример: смена 17:00-02:00 и передача 17:00-00:00.
+            # В этом случае остаток 00:00-02:00 должен сохраниться на следующий день.
+            # Раньше это терялось из-за определения "следующего дня" только по interval_end_min > 1440.
 
-            if spans_prev_day and spans_next_day:
-                affected_offsets = [-1, 0, 1]
-            elif spans_prev_day:
-                affected_offsets = [-1, 0]
-            elif spans_next_day:
-                affected_offsets = [0, 1]
-            else:
-                affected_offsets = [0]
-
+            window_offsets = [-1, 0, 1]
             requester_save_day_map = self._swap_serialize_intervals_to_day_map(
                 requester_remaining_intervals,
                 swap_date_obj,
-                allowed_day_offsets=affected_offsets
+                allowed_day_offsets=window_offsets
             )
             target_save_day_map = self._swap_serialize_intervals_to_day_map(
                 target_next_intervals,
                 swap_date_obj,
-                allowed_day_offsets=affected_offsets
+                allowed_day_offsets=window_offsets
             )
 
-            affected_dates = []
-            if spans_prev_day:
-                affected_dates.append(prev_date_obj)
-            affected_dates.append(swap_date_obj)
-            if spans_next_day:
-                affected_dates.append(next_date_obj)
+            def _shift_signature(shifts):
+                sign = []
+                for seg in (shifts or []):
+                    if not isinstance(seg, dict):
+                        continue
+                    start_val = seg.get('start')
+                    end_val = seg.get('end')
+                    if not start_val or not end_val:
+                        continue
+                    sign.append(f"{start_val}|{end_val}")
+                sign.sort()
+                return sign
 
-            for day_obj in affected_dates:
+            day_candidates = [
+                (prev_date_obj, prev_date_str),
+                (swap_date_obj, swap_date_str),
+                (next_date_obj, next_date_str)
+            ]
+
+            requester_affected_dates = []
+            target_affected_dates = []
+            for day_obj, day_key in day_candidates:
+                before_req = _shift_signature(requester_day_map.get(day_key) or [])
+                after_req = _shift_signature(requester_save_day_map.get(day_key) or [])
+                if before_req != after_req:
+                    requester_affected_dates.append(day_obj)
+
+                before_tgt = _shift_signature(target_day_map.get(day_key) or [])
+                after_tgt = _shift_signature(target_save_day_map.get(day_key) or [])
+                if before_tgt != after_tgt:
+                    target_affected_dates.append(day_obj)
+
+            for day_obj in requester_affected_dates:
                 self._clear_day_schedule_tx(cursor, requester_operator_id, day_obj)
+            for day_obj in target_affected_dates:
                 self._clear_day_schedule_tx(cursor, target_operator_id, day_obj)
 
-            for day_obj in affected_dates:
+            for day_obj in requester_affected_dates:
                 day_key = day_obj.strftime('%Y-%m-%d')
                 for seg in (requester_save_day_map.get(day_key) or []):
                     seg_start_obj = self._normalize_schedule_time(seg.get('start'), 'start_time')
@@ -7778,6 +7793,9 @@ class Database:
                         # Перерывы пересчитываем по правилам после обмена, старые не переносим.
                         breaks=None
                     )
+
+            for day_obj in target_affected_dates:
+                day_key = day_obj.strftime('%Y-%m-%d')
                 for seg in (target_save_day_map.get(day_key) or []):
                     seg_start_obj = self._normalize_schedule_time(seg.get('start'), 'start_time')
                     seg_end_obj = self._normalize_schedule_time(seg.get('end'), 'end_time')
