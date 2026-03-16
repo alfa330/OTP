@@ -18497,16 +18497,48 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, [showSidebarAccountDropdown, showSidebarEmployeesDropdown]);
 
             useEffect(() => {
+                if (!showSidebarEmployeesDropdown && !isEmployeesClosing) return;
+
+                let rafId = null;
                 const updatePos = () => {
                     const rect = sidebarEmployeesRef.current?.getBoundingClientRect();
-                    if (rect) setEmployeesDropdownPos({ top: rect.top, left: rect.right + 8 });
+                    if (!rect) return;
+
+                    const nextTop = rect.top;
+                    const nextLeft = rect.right + 8;
+                    setEmployeesDropdownPos((prev) => {
+                        if (prev.top === nextTop && prev.left === nextLeft) return prev;
+                        return { top: nextTop, left: nextLeft };
+                    });
                 };
-                if (showSidebarEmployeesDropdown || isEmployeesClosing) {
-                    updatePos();
-                    const el = sidebarMenuScrollRef.current;
-                    el?.addEventListener('scroll', updatePos);
-                    return () => el?.removeEventListener('scroll', updatePos);
+
+                const scheduleUpdatePos = () => {
+                    if (rafId) cancelAnimationFrame(rafId);
+                    rafId = requestAnimationFrame(updatePos);
+                };
+
+                scheduleUpdatePos();
+
+                const scrollEl = sidebarMenuScrollRef.current;
+                scrollEl?.addEventListener('scroll', scheduleUpdatePos, { passive: true });
+                window.addEventListener('resize', scheduleUpdatePos);
+
+                const sidebarEl = sidebarEmployeesRef.current?.closest('.sidebar');
+                sidebarEl?.addEventListener('transitionend', scheduleUpdatePos);
+
+                let ro = null;
+                if (typeof ResizeObserver !== 'undefined') {
+                    ro = new ResizeObserver(scheduleUpdatePos);
+                    if (sidebarEmployeesRef.current) ro.observe(sidebarEmployeesRef.current);
                 }
+
+                return () => {
+                    if (rafId) cancelAnimationFrame(rafId);
+                    scrollEl?.removeEventListener('scroll', scheduleUpdatePos);
+                    window.removeEventListener('resize', scheduleUpdatePos);
+                    sidebarEl?.removeEventListener('transitionend', scheduleUpdatePos);
+                    ro?.disconnect();
+                };
             }, [showSidebarEmployeesDropdown, isEmployeesClosing]);
 
             function TrainingModal({ isOpen, onClose, onSave, initialData = {} }) {
