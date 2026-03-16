@@ -279,6 +279,7 @@ const TOKEN_TO_ICON = {
     'fa-user-plus': 'UserPlus',
     'fa-user-tag': 'User',
     'fa-user-tie': 'User',
+    'fa-user-shield': 'Shield',
     'fa-user-slash': 'UserX',
     'fa-user-times': 'UserX',
     'fa-users': 'Users',
