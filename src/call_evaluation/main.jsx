@@ -1178,6 +1178,9 @@ const App = ({ user, initialSelection }) => {
     const [calibrationDetail, setCalibrationDetail] = useState(null);
     const [showCalibrationEvalModal, setShowCalibrationEvalModal] = useState(false);
     const [showCalibrationCreateModal, setShowCalibrationCreateModal] = useState(false);
+    const [isEditingCalibrationRoomTitle, setIsEditingCalibrationRoomTitle] = useState(false);
+    const [calibrationRoomTitleDraft, setCalibrationRoomTitleDraft] = useState('');
+    const [isSavingCalibrationRoomTitle, setIsSavingCalibrationRoomTitle] = useState(false);
     const [etalonScoresDraft, setEtalonScoresDraft] = useState([]);
     const [etalonCommentsDraft, setEtalonCommentsDraft] = useState([]);
     const [isSavingEtalon, setIsSavingEtalon] = useState(false);
@@ -1727,6 +1730,64 @@ const App = ({ user, initialSelection }) => {
         }
     };
 
+    const handleSaveCalibrationRoomTitle = useCallback(async () => {
+        if (!canManageCalibrationRooms || !activeCalibrationRoomId || isSavingCalibrationRoomTitle) return;
+        const nextTitle = String(calibrationRoomTitleDraft || '').trim();
+        const currentTitle = String(calibrationDetail?.room?.room_title || '').trim();
+        const isDirty = nextTitle !== currentTitle;
+
+        if (nextTitle.length > 255) {
+            emitCallEvaluationToast('Название комнаты не должно превышать 255 символов', 'error');
+            return;
+        }
+        if (!isDirty) {
+            setIsEditingCalibrationRoomTitle(false);
+            return;
+        }
+
+        setIsSavingCalibrationRoomTitle(true);
+        try {
+            const r = await authFetch(`${API_BASE_URL}/api/call_calibration/rooms/${activeCalibrationRoomId}`, {
+                method: 'PATCH',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-User-Id': userId
+                },
+                body: JSON.stringify({
+                    room_title: nextTitle
+                })
+            });
+            const d = await r.json();
+            if (!r.ok || d.status !== 'success') throw new Error(d.error || 'Не удалось обновить название комнаты');
+
+            const updatedTitle = String(d?.room?.room_title || `Комната #${activeCalibrationRoomId}`);
+            setCalibrationRooms(prev => prev.map(room => (
+                Number(room.id) === Number(activeCalibrationRoomId)
+                    ? { ...room, room_title: updatedTitle }
+                    : room
+            )));
+            setCalibrationDetail(prev => {
+                if (!prev?.room || Number(prev.room.id) !== Number(activeCalibrationRoomId)) return prev;
+                return { ...prev, room: { ...prev.room, room_title: updatedTitle } };
+            });
+            calibrationDetailCacheRef.current.clear();
+            setCalibrationRoomTitleDraft(updatedTitle);
+            setIsEditingCalibrationRoomTitle(false);
+            emitCallEvaluationToast('Название комнаты обновлено', 'success');
+        } catch (e) {
+            emitCallEvaluationToast('Ошибка: ' + e.message, 'error');
+        } finally {
+            setIsSavingCalibrationRoomTitle(false);
+        }
+    }, [
+        canManageCalibrationRooms,
+        activeCalibrationRoomId,
+        isSavingCalibrationRoomTitle,
+        calibrationRoomTitleDraft,
+        calibrationDetail,
+        userId
+    ]);
+
     const handleOpenCalibrationHistory = async () => {
         if (!activeCalibrationRoomId) return;
         setShowCalibrationHistoryModal(true);
@@ -1775,6 +1836,23 @@ const App = ({ user, initialSelection }) => {
     const calibrationRows = calibrationResults?.criteria_rows || [];
     const calibrationEvaluators = calibrationDetail?.evaluators || [];
     const calibrationCriteria = calibrationCall?.direction?.criteria || [];
+    const calibrationRoomId = calibrationRoom?.id || null;
+    const calibrationRoomTitleCurrent = String(calibrationRoom?.room_title || '').trim();
+    const calibrationRoomTitleDisplay = calibrationRoom?.room_title || (calibrationRoomId ? `Комната #${calibrationRoomId}` : '');
+    const calibrationRoomTitleDraftNormalized = String(calibrationRoomTitleDraft || '').trim();
+    const isCalibrationRoomTitleDirty = !!calibrationRoom && calibrationRoomTitleDraftNormalized !== calibrationRoomTitleCurrent;
+
+    useEffect(() => {
+        if (!calibrationRoom) {
+            setIsEditingCalibrationRoomTitle(false);
+            setCalibrationRoomTitleDraft('');
+            setIsSavingCalibrationRoomTitle(false);
+            return;
+        }
+        setCalibrationRoomTitleDraft(calibrationRoomTitleDisplay);
+        setIsEditingCalibrationRoomTitle(false);
+        setIsSavingCalibrationRoomTitle(false);
+    }, [calibrationRoomId, calibrationRoomTitleCurrent, calibrationRoomTitleDisplay]);
 
     useEffect(() => {
         if (!calibrationCall) {
@@ -2228,7 +2306,55 @@ const App = ({ user, initialSelection }) => {
                                     <div className="expanded-content" style={{borderTop:'none',paddingTop:18}}>
                                         <div className="calibration-detail-head">
                                             <div>
-                                                <h4>{calibrationRoom.room_title || `Комната #${calibrationRoom.id}`}</h4>
+                                                {canManageCalibrationRooms ? (
+                                                    <div style={{display:'flex', alignItems:'center', gap:8, flexWrap:'wrap', marginBottom:6}}>
+                                                        {isEditingCalibrationRoomTitle ? (
+                                                            <>
+                                                                <input
+                                                                    className="input"
+                                                                    type="text"
+                                                                    value={calibrationRoomTitleDraft}
+                                                                    onChange={e => setCalibrationRoomTitleDraft(e.target.value)}
+                                                                    maxLength={255}
+                                                                    placeholder={`Комната #${calibrationRoom.id}`}
+                                                                    style={{minWidth:280, maxWidth:'100%', flex:'1 1 280px'}}
+                                                                />
+                                                                <button
+                                                                    className="btn btn-primary btn-sm"
+                                                                    onClick={handleSaveCalibrationRoomTitle}
+                                                                    disabled={isSavingCalibrationRoomTitle || !isCalibrationRoomTitleDirty}
+                                                                >
+                                                                    {isSavingCalibrationRoomTitle ? <><span className="spinner" /> Сохранение...</> : <><FaIcon className="fas fa-save" /> Сохранить</>}
+                                                                </button>
+                                                                <button
+                                                                    className="btn btn-secondary btn-sm"
+                                                                    onClick={() => {
+                                                                        setCalibrationRoomTitleDraft(calibrationRoomTitleDisplay);
+                                                                        setIsEditingCalibrationRoomTitle(false);
+                                                                    }}
+                                                                    disabled={isSavingCalibrationRoomTitle}
+                                                                >
+                                                                    Отмена
+                                                                </button>
+                                                            </>
+                                                        ) : (
+                                                            <>
+                                                                <h4 style={{margin:0}}>{calibrationRoomTitleDisplay}</h4>
+                                                                <button
+                                                                    className="btn btn-secondary btn-sm"
+                                                                    onClick={() => {
+                                                                        setCalibrationRoomTitleDraft(calibrationRoomTitleDisplay);
+                                                                        setIsEditingCalibrationRoomTitle(true);
+                                                                    }}
+                                                                >
+                                                                    <FaIcon className="fas fa-pen" /> Переименовать
+                                                                </button>
+                                                            </>
+                                                        )}
+                                                    </div>
+                                                ) : (
+                                                    <h4>{calibrationRoomTitleDisplay}</h4>
+                                                )}
                                                 <div className="expanded-meta">
                                                     <div className="expanded-meta-item"><strong>Комната:</strong> #{calibrationRoom.id}</div>
                                                     <div className="expanded-meta-item"><strong>Месяц:</strong> {calibrationRoom.month || selectedMonth}</div>
