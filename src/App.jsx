@@ -23267,19 +23267,35 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         style={isCallEvaluationView ? { backgroundColor: '#f7f7f5' } : undefined}
                     >
                         {birthdayBannerVisible && (
-                        <div className="bg-gradient-to-r from-amber-50 via-yellow-50 to-amber-100 border border-amber-200 text-amber-900 rounded-xl px-4 py-3 mb-6 shadow-sm flex items-start gap-3">
-                            <FaIcon className="fas fa-birthday-cake text-amber-600 text-xl mt-0.5"></FaIcon>
-                            <div className="flex-1">
-                                <div className="font-semibold">День рождения сегодня</div>
-                                <div className="text-sm">{birthdayBannerText}</div>
+                        <div className="relative overflow-hidden rounded-2xl border border-amber-200/70 bg-gradient-to-r from-amber-50 via-yellow-50 to-rose-50 px-4 py-4 mb-6 shadow-lg">
+                            <div
+                                className="pointer-events-none absolute inset-0 opacity-70"
+                                style={{
+                                    backgroundImage: "radial-gradient(circle at 10% 20%, rgba(251,191,36,0.35), transparent 45%), radial-gradient(circle at 90% 30%, rgba(251,113,133,0.25), transparent 45%), radial-gradient(circle at 50% 120%, rgba(251,191,36,0.25), transparent 40%)"
+                                }}
+                            />
+                            <div className="relative flex flex-col sm:flex-row sm:items-center gap-4">
+                                <div className="flex items-start gap-3">
+                                    <div className="h-12 w-12 rounded-2xl bg-white/85 border border-amber-200/70 shadow flex items-center justify-center">
+                                        <FaIcon className="fas fa-birthday-cake text-amber-500 text-2xl" />
+                                    </div>
+                                    <div>
+                                        <div className="inline-flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.2em] text-amber-700/80 bg-white/70 border border-amber-200/60 px-2.5 py-1 rounded-full">
+                                            <FaIcon className="fas fa-sparkles text-amber-500 text-[11px]" />
+                                            Праздник
+                                        </div>
+                                        <div className="mt-2 text-lg font-bold text-amber-900">День рождения сегодня</div>
+                                        <div className="text-sm text-amber-900/80">{birthdayBannerText}</div>
+                                    </div>
+                                </div>
+                                <button
+                                    onClick={() => setBirthdayBannerDismissed(true)}
+                                    className="sm:ml-auto h-9 w-9 rounded-full bg-white/80 border border-amber-200/70 text-amber-700 hover:text-amber-900 hover:bg-white transition"
+                                    aria-label="Скрыть уведомление"
+                                >
+                                    <FaIcon className="fas fa-times" />
+                                </button>
                             </div>
-                            <button
-                                onClick={() => setBirthdayBannerDismissed(true)}
-                                className="text-amber-700 hover:text-amber-900 transition"
-                                aria-label="Скрыть уведомление"
-                            >
-                                <FaIcon className="fas fa-times"></FaIcon>
-                            </button>
                         </div>
                         )}
                         {user.role === 'operator' && (
@@ -26672,49 +26688,73 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             <SimpleModal
                                 open={showBirthdayGreetingModal}
                                 onClose={() => { setShowBirthdayGreetingModal(false); }}
-                                panelClassName="w-[720px] max-w-[calc(100vw-1rem)]"
+                                panelClassName="w-[760px] max-w-[calc(100vw-1rem)] !bg-transparent !p-0"
                             >
-                                <div className="p-2">
-                                    <div className="flex items-start justify-between gap-4 mb-3">
-                                        <div>
-                                            <h2 className="text-2xl font-bold text-amber-700">С днем рождения, {user?.name || 'сотрудник'}!</h2>
-                                            <p className="text-sm text-amber-700/80 mt-1">Пусть этот день принесёт тёплые слова и хорошее настроение.</p>
+                                <div className="relative overflow-hidden rounded-3xl border border-amber-200/70 bg-gradient-to-br from-amber-50 via-white to-rose-50 shadow-2xl">
+                                    <div className="pointer-events-none absolute -top-24 -right-24 h-56 w-56 rounded-full bg-amber-200/60 blur-3xl" />
+                                    <div className="pointer-events-none absolute -bottom-28 -left-20 h-64 w-64 rounded-full bg-rose-200/60 blur-3xl" />
+
+                                    <div className="relative p-6 sm:p-8">
+                                        <div className="flex items-start justify-between gap-4">
+                                            <div className="flex items-start gap-4">
+                                                <div className="h-14 w-14 rounded-2xl bg-white/85 border border-amber-200/70 shadow flex items-center justify-center">
+                                                    <FaIcon className="fas fa-gift text-amber-500 text-2xl" />
+                                                </div>
+                                                <div>
+                                                    <div className="inline-flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.2em] text-amber-700/80 bg-white/70 border border-amber-200/60 px-2.5 py-1 rounded-full">
+                                                        <FaIcon className="fas fa-sparkles text-amber-500 text-[11px]" />
+                                                        Сегодня праздник
+                                                    </div>
+                                                    <h2 className="mt-3 text-2xl sm:text-3xl font-extrabold text-amber-900">
+                                                        С днем рождения, {user?.name || 'сотрудник'}!
+                                                    </h2>
+                                                    <p className="text-sm text-amber-900/70 mt-1">
+                                                        Пусть этот день принесёт тёплые слова и отличное настроение.
+                                                    </p>
+                                                </div>
+                                            </div>
+                                            <button
+                                                onClick={() => setShowBirthdayGreetingModal(false)}
+                                                className="h-9 w-9 rounded-full bg-white/80 border border-amber-200/70 text-amber-700 hover:text-amber-900 hover:bg-white transition"
+                                                aria-label="Закрыть"
+                                            >
+                                                <FaIcon className="fas fa-times text-lg" />
+                                            </button>
                                         </div>
-                                        <button
-                                            onClick={() => setShowBirthdayGreetingModal(false)}
-                                            className="rounded-md p-2 text-amber-700 hover:bg-amber-100 transition"
-                                            aria-label="Закрыть"
-                                        >
-                                            <FaIcon className="fas fa-times text-lg" />
-                                        </button>
-                                    </div>
 
-                                    {birthdayGreetingLoading && (
-                                        <div className="flex items-center gap-2 text-amber-700">
-                                            <FaIcon className="fas fa-spinner fa-spin" />
-                                            <span>Готовим персональное поздравление...</span>
+                                        <div className="mt-6">
+                                            {birthdayGreetingLoading && (
+                                                <div className="flex items-center gap-2 text-amber-700">
+                                                    <FaIcon className="fas fa-spinner fa-spin" />
+                                                    <span>Готовим персональное поздравление...</span>
+                                                </div>
+                                            )}
+
+                                            {!birthdayGreetingLoading && birthdayGreetingError && (
+                                                <div className="rounded-2xl border border-red-200 bg-red-50/90 text-red-700 p-4 text-sm">
+                                                    {birthdayGreetingError}
+                                                </div>
+                                            )}
+
+                                            {!birthdayGreetingLoading && !birthdayGreetingError && (
+                                                <div className="rounded-2xl border border-amber-200/70 bg-white/80 p-5 text-gray-700 leading-relaxed whitespace-pre-line shadow-sm backdrop-blur">
+                                                    {birthdayGreeting || 'С днем рождения! Пусть всё задуманное получается легко.'}
+                                                </div>
+                                            )}
                                         </div>
-                                    )}
 
-                                    {!birthdayGreetingLoading && birthdayGreetingError && (
-                                        <div className="rounded-lg border border-red-200 bg-red-50 text-red-700 p-3 text-sm">
-                                            {birthdayGreetingError}
+                                        <div className="mt-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                                            <div className="flex items-center gap-2 text-xs text-amber-800/80">
+                                                <FaIcon className="fas fa-star text-amber-500 text-sm" />
+                                                Пусть день будет ярким и добрым
+                                            </div>
+                                            <button
+                                                onClick={() => setShowBirthdayGreetingModal(false)}
+                                                className="px-6 py-2.5 rounded-full bg-amber-500 text-white hover:bg-amber-600 transition font-semibold shadow"
+                                            >
+                                                Спасибо!
+                                            </button>
                                         </div>
-                                    )}
-
-                                    {!birthdayGreetingLoading && !birthdayGreetingError && (
-                                        <p className="text-gray-700 leading-relaxed whitespace-pre-line">
-                                            {birthdayGreeting || 'С днем рождения! Пусть всё задуманное получается легко.'}
-                                        </p>
-                                    )}
-
-                                    <div className="mt-6 flex justify-end">
-                                        <button
-                                            onClick={() => setShowBirthdayGreetingModal(false)}
-                                            className="px-5 py-2 rounded-lg bg-amber-500 text-white hover:bg-amber-600 transition font-semibold"
-                                        >
-                                            Спасибо!
-                                        </button>
                                     </div>
                                 </div>
                             </SimpleModal>
