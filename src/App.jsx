@@ -17983,6 +17983,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [aiMonthlyFeedbackError, setAiMonthlyFeedbackError] = useState('');
             const [aiMonthlyFeedbackResult, setAiMonthlyFeedbackResult] = useState(null);
             const [aiMonthlyFeedbackTitle, setAiMonthlyFeedbackTitle] = useState('');
+            const [birthdaysToday, setBirthdaysToday] = useState([]);
+            const [birthdaysDate, setBirthdaysDate] = useState('');
+            const [birthdaysLoading, setBirthdaysLoading] = useState(false);
+            const [birthdaysError, setBirthdaysError] = useState('');
+            const [birthdayGreeting, setBirthdayGreeting] = useState('');
+            const [birthdayGreetingLoading, setBirthdayGreetingLoading] = useState(false);
+            const [birthdayGreetingError, setBirthdayGreetingError] = useState('');
+            const [showBirthdayGreetingModal, setShowBirthdayGreetingModal] = useState(false);
+            const [birthdayBannerDismissed, setBirthdayBannerDismissed] = useState(false);
             const [sensitiveAccess, setSensitiveAccess] = useState({ required: false, granted: false, loading: false });
             const [showSensitiveQrModal, setShowSensitiveQrModal] = useState(false);
             const [sensitiveQrUrl, setSensitiveQrUrl] = useState('');
@@ -19689,6 +19698,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             return String(n).padStart(2, "0");
             }
 
+            const getLocalDateKey = useCallback((date = new Date()) => {
+                const d = date instanceof Date ? date : new Date(date);
+                if (isNaN(d)) return '';
+                return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+            }, []);
+
             const getCellColor = (hours, isPastDayWithZero) => {
             if (isPastDayWithZero) return "bg-gray-300 text-gray-700";
             if (hours === 0) return "bg-gray-200 text-gray-500";
@@ -20992,6 +21007,115 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 };
             }, []);
 
+            useEffect(() => {
+                if (!user?.id) {
+                    setBirthdaysToday([]);
+                    setBirthdaysDate('');
+                    setBirthdaysLoading(false);
+                    setBirthdaysError('');
+                    setBirthdayGreeting('');
+                    setBirthdayGreetingLoading(false);
+                    setBirthdayGreetingError('');
+                    setShowBirthdayGreetingModal(false);
+                    setBirthdayBannerDismissed(false);
+                    return;
+                }
+
+                setBirthdayBannerDismissed(false);
+            }, [user?.id]);
+
+            useEffect(() => {
+                if (!user?.id) return;
+                let cancelled = false;
+                const requestKey = `birthdaysToday:${user.id}`;
+                runSingleFlight(requestKey, async () => {
+                    if (isMounted.current) {
+                        setBirthdaysLoading(true);
+                        setBirthdaysError('');
+                    }
+                    try {
+                        const response = await axios.get(`${API_BASE_URL}/api/birthdays/today`, {
+                            headers: withAccessTokenHeader({ 'X-User-Id': user.id })
+                        });
+                        const data = response?.data || {};
+                        if (!cancelled && isMounted.current) {
+                            if (data.status === 'success') {
+                                setBirthdaysToday(Array.isArray(data.birthdays) ? data.birthdays : []);
+                                setBirthdaysDate(data.date || '');
+                            } else {
+                                setBirthdaysToday([]);
+                                setBirthdaysDate(data.date || '');
+                                setBirthdaysError(data.error || 'Не удалось получить дни рождения');
+                            }
+                        }
+                    } catch (err) {
+                        if (!cancelled && isMounted.current) {
+                            setBirthdaysToday([]);
+                            setBirthdaysDate('');
+                            setBirthdaysError(err.response?.data?.error || 'Не удалось получить дни рождения');
+                        }
+                    } finally {
+                        if (!cancelled && isMounted.current) {
+                            setBirthdaysLoading(false);
+                        }
+                    }
+                });
+                return () => { cancelled = true; };
+            }, [user?.id, runSingleFlight]);
+
+            const isUserBirthdayToday = useMemo(() => {
+                if (!user?.id) return false;
+                return (birthdaysToday || []).some((b) => Number(b?.id) === Number(user.id));
+            }, [birthdaysToday, user?.id]);
+
+            useEffect(() => {
+                if (!user?.id || !isUserBirthdayToday) return;
+                const dateKey = birthdaysDate || getLocalDateKey();
+                if (!dateKey) return;
+                const storageKey = `otp.birthday.greeting.shown.${user.id}.${dateKey}`;
+                try {
+                    if (sessionStorage.getItem(storageKey)) return;
+                } catch (e) {
+                    // ignore sessionStorage errors
+                }
+
+                let cancelled = false;
+                const requestKey = `birthdayGreeting:${user.id}:${dateKey}`;
+                runSingleFlight(requestKey, async () => {
+                    if (isMounted.current) {
+                        setBirthdayGreetingLoading(true);
+                        setBirthdayGreetingError('');
+                        setShowBirthdayGreetingModal(true);
+                    }
+                    try {
+                        const resp = await axios.post(
+                            `${API_BASE_URL}/api/ai/birthday_greeting`,
+                            {},
+                            { headers: withAccessTokenHeader({ 'X-User-Id': user.id }) }
+                        );
+                        const data = resp?.data || {};
+                        if (!cancelled && isMounted.current) {
+                            if (data.status === 'success' && data.result) {
+                                const greetingText = String(data.result.greeting || '').trim();
+                                setBirthdayGreeting(greetingText || 'С днем рождения!');
+                                try { sessionStorage.setItem(storageKey, '1'); } catch (e) {}
+                            } else {
+                                setBirthdayGreetingError(typeof data?.error === 'string' ? data.error : 'Не удалось получить поздравление');
+                            }
+                        }
+                    } catch (err) {
+                        if (!cancelled && isMounted.current) {
+                            setBirthdayGreetingError(err.response?.data?.error || 'Не удалось получить поздравление');
+                        }
+                    } finally {
+                        if (!cancelled && isMounted.current) {
+                            setBirthdayGreetingLoading(false);
+                        }
+                    }
+                });
+                return () => { cancelled = true; };
+            }, [user?.id, isUserBirthdayToday, birthdaysDate, runSingleFlight, getLocalDateKey]);
+
             const validateUrl = (url) => {
                 const googleSheetsRegex = /^https:\/\/docs\.google\.com\/spreadsheets\/d\/[a-zA-Z0-9_-]+/;
                 return googleSheetsRegex.test(url);
@@ -21604,6 +21728,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setSensitiveQrExpiresAt('');
                     setSensitiveQrError('');
                     setShowAuthEntranceSplash(false);
+                    setBirthdaysToday([]);
+                    setBirthdaysDate('');
+                    setBirthdaysLoading(false);
+                    setBirthdaysError('');
+                    setBirthdayGreeting('');
+                    setBirthdayGreetingLoading(false);
+                    setBirthdayGreetingError('');
+                    setShowBirthdayGreetingModal(false);
+                    setBirthdayBannerDismissed(false);
                     setUser(null);
                     setSvList([]);
                     setSvData(null);
@@ -22759,6 +22892,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const callEvaluationIframeUrl = `${APP_BASE_URL}call_evaluation.html`;
             const isCallEvaluationView = view === 'call_evaluation' && (user.role === 'admin' || user.role === 'sv' || user.role === 'supervisor');
             const canSeeCallEvaluation = user.role === 'admin' || user.role === 'sv' || user.role === 'supervisor';
+            const birthdayBannerVisible = !isCallEvaluationView && !birthdayBannerDismissed && Array.isArray(birthdaysToday) && birthdaysToday.length > 0;
+            const birthdayBannerNames = (birthdaysToday || []).map((b) => {
+                const name = String(b?.name || 'Сотрудник').trim();
+                return Number(b?.id) === Number(user?.id) ? `${name} (вы)` : name;
+            });
+            const birthdayBannerText = birthdaysToday.length === 1
+                ? `Сегодня день рождения у ${birthdayBannerNames[0]}!`
+                : `Сегодня день рождения у: ${birthdayBannerNames.join(', ')}.`;
 
             return (
                 <div className="flex h-screen overflow-hidden">
@@ -23125,6 +23266,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         className={`main-content w-full ${isCallEvaluationView ? 'p-0 h-screen overflow-hidden' : 'p-8 bg-gray-50 min-h-screen overflow-y-auto'} ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}
                         style={isCallEvaluationView ? { backgroundColor: '#f7f7f5' } : undefined}
                     >
+                        {birthdayBannerVisible && (
+                        <div className="bg-gradient-to-r from-amber-50 via-yellow-50 to-amber-100 border border-amber-200 text-amber-900 rounded-xl px-4 py-3 mb-6 shadow-sm flex items-start gap-3">
+                            <FaIcon className="fas fa-birthday-cake text-amber-600 text-xl mt-0.5"></FaIcon>
+                            <div className="flex-1">
+                                <div className="font-semibold">День рождения сегодня</div>
+                                <div className="text-sm">{birthdayBannerText}</div>
+                            </div>
+                            <button
+                                onClick={() => setBirthdayBannerDismissed(true)}
+                                className="text-amber-700 hover:text-amber-900 transition"
+                                aria-label="Скрыть уведомление"
+                            >
+                                <FaIcon className="fas fa-times"></FaIcon>
+                            </button>
+                        </div>
+                        )}
                         {user.role === 'operator' && (
                         <div className="bg-white p-4 rounded-xl shadow-sm mb-6 border border-gray-200 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                             <div className="flex items-center gap-3">
@@ -26510,6 +26667,57 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     }
                                     />
                             </Suspense>
+                        )}
+                        {showBirthdayGreetingModal && (
+                            <SimpleModal
+                                open={showBirthdayGreetingModal}
+                                onClose={() => { setShowBirthdayGreetingModal(false); }}
+                                panelClassName="w-[720px] max-w-[calc(100vw-1rem)]"
+                            >
+                                <div className="p-2">
+                                    <div className="flex items-start justify-between gap-4 mb-3">
+                                        <div>
+                                            <h2 className="text-2xl font-bold text-amber-700">С днем рождения, {user?.name || 'сотрудник'}!</h2>
+                                            <p className="text-sm text-amber-700/80 mt-1">Пусть этот день принесёт тёплые слова и хорошее настроение.</p>
+                                        </div>
+                                        <button
+                                            onClick={() => setShowBirthdayGreetingModal(false)}
+                                            className="rounded-md p-2 text-amber-700 hover:bg-amber-100 transition"
+                                            aria-label="Закрыть"
+                                        >
+                                            <FaIcon className="fas fa-times text-lg" />
+                                        </button>
+                                    </div>
+
+                                    {birthdayGreetingLoading && (
+                                        <div className="flex items-center gap-2 text-amber-700">
+                                            <FaIcon className="fas fa-spinner fa-spin" />
+                                            <span>Готовим персональное поздравление...</span>
+                                        </div>
+                                    )}
+
+                                    {!birthdayGreetingLoading && birthdayGreetingError && (
+                                        <div className="rounded-lg border border-red-200 bg-red-50 text-red-700 p-3 text-sm">
+                                            {birthdayGreetingError}
+                                        </div>
+                                    )}
+
+                                    {!birthdayGreetingLoading && !birthdayGreetingError && (
+                                        <p className="text-gray-700 leading-relaxed whitespace-pre-line">
+                                            {birthdayGreeting || 'С днем рождения! Пусть всё задуманное получается легко.'}
+                                        </p>
+                                    )}
+
+                                    <div className="mt-6 flex justify-end">
+                                        <button
+                                            onClick={() => setShowBirthdayGreetingModal(false)}
+                                            className="px-5 py-2 rounded-lg bg-amber-500 text-white hover:bg-amber-600 transition font-semibold"
+                                        >
+                                            Спасибо!
+                                        </button>
+                                    </div>
+                                </div>
+                            </SimpleModal>
                         )}
                         {(showChangeLoginForm || showChangePasswordForm) && (
                         <>
