@@ -2218,7 +2218,14 @@ def get_admin_users():
                         sp.end_date as status_period_end_date,
                         sp.dismissal_reason as status_period_dismissal_reason,
                         COALESCE(sp.is_blacklist, FALSE) as status_period_is_blacklist,
-                        sp.comment as status_period_comment
+                        sp.comment as status_period_comment,
+                        u.phone,
+                        u.email,
+                        u.instagram,
+                        u.company_name,
+                        u.employment_type,
+                        COALESCE(u.has_proxy, FALSE) as has_proxy,
+                        u.sip_number
                     FROM users u
                     LEFT JOIN directions d ON u.direction_id = d.id
                     LEFT JOIN users s ON u.supervisor_id = s.id
@@ -2275,7 +2282,14 @@ def get_admin_users():
                         "status_period_end_date": row[17].strftime('%Y-%m-%d') if row[17] else None,
                         "status_period_dismissal_reason": row[18] or "",
                         "status_period_is_blacklist": bool(row[19]) if row[19] is not None else False,
-                        "status_period_comment": row[20] or ""
+                        "status_period_comment": row[20] or "",
+                        "phone": row[21] or "",
+                        "email": row[22] or "",
+                        "instagram": row[23] or "",
+                        "company_name": row[24] or "",
+                        "employment_type": row[25] or "",
+                        "has_proxy": bool(row[26]) if row[26] is not None else False,
+                        "sip_number": row[27] or ""
                     })
         return jsonify({"status": "success", "users": users}), 200
     except Exception as e:
@@ -2340,6 +2354,35 @@ def admin_update_user():
                 value = None
             elif value not in ['male', 'female']:
                 return jsonify({"error": "Invalid gender value"}), 400
+        elif field in ['phone', 'email', 'instagram', 'company_name', 'sip_number']:
+            value = str(value).strip() if value is not None else ''
+            value = value or None
+            if field == 'sip_number' and target_role != 'operator':
+                value = None
+            if field == 'email' and value and '@' not in value:
+                return jsonify({"error": "Invalid email value"}), 400
+        elif field == 'employment_type':
+            value = str(value).strip().lower() if value is not None else ''
+            value = value or None
+            if value not in [None, 'gph', 'of']:
+                return jsonify({"error": "Invalid employment_type value"}), 400
+        elif field == 'has_proxy':
+            if isinstance(value, bool):
+                pass
+            elif isinstance(value, (int, float)):
+                value = bool(value)
+            elif isinstance(value, str):
+                value_normalized = value.strip().lower()
+                if value_normalized in ['1', 'true', 'yes', 'y', 'on']:
+                    value = True
+                elif value_normalized in ['0', 'false', 'no', 'n', 'off', '']:
+                    value = False
+                else:
+                    return jsonify({"error": "Invalid has_proxy value"}), 400
+            elif value is None:
+                value = False
+            else:
+                return jsonify({"error": "Invalid has_proxy value"}), 400
         else:
             return jsonify({"error": "Invalid field"}), 400
 
@@ -5222,6 +5265,39 @@ def add_user():
         else:
             birth_date = None
 
+        phone = str(data.get('phone') or '').strip() or None
+        email = str(data.get('email') or '').strip() or None
+        if email and '@' not in email:
+            return jsonify({"error": "Invalid email value"}), 400
+        instagram = str(data.get('instagram') or '').strip() or None
+        company_name = str(data.get('company_name') or '').strip() or None
+
+        employment_type = str(data.get('employment_type') or '').strip().lower() or None
+        if employment_type not in [None, 'gph', 'of']:
+            return jsonify({"error": "Invalid employment_type value"}), 400
+
+        has_proxy_raw = data.get('has_proxy')
+        if isinstance(has_proxy_raw, bool):
+            has_proxy = has_proxy_raw
+        elif isinstance(has_proxy_raw, (int, float)):
+            has_proxy = bool(has_proxy_raw)
+        elif isinstance(has_proxy_raw, str):
+            has_proxy_value = has_proxy_raw.strip().lower()
+            if has_proxy_value in ['1', 'true', 'yes', 'y', 'on']:
+                has_proxy = True
+            elif has_proxy_value in ['0', 'false', 'no', 'n', 'off', '']:
+                has_proxy = False
+            else:
+                return jsonify({"error": "Invalid has_proxy value"}), 400
+        elif has_proxy_raw is None:
+            has_proxy = False
+        else:
+            return jsonify({"error": "Invalid has_proxy value"}), 400
+
+        sip_number = str(data.get('sip_number') or '').strip() or None
+        if role != 'operator':
+            sip_number = None
+
         login_prefix = 'trainer' if role == 'trainer' else 'user'
         login = f"{login_prefix}_{str(uuid.uuid4())[:8]}"
         password = str(uuid.uuid4())[:8]
@@ -5237,7 +5313,14 @@ def add_user():
             login=login,
             password=password,
             gender=gender,
-            birth_date=birth_date
+            birth_date=birth_date,
+            phone=phone,
+            email=email,
+            instagram=instagram,
+            company_name=company_name,
+            employment_type=employment_type,
+            has_proxy=has_proxy,
+            sip_number=sip_number
         )
 
         requester_header = request.headers.get('X-User-Id')

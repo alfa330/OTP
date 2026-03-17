@@ -20738,6 +20738,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return status;
                 };
                 const isPeriodStatusValue = (v) => PERIOD_STATUSES.has(String(v || '').trim());
+                const normalizeTextForApi = (value) => {
+                    const str = String(value ?? '').trim();
+                    return str || null;
+                };
+                const normalizeEmploymentTypeForApi = (value) => {
+                    const normalized = String(value ?? '').trim().toLowerCase();
+                    return ['gph', 'of'].includes(normalized) ? normalized : null;
+                };
+                const normalizeBoolForApi = (value) => {
+                    if (typeof value === 'boolean') return value;
+                    if (typeof value === 'number') return value !== 0;
+                    const normalized = String(value ?? '').trim().toLowerCase();
+                    return ['1', 'true', 'yes', 'y', 'on'].includes(normalized);
+                };
                 const syncUserAvatar = async (targetUserId, avatarFile, avatarOriginalFile, avatarRemove) => {
                     if (!targetUserId || (!avatarFile && !avatarRemove)) {
                         return null;
@@ -20816,6 +20830,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         const newName = (editedUser.name || '').trim();
                         const createdRole = String(editedUser?.role || 'operator').trim().toLowerCase();
                         const isCreatedTrainer = createdRole === 'trainer';
+                        const isCreatedOperator = createdRole === 'operator';
                         const createdRoleLabel = createdRole === 'trainer'
                             ? 'Тренер'
                             : (createdRole === 'sv' || createdRole === 'supervisor' ? 'Супервайзер' : 'Оператор');
@@ -20841,6 +20856,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             hire_date: normalizeDateForApi(editedUser.hire_date),
                             gender: editedUser.gender || null,
                             birth_date: normalizeDateForApi(editedUser.birth_date),
+                            phone: normalizeTextForApi(editedUser.phone),
+                            email: normalizeTextForApi(editedUser.email),
+                            instagram: normalizeTextForApi(editedUser.instagram),
+                            company_name: normalizeTextForApi(editedUser.company_name),
+                            employment_type: normalizeEmploymentTypeForApi(editedUser.employment_type),
+                            has_proxy: normalizeBoolForApi(editedUser.has_proxy),
+                            sip_number: isCreatedOperator ? normalizeTextForApi(editedUser.sip_number) : null,
                             status: isPeriodStatusValue(editedUser?.status) ? "working" : (editedUser.status || "working"),
                             // если UI даёт new_login/new_password — можно передать их
                             new_login: editedUser.new_login || undefined,
@@ -21033,6 +21055,83 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             user_id: editedUser.id,
                             field: 'birth_date',
                             value: nextBirthDate
+                        }, {
+                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        });
+                    }
+                    const nextPhone = normalizeTextForApi(editedUser?.phone);
+                    const prevPhone = normalizeTextForApi(userToEdit?.phone);
+                    if (nextPhone !== prevPhone) {
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'phone',
+                            value: nextPhone
+                        }, {
+                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        });
+                    }
+                    const nextEmail = normalizeTextForApi(editedUser?.email);
+                    const prevEmail = normalizeTextForApi(userToEdit?.email);
+                    if (nextEmail !== prevEmail) {
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'email',
+                            value: nextEmail
+                        }, {
+                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        });
+                    }
+                    const nextInstagram = normalizeTextForApi(editedUser?.instagram);
+                    const prevInstagram = normalizeTextForApi(userToEdit?.instagram);
+                    if (nextInstagram !== prevInstagram) {
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'instagram',
+                            value: nextInstagram
+                        }, {
+                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        });
+                    }
+                    const nextCompanyName = normalizeTextForApi(editedUser?.company_name);
+                    const prevCompanyName = normalizeTextForApi(userToEdit?.company_name);
+                    if (nextCompanyName !== prevCompanyName) {
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'company_name',
+                            value: nextCompanyName
+                        }, {
+                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        });
+                    }
+                    const nextEmploymentType = normalizeEmploymentTypeForApi(editedUser?.employment_type);
+                    const prevEmploymentType = normalizeEmploymentTypeForApi(userToEdit?.employment_type);
+                    if (nextEmploymentType !== prevEmploymentType) {
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'employment_type',
+                            value: nextEmploymentType
+                        }, {
+                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        });
+                    }
+                    const nextHasProxy = normalizeBoolForApi(editedUser?.has_proxy);
+                    const prevHasProxy = normalizeBoolForApi(userToEdit?.has_proxy);
+                    if (nextHasProxy !== prevHasProxy) {
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'has_proxy',
+                            value: nextHasProxy
+                        }, {
+                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        });
+                    }
+                    const nextSipNumber = editedRole === 'operator' ? normalizeTextForApi(editedUser?.sip_number) : null;
+                    const prevSipNumber = normalizeTextForApi(userToEdit?.sip_number);
+                    if (nextSipNumber !== prevSipNumber) {
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'sip_number',
+                            value: nextSipNumber
                         }, {
                             headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
                         });
