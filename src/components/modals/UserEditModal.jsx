@@ -28,6 +28,14 @@ const AVATAR_MAX_BYTES = 512 * 1024;
 const AVATAR_CROP_PREVIEW_SIZE = 256;
 const AVATAR_MIN_ZOOM = 1;
 const AVATAR_MAX_ZOOM_CAP = 6;
+const KZ_PHONE_REGEX = /^\+7\d{9}$/;
+const KZ_PHONE_PLACEHOLDER = '+7XXXXXXXXX';
+
+const isValidKzPhone = (value) => {
+    const normalized = String(value || '').trim();
+    if (!normalized) return true;
+    return KZ_PHONE_REGEX.test(normalized);
+};
 
 const clampNumber = (value, min, max) => Math.min(max, Math.max(min, value));
 
@@ -586,6 +594,22 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         return;
         }
 
+        const normalizedPhone = String(editedUser?.phone || '').trim();
+        if (!isValidKzPhone(normalizedPhone)) {
+        setModalError(`Номер телефона должен быть в формате ${KZ_PHONE_PLACEHOLDER}`);
+        return;
+        }
+        const normalizedCloseContact1Phone = String(editedUser?.close_contact_1_phone || '').trim();
+        if (!isValidKzPhone(normalizedCloseContact1Phone)) {
+        setModalError(`Телефон близкого контакта 1 должен быть в формате ${KZ_PHONE_PLACEHOLDER}`);
+        return;
+        }
+        const normalizedCloseContact2Phone = String(editedUser?.close_contact_2_phone || '').trim();
+        if (!isValidKzPhone(normalizedCloseContact2Phone)) {
+        setModalError(`Телефон близкого контакта 2 должен быть в формате ${KZ_PHONE_PLACEHOLDER}`);
+        return;
+        }
+
         if (usesScheduleStatusPeriodForm(editedUser?.status) && editedUser?.use_schedule_status_period) {
         const startDate = String(editedUser?.status_period_start_date || "").trim();
         const endDate = String(editedUser?.status_period_end_date || "").trim();
@@ -813,7 +837,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
             className="pointer-events-auto w-full max-w-lg bg-white/95 dark:bg-slate-900/95 rounded-2xl shadow-2xl overflow-hidden transform transition-all duration-300 animate-scale-in"
             onClick={(e) => e.stopPropagation()}
             >
-            <div className="px-6 py-5">
+            <div className="px-6 py-5 max-h-[88vh] overflow-y-auto">
                 {/* Header */}
                 <div className="flex items-start justify-between gap-4">
                 <div className="flex flex-col gap-0.5">
@@ -940,6 +964,9 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         onChange={(e) => setEditedUser({ ...editedUser, phone: e.target.value })}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                         disabled={isLoading || !!createdCredentials}
+                        placeholder={KZ_PHONE_PLACEHOLDER}
+                        maxLength={11}
+                        inputMode="tel"
                         />
                     </div>
 
@@ -977,73 +1004,83 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         />
                     </div>
 
-                    <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-3">
-                        <div className="text-sm font-medium text-slate-700">Близкий контакт 1</div>
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Кем приходится</label>
-                            <input
-                            type="text"
-                            value={editedUser?.close_contact_1_relation || ""}
-                            onChange={(e) => setEditedUser({ ...editedUser, close_contact_1_relation: e.target.value })}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                            disabled={isLoading || !!createdCredentials}
-                            />
+                    <details className="rounded-lg border border-slate-200 bg-slate-50 p-3" open>
+                        <summary className="cursor-pointer text-sm font-medium text-slate-700">Близкий контакт 1</summary>
+                        <div className="mt-3 space-y-3">
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Кем приходится</label>
+                                <input
+                                type="text"
+                                value={editedUser?.close_contact_1_relation || ""}
+                                onChange={(e) => setEditedUser({ ...editedUser, close_contact_1_relation: e.target.value })}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                disabled={isLoading || !!createdCredentials}
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">ФИО</label>
+                                <input
+                                type="text"
+                                value={editedUser?.close_contact_1_full_name || ""}
+                                onChange={(e) => setEditedUser({ ...editedUser, close_contact_1_full_name: e.target.value })}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                disabled={isLoading || !!createdCredentials}
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Номер</label>
+                                <input
+                                type="text"
+                                value={editedUser?.close_contact_1_phone || ""}
+                                onChange={(e) => setEditedUser({ ...editedUser, close_contact_1_phone: e.target.value })}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                disabled={isLoading || !!createdCredentials}
+                                placeholder={KZ_PHONE_PLACEHOLDER}
+                                maxLength={11}
+                                inputMode="tel"
+                                />
+                            </div>
                         </div>
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">ФИО</label>
-                            <input
-                            type="text"
-                            value={editedUser?.close_contact_1_full_name || ""}
-                            onChange={(e) => setEditedUser({ ...editedUser, close_contact_1_full_name: e.target.value })}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                            disabled={isLoading || !!createdCredentials}
-                            />
-                        </div>
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Номер</label>
-                            <input
-                            type="text"
-                            value={editedUser?.close_contact_1_phone || ""}
-                            onChange={(e) => setEditedUser({ ...editedUser, close_contact_1_phone: e.target.value })}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                            disabled={isLoading || !!createdCredentials}
-                            />
-                        </div>
-                    </div>
+                    </details>
 
-                    <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-3">
-                        <div className="text-sm font-medium text-slate-700">Близкий контакт 2</div>
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Кем приходится</label>
-                            <input
-                            type="text"
-                            value={editedUser?.close_contact_2_relation || ""}
-                            onChange={(e) => setEditedUser({ ...editedUser, close_contact_2_relation: e.target.value })}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                            disabled={isLoading || !!createdCredentials}
-                            />
+                    <details className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                        <summary className="cursor-pointer text-sm font-medium text-slate-700">Близкий контакт 2</summary>
+                        <div className="mt-3 space-y-3">
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Кем приходится</label>
+                                <input
+                                type="text"
+                                value={editedUser?.close_contact_2_relation || ""}
+                                onChange={(e) => setEditedUser({ ...editedUser, close_contact_2_relation: e.target.value })}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                disabled={isLoading || !!createdCredentials}
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">ФИО</label>
+                                <input
+                                type="text"
+                                value={editedUser?.close_contact_2_full_name || ""}
+                                onChange={(e) => setEditedUser({ ...editedUser, close_contact_2_full_name: e.target.value })}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                disabled={isLoading || !!createdCredentials}
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Номер</label>
+                                <input
+                                type="text"
+                                value={editedUser?.close_contact_2_phone || ""}
+                                onChange={(e) => setEditedUser({ ...editedUser, close_contact_2_phone: e.target.value })}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                disabled={isLoading || !!createdCredentials}
+                                placeholder={KZ_PHONE_PLACEHOLDER}
+                                maxLength={11}
+                                inputMode="tel"
+                                />
+                            </div>
                         </div>
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">ФИО</label>
-                            <input
-                            type="text"
-                            value={editedUser?.close_contact_2_full_name || ""}
-                            onChange={(e) => setEditedUser({ ...editedUser, close_contact_2_full_name: e.target.value })}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                            disabled={isLoading || !!createdCredentials}
-                            />
-                        </div>
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Номер</label>
-                            <input
-                            type="text"
-                            value={editedUser?.close_contact_2_phone || ""}
-                            onChange={(e) => setEditedUser({ ...editedUser, close_contact_2_phone: e.target.value })}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                            disabled={isLoading || !!createdCredentials}
-                            />
-                        </div>
-                    </div>
+                    </details>
                     </>
                 )}
 
@@ -1395,6 +1432,9 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             onChange={(e) => setEditedUser({ ...editedUser, phone: e.target.value })}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                             disabled={isLoading}
+                            placeholder={KZ_PHONE_PLACEHOLDER}
+                            maxLength={11}
+                            inputMode="tel"
                             />
                         </div>
 
@@ -1432,73 +1472,83 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             />
                         </div>
 
-                        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-3">
-                            <div className="text-sm font-medium text-slate-700">Близкий контакт 1</div>
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Кем приходится</label>
-                                <input
-                                type="text"
-                                value={editedUser?.close_contact_1_relation || ""}
-                                onChange={(e) => setEditedUser({ ...editedUser, close_contact_1_relation: e.target.value })}
-                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                                disabled={isLoading}
-                                />
+                        <details className="rounded-lg border border-slate-200 bg-slate-50 p-3" open>
+                            <summary className="cursor-pointer text-sm font-medium text-slate-700">Близкий контакт 1</summary>
+                            <div className="mt-3 space-y-3">
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Кем приходится</label>
+                                    <input
+                                    type="text"
+                                    value={editedUser?.close_contact_1_relation || ""}
+                                    onChange={(e) => setEditedUser({ ...editedUser, close_contact_1_relation: e.target.value })}
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                    disabled={isLoading}
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">ФИО</label>
+                                    <input
+                                    type="text"
+                                    value={editedUser?.close_contact_1_full_name || ""}
+                                    onChange={(e) => setEditedUser({ ...editedUser, close_contact_1_full_name: e.target.value })}
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                    disabled={isLoading}
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Номер</label>
+                                    <input
+                                    type="text"
+                                    value={editedUser?.close_contact_1_phone || ""}
+                                    onChange={(e) => setEditedUser({ ...editedUser, close_contact_1_phone: e.target.value })}
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                    disabled={isLoading}
+                                    placeholder={KZ_PHONE_PLACEHOLDER}
+                                    maxLength={11}
+                                    inputMode="tel"
+                                    />
+                                </div>
                             </div>
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">ФИО</label>
-                                <input
-                                type="text"
-                                value={editedUser?.close_contact_1_full_name || ""}
-                                onChange={(e) => setEditedUser({ ...editedUser, close_contact_1_full_name: e.target.value })}
-                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                                disabled={isLoading}
-                                />
-                            </div>
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Номер</label>
-                                <input
-                                type="text"
-                                value={editedUser?.close_contact_1_phone || ""}
-                                onChange={(e) => setEditedUser({ ...editedUser, close_contact_1_phone: e.target.value })}
-                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                                disabled={isLoading}
-                                />
-                            </div>
-                        </div>
+                        </details>
 
-                        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-3">
-                            <div className="text-sm font-medium text-slate-700">Близкий контакт 2</div>
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Кем приходится</label>
-                                <input
-                                type="text"
-                                value={editedUser?.close_contact_2_relation || ""}
-                                onChange={(e) => setEditedUser({ ...editedUser, close_contact_2_relation: e.target.value })}
-                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                                disabled={isLoading}
-                                />
+                        <details className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                            <summary className="cursor-pointer text-sm font-medium text-slate-700">Близкий контакт 2</summary>
+                            <div className="mt-3 space-y-3">
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Кем приходится</label>
+                                    <input
+                                    type="text"
+                                    value={editedUser?.close_contact_2_relation || ""}
+                                    onChange={(e) => setEditedUser({ ...editedUser, close_contact_2_relation: e.target.value })}
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                    disabled={isLoading}
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">ФИО</label>
+                                    <input
+                                    type="text"
+                                    value={editedUser?.close_contact_2_full_name || ""}
+                                    onChange={(e) => setEditedUser({ ...editedUser, close_contact_2_full_name: e.target.value })}
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                    disabled={isLoading}
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Номер</label>
+                                    <input
+                                    type="text"
+                                    value={editedUser?.close_contact_2_phone || ""}
+                                    onChange={(e) => setEditedUser({ ...editedUser, close_contact_2_phone: e.target.value })}
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                    disabled={isLoading}
+                                    placeholder={KZ_PHONE_PLACEHOLDER}
+                                    maxLength={11}
+                                    inputMode="tel"
+                                    />
+                                </div>
                             </div>
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">ФИО</label>
-                                <input
-                                type="text"
-                                value={editedUser?.close_contact_2_full_name || ""}
-                                onChange={(e) => setEditedUser({ ...editedUser, close_contact_2_full_name: e.target.value })}
-                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                                disabled={isLoading}
-                                />
-                            </div>
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Номер</label>
-                                <input
-                                type="text"
-                                value={editedUser?.close_contact_2_phone || ""}
-                                onChange={(e) => setEditedUser({ ...editedUser, close_contact_2_phone: e.target.value })}
-                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                                disabled={isLoading}
-                                />
-                            </div>
-                        </div>
+                        </details>
                         </>
                     )}
 
