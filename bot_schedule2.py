@@ -831,6 +831,13 @@ def _truncate_for_telegram(text, max_chars):
     return f"{value[:available].rstrip()}{suffix}"
 
 
+def _escape_telegram_html(text, max_chars=None):
+    value = str(text or '').strip()
+    if max_chars is not None:
+        value = _truncate_for_telegram(value, max_chars)
+    return html.escape(value)
+
+
 def _get_telegram_error_text(response):
     try:
         payload = response.json()
@@ -846,12 +853,18 @@ def _get_telegram_error_text(response):
     return f"HTTP {response.status_code}"
 
 
-def _send_telegram_text_message(chat_id, text):
+def _send_telegram_text_message(chat_id, text, parse_mode='HTML'):
     telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
+    message_text = str(text or '')
+    if parse_mode != 'HTML':
+        message_text = _truncate_for_telegram(message_text, TELEGRAM_MAX_MESSAGE_CHARS)
     payload = {
         "chat_id": int(chat_id),
-        "text": _truncate_for_telegram(text, TELEGRAM_MAX_MESSAGE_CHARS)
+        "text": message_text,
+        "disable_web_page_preview": True
     }
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     return requests.post(telegram_url, json=payload, timeout=TASK_TELEGRAM_TIMEOUT_SECONDS)
 
 
@@ -860,9 +873,11 @@ def _fetch_task_notification_context(task_id):
         cursor.execute("""
             SELECT
                 t.id, t.subject, t.tag, t.created_by,
-                creator.telegram_id, creator.name
+                creator.telegram_id, creator.name,
+                t.assigned_to, assignee.telegram_id, assignee.name
             FROM tasks t
             LEFT JOIN users creator ON creator.id = t.created_by
+            LEFT JOIN users assignee ON assignee.id = t.assigned_to
             WHERE t.id = %s
             LIMIT 1
         """, (int(task_id),))
@@ -875,8 +890,104 @@ def _fetch_task_notification_context(task_id):
         "tag": row[2],
         "created_by": row[3],
         "creator_telegram_id": row[4],
-        "creator_name": row[5]
+        "creator_name": row[5],
+        "assigned_to": row[6],
+        "assignee_telegram_id": row[7],
+        "assignee_name": row[8]
     }
+
+
+def _collect_task_notification_recipients(task_ctx, actor_user_id):
+    recipients = []
+    seen_chat_ids = set()
+
+    creator_chat_id = task_ctx.get('creator_telegram_id')
+    creator_id = task_ctx.get('created_by')
+    if creator_chat_id and (creator_id is None or int(creator_id) != int(actor_user_id)):
+        chat_key = str(creator_chat_id)
+        if chat_key not in seen_chat_ids:
+            seen_chat_ids.add(chat_key)
+            recipients.append({
+                "kind": "creator",
+                "chat_id": creator_chat_id,
+                "name": task_ctx.get('creator_name') or 'Постановщик'
+            })
+
+    assignee_chat_id = task_ctx.get('assignee_telegram_id')
+    assignee_id = task_ctx.get('assigned_to')
+    if assignee_chat_id and (assignee_id is None or int(assignee_id) != int(actor_user_id)):
+        chat_key = str(assignee_chat_id)
+        if chat_key not in seen_chat_ids:
+            seen_chat_ids.add(chat_key)
+            recipients.append({
+                "kind": "assignee",
+                "chat_id": assignee_chat_id,
+                "name": task_ctx.get('assignee_name') or 'Исполнитель'
+            })
+
+    return recipients
+
+
+def _build_task_status_notification_html(
+    action,
+    task_ctx,
+    actor_name,
+    recipient_kind,
+    comment=None,
+    completion_summary=None,
+    completion_files_count=0
+):
+    action_norm = (action or '').strip().lower()
+    tag_label = TASK_TAG_LABELS.get((task_ctx.get('tag') or 'task').strip().lower(), 'Задача')
+    subject_safe = _escape_telegram_html(task_ctx.get('subject') or f"Задача #{task_ctx.get('id')}", 220)
+    tag_safe = _escape_telegram_html(tag_label, 60)
+    actor_safe = _escape_telegram_html(actor_name or 'Сотрудник', 80)
+    recipient_role_label = 'Постановщик' if recipient_kind == 'creator' else 'Исполнитель'
+
+    header_map = {
+        'in_progress': '📥 Задача принята в работу',
+        'completed': '✅ Задача отмечена выполненной',
+        'accepted': '✅ Результат принят',
+        'returned': '↩️ Задача возвращена на доработку',
+        'reopened': '🔄 Задача возобновлена'
+    }
+    status_map = {
+        'in_progress': 'В работе',
+        'completed': 'Ожидает проверки',
+        'accepted': 'Принята',
+        'returned': 'Возвращена',
+        'reopened': 'Снова в работе'
+    }
+
+    lines = [
+        f"<b>{header_map.get(action_norm, '🔔 Обновление статуса задачи')}</b>",
+        "",
+        f"<b>Для:</b> {recipient_role_label}",
+        f"<b>Тип:</b> {tag_safe}",
+        f"<b>Тема:</b> {subject_safe}",
+        f"<b>Статус:</b> {status_map.get(action_norm, 'Обновлён')}",
+        f"<b>Кто изменил:</b> {actor_safe}"
+    ]
+
+    if comment:
+        lines.extend([
+            "",
+            "<b>Комментарий:</b>",
+            _escape_telegram_html(comment, 800)
+        ])
+
+    if action_norm == 'completed':
+        lines.append(f"<b>Файлов:</b> {int(completion_files_count or 0)}")
+        lines.extend([
+            "",
+            "<b>Итоги выполнения:</b>",
+            _escape_telegram_html(completion_summary or "Итоги выполнения не указаны.", 2500)
+        ])
+
+    message = "\n".join(lines)
+    if len(message) > TELEGRAM_MAX_MESSAGE_CHARS:
+        message = message[:TELEGRAM_MAX_MESSAGE_CHARS]
+    return message
 
 
 def _send_task_completion_attachments_to_telegram(chat_id, task_subject, attachments):
@@ -925,12 +1036,15 @@ def _send_task_completion_attachments_to_telegram(chat_id, task_subject, attachm
                 'chat_id': int(chat_id)
             }
             if idx == 1:
-                caption = _truncate_for_telegram(
-                    f"Файлы по задаче: {task_subject or 'Без названия'}",
-                    TELEGRAM_MAX_CAPTION_CHARS
+                caption = (
+                    "<b>📎 Файлы по задаче</b>\n"
+                    f"{_escape_telegram_html(task_subject or 'Без названия', 180)}"
                 )
+                if len(caption) > TELEGRAM_MAX_CAPTION_CHARS:
+                    caption = caption[:TELEGRAM_MAX_CAPTION_CHARS]
                 if caption:
                     data['caption'] = caption
+                    data['parse_mode'] = 'HTML'
 
             response = requests.post(
                 telegram_url,
@@ -6092,23 +6206,15 @@ def handle_tasks():
                 tag_label = TASK_TAG_LABELS.get(tag, 'Задача')
                 requester_name = requester[2] if requester else 'Система'
                 message = (
-                    f"📌 <b>Новая задача</b>\n\n"
-                    f"Тема: <b>{html.escape(subject)}</b>\n"
-                    f"Тег: <b>{html.escape(tag_label)}</b>\n"
-                    f"Поставил(а): <b>{html.escape(str(requester_name))}</b>"
+                    "<b>🆕 Новая задача</b>\n\n"
+                    f"<b>Тип:</b> {_escape_telegram_html(tag_label, 60)}\n"
+                    f"<b>Тема:</b> {_escape_telegram_html(subject, 220)}\n"
+                    f"<b>От:</b> {_escape_telegram_html(requester_name, 80)}\n\n"
+                    "<b>Откройте раздел «Задачи», чтобы посмотреть детали.</b>"
                 )
-                telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
-                tg_response = requests.post(
-                    telegram_url,
-                    json={
-                        "chat_id": assignee_chat_id,
-                        "text": message,
-                        "parse_mode": "HTML"
-                    },
-                    timeout=10
-                )
+                tg_response = _send_telegram_text_message(assignee_chat_id, message, parse_mode='HTML')
                 if tg_response.status_code != 200:
-                    error_detail = tg_response.json().get('description', 'Unknown error')
+                    error_detail = _get_telegram_error_text(tg_response)
                     telegram_warning = f"Task created, but Telegram notification failed: {error_detail}"
                     logging.error(f"Task Telegram API error: {error_detail}")
         except Exception as notify_error:
@@ -6206,53 +6312,44 @@ def update_task_status(task_id):
 
         telegram_warnings = []
         try:
-            should_notify_creator = action in ('in_progress', 'completed') and result.get('history_id')
-            if should_notify_creator:
+            should_notify_participants = bool(result.get('history_id'))
+            if should_notify_participants:
                 task_ctx = _fetch_task_notification_context(task_id)
-                creator_id = task_ctx.get('created_by') if task_ctx else None
-                creator_chat_id = task_ctx.get('creator_telegram_id') if task_ctx else None
-                if creator_chat_id and (creator_id is None or int(creator_id) != requester_id):
-                    task_subject = (task_ctx.get('subject') or f"Задача #{task_id}").strip()
-                    task_tag = (task_ctx.get('tag') or 'task').strip().lower() or 'task'
-                    tag_label = TASK_TAG_LABELS.get(task_tag, 'Задача')
+                if task_ctx:
                     actor_name = requester[2] if requester and len(requester) > 2 else 'Сотрудник'
+                    task_subject = (task_ctx.get('subject') or f"Задача #{task_id}").strip()
+                    recipients = _collect_task_notification_recipients(task_ctx, requester_id)
 
-                    if action == 'in_progress':
-                        text = (
-                            "📥 Задача принята в работу\n\n"
-                            f"Тип: {tag_label}\n"
-                            f"Тема: {task_subject}\n"
-                            f"Исполнитель: {actor_name}"
+                    for recipient in recipients:
+                        message_html = _build_task_status_notification_html(
+                            action=action,
+                            task_ctx=task_ctx,
+                            actor_name=actor_name,
+                            recipient_kind=recipient.get('kind') or 'participant',
+                            comment=comment,
+                            completion_summary=completion_summary,
+                            completion_files_count=len(completion_attachments)
                         )
-                        response = _send_telegram_text_message(creator_chat_id, text)
+                        response = _send_telegram_text_message(
+                            recipient.get('chat_id'),
+                            message_html,
+                            parse_mode='HTML'
+                        )
                         if response.status_code != 200:
+                            recipient_name = recipient.get('name') or recipient.get('kind') or 'получатель'
                             telegram_warnings.append(
-                                f"Не удалось отправить уведомление о принятии задачи: {_get_telegram_error_text(response)}"
+                                f"Не удалось отправить уведомление ({recipient_name}): {_get_telegram_error_text(response)}"
                             )
+                            continue
 
-                    elif action == 'completed':
-                        summary_text = completion_summary or "Итоги выполнения не указаны."
-                        completion_count = len(completion_attachments)
-                        text = (
-                            "✅ Задача выполнена\n\n"
-                            f"Тип: {tag_label}\n"
-                            f"Тема: {task_subject}\n"
-                            f"Исполнитель: {actor_name}\n"
-                            f"Файлов: {completion_count}\n\n"
-                            f"Итоги выполнения:\n{summary_text}"
-                        )
-                        response = _send_telegram_text_message(creator_chat_id, text)
-                        if response.status_code != 200:
-                            telegram_warnings.append(
-                                f"Не удалось отправить итоги выполнения: {_get_telegram_error_text(response)}"
+                        if action == 'completed':
+                            telegram_warnings.extend(
+                                _send_task_completion_attachments_to_telegram(
+                                    recipient.get('chat_id'),
+                                    task_subject,
+                                    completion_attachments
+                                )
                             )
-                        telegram_warnings.extend(
-                            _send_task_completion_attachments_to_telegram(
-                                creator_chat_id,
-                                task_subject,
-                                completion_attachments
-                            )
-                        )
         except Exception as notify_error:
             telegram_warnings.append(f"Ошибка отправки Telegram-уведомления: {notify_error}")
 
