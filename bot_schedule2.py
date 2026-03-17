@@ -942,7 +942,6 @@ def _build_task_status_notification_html(
     subject_safe = _escape_telegram_html(task_ctx.get('subject') or f"Задача #{task_ctx.get('id')}", 220)
     tag_safe = _escape_telegram_html(tag_label, 60)
     actor_safe = _escape_telegram_html(actor_name or 'Сотрудник', 80)
-    recipient_role_label = 'Постановщик' if recipient_kind == 'creator' else 'Исполнитель'
 
     header_map = {
         'in_progress': '📥 Задача принята в работу',
@@ -962,7 +961,6 @@ def _build_task_status_notification_html(
     lines = [
         f"<b>{header_map.get(action_norm, '🔔 Обновление статуса задачи')}</b>",
         "",
-        f"<b>Для:</b> {recipient_role_label}",
         f"<b>Тип:</b> {tag_safe}",
         f"<b>Тема:</b> {subject_safe}",
         f"<b>Статус:</b> {status_map.get(action_norm, 'Обновлён')}",
