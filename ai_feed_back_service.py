@@ -68,7 +68,7 @@ MASTER_PROMPT_BIRTHDAY = """ТЫ — Dos, дружелюбный и тактич
 Твоя задача — написать короткое персональное поздравление с днем рождения.
 
 Входные данные:
-- NAME: имя сотрудника
+- NAME: ФИО сотрудника
 - ROLE: роль (admin|sv|supervisor|trainer|operator)
 - DIRECTION: направление (если есть)
 - GENDER: male|female|unknown
