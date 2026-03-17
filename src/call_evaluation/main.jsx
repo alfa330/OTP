@@ -120,6 +120,17 @@ const calibrationScoreLabel = (value) => {
     return v || '—';
 };
 
+const normalizeStatus = (status) => String(status ?? '').trim().toLowerCase();
+const isFiredStatus = (status) => {
+    const s = normalizeStatus(status);
+    return s === 'fired' || s === 'dismissed' || s === 'terminated' || s === 'уволен';
+};
+const compareByNameRu = (a, b) => String(a?.name ?? '').localeCompare(String(b?.name ?? ''), 'ru');
+const sortByFiredAndName = (list = []) => [...list].sort((a, b) => {
+    const firedDiff = Number(isFiredStatus(a?.status)) - Number(isFiredStatus(b?.status));
+    return firedDiff !== 0 ? firedDiff : compareByNameRu(a, b);
+});
+
 // ─── Score Toggle Button ───────────────────────────────
 const ScoreToggle = ({ label, value, active, onClick }) => (
     <button
@@ -353,6 +364,7 @@ const EvaluationModal = ({
     supervisors = [],
     selectedSupervisorId = null,
     isAdminRole = false,
+    isSupervisorRole = false,
     selectedMonth,
     userId,
     userName,
@@ -388,6 +400,17 @@ const EvaluationModal = ({
     const activeOperator = isCalibrationAddCallMode
         ? (calibrationOperatorPool.find(op => op.id === selectedCalibrationOperatorId) || null)
         : operator;
+    const canSelectCalibrationSupervisor = isAdminRole || (isSupervisorRole && supervisors.length > 0);
+    const orderedCalibrationSupervisors = sortByFiredAndName(supervisors);
+    const orderedCalibrationOperators = sortByFiredAndName(calibrationOperatorPool);
+    const selectedCalibrationSupervisorObj = selectedCalibrationSupervisorId
+        ? supervisors.find(sv => Number(sv.id) === Number(selectedCalibrationSupervisorId))
+        : null;
+    const selectedCalibrationSupervisorIsFired = isFiredStatus(selectedCalibrationSupervisorObj?.status);
+    const selectedCalibrationOperatorObj = selectedCalibrationOperatorId
+        ? calibrationOperatorPool.find(op => Number(op.id) === Number(selectedCalibrationOperatorId))
+        : null;
+    const selectedCalibrationOperatorIsFired = isFiredStatus(selectedCalibrationOperatorObj?.status);
 
     const currentDir = directions?.find(d => d.id === selectedDirId) || directions?.[0] || null;
     const criteria = currentDir?.criteria || [];
@@ -395,14 +418,16 @@ const EvaluationModal = ({
 
     useEffect(() => {
         if (!isOpen || !isCalibrationAddCallMode) return;
-        if (isAdminRole) {
-            const preferredSupervisorId = selectedSupervisorId || supervisors?.[0]?.id || null;
+        if (canSelectCalibrationSupervisor) {
+            const hasUserInSupervisors = userId && supervisors.some((sv) => Number(sv.id) === Number(userId));
+            const preferredSupervisorId = selectedSupervisorId || (hasUserInSupervisors ? userId : null) || supervisors?.[0]?.id || null;
             setSelectedCalibrationSupervisorId((prev) => {
                 const hasCurrent = prev && supervisors.some((sv) => Number(sv.id) === Number(prev));
                 return hasCurrent ? prev : preferredSupervisorId;
             });
-            if (selectedSupervisorId && Number(preferredSupervisorId) === Number(selectedSupervisorId) && Array.isArray(operators)) {
-                calibrationOperatorsCacheRef.current.set(String(selectedSupervisorId), operators);
+            const primeSupervisorId = selectedSupervisorId || (hasUserInSupervisors ? userId : null);
+            if (primeSupervisorId && Number(primeSupervisorId) === Number(preferredSupervisorId) && Array.isArray(operators)) {
+                calibrationOperatorsCacheRef.current.set(String(primeSupervisorId), operators);
                 setCalibrationOperators(operators);
             }
         } else {
@@ -412,7 +437,7 @@ const EvaluationModal = ({
     }, [
         isOpen,
         isCalibrationAddCallMode,
-        isAdminRole,
+        canSelectCalibrationSupervisor,
         selectedSupervisorId,
         supervisors,
         operators,
@@ -420,7 +445,7 @@ const EvaluationModal = ({
     ]);
 
     useEffect(() => {
-        if (!isOpen || !isCalibrationAddCallMode || !isAdminRole) return;
+        if (!isOpen || !isCalibrationAddCallMode || !canSelectCalibrationSupervisor) return;
         if (!selectedCalibrationSupervisorId || !userId) {
             setCalibrationOperators([]);
             return;
@@ -454,18 +479,19 @@ const EvaluationModal = ({
     }, [
         isOpen,
         isCalibrationAddCallMode,
-        isAdminRole,
+        canSelectCalibrationSupervisor,
         selectedCalibrationSupervisorId,
         userId
     ]);
 
     useEffect(() => {
         if (!isOpen || !isCalibrationAddCallMode) return;
-        const operatorIdFromProp = operator?.id && calibrationOperatorPool.some(op => op.id === operator.id)
+        const orderedOperators = sortByFiredAndName(calibrationOperatorPool);
+        const operatorIdFromProp = operator?.id && orderedOperators.some(op => op.id === operator.id)
             ? operator.id
             : null;
-        const preferredId = operatorIdFromProp || calibrationOperatorPool?.[0]?.id || null;
-        const hasCurrent = selectedCalibrationOperatorId && calibrationOperatorPool.some(op => op.id === selectedCalibrationOperatorId);
+        const preferredId = operatorIdFromProp || orderedOperators?.[0]?.id || null;
+        const hasCurrent = selectedCalibrationOperatorId && orderedOperators.some(op => op.id === selectedCalibrationOperatorId);
         if (!hasCurrent) {
             setSelectedCalibrationOperatorId(preferredId);
         }
@@ -705,12 +731,13 @@ const EvaluationModal = ({
                     <button className="close-btn" onClick={onClose}><FaIcon className="fas fa-times" /></button>
                 </div>
                 <div className="modal-body">
-                    {isCalibrationAddCallMode && isAdminRole && (
+                    {isCalibrationAddCallMode && canSelectCalibrationSupervisor && (
                         <div className="field" style={{ marginBottom: 16 }}>
                             <label className="label">Супервайзер</label>
                             <select
                                 className="select"
                                 value={selectedCalibrationSupervisorId || ''}
+                                style={selectedCalibrationSupervisorIsFired ? { color:'var(--text-3)' } : undefined}
                                 onChange={(e) => {
                                     const nextId = parseInt(e.target.value, 10) || null;
                                     setSelectedCalibrationSupervisorId(nextId);
@@ -718,8 +745,15 @@ const EvaluationModal = ({
                                 }}
                             >
                                 <option value="">Выбрать супервайзера</option>
-                                {supervisors.map((sv) => (
-                                    <option key={sv.id} value={sv.id}>{sv.name}</option>
+                                {orderedCalibrationSupervisors.map((sv) => (
+                                    <option
+                                        key={sv.id}
+                                        value={sv.id}
+                                        className={isFiredStatus(sv?.status) ? 'option-fired' : ''}
+                                        style={isFiredStatus(sv?.status) ? { color:'var(--text-3)' } : undefined}
+                                    >
+                                        {sv.name}
+                                    </option>
                                 ))}
                             </select>
                         </div>
@@ -731,6 +765,7 @@ const EvaluationModal = ({
                                 className="select"
                                 value={selectedCalibrationOperatorId || ''}
                                 disabled={isCalibrationOperatorsLoading}
+                                style={selectedCalibrationOperatorIsFired ? { color:'var(--text-3)' } : undefined}
                                 onChange={(e) => {
                                     const nextId = parseInt(e.target.value, 10) || null;
                                     setSelectedCalibrationOperatorId(nextId);
@@ -747,8 +782,15 @@ const EvaluationModal = ({
                                 <option value="">
                                     {isCalibrationOperatorsLoading ? 'Загрузка операторов...' : 'Выбрать оператора'}
                                 </option>
-                                {calibrationOperatorPool.map(op => (
-                                    <option key={op.id} value={op.id}>{op.name}</option>
+                                {orderedCalibrationOperators.map(op => (
+                                    <option
+                                        key={op.id}
+                                        value={op.id}
+                                        className={isFiredStatus(op?.status) ? 'option-fired' : ''}
+                                        style={isFiredStatus(op?.status) ? { color:'var(--text-3)' } : undefined}
+                                    >
+                                        {op.name}
+                                    </option>
                                 ))}
                             </select>
                         </div>
@@ -1154,12 +1196,6 @@ const App = ({ user, initialSelection }) => {
     const calibrationDetailInFlightRef = useRef(new Map());
     const calibrationDetailCacheRef = useRef(new Map());
     const MAX_EVALS = 20;
-    const normalizeStatus = (status) => String(status ?? '').trim().toLowerCase();
-    const isFiredStatus = (status) => {
-        const s = normalizeStatus(status);
-        return s === 'fired' || s === 'dismissed' || s === 'terminated' || s === 'уволен';
-    };
-    const compareByNameRu = (a, b) => String(a?.name ?? '').localeCompare(String(b?.name ?? ''), 'ru');
 
     const fmtDate = (ds) => {
         if (!ds) return '—';
@@ -1209,10 +1245,10 @@ const App = ({ user, initialSelection }) => {
 
     // Supervisors
     useEffect(() => {
-        if (!isAdminRole || !userId) return;
+        if (!(isAdminRole || isSupervisorRole) || !userId) return;
         authFetch(`${API_BASE_URL}/api/admin/sv_list`, { headers:{'X-User-Id':userId} })
             .then(r=>r.json()).then(d=>{ if(d.status==='success') setSupervisors(d.sv_list||[]); }).catch(console.error);
-    }, [isAdminRole, userId]);
+    }, [isAdminRole, isSupervisorRole, userId]);
 
     useEffect(() => {
         if (!initialSelection) return;
@@ -1719,14 +1755,8 @@ const App = ({ user, initialSelection }) => {
     const evalCount = displayedCalls.filter(c => !c.isDraft && !c.is_imported).length;
     const avgScore = evalCount > 0 ? displayedCalls.filter(c=>!c.isDraft&&!c.is_imported).reduce((s,c)=>s+parseFloat(c.totalScore),0)/evalCount : 0;
     const isMaxReached = callsByMonth.filter(c=>!c.isDraft&&!c.is_imported).length >= MAX_EVALS;
-    const orderedSupervisors = [...supervisors].sort((a, b) => {
-        const firedDiff = Number(isFiredStatus(a?.status)) - Number(isFiredStatus(b?.status));
-        return firedDiff !== 0 ? firedDiff : compareByNameRu(a, b);
-    });
-    const orderedOperators = [...operators].sort((a, b) => {
-        const firedDiff = Number(isFiredStatus(a?.status)) - Number(isFiredStatus(b?.status));
-        return firedDiff !== 0 ? firedDiff : compareByNameRu(a, b);
-    });
+    const orderedSupervisors = sortByFiredAndName(supervisors);
+    const orderedOperators = sortByFiredAndName(operators);
     const selectedSupervisorObj = selectedSupervisor ? supervisors.find(sv => sv.id === selectedSupervisor) : null;
     const selectedSupervisorIsFired = isFiredStatus(selectedSupervisorObj?.status);
     const selectedOperatorIsFired = isFiredStatus(selectedOperator?.status);
@@ -2228,7 +2258,7 @@ const App = ({ user, initialSelection }) => {
                                                                 emitCallEvaluationToast('Нет доступных супервайзеров для добавления звонка', 'error');
                                                                 return;
                                                             }
-                                                            if (!isAdminRole && !operators.length) {
+                                                            if (isSupervisorRole && !supervisors.length && !operators.length) {
                                                                 emitCallEvaluationToast('Нет доступных операторов для добавления звонка', 'error');
                                                                 return;
                                                             }
@@ -2557,6 +2587,7 @@ const App = ({ user, initialSelection }) => {
                 supervisors={supervisors}
                 selectedSupervisorId={selectedSupervisor}
                 isAdminRole={isAdminRole}
+                isSupervisorRole={isSupervisorRole}
                 selectedMonth={selectedMonth}
                 userId={userId}
                 userName={userName}
