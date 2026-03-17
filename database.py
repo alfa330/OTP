@@ -418,7 +418,15 @@ class Database:
                     ADD COLUMN IF NOT EXISTS company_name VARCHAR(255),
                     ADD COLUMN IF NOT EXISTS employment_type VARCHAR(10),
                     ADD COLUMN IF NOT EXISTS has_proxy BOOLEAN NOT NULL DEFAULT FALSE,
-                    ADD COLUMN IF NOT EXISTS sip_number VARCHAR(64);
+                    ADD COLUMN IF NOT EXISTS sip_number VARCHAR(64),
+                    ADD COLUMN IF NOT EXISTS study_place VARCHAR(255),
+                    ADD COLUMN IF NOT EXISTS study_course VARCHAR(100),
+                    ADD COLUMN IF NOT EXISTS close_contact_1_relation VARCHAR(100),
+                    ADD COLUMN IF NOT EXISTS close_contact_1_full_name VARCHAR(255),
+                    ADD COLUMN IF NOT EXISTS close_contact_1_phone VARCHAR(50),
+                    ADD COLUMN IF NOT EXISTS close_contact_2_relation VARCHAR(100),
+                    ADD COLUMN IF NOT EXISTS close_contact_2_full_name VARCHAR(255),
+                    ADD COLUMN IF NOT EXISTS close_contact_2_phone VARCHAR(50);
             """)
             cursor.execute("""
                 DO $$
@@ -1234,7 +1242,15 @@ class Database:
         company_name=None,
         employment_type=None,
         has_proxy=None,
-        sip_number=None
+        sip_number=None,
+        study_place=None,
+        study_course=None,
+        close_contact_1_relation=None,
+        close_contact_1_full_name=None,
+        close_contact_1_phone=None,
+        close_contact_2_relation=None,
+        close_contact_2_full_name=None,
+        close_contact_2_phone=None
     ):
         if login is None:
             base_login = f"user_{str(uuid.uuid4())[:8]}"
@@ -1258,6 +1274,14 @@ class Database:
         company_name = str(company_name).strip() if company_name is not None else ""
         employment_type = str(employment_type).strip().lower() if employment_type is not None else ""
         sip_number = str(sip_number).strip() if sip_number is not None else ""
+        study_place = str(study_place).strip() if study_place is not None else ""
+        study_course = str(study_course).strip() if study_course is not None else ""
+        close_contact_1_relation = str(close_contact_1_relation).strip() if close_contact_1_relation is not None else ""
+        close_contact_1_full_name = str(close_contact_1_full_name).strip() if close_contact_1_full_name is not None else ""
+        close_contact_1_phone = str(close_contact_1_phone).strip() if close_contact_1_phone is not None else ""
+        close_contact_2_relation = str(close_contact_2_relation).strip() if close_contact_2_relation is not None else ""
+        close_contact_2_full_name = str(close_contact_2_full_name).strip() if close_contact_2_full_name is not None else ""
+        close_contact_2_phone = str(close_contact_2_phone).strip() if close_contact_2_phone is not None else ""
 
         phone = phone or None
         email = email or None
@@ -1266,6 +1290,14 @@ class Database:
         company_name = company_name or None
         employment_type = employment_type or None
         sip_number = sip_number or None
+        study_place = study_place or None
+        study_course = study_course or None
+        close_contact_1_relation = close_contact_1_relation or None
+        close_contact_1_full_name = close_contact_1_full_name or None
+        close_contact_1_phone = close_contact_1_phone or None
+        close_contact_2_relation = close_contact_2_relation or None
+        close_contact_2_full_name = close_contact_2_full_name or None
+        close_contact_2_phone = close_contact_2_phone or None
         if employment_type not in (None, 'gph', 'of'):
             raise ValueError("Invalid employment_type")
         has_proxy_value = None if has_proxy is None else bool(has_proxy)
@@ -1288,16 +1320,22 @@ class Database:
                     INSERT INTO users (
                         telegram_id, name, role, direction_id, rate, hire_date, supervisor_id,
                         login, password_hash, hours_table_url, gender, birth_date, phone, email,
-                        instagram, telegram_nick, company_name, employment_type, has_proxy, sip_number
+                        instagram, telegram_nick, company_name, employment_type, has_proxy, sip_number,
+                        study_place, study_course,
+                        close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
+                        close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                 """, (
                     telegram_id, name, role, direction_id, rate, hire_date, supervisor_id,
                     login, password_hash, hours_table_url, gender, birth_date, phone, email,
                     instagram, telegram_nick, company_name, employment_type,
                     (has_proxy_value if has_proxy_value is not None else False),
-                    sip_number
+                    sip_number,
+                    study_place, study_course,
+                    close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
+                    close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone
                 ))
                 created_user_id = cursor.fetchone()[0]
                 _clear_trainer_links(created_user_id)
@@ -1319,12 +1357,23 @@ class Database:
                             company_name = COALESCE(%s, company_name),
                             employment_type = COALESCE(%s, employment_type),
                             has_proxy = COALESCE(%s, has_proxy),
-                            sip_number = COALESCE(%s, sip_number)
+                            sip_number = COALESCE(%s, sip_number),
+                            study_place = COALESCE(%s, study_place),
+                            study_course = COALESCE(%s, study_course),
+                            close_contact_1_relation = COALESCE(%s, close_contact_1_relation),
+                            close_contact_1_full_name = COALESCE(%s, close_contact_1_full_name),
+                            close_contact_1_phone = COALESCE(%s, close_contact_1_phone),
+                            close_contact_2_relation = COALESCE(%s, close_contact_2_relation),
+                            close_contact_2_full_name = COALESCE(%s, close_contact_2_full_name),
+                            close_contact_2_phone = COALESCE(%s, close_contact_2_phone)
                         WHERE name = %s AND role = %s
                         RETURNING id
                     """, (
                         direction_id, supervisor_id, hours_table_url, gender, birth_date,
                         phone, email, instagram, telegram_nick, company_name, employment_type, has_proxy_value, sip_number,
+                        study_place, study_course,
+                        close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
+                        close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
                         name, role
                     ))
                     result = cursor.fetchone()
@@ -1354,13 +1403,25 @@ class Database:
                             company_name = COALESCE(%s, company_name),
                             employment_type = COALESCE(%s, employment_type),
                             has_proxy = COALESCE(%s, has_proxy),
-                            sip_number = COALESCE(%s, sip_number)
+                            sip_number = COALESCE(%s, sip_number),
+                            study_place = COALESCE(%s, study_place),
+                            study_course = COALESCE(%s, study_course),
+                            close_contact_1_relation = COALESCE(%s, close_contact_1_relation),
+                            close_contact_1_full_name = COALESCE(%s, close_contact_1_full_name),
+                            close_contact_1_phone = COALESCE(%s, close_contact_1_phone),
+                            close_contact_2_relation = COALESCE(%s, close_contact_2_relation),
+                            close_contact_2_full_name = COALESCE(%s, close_contact_2_full_name),
+                            close_contact_2_phone = COALESCE(%s, close_contact_2_phone)
                         WHERE telegram_id = %s
                         RETURNING id
                     """, (
                         name, role, direction_id, hire_date, supervisor_id, login, password_hash, hours_table_url,
                         gender, birth_date, phone, email, instagram, telegram_nick, company_name, employment_type,
-                        has_proxy_value, sip_number, telegram_id
+                        has_proxy_value, sip_number,
+                        study_place, study_course,
+                        close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
+                        close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
+                        telegram_id
                     ))
                     updated_user_id = cursor.fetchone()[0]
                     _clear_trainer_links(updated_user_id)
@@ -3549,7 +3610,15 @@ class Database:
             'company_name',
             'employment_type',
             'has_proxy',
-            'sip_number'
+            'sip_number',
+            'study_place',
+            'study_course',
+            'close_contact_1_relation',
+            'close_contact_1_full_name',
+            'close_contact_1_phone',
+            'close_contact_2_relation',
+            'close_contact_2_full_name',
+            'close_contact_2_phone'
         ]
         if field not in allowed_fields:
             raise ValueError("Invalid field to update")
