@@ -280,6 +280,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         phone: base.phone ?? "",
         email: base.email ?? "",
         instagram: base.instagram ?? "",
+        telegram_nick: base.telegram_nick ?? "",
         company_name: base.company_name ?? "",
         employment_type: base.employment_type ?? "",
         has_proxy: !!base.has_proxy,
@@ -294,6 +295,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         defaults.phone = String(defaults.phone ?? '').trim();
         defaults.email = String(defaults.email ?? '').trim();
         defaults.instagram = String(defaults.instagram ?? '').trim();
+        defaults.telegram_nick = String(defaults.telegram_nick ?? '').trim();
         defaults.company_name = String(defaults.company_name ?? '').trim();
         defaults.employment_type = ['gph', 'of'].includes(String(defaults.employment_type || '').trim().toLowerCase())
             ? String(defaults.employment_type || '').trim().toLowerCase()
@@ -498,6 +500,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         phone: "",
         email: "",
         instagram: "",
+        telegram_nick: "",
         company_name: "",
         employment_type: "",
         has_proxy: false,
@@ -596,6 +599,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
             phone: String(editedUser?.phone || '').trim(),
             email: normalizedEmail,
             instagram: String(editedUser?.instagram || '').trim(),
+            telegram_nick: String(editedUser?.telegram_nick || '').trim(),
             company_name: String(editedUser?.company_name || '').trim(),
             employment_type: ['gph', 'of'].includes(String(editedUser?.employment_type || '').trim().toLowerCase())
                 ? String(editedUser?.employment_type || '').trim().toLowerCase()
@@ -652,6 +656,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     const tabs = [
         { id: "general", label: "Общее" },
         { id: "data", label: "Данные" },
+        { id: "contacts", label: "Контакты" },
         { id: "account", label: "Аккаунт" }
     ];
     const avatarInitial = String(editedUser?.name || 'U').charAt(0).toUpperCase();
@@ -801,7 +806,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
 
                 <div className="mt-4 space-y-6">
                 {!createdCredentials && (
-                    <div className="grid grid-cols-3 gap-2 rounded-xl bg-gray-100 p-1">
+                    <div className="grid grid-cols-4 gap-2 rounded-xl bg-gray-100 p-1">
                     {tabs.map((tab) => (
                         <button
                         key={tab.id}
@@ -874,6 +879,35 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     </div>
 
                     <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Наименование ТОО/ИП</label>
+                        <input
+                        type="text"
+                        value={editedUser?.company_name || ""}
+                        onChange={(e) => setEditedUser({ ...editedUser, company_name: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        disabled={isLoading || !!createdCredentials}
+                        />
+                    </div>
+
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Оформлен ГПХ/ОФ</label>
+                        <select
+                        value={editedUser?.employment_type || ""}
+                        onChange={(e) => setEditedUser({ ...editedUser, employment_type: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        disabled={isLoading || !!createdCredentials}
+                        >
+                        <option value="">Не указано</option>
+                        <option value="gph">ГПХ</option>
+                        <option value="of">ОФ</option>
+                        </select>
+                    </div>
+                    </>
+                )}
+
+                {activeTab === "contacts" && (
+                    <>
+                    <div>
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Номер телефона</label>
                         <input
                         type="text"
@@ -907,55 +941,16 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     </div>
 
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Наименование ТОО/ИП</label>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Ник Telegram</label>
                         <input
                         type="text"
-                        value={editedUser?.company_name || ""}
-                        onChange={(e) => setEditedUser({ ...editedUser, company_name: e.target.value })}
+                        value={editedUser?.telegram_nick || ""}
+                        onChange={(e) => setEditedUser({ ...editedUser, telegram_nick: e.target.value })}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                         disabled={isLoading || !!createdCredentials}
+                        placeholder="@username"
                         />
                     </div>
-
-                    <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Оформлен ГПХ/ОФ</label>
-                        <select
-                        value={editedUser?.employment_type || ""}
-                        onChange={(e) => setEditedUser({ ...editedUser, employment_type: e.target.value })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                        disabled={isLoading || !!createdCredentials}
-                        >
-                        <option value="">Не указано</option>
-                        <option value="gph">ГПХ</option>
-                        <option value="of">ОФ</option>
-                        </select>
-                    </div>
-
-                    <div>
-                        <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
-                        <input
-                            type="checkbox"
-                            checked={!!editedUser?.has_proxy}
-                            onChange={(e) => setEditedUser({ ...editedUser, has_proxy: e.target.checked })}
-                            className="rounded border-gray-300"
-                            disabled={isLoading || !!createdCredentials}
-                        />
-                        <span>Наличие прокси</span>
-                        </label>
-                    </div>
-
-                    {isOperatorDraft(editedUser) && (
-                    <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">SIP номер</label>
-                        <input
-                        type="text"
-                        value={editedUser?.sip_number || ""}
-                        onChange={(e) => setEditedUser({ ...editedUser, sip_number: e.target.value })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                        disabled={isLoading || !!createdCredentials}
-                        />
-                    </div>
-                    )}
                     </>
                 )}
 
@@ -1141,6 +1136,32 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         </select>
                     </div>
                     )}
+
+                    <div>
+                        <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
+                        <input
+                            type="checkbox"
+                            checked={!!editedUser?.has_proxy}
+                            onChange={(e) => setEditedUser({ ...editedUser, has_proxy: e.target.checked })}
+                            className="rounded border-gray-300"
+                            disabled={isLoading || !!createdCredentials}
+                        />
+                        <span>Наличие прокси</span>
+                        </label>
+                    </div>
+
+                    {isOperatorDraft(editedUser) && (
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">SIP номер</label>
+                        <input
+                        type="text"
+                        value={editedUser?.sip_number || ""}
+                        onChange={(e) => setEditedUser({ ...editedUser, sip_number: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        disabled={isLoading || !!createdCredentials}
+                        />
+                    </div>
+                    )}
                     </>
                 )}
 
@@ -1229,6 +1250,35 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         </div>
 
                         <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Наименование ТОО/ИП</label>
+                            <input
+                            type="text"
+                            value={editedUser?.company_name || ""}
+                            onChange={(e) => setEditedUser({ ...editedUser, company_name: e.target.value })}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            disabled={isLoading}
+                            />
+                        </div>
+
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Оформлен ГПХ/ОФ</label>
+                            <select
+                            value={editedUser?.employment_type || ""}
+                            onChange={(e) => setEditedUser({ ...editedUser, employment_type: e.target.value })}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            disabled={isLoading}
+                            >
+                            <option value="">Не указано</option>
+                            <option value="gph">ГПХ</option>
+                            <option value="of">ОФ</option>
+                            </select>
+                        </div>
+                        </>
+                    )}
+
+                    {activeTab === "contacts" && (
+                        <>
+                        <div>
                             <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Номер телефона</label>
                             <input
                             type="text"
@@ -1262,55 +1312,16 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         </div>
 
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Наименование ТОО/ИП</label>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Ник Telegram</label>
                             <input
                             type="text"
-                            value={editedUser?.company_name || ""}
-                            onChange={(e) => setEditedUser({ ...editedUser, company_name: e.target.value })}
+                            value={editedUser?.telegram_nick || ""}
+                            onChange={(e) => setEditedUser({ ...editedUser, telegram_nick: e.target.value })}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                             disabled={isLoading}
+                            placeholder="@username"
                             />
                         </div>
-
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Оформлен ГПХ/ОФ</label>
-                            <select
-                            value={editedUser?.employment_type || ""}
-                            onChange={(e) => setEditedUser({ ...editedUser, employment_type: e.target.value })}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                            disabled={isLoading}
-                            >
-                            <option value="">Не указано</option>
-                            <option value="gph">ГПХ</option>
-                            <option value="of">ОФ</option>
-                            </select>
-                        </div>
-
-                        <div>
-                            <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
-                            <input
-                                type="checkbox"
-                                checked={!!editedUser?.has_proxy}
-                                onChange={(e) => setEditedUser({ ...editedUser, has_proxy: e.target.checked })}
-                                className="rounded border-gray-300"
-                                disabled={isLoading}
-                            />
-                            <span>Наличие прокси</span>
-                            </label>
-                        </div>
-
-                        {isOperatorDraft(editedUser) && (
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">SIP номер</label>
-                            <input
-                            type="text"
-                            value={editedUser?.sip_number || ""}
-                            onChange={(e) => setEditedUser({ ...editedUser, sip_number: e.target.value })}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                            disabled={isLoading}
-                            />
-                        </div>
-                        )}
                         </>
                     )}
 
@@ -1504,6 +1515,32 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     </option>
                                 ))}
                                 </select>
+                            </div>
+                            )}
+
+                            <div>
+                                <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
+                                <input
+                                    type="checkbox"
+                                    checked={!!editedUser?.has_proxy}
+                                    onChange={(e) => setEditedUser({ ...editedUser, has_proxy: e.target.checked })}
+                                    className="rounded border-gray-300"
+                                    disabled={isLoading}
+                                />
+                                <span>Наличие прокси</span>
+                                </label>
+                            </div>
+
+                            {isOperatorDraft(editedUser) && (
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">SIP номер</label>
+                                <input
+                                type="text"
+                                value={editedUser?.sip_number || ""}
+                                onChange={(e) => setEditedUser({ ...editedUser, sip_number: e.target.value })}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                disabled={isLoading}
+                                />
                             </div>
                             )}
                             </>

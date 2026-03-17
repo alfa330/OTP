@@ -20859,6 +20859,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             phone: normalizeTextForApi(editedUser.phone),
                             email: normalizeTextForApi(editedUser.email),
                             instagram: normalizeTextForApi(editedUser.instagram),
+                            telegram_nick: normalizeTextForApi(editedUser.telegram_nick),
                             company_name: normalizeTextForApi(editedUser.company_name),
                             employment_type: normalizeEmploymentTypeForApi(editedUser.employment_type),
                             has_proxy: normalizeBoolForApi(editedUser.has_proxy),
@@ -21088,6 +21089,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             user_id: editedUser.id,
                             field: 'instagram',
                             value: nextInstagram
+                        }, {
+                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        });
+                    }
+                    const nextTelegramNick = normalizeTextForApi(editedUser?.telegram_nick);
+                    const prevTelegramNick = normalizeTextForApi(userToEdit?.telegram_nick);
+                    if (nextTelegramNick !== prevTelegramNick) {
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'telegram_nick',
+                            value: nextTelegramNick
                         }, {
                             headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
                         });

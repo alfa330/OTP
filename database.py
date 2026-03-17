@@ -414,6 +414,7 @@ class Database:
                     ADD COLUMN IF NOT EXISTS phone VARCHAR(50),
                     ADD COLUMN IF NOT EXISTS email VARCHAR(255),
                     ADD COLUMN IF NOT EXISTS instagram VARCHAR(255),
+                    ADD COLUMN IF NOT EXISTS telegram_nick VARCHAR(255),
                     ADD COLUMN IF NOT EXISTS company_name VARCHAR(255),
                     ADD COLUMN IF NOT EXISTS employment_type VARCHAR(10),
                     ADD COLUMN IF NOT EXISTS has_proxy BOOLEAN NOT NULL DEFAULT FALSE,
@@ -1229,6 +1230,7 @@ class Database:
         phone=None,
         email=None,
         instagram=None,
+        telegram_nick=None,
         company_name=None,
         employment_type=None,
         has_proxy=None,
@@ -1252,6 +1254,7 @@ class Database:
         phone = str(phone).strip() if phone is not None else ""
         email = str(email).strip() if email is not None else ""
         instagram = str(instagram).strip() if instagram is not None else ""
+        telegram_nick = str(telegram_nick).strip() if telegram_nick is not None else ""
         company_name = str(company_name).strip() if company_name is not None else ""
         employment_type = str(employment_type).strip().lower() if employment_type is not None else ""
         sip_number = str(sip_number).strip() if sip_number is not None else ""
@@ -1259,6 +1262,7 @@ class Database:
         phone = phone or None
         email = email or None
         instagram = instagram or None
+        telegram_nick = telegram_nick or None
         company_name = company_name or None
         employment_type = employment_type or None
         sip_number = sip_number or None
@@ -1284,14 +1288,14 @@ class Database:
                     INSERT INTO users (
                         telegram_id, name, role, direction_id, rate, hire_date, supervisor_id,
                         login, password_hash, hours_table_url, gender, birth_date, phone, email,
-                        instagram, company_name, employment_type, has_proxy, sip_number
+                        instagram, telegram_nick, company_name, employment_type, has_proxy, sip_number
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                 """, (
                     telegram_id, name, role, direction_id, rate, hire_date, supervisor_id,
                     login, password_hash, hours_table_url, gender, birth_date, phone, email,
-                    instagram, company_name, employment_type,
+                    instagram, telegram_nick, company_name, employment_type,
                     (has_proxy_value if has_proxy_value is not None else False),
                     sip_number
                 ))
@@ -1311,6 +1315,7 @@ class Database:
                             phone = COALESCE(%s, phone),
                             email = COALESCE(%s, email),
                             instagram = COALESCE(%s, instagram),
+                            telegram_nick = COALESCE(%s, telegram_nick),
                             company_name = COALESCE(%s, company_name),
                             employment_type = COALESCE(%s, employment_type),
                             has_proxy = COALESCE(%s, has_proxy),
@@ -1319,7 +1324,7 @@ class Database:
                         RETURNING id
                     """, (
                         direction_id, supervisor_id, hours_table_url, gender, birth_date,
-                        phone, email, instagram, company_name, employment_type, has_proxy_value, sip_number,
+                        phone, email, instagram, telegram_nick, company_name, employment_type, has_proxy_value, sip_number,
                         name, role
                     ))
                     result = cursor.fetchone()
@@ -1345,6 +1350,7 @@ class Database:
                             phone = COALESCE(%s, phone),
                             email = COALESCE(%s, email),
                             instagram = COALESCE(%s, instagram),
+                            telegram_nick = COALESCE(%s, telegram_nick),
                             company_name = COALESCE(%s, company_name),
                             employment_type = COALESCE(%s, employment_type),
                             has_proxy = COALESCE(%s, has_proxy),
@@ -1353,7 +1359,7 @@ class Database:
                         RETURNING id
                     """, (
                         name, role, direction_id, hire_date, supervisor_id, login, password_hash, hours_table_url,
-                        gender, birth_date, phone, email, instagram, company_name, employment_type,
+                        gender, birth_date, phone, email, instagram, telegram_nick, company_name, employment_type,
                         has_proxy_value, sip_number, telegram_id
                     ))
                     updated_user_id = cursor.fetchone()[0]
@@ -3539,6 +3545,7 @@ class Database:
             'phone',
             'email',
             'instagram',
+            'telegram_nick',
             'company_name',
             'employment_type',
             'has_proxy',
