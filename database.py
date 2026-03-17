@@ -23,6 +23,7 @@ from openpyxl.styles import PatternFill, Font, Border, Side, Alignment
 from openpyxl.cell.rich_text import CellRichText, TextBlock
 from openpyxl.cell.text import InlineFont
 from openpyxl.worksheet.table import Table, TableStyleInfo
+from openpyxl.utils import get_column_letter
 from openpyxl.styles.fills import Fill
 from collections import defaultdict
 import pandas as pd
@@ -4637,7 +4638,8 @@ class Database:
 
     def generate_users_report(self, current_date=None):
         """
-        Generates an Excel report of all operators with columns: ФИО | Логин | Направление | Супервайзер | Статус | Ставка | Дата принятия.
+        Generates an Excel report of operators with extended profile fields:
+        base data, contacts, study, corporate data, proxy/SIP, and two close contacts.
         
         :param current_date: Optional, current date for filename (defaults to today).
         :return: (filename, content) or (None, None) on error.
@@ -4650,11 +4652,35 @@ class Database:
             
             filename = f"users_report_{current_date.strftime('%Y-%m-%d')}.xlsx"
             
-            # Fetch all operators with required data (added u.login)
+            # Fetch operators with all export fields
             with self._get_cursor() as cursor:
                 cursor.execute("""
-                    SELECT u.name, u.login, COALESCE(d.name, 'N/A') as direction, COALESCE(s.name, 'N/A') as supervisor,
-                        u.status, u.rate, u.hire_date, u.supervisor_id
+                    SELECT
+                        u.name,
+                        u.login,
+                        u.role,
+                        COALESCE(d.name, 'N/A') as direction,
+                        COALESCE(s.name, 'N/A') as supervisor,
+                        u.status,
+                        u.rate,
+                        u.hire_date,
+                        u.phone,
+                        u.email,
+                        u.instagram,
+                        u.telegram_nick,
+                        u.study_place,
+                        u.study_course,
+                        u.company_name,
+                        u.employment_type,
+                        COALESCE(u.has_proxy, FALSE) as has_proxy,
+                        u.sip_number,
+                        u.close_contact_1_relation,
+                        u.close_contact_1_full_name,
+                        u.close_contact_1_phone,
+                        u.close_contact_2_relation,
+                        u.close_contact_2_full_name,
+                        u.close_contact_2_phone,
+                        u.supervisor_id
                     FROM users u
                     LEFT JOIN directions d ON u.direction_id = d.id
                     LEFT JOIN users s ON u.supervisor_id = s.id
@@ -4667,13 +4693,91 @@ class Database:
                 logging.warning("No operators found for users report")
                 return None, None
             
-            # Group by supervisor
+            def _format_date(value):
+                return value.strftime('%Y-%m-%d') if value else 'N/A'
+
+            def _format_employment(value):
+                normalized = str(value or '').strip().lower()
+                if normalized == 'gph':
+                    return 'ГПХ'
+                if normalized == 'of':
+                    return 'ОФ'
+                return ''
+
+            def _format_proxy(value):
+                return 'Да' if bool(value) else 'Нет'
+
+            headers = [
+                "ФИО",
+                "Логин",
+                "Роль",
+                "Направление",
+                "Супервайзер",
+                "Статус",
+                "Ставка",
+                "Дата принятия",
+                "Номер телефона",
+                "Почта",
+                "Инстаграм",
+                "Ник Telegram",
+                "Место учебы",
+                "Курс",
+                "Наименование ТОО/ИП",
+                "Оформлен ГПХ/ОФ",
+                "Наличие прокси",
+                "SIP номер",
+                "Близкий 1: Кем приходится",
+                "Близкий 1: ФИО",
+                "Близкий 1: Номер",
+                "Близкий 2: Кем приходится",
+                "Близкий 2: ФИО",
+                "Близкий 2: Номер"
+            ]
+
+            # Group by supervisor and normalize rows for export
             operators_by_supervisor = defaultdict(list)
             supervisors = {}  # supervisor_id -> name
+            summary_rows = []
             for row in all_operators:
-                # note: row structure: name, login, direction, supervisor, status, rate, hire_date, sup_id
-                name, login, direction, supervisor, status, rate, hire_date, sup_id = row
-                operators_by_supervisor[sup_id].append((name, login, direction, supervisor, status, rate, hire_date))
+                (
+                    name, login, role, direction, supervisor, status, rate, hire_date,
+                    phone, email, instagram, telegram_nick,
+                    study_place, study_course,
+                    company_name, employment_type, has_proxy, sip_number,
+                    close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
+                    close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
+                    sup_id
+                ) = row
+
+                row_values = [
+                    name or "",
+                    login or "",
+                    role or "",
+                    direction or "N/A",
+                    supervisor or "N/A",
+                    status or "",
+                    float(rate) if rate else 1.0,
+                    _format_date(hire_date),
+                    phone or "",
+                    email or "",
+                    instagram or "",
+                    telegram_nick or "",
+                    study_place or "",
+                    study_course or "",
+                    company_name or "",
+                    _format_employment(employment_type),
+                    _format_proxy(has_proxy),
+                    sip_number or "",
+                    close_contact_1_relation or "",
+                    close_contact_1_full_name or "",
+                    close_contact_1_phone or "",
+                    close_contact_2_relation or "",
+                    close_contact_2_full_name or "",
+                    close_contact_2_phone or ""
+                ]
+
+                summary_rows.append(row_values)
+                operators_by_supervisor[sup_id].append(row_values)
                 if sup_id and supervisor != 'N/A':
                     supervisors[sup_id] = supervisor
             
@@ -4681,71 +4785,61 @@ class Database:
             wb = Workbook()
             ws_summary = wb.active
             ws_summary.title = "Summary"
-            
-            # Headers for summary (added "Логин")
-            headers = ["ФИО", "Логин", "Направление", "Супервайзер", "Статус", "Ставка", "Дата принятия"]
-            for col, header in enumerate(headers, start=1):
-                cell = ws_summary.cell(1, col)
-                cell.value = header
-                cell.font = Font(bold=True)
-            
-            # Fill summary data
-            row = 2
-            for op in all_operators:
-                # op: name, login, direction, supervisor, status, rate, hire_date, sup_id
-                name, login, direction, supervisor, status, rate, hire_date = op[:7]
-                ws_summary.cell(row, 1).value = name
-                ws_summary.cell(row, 2).value = login
-                ws_summary.cell(row, 3).value = direction
-                ws_summary.cell(row, 4).value = supervisor
-                ws_summary.cell(row, 5).value = status
-                ws_summary.cell(row, 6).value = float(rate) if rate else 1.0
-                ws_summary.cell(row, 7).value = hire_date.strftime('%Y-%m-%d') if hire_date else 'N/A'
-                row += 1
-            
-            # Add table to summary (expanded to G)
-            tab_summary = Table(displayName="SummaryTable", ref=f"A1:G{row-1}")
-            style = TableStyleInfo(name="TableStyleMedium2", showFirstColumn=True, showLastColumn=False, showRowStripes=True, showColumnStripes=False)
-            tab_summary.tableStyleInfo = style
-            ws_summary.add_table(tab_summary)
-            
-            # Auto-adjust columns A..G
-            for col in ['A', 'B', 'C', 'D', 'E', 'F', 'G']:
-                ws_summary.column_dimensions[col].auto_size = True
-            
-            # Create per-supervisor sheets
-            for sup_id, ops in operators_by_supervisor.items():
-                sup_name = supervisors.get(sup_id, "No Supervisor")
-                sheet_title = sup_name[:31]  # Truncate to Excel sheet name limit
-                ws = wb.create_sheet(title=sheet_title)
-                
-                # Headers
+
+            style = TableStyleInfo(
+                name="TableStyleMedium2",
+                showFirstColumn=True,
+                showLastColumn=False,
+                showRowStripes=True,
+                showColumnStripes=False
+            )
+
+            def _write_rows_to_sheet(ws, rows, table_name):
+                # headers
                 for col, header in enumerate(headers, start=1):
                     cell = ws.cell(1, col)
                     cell.value = header
                     cell.font = Font(bold=True)
-                
-                # Fill data
-                row = 2
-                for name, login, direction, supervisor, status, rate, hire_date in ops:
-                    ws.cell(row, 1).value = name
-                    ws.cell(row, 2).value = login
-                    ws.cell(row, 3).value = direction
-                    ws.cell(row, 4).value = supervisor
-                    ws.cell(row, 5).value = status
-                    ws.cell(row, 6).value = float(rate) if rate else 1.0
-                    ws.cell(row, 7).value = hire_date.strftime('%Y-%m-%d') if hire_date else 'N/A'
-                    row += 1
-                
-                # Add table
-                if row > 2:
-                    tab = Table(displayName=f"Table_{sheet_title.replace(' ', '_')}", ref=f"A1:G{row-1}")
+
+                # data
+                for row_idx, row_values in enumerate(rows, start=2):
+                    for col_idx, value in enumerate(row_values, start=1):
+                        ws.cell(row_idx, col_idx).value = value
+
+                # table
+                if rows:
+                    last_col = get_column_letter(len(headers))
+                    tab = Table(displayName=table_name, ref=f"A1:{last_col}{len(rows) + 1}")
                     tab.tableStyleInfo = style
                     ws.add_table(tab)
-                
-                # Auto-adjust columns A..G
-                for col in ['A', 'B', 'C', 'D', 'E', 'F', 'G']:
-                    ws.column_dimensions[col].auto_size = True
+
+                # column widths
+                for col_idx in range(1, len(headers) + 1):
+                    max_len = len(str(headers[col_idx - 1]))
+                    for row_values in rows:
+                        value = row_values[col_idx - 1]
+                        value_len = len(str(value)) if value is not None else 0
+                        if value_len > max_len:
+                            max_len = value_len
+                    ws.column_dimensions[get_column_letter(col_idx)].width = min(60, max(12, max_len + 2))
+
+            _write_rows_to_sheet(ws_summary, summary_rows, "SummaryTable")
+            
+            # Create per-supervisor sheets
+            for sup_id, ops in operators_by_supervisor.items():
+                sup_name = supervisors.get(sup_id, "No Supervisor")
+                base_sheet_title = (sup_name or "No Supervisor")[:31]
+                sheet_title = base_sheet_title
+                if sheet_title in wb.sheetnames:
+                    suffix_counter = 2
+                    while sheet_title in wb.sheetnames:
+                        suffix = f"_{suffix_counter}"
+                        sheet_title = f"{base_sheet_title[:31 - len(suffix)]}{suffix}"
+                        suffix_counter += 1
+                ws = wb.create_sheet(title=sheet_title)
+                table_name = f"Table_sup_{sup_id if sup_id is not None else 'none'}"
+                table_name = re.sub(r'[^A-Za-z0-9_]', '_', table_name)
+                _write_rows_to_sheet(ws, ops, table_name)
             
             # Save to BytesIO
             output = BytesIO()
