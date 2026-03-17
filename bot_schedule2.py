@@ -3408,6 +3408,73 @@ def delete_calibration_room(room_id):
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 
+@app.route('/api/call_calibration/rooms/<int:room_id>', methods=['PATCH', 'OPTIONS'])
+@require_api_key
+def update_calibration_room(room_id):
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+    try:
+        requester_id = getattr(g, 'user_id', None)
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "Requester not found"}), 404
+        requester_role = requester[3]
+        if requester_role != 'admin' and not _is_supervisor_role(requester_role):
+            return jsonify({"error": "Only admin and supervisors can update calibration rooms"}), 403
+
+        data = request.form if request.form else (request.get_json(silent=True) or {})
+        room_title = str(data.get('room_title') or data.get('title') or '').strip()
+        if len(room_title) > 255:
+            return jsonify({"error": "room_title is too long (max 255)"}), 400
+
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id, created_by_admin_id
+                FROM calibration_rooms
+                WHERE id = %s
+            """, (room_id,))
+            room_row = cursor.fetchone()
+            if not room_row:
+                return jsonify({"error": "Комната не найдена"}), 404
+
+            if _is_supervisor_role(requester_role):
+                room_creator_id = int(room_row[1]) if room_row[1] is not None else None
+                if int(requester_id) != int(room_creator_id or 0):
+                    cursor.execute("""
+                        SELECT id
+                        FROM calibration_room_members
+                        WHERE room_id = %s AND supervisor_id = %s
+                    """, (room_id, requester_id))
+                    if not cursor.fetchone():
+                        return jsonify({"error": "Join the room first"}), 403
+
+            cursor.execute("""
+                UPDATE calibration_rooms
+                SET
+                    room_title = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                RETURNING id, room_title
+            """, (room_title or None, room_id))
+            updated = cursor.fetchone()
+            if not updated:
+                return jsonify({"error": "Комната не найдена"}), 404
+
+        return jsonify({
+            "status": "success",
+            "room": {
+                "id": updated[0],
+                "room_title": updated[1] or f"Комната #{updated[0]}"
+            }
+        }), 200
+    except Exception as e:
+        logging.exception("Error updating calibration room")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
 @app.route('/api/call_calibration/rooms/<int:room_id>/calls', methods=['POST'])
 @require_api_key
 def add_call_to_calibration_room(room_id):
