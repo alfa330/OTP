@@ -19814,13 +19814,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 buildUpcomingBirthdays(users, (employee) => employee?.direction || 'Без направления', 14)
             ), [users, buildUpcomingBirthdays]);
 
+            const isSupervisorRole = user?.role === 'sv' || user?.role === 'supervisor';
+
+            const manageOperatorsBirthdaySource = useMemo(() => {
+                if (isSupervisorRole && Array.isArray(users) && users.length > 0) {
+                    // For supervisors show upcoming birthdays across all operators, not only direct reports.
+                    return users;
+                }
+                return Array.isArray(svData?.operators) ? svData.operators : [];
+            }, [isSupervisorRole, users, svData?.operators]);
+
             const upcomingManageOperatorsBirthdays = useMemo(() => (
                 buildUpcomingBirthdays(
-                    svData?.operators || [],
-                    (employee) => directions.find((dir) => Number(dir?.id) === Number(employee?.direction_id))?.name || 'Без направления',
+                    manageOperatorsBirthdaySource,
+                    (employee) =>
+                        employee?.direction ||
+                        directions.find((dir) => Number(dir?.id) === Number(employee?.direction_id))?.name ||
+                        'Без направления',
                     14
                 )
-            ), [svData?.operators, directions, buildUpcomingBirthdays]);
+            ), [manageOperatorsBirthdaySource, directions, buildUpcomingBirthdays]);
 
             const getCellColor = (hours, isPastDayWithZero) => {
             if (isPastDayWithZero) return "bg-gray-300 text-gray-700";
@@ -23018,6 +23031,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const birthdayBannerText = birthdaysToday.length === 1
                 ? `Сегодня день рождения у ${birthdayBannerNames[0]}!`
                 : `Сегодня день рождения у: ${birthdayBannerNames.join(', ')}.`;
+            const manageOperatorsBirthdaysCaption = isSupervisorRole ? 'Все операторы' : 'Мои сотрудники';
 
             const renderUpcomingBirthdaysCard = (items, caption) => {
                 const list = Array.isArray(items) ? items : [];
@@ -25168,7 +25182,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </button>
                                         </div>
 
-                                        {renderUpcomingBirthdaysCard(upcomingManageOperatorsBirthdays, 'Мои сотрудники')}
+                                        {renderUpcomingBirthdaysCard(upcomingManageOperatorsBirthdays, manageOperatorsBirthdaysCaption)}
 
                                         {/* Tabs */}
                                         <div className="flex flex-wrap gap-3 mb-6">
