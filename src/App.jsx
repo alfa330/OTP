@@ -19704,6 +19704,124 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
             }, []);
 
+            const extractBirthMonthDay = useCallback((value) => {
+                if (!value) return null;
+                if (value instanceof Date && !isNaN(value)) {
+                    return { month: value.getMonth() + 1, day: value.getDate() };
+                }
+
+                const raw = String(value).trim().split('T')[0];
+                if (!raw) return null;
+
+                let month = 0;
+                let day = 0;
+                let match = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+                if (match) {
+                    month = Number(match[2]);
+                    day = Number(match[3]);
+                } else {
+                    match = raw.match(/^(\d{2})[-./](\d{2})[-./](\d{4})$/);
+                    if (!match) return null;
+                    day = Number(match[1]);
+                    month = Number(match[2]);
+                }
+
+                if (!Number.isFinite(month) || !Number.isFinite(day) || month < 1 || month > 12 || day < 1 || day > 31) {
+                    return null;
+                }
+                return { month, day };
+            }, []);
+
+            const buildBirthdayDateForYear = useCallback((year, month, day) => {
+                let candidate = new Date(year, month - 1, day);
+                if (candidate.getMonth() + 1 !== month || candidate.getDate() !== day) {
+                    const monthLastDay = new Date(year, month, 0).getDate();
+                    candidate = new Date(year, month - 1, Math.min(day, monthLastDay));
+                }
+                candidate.setHours(0, 0, 0, 0);
+                return candidate;
+            }, []);
+
+            const getNextBirthdayMeta = useCallback((birthDateValue, fromDate = new Date()) => {
+                const md = extractBirthMonthDay(birthDateValue);
+                if (!md) return null;
+
+                const today = new Date(fromDate);
+                today.setHours(0, 0, 0, 0);
+
+                let nextBirthday = buildBirthdayDateForYear(today.getFullYear(), md.month, md.day);
+                if (nextBirthday < today) {
+                    nextBirthday = buildBirthdayDateForYear(today.getFullYear() + 1, md.month, md.day);
+                }
+
+                const daysAway = Math.round((nextBirthday.getTime() - today.getTime()) / (24 * 60 * 60 * 1000));
+                if (!Number.isFinite(daysAway) || daysAway < 0) return null;
+
+                return {
+                    daysAway,
+                    nextDate: nextBirthday,
+                    dateLabel: nextBirthday.toLocaleDateString('ru-RU', { day: '2-digit', month: 'long' })
+                };
+            }, [buildBirthdayDateForYear, extractBirthMonthDay]);
+
+            const formatDaysAwayLabel = useCallback((days) => {
+                if (days === 0) return 'Сегодня';
+                if (days === 1) return 'Завтра';
+                if (days >= 2 && days <= 4) return `Через ${days} дня`;
+                return `Через ${days} дней`;
+            }, []);
+
+            const buildUpcomingBirthdays = useCallback((employees, resolveDirectionLabel = null, daysLimit = 14) => {
+                if (!Array.isArray(employees) || employees.length === 0) return [];
+
+                const byKey = new Map();
+                const now = new Date();
+                now.setHours(0, 0, 0, 0);
+
+                employees.forEach((employee) => {
+                    if (!employee) return;
+                    if (!isEmployeeVisibleByStatusTab(employee?.status, 'active')) return;
+
+                    const meta = getNextBirthdayMeta(employee?.birth_date, now);
+                    if (!meta || meta.daysAway > daysLimit) return;
+
+                    const numericId = Number(employee?.id);
+                    const name = String(employee?.name || 'Сотрудник').trim();
+                    if (!name) return;
+                    const fallbackKey = name.toLowerCase();
+                    const mapKey = Number.isFinite(numericId) ? `id:${numericId}` : `name:${fallbackKey}`;
+                    if (byKey.has(mapKey)) return;
+
+                    byKey.set(mapKey, {
+                        id: Number.isFinite(numericId) ? numericId : null,
+                        name,
+                        directionLabel: typeof resolveDirectionLabel === 'function'
+                            ? (resolveDirectionLabel(employee) || 'Без направления')
+                            : (employee?.direction || 'Без направления'),
+                        daysAway: meta.daysAway,
+                        dateLabel: meta.dateLabel,
+                        nextDate: meta.nextDate
+                    });
+                });
+
+                return Array.from(byKey.values()).sort((a, b) => {
+                    if (a.daysAway !== b.daysAway) return a.daysAway - b.daysAway;
+                    return String(a.name || '').localeCompare(String(b.name || ''), 'ru', { sensitivity: 'base' });
+                });
+            }, [getNextBirthdayMeta, isEmployeeVisibleByStatusTab]);
+
+            const upcomingManageUsersBirthdays = useMemo(() => (
+                buildUpcomingBirthdays(users, (employee) => employee?.direction || 'Без направления', 14)
+            ), [users, buildUpcomingBirthdays]);
+
+            const upcomingManageOperatorsBirthdays = useMemo(() => (
+                buildUpcomingBirthdays(
+                    svData?.operators || [],
+                    (employee) => directions.find((dir) => Number(dir?.id) === Number(employee?.direction_id))?.name || 'Без направления',
+                    14
+                )
+            ), [svData?.operators, directions, buildUpcomingBirthdays]);
+
             const getCellColor = (hours, isPastDayWithZero) => {
             if (isPastDayWithZero) return "bg-gray-300 text-gray-700";
             if (hours === 0) return "bg-gray-200 text-gray-500";
@@ -22901,6 +23019,62 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 ? `Сегодня день рождения у ${birthdayBannerNames[0]}!`
                 : `Сегодня день рождения у: ${birthdayBannerNames.join(', ')}.`;
 
+            const renderUpcomingBirthdaysCard = (items, caption) => {
+                const list = Array.isArray(items) ? items : [];
+                return (
+                    <div className="relative overflow-hidden rounded-2xl border border-sky-200/70 bg-gradient-to-r from-sky-50 via-cyan-50 to-blue-50 px-5 py-4 mb-6 shadow-md">
+                        <div
+                            className="pointer-events-none absolute inset-0 opacity-70"
+                            style={{
+                                backgroundImage: "radial-gradient(circle at 18% 20%, rgba(14,165,233,0.16), transparent 40%), radial-gradient(circle at 85% 65%, rgba(59,130,246,0.14), transparent 42%)"
+                            }}
+                        />
+                        <div className="relative">
+                            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                                <div className="flex items-center gap-3">
+                                    <div className="h-11 w-11 rounded-xl bg-white/80 border border-sky-200 shadow-sm flex items-center justify-center">
+                                        <FaIcon className="fas fa-calendar-day text-sky-600 text-xl" />
+                                    </div>
+                                    <div>
+                                        <div className="text-lg font-semibold text-slate-900">Ближайшие дни рождения</div>
+                                        <div className="text-xs uppercase tracking-[0.18em] text-sky-700/80">{caption}</div>
+                                    </div>
+                                </div>
+                                <span className="inline-flex items-center justify-center px-3 py-1 rounded-full bg-white/85 border border-sky-200 text-xs font-semibold text-sky-700 w-fit">
+                                    14 дней
+                                </span>
+                            </div>
+
+                            {list.length === 0 ? (
+                                <div className="mt-4 rounded-xl border border-dashed border-sky-200 bg-white/70 px-4 py-3 text-sm text-slate-600">
+                                    В ближайшие 2 недели дней рождений нет.
+                                </div>
+                            ) : (
+                                <div className="mt-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                                    {list.map((item, idx) => (
+                                        <div key={`${item.id || item.name}-${idx}`} className="rounded-xl border border-sky-200/70 bg-white/85 px-4 py-3 shadow-sm">
+                                            <div className="flex items-start justify-between gap-2">
+                                                <div className="min-w-0">
+                                                    <div className="font-semibold text-slate-900 truncate">{item.name}</div>
+                                                    <div className="text-xs text-slate-500 truncate">{item.directionLabel || 'Без направления'}</div>
+                                                </div>
+                                                <span className="text-xs font-semibold px-2 py-1 rounded-full bg-sky-100 text-sky-700 whitespace-nowrap">
+                                                    {formatDaysAwayLabel(item.daysAway)}
+                                                </span>
+                                            </div>
+                                            <div className="mt-2 text-sm text-slate-700 flex items-center gap-2">
+                                                <FaIcon className="fas fa-gift text-sky-600" />
+                                                <span>{item.dateLabel}</span>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                );
+            };
+
             return (
                 <div className="flex h-screen overflow-hidden">
                     {/* Гамбургер кнопка для мобильных */}
@@ -24128,6 +24302,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </div>
                                     </div>
 
+                                    {renderUpcomingBirthdaysCard(upcomingManageUsersBirthdays, 'Сотрудники')}
+
                                     {/* Tabs */}
                                     <div className="flex flex-wrap gap-3 mb-6">
                                     {(() => {
@@ -24991,6 +25167,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <FaIcon className="fas fa-user-plus"></FaIcon> Добавить оператора
                                         </button>
                                         </div>
+
+                                        {renderUpcomingBirthdaysCard(upcomingManageOperatorsBirthdays, 'Мои сотрудники')}
 
                                         {/* Tabs */}
                                         <div className="flex flex-wrap gap-3 mb-6">
