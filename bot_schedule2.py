@@ -2222,6 +2222,7 @@ def get_admin_users():
                         u.phone,
                         u.email,
                         u.instagram,
+                        u.telegram_nick,
                         u.company_name,
                         u.employment_type,
                         COALESCE(u.has_proxy, FALSE) as has_proxy,
@@ -2286,10 +2287,11 @@ def get_admin_users():
                         "phone": row[21] or "",
                         "email": row[22] or "",
                         "instagram": row[23] or "",
-                        "company_name": row[24] or "",
-                        "employment_type": row[25] or "",
-                        "has_proxy": bool(row[26]) if row[26] is not None else False,
-                        "sip_number": row[27] or ""
+                        "telegram_nick": row[24] or "",
+                        "company_name": row[25] or "",
+                        "employment_type": row[26] or "",
+                        "has_proxy": bool(row[27]) if row[27] is not None else False,
+                        "sip_number": row[28] or ""
                     })
         return jsonify({"status": "success", "users": users}), 200
     except Exception as e:
@@ -2354,7 +2356,7 @@ def admin_update_user():
                 value = None
             elif value not in ['male', 'female']:
                 return jsonify({"error": "Invalid gender value"}), 400
-        elif field in ['phone', 'email', 'instagram', 'company_name', 'sip_number']:
+        elif field in ['phone', 'email', 'instagram', 'telegram_nick', 'company_name', 'sip_number']:
             value = str(value).strip() if value is not None else ''
             value = value or None
             if field == 'sip_number' and target_role != 'operator':
@@ -5270,6 +5272,7 @@ def add_user():
         if email and '@' not in email:
             return jsonify({"error": "Invalid email value"}), 400
         instagram = str(data.get('instagram') or '').strip() or None
+        telegram_nick = str(data.get('telegram_nick') or '').strip() or None
         company_name = str(data.get('company_name') or '').strip() or None
 
         employment_type = str(data.get('employment_type') or '').strip().lower() or None
@@ -5317,6 +5320,7 @@ def add_user():
             phone=phone,
             email=email,
             instagram=instagram,
+            telegram_nick=telegram_nick,
             company_name=company_name,
             employment_type=employment_type,
             has_proxy=has_proxy,
