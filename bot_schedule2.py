@@ -586,7 +586,7 @@ def _is_sensitive_access_unlocked(user_id, session_id):
         return False
 
 
-def _sanitize_evaluations_for_access(evaluations, reveal_sensitive):
+def _sanitize_evaluations_for_access(evaluations, reveal_sensitive, hide_hidden_operator_comments=False):
     result = []
     for ev in (evaluations or []):
         if not isinstance(ev, dict):
@@ -599,6 +599,8 @@ def _sanitize_evaluations_for_access(evaluations, reveal_sensitive):
         if not reveal_sensitive:
             item['phone_number'] = phone_masked
             item['audio_path'] = None
+        if hide_hidden_operator_comments and item.get('comment_visible_to_operator') is False:
+            item['comment'] = None
         result.append(item)
     return result
 
@@ -3214,7 +3216,11 @@ def get_call_evaluations():
             reveal_sensitive = bool(_is_sensitive_access_unlocked(requester_id, session_id))
         else:
             reveal_sensitive = True
-        evaluations = _sanitize_evaluations_for_access(evaluations, reveal_sensitive)
+        evaluations = _sanitize_evaluations_for_access(
+            evaluations,
+            reveal_sensitive,
+            hide_hidden_operator_comments=(role == 'operator')
+        )
 
         # Получаем информацию о супервайзере для dispute button
         operator = db.get_user(id=operator_id)
@@ -7053,6 +7059,8 @@ def receive_call_evaluation():
         comment = request.form['comment']
         month = request.form['month'] or datetime.now().strftime('%Y-%m')
         is_draft = request.form['is_draft'].lower() == 'true'
+        comment_visible_to_operator_raw = str(request.form.get('comment_visible_to_operator', 'true')).strip().lower()
+        comment_visible_to_operator = comment_visible_to_operator_raw in ('1', 'true', 'yes', 'on')
         scores = json.loads(request.form.get('scores', '[]'))
         criterion_comments = json.loads(request.form.get('criterion_comments', '[]'))
         direction_id = request.form.get('direction')
@@ -7142,6 +7150,7 @@ def receive_call_evaluation():
             phone_number=phone_number,
             score=score,
             comment=comment,
+            comment_visible_to_operator=comment_visible_to_operator,
             month=month,
             audio_path=audio_path,
             is_draft=is_draft,

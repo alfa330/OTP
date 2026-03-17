@@ -379,6 +379,8 @@ const EvaluationModal = ({
     const [scores, setScores] = useState([]);
     const [comments, setComments] = useState([]);
     const [commentVisible, setCommentVisible] = useState([]);
+    const [generalComment, setGeneralComment] = useState('');
+    const [commentVisibleToOperator, setCommentVisibleToOperator] = useState(true);
     const [phoneNumber, setPhoneNumber] = useState('');
     const [phoneError, setPhoneError] = useState('');
     const [appealDate, setAppealDate] = useState('');
@@ -531,11 +533,23 @@ const EvaluationModal = ({
                 setScores(initDir?.criteria?.map(()=>'Correct') || []);
                 setComments(initDir?.criteria?.map(()=>'') || []);
                 setCommentVisible(initDir?.criteria?.map(()=>false) || []);
+                setGeneralComment('');
+                setCommentVisibleToOperator(true);
                 setAssignedMonth(selectedMonth); setAudioUrl(null); setCallFile(null); setPhoneError('');
             } else {
                 setScores(existingEvaluation.scores || []);
                 setComments(existingEvaluation.criterionComments || []);
                 setCommentVisible((existingEvaluation.criterionComments||[]).map(c=>!!(c&&c.trim())));
+                setGeneralComment(
+                    existingEvaluation.combinedComment
+                    ?? existingEvaluation._rawEvaluation?.comment
+                    ?? ''
+                );
+                setCommentVisibleToOperator(
+                    existingEvaluation.commentVisibleToOperator
+                    ?? existingEvaluation._rawEvaluation?.comment_visible_to_operator
+                    ?? true
+                );
                 setPhoneNumber(existingEvaluation.phoneNumber || '');
                 setAssignedMonth(existingEvaluation.assignedMonth || selectedMonth);
                 setAudioUrl(existingEvaluation.audioUrl || null);
@@ -553,6 +567,8 @@ const EvaluationModal = ({
             setScores(initDir?.criteria?.map(()=>'Correct') || []);
             setComments(initDir?.criteria?.map(()=>'') || []);
             setCommentVisible(initDir?.criteria?.map(()=>false) || []);
+            setGeneralComment('');
+            setCommentVisibleToOperator(true);
             setCallFile(null); setAudioUrl(null); setPhoneNumber(''); setAppealDate(''); setPhoneError('');
             setAssignedMonth(selectedMonth);
         }
@@ -659,11 +675,21 @@ const EvaluationModal = ({
     const handleSubmit = async (draft = false) => {
         setIsSubmitting(true);
         const fd = new FormData();
+        const criteriaCommentSummary = criteria
+            .map((c, i) => comments[i] ? `${c.name}: ${comments[i]}` : '')
+            .filter(Boolean)
+            .join('; ');
+        const submitComment = isCalibrationAddCallMode
+            ? criteriaCommentSummary
+            : String(generalComment || '').trim();
         fd.append('evaluator', userName);
         fd.append('operator', activeOperator?.name || '');
         fd.append('phone_number', phoneNumber);
         fd.append('score', totalScore);
-        fd.append('comment', criteria.map((c,i)=>comments[i]?`${c.name}: ${comments[i]}`:'').filter(Boolean).join('; '));
+        fd.append('comment', submitComment);
+        if (!isCalibrationAddCallMode) {
+            fd.append('comment_visible_to_operator', String(!!commentVisibleToOperator));
+        }
         fd.append('month', assignedMonth);
         fd.append('is_draft', draft);
         fd.append('scores', JSON.stringify(scores));
@@ -698,7 +724,26 @@ const EvaluationModal = ({
             const r = await authFetch(`${API_BASE_URL}/api/call_evaluation`, { method:'POST', headers:{'X-User-Id':userId}, body: fd });
             const res = await r.json();
             if (res.status === 'success') {
-                onSubmit({ id: res.evaluation_id, evaluator: userName, operator: activeOperator?.name || '', phoneNumber, totalScore: totalScore.toFixed(2), comment: fd.get('comment'), selectedDirection: currentDir?.name, directionId: currentDir?.id, is_imported: false, directions: [{name: currentDir?.name, hasFileUpload: currentDir?.hasFileUpload, criteria}], scores, criterionComments: comments, audioUrl: currentDir?.hasFileUpload ? audioUrl : null, isDraft: draft, assignedMonth, isCorrection: existingEvaluation?.isReevaluation || false, appeal_date: ad });
+                onSubmit({
+                    id: res.evaluation_id,
+                    evaluator: userName,
+                    operator: activeOperator?.name || '',
+                    phoneNumber,
+                    totalScore: totalScore.toFixed(2),
+                    comment: fd.get('comment'),
+                    commentVisibleToOperator: !!commentVisibleToOperator,
+                    selectedDirection: currentDir?.name,
+                    directionId: currentDir?.id,
+                    is_imported: false,
+                    directions: [{name: currentDir?.name, hasFileUpload: currentDir?.hasFileUpload, criteria}],
+                    scores,
+                    criterionComments: comments,
+                    audioUrl: currentDir?.hasFileUpload ? audioUrl : null,
+                    isDraft: draft,
+                    assignedMonth,
+                    isCorrection: existingEvaluation?.isReevaluation || false,
+                    appeal_date: ad
+                });
                 onClose();
             } else emitCallEvaluationToast('Ошибка: ' + res.error, 'error');
         } catch(e) { emitCallEvaluationToast('Ошибка отправки: ' + e.message, 'error'); }
@@ -887,6 +932,29 @@ const EvaluationModal = ({
                                 />
                             ))}
                         </div>
+                    )}
+
+                    {!isCalibrationAddCallMode && (
+                        <>
+                            <div className="section-divider">Общий комментарий</div>
+                            <div className="field" style={{marginBottom: 10}}>
+                                <label className="label">Комментарий (необязательно)</label>
+                                <textarea
+                                    className="textarea"
+                                    value={generalComment}
+                                    onChange={e => setGeneralComment(e.target.value)}
+                                    placeholder="Общий комментарий по оценке"
+                                />
+                            </div>
+                            <label className="comment-visibility-toggle">
+                                <input
+                                    type="checkbox"
+                                    checked={!!commentVisibleToOperator}
+                                    onChange={e => setCommentVisibleToOperator(e.target.checked)}
+                                />
+                                <span>Показывать оператору</span>
+                            </label>
+                        </>
                     )}
 
                     {/* Score summary */}
@@ -1243,6 +1311,7 @@ const App = ({ user, initialSelection }) => {
         sv_request_approved_by: ev.sv_request_approved_by || null,
         sv_request_approved_by_name: ev.sv_request_approved_by_name || null,
         sv_request_approved_at: ev.sv_request_approved_at || null,
+        commentVisibleToOperator: ev.comment_visible_to_operator !== false,
         _rawEvaluation: ev
     }), []);
 
@@ -1628,7 +1697,11 @@ const App = ({ user, initialSelection }) => {
                 directionId: data.directionId ?? selectedOperator?.direction_id, directions: data.directions,
                 phoneNumber: data.phoneNumber, assignedMonth: data.assignedMonth, isCorrection: data.isCorrection,
                 appeal_date: data.appeal_date, is_imported: false,
-                sv_request: false, sv_request_approved: false, _rawEvaluation: {}
+                commentVisibleToOperator: data.commentVisibleToOperator !== false,
+                sv_request: false, sv_request_approved: false,
+                _rawEvaluation: {
+                    comment_visible_to_operator: data.commentVisibleToOperator !== false
+                }
             };
             let updated = data.isCorrection
                 ? prev.filter(c => c.id !== data.id && c.id !== editingEval?.id)
@@ -2182,6 +2255,10 @@ const App = ({ user, initialSelection }) => {
                                                             <div className="expanded-meta-item"><strong>Оценщик:</strong> {call._rawEvaluation?.evaluator || '—'}</div>
                                                             <div className="expanded-meta-item"><strong>Дата оценки:</strong> {fmtDate(call._rawEvaluation?.evaluation_date||call.date)}</div>
                                                             <div className="expanded-meta-item"><strong>Дата обращения:</strong> {fmtDate(call._rawEvaluation?.appeal_date||call.appeal_date)}</div>
+                                                            <div className="expanded-meta-item"><strong>Показ оператору:</strong> {call.commentVisibleToOperator !== false ? 'Да' : 'Нет'}</div>
+                                                        </div>
+                                                        <div style={{marginBottom:12, fontSize:13, color:'var(--text-2)'}}>
+                                                            <strong style={{color:'var(--text)'}}>Общий комментарий:</strong> {call.combinedComment?.trim() || '—'}
                                                         </div>
                                                         {call.audioUrl && call.directions?.[0]?.hasFileUpload && (
                                                             <div className="audio-wrap" style={{marginBottom:14,maxWidth:480}}>
