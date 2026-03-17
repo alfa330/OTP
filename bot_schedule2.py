@@ -513,6 +513,18 @@ def _mask_phone_number(phone_number):
     return ('*' * (len(digits) - 4)) + digits[-4:]
 
 
+KZ_PHONE_REGEX = re.compile(r'^\+7\d{9}$')
+
+
+def _is_valid_kz_phone(phone_number):
+    if phone_number is None:
+        return True
+    value = str(phone_number).strip()
+    if not value:
+        return True
+    return bool(KZ_PHONE_REGEX.match(value))
+
+
 def _build_sensitive_qr_token(session_id, user_id):
     expires_at = datetime.utcnow() + timedelta(seconds=SENSITIVE_QR_TTL_SECONDS)
     payload = {
@@ -2392,6 +2404,8 @@ def admin_update_user():
             value = value or None
             if field == 'sip_number' and target_role != 'operator':
                 value = None
+            if field in ['phone', 'close_contact_1_phone', 'close_contact_2_phone'] and value and not _is_valid_kz_phone(value):
+                return jsonify({"error": f"Invalid {field} format. Use +7XXXXXXXXX"}), 400
             if field == 'email' and value and '@' not in value:
                 return jsonify({"error": "Invalid email value"}), 400
         elif field == 'employment_type':
@@ -5313,6 +5327,13 @@ def add_user():
         close_contact_2_relation = str(data.get('close_contact_2_relation') or '').strip() or None
         close_contact_2_full_name = str(data.get('close_contact_2_full_name') or '').strip() or None
         close_contact_2_phone = str(data.get('close_contact_2_phone') or '').strip() or None
+
+        if phone and not _is_valid_kz_phone(phone):
+            return jsonify({"error": "Invalid phone format. Use +7XXXXXXXXX"}), 400
+        if close_contact_1_phone and not _is_valid_kz_phone(close_contact_1_phone):
+            return jsonify({"error": "Invalid close_contact_1_phone format. Use +7XXXXXXXXX"}), 400
+        if close_contact_2_phone and not _is_valid_kz_phone(close_contact_2_phone):
+            return jsonify({"error": "Invalid close_contact_2_phone format. Use +7XXXXXXXXX"}), 400
 
         employment_type = str(data.get('employment_type') or '').strip().lower() or None
         if employment_type not in [None, 'gph', 'of']:
