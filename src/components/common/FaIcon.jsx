@@ -126,6 +126,8 @@ const TOKEN_TO_ICON = {
     'fa-arrow-down': 'ArrowDown',
     'fa-arrows-rotate': 'RefreshCw',
     'fa-award': 'Award',
+    'fa-birthday-cake': 'Gift',
+    'fa-cake-candles': 'Gift',
     'fa-ban': 'XCircle',
     'fa-bars': 'Menu',
     'fa-bell': 'Bell',
