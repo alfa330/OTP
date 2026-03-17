@@ -217,6 +217,7 @@ const TOKEN_TO_ICON = {
     'fa-list-ol': 'ListOrdered',
     'fa-list-ul': 'List',
     'fa-lock': 'Lock',
+    'fa-lock-alt': 'Lock',
     'fa-medal': 'Medal',
     'fa-minus': 'Minus',
     'fa-mug-hot': 'Coffee',

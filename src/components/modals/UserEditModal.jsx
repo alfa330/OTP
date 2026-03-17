@@ -281,6 +281,14 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         email: base.email ?? "",
         instagram: base.instagram ?? "",
         telegram_nick: base.telegram_nick ?? "",
+        study_place: base.study_place ?? "",
+        study_course: base.study_course ?? "",
+        close_contact_1_relation: base.close_contact_1_relation ?? "",
+        close_contact_1_full_name: base.close_contact_1_full_name ?? "",
+        close_contact_1_phone: base.close_contact_1_phone ?? "",
+        close_contact_2_relation: base.close_contact_2_relation ?? "",
+        close_contact_2_full_name: base.close_contact_2_full_name ?? "",
+        close_contact_2_phone: base.close_contact_2_phone ?? "",
         company_name: base.company_name ?? "",
         employment_type: base.employment_type ?? "",
         has_proxy: !!base.has_proxy,
@@ -296,6 +304,14 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         defaults.email = String(defaults.email ?? '').trim();
         defaults.instagram = String(defaults.instagram ?? '').trim();
         defaults.telegram_nick = String(defaults.telegram_nick ?? '').trim();
+        defaults.study_place = String(defaults.study_place ?? '').trim();
+        defaults.study_course = String(defaults.study_course ?? '').trim();
+        defaults.close_contact_1_relation = String(defaults.close_contact_1_relation ?? '').trim();
+        defaults.close_contact_1_full_name = String(defaults.close_contact_1_full_name ?? '').trim();
+        defaults.close_contact_1_phone = String(defaults.close_contact_1_phone ?? '').trim();
+        defaults.close_contact_2_relation = String(defaults.close_contact_2_relation ?? '').trim();
+        defaults.close_contact_2_full_name = String(defaults.close_contact_2_full_name ?? '').trim();
+        defaults.close_contact_2_phone = String(defaults.close_contact_2_phone ?? '').trim();
         defaults.company_name = String(defaults.company_name ?? '').trim();
         defaults.employment_type = ['gph', 'of'].includes(String(defaults.employment_type || '').trim().toLowerCase())
             ? String(defaults.employment_type || '').trim().toLowerCase()
@@ -501,6 +517,14 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         email: "",
         instagram: "",
         telegram_nick: "",
+        study_place: "",
+        study_course: "",
+        close_contact_1_relation: "",
+        close_contact_1_full_name: "",
+        close_contact_1_phone: "",
+        close_contact_2_relation: "",
+        close_contact_2_full_name: "",
+        close_contact_2_phone: "",
         company_name: "",
         employment_type: "",
         has_proxy: false,
@@ -600,6 +624,14 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
             email: normalizedEmail,
             instagram: String(editedUser?.instagram || '').trim(),
             telegram_nick: String(editedUser?.telegram_nick || '').trim(),
+            study_place: String(editedUser?.study_place || '').trim(),
+            study_course: String(editedUser?.study_course || '').trim(),
+            close_contact_1_relation: String(editedUser?.close_contact_1_relation || '').trim(),
+            close_contact_1_full_name: String(editedUser?.close_contact_1_full_name || '').trim(),
+            close_contact_1_phone: String(editedUser?.close_contact_1_phone || '').trim(),
+            close_contact_2_relation: String(editedUser?.close_contact_2_relation || '').trim(),
+            close_contact_2_full_name: String(editedUser?.close_contact_2_full_name || '').trim(),
+            close_contact_2_phone: String(editedUser?.close_contact_2_phone || '').trim(),
             company_name: String(editedUser?.company_name || '').trim(),
             employment_type: ['gph', 'of'].includes(String(editedUser?.employment_type || '').trim().toLowerCase())
                 ? String(editedUser?.employment_type || '').trim().toLowerCase()
@@ -657,7 +689,12 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         { id: "general", label: "Общее" },
         { id: "data", label: "Данные" },
         { id: "contacts", label: "Контакты" },
-        { id: "account", label: "Аккаунт" }
+        { id: "corporate", label: "Корпоративное" },
+        {
+            id: "account",
+            label: <FaIcon className="fa-solid fa-lock" aria-hidden="true" />,
+            title: "Аккаунт"
+        }
     ];
     const avatarInitial = String(editedUser?.name || 'U').charAt(0).toUpperCase();
     const avatarDisabled = isLoading || !!createdCredentials || isAvatarProcessing || !!avatarCropState;
@@ -806,7 +843,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
 
                 <div className="mt-4 space-y-6">
                 {!createdCredentials && (
-                    <div className="grid grid-cols-4 gap-2 rounded-xl bg-gray-100 p-1">
+                    <div className="grid grid-cols-5 gap-2 rounded-xl bg-gray-100 p-1">
                     {tabs.map((tab) => (
                         <button
                         key={tab.id}
@@ -818,6 +855,8 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             : "text-gray-600 hover:text-gray-900"
                         }`}
                         aria-pressed={activeTab === tab.id}
+                        aria-label={tab.title || (typeof tab.label === 'string' ? tab.label : undefined)}
+                        title={tab.title || undefined}
                         >
                         {tab.label}
                         </button>
@@ -868,39 +907,25 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     </div>
 
                     <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Дата найма</label>
-                    <input
-                        type="date"
-                        value={toDateInputValue(editedUser?.hire_date)}
-                        onChange={(e) => setEditedUser({ ...editedUser, hire_date: e.target.value })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                        disabled={isLoading || !!createdCredentials}
-                    />
-                    </div>
-
-                    <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Наименование ТОО/ИП</label>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Место учебы</label>
                         <input
                         type="text"
-                        value={editedUser?.company_name || ""}
-                        onChange={(e) => setEditedUser({ ...editedUser, company_name: e.target.value })}
+                        value={editedUser?.study_place || ""}
+                        onChange={(e) => setEditedUser({ ...editedUser, study_place: e.target.value })}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                         disabled={isLoading || !!createdCredentials}
                         />
                     </div>
 
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Оформлен ГПХ/ОФ</label>
-                        <select
-                        value={editedUser?.employment_type || ""}
-                        onChange={(e) => setEditedUser({ ...editedUser, employment_type: e.target.value })}
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Курс</label>
+                        <input
+                        type="text"
+                        value={editedUser?.study_course || ""}
+                        onChange={(e) => setEditedUser({ ...editedUser, study_course: e.target.value })}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                         disabled={isLoading || !!createdCredentials}
-                        >
-                        <option value="">Не указано</option>
-                        <option value="gph">ГПХ</option>
-                        <option value="of">ОФ</option>
-                        </select>
+                        />
                     </div>
                     </>
                 )}
@@ -950,6 +975,114 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         disabled={isLoading || !!createdCredentials}
                         placeholder="@username"
                         />
+                    </div>
+
+                    <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-3">
+                        <div className="text-sm font-medium text-slate-700">Близкий контакт 1</div>
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Кем приходится</label>
+                            <input
+                            type="text"
+                            value={editedUser?.close_contact_1_relation || ""}
+                            onChange={(e) => setEditedUser({ ...editedUser, close_contact_1_relation: e.target.value })}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            disabled={isLoading || !!createdCredentials}
+                            />
+                        </div>
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">ФИО</label>
+                            <input
+                            type="text"
+                            value={editedUser?.close_contact_1_full_name || ""}
+                            onChange={(e) => setEditedUser({ ...editedUser, close_contact_1_full_name: e.target.value })}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            disabled={isLoading || !!createdCredentials}
+                            />
+                        </div>
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Номер</label>
+                            <input
+                            type="text"
+                            value={editedUser?.close_contact_1_phone || ""}
+                            onChange={(e) => setEditedUser({ ...editedUser, close_contact_1_phone: e.target.value })}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            disabled={isLoading || !!createdCredentials}
+                            />
+                        </div>
+                    </div>
+
+                    <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-3">
+                        <div className="text-sm font-medium text-slate-700">Близкий контакт 2</div>
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Кем приходится</label>
+                            <input
+                            type="text"
+                            value={editedUser?.close_contact_2_relation || ""}
+                            onChange={(e) => setEditedUser({ ...editedUser, close_contact_2_relation: e.target.value })}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            disabled={isLoading || !!createdCredentials}
+                            />
+                        </div>
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">ФИО</label>
+                            <input
+                            type="text"
+                            value={editedUser?.close_contact_2_full_name || ""}
+                            onChange={(e) => setEditedUser({ ...editedUser, close_contact_2_full_name: e.target.value })}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            disabled={isLoading || !!createdCredentials}
+                            />
+                        </div>
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Номер</label>
+                            <input
+                            type="text"
+                            value={editedUser?.close_contact_2_phone || ""}
+                            onChange={(e) => setEditedUser({ ...editedUser, close_contact_2_phone: e.target.value })}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            disabled={isLoading || !!createdCredentials}
+                            />
+                        </div>
+                    </div>
+                    </>
+                )}
+
+                {activeTab === "corporate" && (
+                    <>
+                    <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Дата найма</label>
+                    <input
+                        type="date"
+                        value={toDateInputValue(editedUser?.hire_date)}
+                        onChange={(e) => setEditedUser({ ...editedUser, hire_date: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        disabled={isLoading || !!createdCredentials}
+                    />
+                    </div>
+
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Наименование ТОО/ИП</label>
+                        <input
+                        type="text"
+                        value={editedUser?.company_name || ""}
+                        onChange={(e) => setEditedUser({ ...editedUser, company_name: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        disabled={isLoading || !!createdCredentials}
+                        />
+                    </div>
+
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Оформлен ГПХ/ОФ</label>
+                        <select
+                        value={editedUser?.employment_type || ""}
+                        onChange={(e) => setEditedUser({ ...editedUser, employment_type: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        disabled={isLoading || !!createdCredentials}
+                        >
+                        <option value="">Не указано</option>
+                        <option value="gph">ГПХ</option>
+                        <option value="of">ОФ</option>
+                        </select>
                     </div>
                     </>
                 )}
@@ -1229,49 +1362,25 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         </div>
 
                         <div>
-                            <label htmlFor="hireDate" className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
-                            Дата найма
-                            </label>
-                            <div className="flex items-center gap-2">
-                            <input
-                                type="date"
-                                id="hireDate"
-                                value={toDateInputValue(editedUser?.hire_date)}
-                                onChange={(e) => setEditedUser({ ...editedUser, hire_date: e.target.value || null })}
-                                className="px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                                disabled={isLoading}
-                            />
-                            {editedUser?.hire_date && (
-                                <span className="text-gray-600 text-xs whitespace-nowrap">
-                                Текущая: {toDateInputValue(editedUser.hire_date)}
-                                </span>
-                            )}
-                            </div>
-                        </div>
-
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Наименование ТОО/ИП</label>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Место учебы</label>
                             <input
                             type="text"
-                            value={editedUser?.company_name || ""}
-                            onChange={(e) => setEditedUser({ ...editedUser, company_name: e.target.value })}
+                            value={editedUser?.study_place || ""}
+                            onChange={(e) => setEditedUser({ ...editedUser, study_place: e.target.value })}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                             disabled={isLoading}
                             />
                         </div>
 
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Оформлен ГПХ/ОФ</label>
-                            <select
-                            value={editedUser?.employment_type || ""}
-                            onChange={(e) => setEditedUser({ ...editedUser, employment_type: e.target.value })}
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Курс</label>
+                            <input
+                            type="text"
+                            value={editedUser?.study_course || ""}
+                            onChange={(e) => setEditedUser({ ...editedUser, study_course: e.target.value })}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                             disabled={isLoading}
-                            >
-                            <option value="">Не указано</option>
-                            <option value="gph">ГПХ</option>
-                            <option value="of">ОФ</option>
-                            </select>
+                            />
                         </div>
                         </>
                     )}
@@ -1321,6 +1430,124 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             disabled={isLoading}
                             placeholder="@username"
                             />
+                        </div>
+
+                        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-3">
+                            <div className="text-sm font-medium text-slate-700">Близкий контакт 1</div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Кем приходится</label>
+                                <input
+                                type="text"
+                                value={editedUser?.close_contact_1_relation || ""}
+                                onChange={(e) => setEditedUser({ ...editedUser, close_contact_1_relation: e.target.value })}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                disabled={isLoading}
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">ФИО</label>
+                                <input
+                                type="text"
+                                value={editedUser?.close_contact_1_full_name || ""}
+                                onChange={(e) => setEditedUser({ ...editedUser, close_contact_1_full_name: e.target.value })}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                disabled={isLoading}
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Номер</label>
+                                <input
+                                type="text"
+                                value={editedUser?.close_contact_1_phone || ""}
+                                onChange={(e) => setEditedUser({ ...editedUser, close_contact_1_phone: e.target.value })}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                disabled={isLoading}
+                                />
+                            </div>
+                        </div>
+
+                        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-3">
+                            <div className="text-sm font-medium text-slate-700">Близкий контакт 2</div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Кем приходится</label>
+                                <input
+                                type="text"
+                                value={editedUser?.close_contact_2_relation || ""}
+                                onChange={(e) => setEditedUser({ ...editedUser, close_contact_2_relation: e.target.value })}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                disabled={isLoading}
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">ФИО</label>
+                                <input
+                                type="text"
+                                value={editedUser?.close_contact_2_full_name || ""}
+                                onChange={(e) => setEditedUser({ ...editedUser, close_contact_2_full_name: e.target.value })}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                disabled={isLoading}
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Номер</label>
+                                <input
+                                type="text"
+                                value={editedUser?.close_contact_2_phone || ""}
+                                onChange={(e) => setEditedUser({ ...editedUser, close_contact_2_phone: e.target.value })}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                disabled={isLoading}
+                                />
+                            </div>
+                        </div>
+                        </>
+                    )}
+
+                    {activeTab === "corporate" && (
+                        <>
+                        <div>
+                            <label htmlFor="hireDate" className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
+                            Дата найма
+                            </label>
+                            <div className="flex items-center gap-2">
+                            <input
+                                type="date"
+                                id="hireDate"
+                                value={toDateInputValue(editedUser?.hire_date)}
+                                onChange={(e) => setEditedUser({ ...editedUser, hire_date: e.target.value || null })}
+                                className="px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                disabled={isLoading}
+                            />
+                            {editedUser?.hire_date && (
+                                <span className="text-gray-600 text-xs whitespace-nowrap">
+                                Текущая: {toDateInputValue(editedUser.hire_date)}
+                                </span>
+                            )}
+                            </div>
+                        </div>
+
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Наименование ТОО/ИП</label>
+                            <input
+                            type="text"
+                            value={editedUser?.company_name || ""}
+                            onChange={(e) => setEditedUser({ ...editedUser, company_name: e.target.value })}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            disabled={isLoading}
+                            />
+                        </div>
+
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Оформлен ГПХ/ОФ</label>
+                            <select
+                            value={editedUser?.employment_type || ""}
+                            onChange={(e) => setEditedUser({ ...editedUser, employment_type: e.target.value })}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            disabled={isLoading}
+                            >
+                            <option value="">Не указано</option>
+                            <option value="gph">ГПХ</option>
+                            <option value="of">ОФ</option>
+                            </select>
                         </div>
                         </>
                     )}

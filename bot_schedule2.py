@@ -2226,7 +2226,15 @@ def get_admin_users():
                         u.company_name,
                         u.employment_type,
                         COALESCE(u.has_proxy, FALSE) as has_proxy,
-                        u.sip_number
+                        u.sip_number,
+                        u.study_place,
+                        u.study_course,
+                        u.close_contact_1_relation,
+                        u.close_contact_1_full_name,
+                        u.close_contact_1_phone,
+                        u.close_contact_2_relation,
+                        u.close_contact_2_full_name,
+                        u.close_contact_2_phone
                     FROM users u
                     LEFT JOIN directions d ON u.direction_id = d.id
                     LEFT JOIN users s ON u.supervisor_id = s.id
@@ -2291,7 +2299,15 @@ def get_admin_users():
                         "company_name": row[25] or "",
                         "employment_type": row[26] or "",
                         "has_proxy": bool(row[27]) if row[27] is not None else False,
-                        "sip_number": row[28] or ""
+                        "sip_number": row[28] or "",
+                        "study_place": row[29] or "",
+                        "study_course": row[30] or "",
+                        "close_contact_1_relation": row[31] or "",
+                        "close_contact_1_full_name": row[32] or "",
+                        "close_contact_1_phone": row[33] or "",
+                        "close_contact_2_relation": row[34] or "",
+                        "close_contact_2_full_name": row[35] or "",
+                        "close_contact_2_phone": row[36] or ""
                     })
         return jsonify({"status": "success", "users": users}), 200
     except Exception as e:
@@ -2356,7 +2372,22 @@ def admin_update_user():
                 value = None
             elif value not in ['male', 'female']:
                 return jsonify({"error": "Invalid gender value"}), 400
-        elif field in ['phone', 'email', 'instagram', 'telegram_nick', 'company_name', 'sip_number']:
+        elif field in [
+            'phone',
+            'email',
+            'instagram',
+            'telegram_nick',
+            'company_name',
+            'sip_number',
+            'study_place',
+            'study_course',
+            'close_contact_1_relation',
+            'close_contact_1_full_name',
+            'close_contact_1_phone',
+            'close_contact_2_relation',
+            'close_contact_2_full_name',
+            'close_contact_2_phone'
+        ]:
             value = str(value).strip() if value is not None else ''
             value = value or None
             if field == 'sip_number' and target_role != 'operator':
@@ -5274,6 +5305,14 @@ def add_user():
         instagram = str(data.get('instagram') or '').strip() or None
         telegram_nick = str(data.get('telegram_nick') or '').strip() or None
         company_name = str(data.get('company_name') or '').strip() or None
+        study_place = str(data.get('study_place') or '').strip() or None
+        study_course = str(data.get('study_course') or '').strip() or None
+        close_contact_1_relation = str(data.get('close_contact_1_relation') or '').strip() or None
+        close_contact_1_full_name = str(data.get('close_contact_1_full_name') or '').strip() or None
+        close_contact_1_phone = str(data.get('close_contact_1_phone') or '').strip() or None
+        close_contact_2_relation = str(data.get('close_contact_2_relation') or '').strip() or None
+        close_contact_2_full_name = str(data.get('close_contact_2_full_name') or '').strip() or None
+        close_contact_2_phone = str(data.get('close_contact_2_phone') or '').strip() or None
 
         employment_type = str(data.get('employment_type') or '').strip().lower() or None
         if employment_type not in [None, 'gph', 'of']:
@@ -5324,7 +5363,15 @@ def add_user():
             company_name=company_name,
             employment_type=employment_type,
             has_proxy=has_proxy,
-            sip_number=sip_number
+            sip_number=sip_number,
+            study_place=study_place,
+            study_course=study_course,
+            close_contact_1_relation=close_contact_1_relation,
+            close_contact_1_full_name=close_contact_1_full_name,
+            close_contact_1_phone=close_contact_1_phone,
+            close_contact_2_relation=close_contact_2_relation,
+            close_contact_2_full_name=close_contact_2_full_name,
+            close_contact_2_phone=close_contact_2_phone
         )
 
         requester_header = request.headers.get('X-User-Id')

@@ -20860,6 +20860,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             email: normalizeTextForApi(editedUser.email),
                             instagram: normalizeTextForApi(editedUser.instagram),
                             telegram_nick: normalizeTextForApi(editedUser.telegram_nick),
+                            study_place: normalizeTextForApi(editedUser.study_place),
+                            study_course: normalizeTextForApi(editedUser.study_course),
+                            close_contact_1_relation: normalizeTextForApi(editedUser.close_contact_1_relation),
+                            close_contact_1_full_name: normalizeTextForApi(editedUser.close_contact_1_full_name),
+                            close_contact_1_phone: normalizeTextForApi(editedUser.close_contact_1_phone),
+                            close_contact_2_relation: normalizeTextForApi(editedUser.close_contact_2_relation),
+                            close_contact_2_full_name: normalizeTextForApi(editedUser.close_contact_2_full_name),
+                            close_contact_2_phone: normalizeTextForApi(editedUser.close_contact_2_phone),
                             company_name: normalizeTextForApi(editedUser.company_name),
                             employment_type: normalizeEmploymentTypeForApi(editedUser.employment_type),
                             has_proxy: normalizeBoolForApi(editedUser.has_proxy),
@@ -21100,6 +21108,94 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             user_id: editedUser.id,
                             field: 'telegram_nick',
                             value: nextTelegramNick
+                        }, {
+                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        });
+                    }
+                    const nextStudyPlace = normalizeTextForApi(editedUser?.study_place);
+                    const prevStudyPlace = normalizeTextForApi(userToEdit?.study_place);
+                    if (nextStudyPlace !== prevStudyPlace) {
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'study_place',
+                            value: nextStudyPlace
+                        }, {
+                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        });
+                    }
+                    const nextStudyCourse = normalizeTextForApi(editedUser?.study_course);
+                    const prevStudyCourse = normalizeTextForApi(userToEdit?.study_course);
+                    if (nextStudyCourse !== prevStudyCourse) {
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'study_course',
+                            value: nextStudyCourse
+                        }, {
+                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        });
+                    }
+                    const nextCloseContact1Relation = normalizeTextForApi(editedUser?.close_contact_1_relation);
+                    const prevCloseContact1Relation = normalizeTextForApi(userToEdit?.close_contact_1_relation);
+                    if (nextCloseContact1Relation !== prevCloseContact1Relation) {
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'close_contact_1_relation',
+                            value: nextCloseContact1Relation
+                        }, {
+                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        });
+                    }
+                    const nextCloseContact1FullName = normalizeTextForApi(editedUser?.close_contact_1_full_name);
+                    const prevCloseContact1FullName = normalizeTextForApi(userToEdit?.close_contact_1_full_name);
+                    if (nextCloseContact1FullName !== prevCloseContact1FullName) {
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'close_contact_1_full_name',
+                            value: nextCloseContact1FullName
+                        }, {
+                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        });
+                    }
+                    const nextCloseContact1Phone = normalizeTextForApi(editedUser?.close_contact_1_phone);
+                    const prevCloseContact1Phone = normalizeTextForApi(userToEdit?.close_contact_1_phone);
+                    if (nextCloseContact1Phone !== prevCloseContact1Phone) {
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'close_contact_1_phone',
+                            value: nextCloseContact1Phone
+                        }, {
+                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        });
+                    }
+                    const nextCloseContact2Relation = normalizeTextForApi(editedUser?.close_contact_2_relation);
+                    const prevCloseContact2Relation = normalizeTextForApi(userToEdit?.close_contact_2_relation);
+                    if (nextCloseContact2Relation !== prevCloseContact2Relation) {
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'close_contact_2_relation',
+                            value: nextCloseContact2Relation
+                        }, {
+                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        });
+                    }
+                    const nextCloseContact2FullName = normalizeTextForApi(editedUser?.close_contact_2_full_name);
+                    const prevCloseContact2FullName = normalizeTextForApi(userToEdit?.close_contact_2_full_name);
+                    if (nextCloseContact2FullName !== prevCloseContact2FullName) {
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'close_contact_2_full_name',
+                            value: nextCloseContact2FullName
+                        }, {
+                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        });
+                    }
+                    const nextCloseContact2Phone = normalizeTextForApi(editedUser?.close_contact_2_phone);
+                    const prevCloseContact2Phone = normalizeTextForApi(userToEdit?.close_contact_2_phone);
+                    if (nextCloseContact2Phone !== prevCloseContact2Phone) {
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'close_contact_2_phone',
+                            value: nextCloseContact2Phone
                         }, {
                             headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
                         });
