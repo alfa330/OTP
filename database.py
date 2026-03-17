@@ -879,6 +879,23 @@ class Database:
                 );
             """)
 
+            # AI birthday greeting cache table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS ai_birthday_greeting_cache (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    greeting_date DATE NOT NULL,
+                    greeting_data JSONB NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, greeting_date)
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_ai_birthday_greeting_cache_user_date
+                ON ai_birthday_greeting_cache(user_id, greeting_date);
+            """)
+
             # Surveys tables
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS surveys (
@@ -2058,6 +2075,52 @@ class Database:
         with self._get_cursor() as cursor:
             cursor.execute(query, params)
             return cursor.fetchone()
+
+    def get_birthdays_for_date(self, day_value):
+        """Return list of active users with birthdays matching the given date (month/day)."""
+        day = None
+        if isinstance(day_value, str):
+            try:
+                day = datetime.strptime(day_value, "%Y-%m-%d").date()
+            except ValueError:
+                raise ValueError("Invalid date format. Use YYYY-MM-DD")
+        elif isinstance(day_value, datetime):
+            day = day_value.date()
+        else:
+            day = day_value
+
+        if not day:
+            return []
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    u.id,
+                    u.name,
+                    u.role,
+                    d.name AS direction,
+                    u.status,
+                    u.birth_date
+                FROM users u
+                LEFT JOIN directions d ON u.direction_id = d.id
+                WHERE u.birth_date IS NOT NULL
+                  AND EXTRACT(MONTH FROM u.birth_date) = %s
+                  AND EXTRACT(DAY FROM u.birth_date) = %s
+                  AND (u.status IS NULL OR u.status NOT IN ('fired', 'dismissal'))
+            """, (day.month, day.day))
+            rows = cursor.fetchall()
+
+        return [
+            {
+                "id": row[0],
+                "name": row[1],
+                "role": row[2],
+                "direction": row[3],
+                "status": row[4],
+                "birth_date": row[5].strftime('%Y-%m-%d') if row[5] else None
+            }
+            for row in rows
+        ]
 
     def get_call_by_id(self, call_id):
         with self._get_cursor() as cursor:
@@ -8474,6 +8537,23 @@ class Database:
                 }
             return None
 
+    def get_ai_birthday_greeting_cache(self, user_id: int, date_key: str):
+        """Получить кэшированное AI-поздравление с днем рождения"""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT greeting_data, created_at, updated_at
+                FROM ai_birthday_greeting_cache
+                WHERE user_id = %s AND greeting_date = %s
+            """, (user_id, date_key))
+            result = cursor.fetchone()
+            if result:
+                return {
+                    'greeting_data': result[0],
+                    'created_at': result[1],
+                    'updated_at': result[2]
+                }
+            return None
+
     def find_operator_by_name_fuzzy(self, name: str):
         """Попытаться найти оператора по ФИО. Сначала точное совпадение (case-insensitive),
         затем попытка по фамилии (ILIKE '%surname%'). Возвращает запись пользователя или None.
@@ -10363,6 +10443,18 @@ class Database:
                     feedback_data = EXCLUDED.feedback_data,
                     updated_at = CURRENT_TIMESTAMP
             """, (operator_id, month, json.dumps(feedback_data, ensure_ascii=False)))
+
+    def save_ai_birthday_greeting_cache(self, user_id: int, date_key: str, greeting_data: dict):
+        """Сохранить или обновить AI-поздравление с днем рождения"""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO ai_birthday_greeting_cache (user_id, greeting_date, greeting_data, updated_at)
+                VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT (user_id, greeting_date)
+                DO UPDATE SET
+                    greeting_data = EXCLUDED.greeting_data,
+                    updated_at = CURRENT_TIMESTAMP
+            """, (user_id, date_key, json.dumps(greeting_data, ensure_ascii=False)))
 
 
 # Initialize database

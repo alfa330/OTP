@@ -5,10 +5,11 @@ from loguru import logger
 from database import db
 from collections import defaultdict
 import os
+from datetime import datetime, date
 
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
-MASTER_PROMPT_MONTHLY = """ТЫ — Jana, опытный и дружелюбный тренер/ментор для операторов колл-центра.
+MASTER_PROMPT_MONTHLY = """ТЫ — Dos, опытный и дружелюбный тренер/ментор для операторов колл-центра.
 Твоя задача — проанализировать результаты оценок за выбранный месяц и сгенерировать развёрнутую, практичную обратную связь на основе мониторинговой шкалы.
 
 Входные данные:
@@ -61,6 +62,27 @@ MASTER_PROMPT_MONTHLY = """ТЫ — Jana, опытный и дружелюбны
     "training_plan": ["<шаг 1>", "<шаг 2>", "<шаг 3>"]
   }
 }
+"""
+
+MASTER_PROMPT_BIRTHDAY = """ТЫ — Dos, дружелюбный и тактичный тренер/ментор для сотрудников колл-центра.
+Твоя задача — написать короткое персональное поздравление с днем рождения.
+
+Входные данные:
+- NAME: имя сотрудника
+- ROLE: роль (admin|sv|supervisor|trainer|operator)
+- DIRECTION: направление (если есть)
+- GENDER: male|female|unknown
+- HIRE_DATE: дата найма (если есть)
+- TENURE_MONTHS: стаж в месяцах (если есть)
+- DATE: сегодняшняя дата
+
+Требования:
+1) 2–4 предложения, до 60 слов.
+2) Тон: теплый, профессиональный, уважительный.
+3) Не упоминай возраст, год рождения, зарплату, политику, религию и любые конфиденциальные данные.
+4) Если GENDER неизвестен — используй нейтральное обращение.
+5) Можно добавить 1–2 аккуратные эмодзи.
+6) Верни результат ТОЛЬКО в JSON: {"greeting": "<текст>"}.
 """
 
 # Рекомендуемые параметры генерации (более детерминированно)
@@ -181,9 +203,123 @@ def _build_monthly_criteria_payload(evaluations: list[dict], direction: dict | N
     return agg
 
 
+def _parse_date(value: object) -> date | None:
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        for fmt in ("%Y-%m-%d", "%d-%m-%Y"):
+            try:
+                return datetime.strptime(raw, fmt).date()
+            except ValueError:
+                continue
+    return None
+
+
+def _calc_tenure_months(hire_date: date | None, on_date: date) -> int | None:
+    if not hire_date:
+        return None
+    months = (on_date.year - hire_date.year) * 12 + (on_date.month - hire_date.month)
+    if on_date.day < hire_date.day:
+        months -= 1
+    return max(months, 0)
+
+
 async def generate_monthly_feedback_with_ai(operator_id: int, month: str) -> dict | None:
     if not GEMINI_API_KEY:
         logger.error("Gemini API key is not configured.")
+        return None
+
+
+async def generate_birthday_greeting_with_ai(user_payload: dict, for_date: str) -> dict | None:
+    if not GEMINI_API_KEY:
+        logger.error("Gemini API key is not configured.")
+        return None
+
+    if not isinstance(user_payload, dict):
+        return None
+
+    user_id = user_payload.get("id")
+    if not user_id:
+        return None
+
+    date_obj = _parse_date(for_date) or datetime.now().date()
+    date_key = date_obj.isoformat()
+
+    cached_greeting = db.get_ai_birthday_greeting_cache(int(user_id), date_key)
+    if cached_greeting:
+        logger.info(f"Returning cached AI birthday greeting for user {user_id}, date {date_key}")
+        return cached_greeting["greeting_data"]
+
+    name = (user_payload.get("name") or "Сотрудник").strip()
+    role = (user_payload.get("role") or "").strip()
+    direction = (user_payload.get("direction") or "").strip()
+    gender = (user_payload.get("gender") or "unknown").strip().lower() or "unknown"
+    hire_date = _parse_date(user_payload.get("hire_date"))
+    tenure_months = _calc_tenure_months(hire_date, date_obj)
+    hire_date_text = hire_date.isoformat() if hire_date else ""
+
+    full_prompt = (
+        f"{MASTER_PROMPT_BIRTHDAY}\n"
+        f"---DATA---\n"
+        f"NAME: {name}\n"
+        f"ROLE: {role}\n"
+        f"DIRECTION: {direction}\n"
+        f"GENDER: {gender}\n"
+        f"HIRE_DATE: {hire_date_text}\n"
+        f"TENURE_MONTHS: {tenure_months if tenure_months is not None else ''}\n"
+        f"DATE: {date_key}\n"
+        f"---END DATA---\n"
+        f"ВЕРНИТЕ JSON ПО ШАБЛОНУ."
+    )
+
+    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    payload = {
+        "contents": [{"parts": [{"text": full_prompt}]}],
+        "generationConfig": generation_config,
+        "safetySettings": safety_settings,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(api_url, json=payload)
+            response.raise_for_status()
+            result = response.json()
+            if "candidates" not in result or not result["candidates"]:
+                logger.error("Gemini response empty or blocked.")
+                return None
+            candidate = result["candidates"][0]
+            if "finishReason" in candidate and candidate["finishReason"] != "STOP":
+                logger.warning(f"Finish reason: {candidate['finishReason']}")
+            raw_text = candidate.get("content", {}).get("parts", [])[0].get("text", "")
+
+            json_match = re.search(r'```json\s*(\{.*\})\s*```', raw_text, re.DOTALL)
+            if json_match:
+                cleaned = json_match.group(1)
+            else:
+                start = raw_text.find('{')
+                end = raw_text.rfind('}')
+                if start != -1 and end != -1 and end > start:
+                    cleaned = raw_text[start:end + 1]
+                else:
+                    cleaned = raw_text
+
+            try:
+                parsed = json.loads(cleaned)
+                db.save_ai_birthday_greeting_cache(int(user_id), date_key, parsed)
+                logger.info(f"Cached AI birthday greeting for user {user_id}, date {date_key}")
+                return parsed
+            except json.JSONDecodeError as e:
+                logger.error(f"JSON parse error: {e}. Cleaned: {cleaned}")
+                return {"error": "json_parse_error", "raw_response": raw_text, "cleaned": cleaned}
+
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error: {e.response.status_code} - {e.response.text}")
+        return None
+    except Exception as e:
+        logger.exception(f"Unexpected error while contacting Gemini: {e}")
         return None
 
     # Сначала проверяем кэш

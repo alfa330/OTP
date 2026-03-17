@@ -37,7 +37,7 @@ from datetime import datetime, timedelta, date as dt_date
 import time
 import math
 from urllib.parse import quote, urlparse, parse_qs
-from ai_feed_back_service import generate_monthly_feedback_with_ai
+from ai_feed_back_service import generate_monthly_feedback_with_ai, generate_birthday_greeting_with_ai
 
 os.environ['TZ'] = 'Asia/Almaty'
 time.tzset()
@@ -4396,6 +4396,83 @@ def get_calibration_room_history(room_id):
     except Exception as e:
         logging.exception("Error getting calibration room history")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
+@app.route('/api/birthdays/today', methods=['GET'])
+@require_api_key
+def birthdays_today():
+    try:
+        today = datetime.now().date()
+        birthdays = db.get_birthdays_for_date(today)
+        return jsonify({"status": "success", "date": today.isoformat(), "birthdays": birthdays}), 200
+    except Exception as e:
+        logging.exception("Error in /api/birthdays/today")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/ai/birthday_greeting', methods=['POST'])
+@require_api_key
+def ai_birthday_greeting():
+    try:
+        requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
+        if not requester_id:
+            return jsonify({"status": "error", "error": "Missing X-User-Id header"}), 400
+
+        try:
+            requester_id = int(requester_id)
+        except (ValueError, TypeError):
+            return jsonify({"status": "error", "error": "Invalid X-User-Id format"}), 400
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"status": "error", "error": "User not found"}), 404
+
+        status = str(requester[11] or '').strip().lower()
+        if status in ('fired', 'dismissal'):
+            return jsonify({"status": "error", "error": "User is not active"}), 403
+
+        birth_date = requester[14]
+        if not birth_date:
+            return jsonify({"status": "error", "error": "Birth date not set"}), 404
+
+        today = datetime.now().date()
+        if birth_date.month != today.month or birth_date.day != today.day:
+            return jsonify({"status": "error", "error": "Not birthday"}), 409
+
+        user_payload = {
+            "id": requester_id,
+            "name": requester[2],
+            "role": requester[3],
+            "direction": requester[4],
+            "gender": requester[13],
+            "hire_date": requester[5].strftime('%Y-%m-%d') if requester[5] else None
+        }
+
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            fut = asyncio.run_coroutine_threadsafe(
+                generate_birthday_greeting_with_ai(user_payload=user_payload, for_date=today.isoformat()),
+                loop,
+            )
+            result = fut.result(timeout=120)
+        else:
+            result = asyncio.run(generate_birthday_greeting_with_ai(user_payload=user_payload, for_date=today.isoformat()))
+
+        if result is None:
+            return jsonify({"status": "error", "error": "ai_failed"}), 500
+
+        if isinstance(result, dict) and result.get('error'):
+            return jsonify({"status": "error", "error": result}), 200
+
+        return jsonify({"status": "success", "result": result}), 200
+
+    except Exception as e:
+        logging.exception("Error in /api/ai/birthday_greeting")
+        return jsonify({"status": "error", "error": f"Internal server error: {str(e)}"}), 500
 
 
 @app.route('/api/ai/monthly_feedback', methods=['POST'])
