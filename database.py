@@ -439,6 +439,7 @@ class Database:
                     UNIQUE(evaluator_id, operator_id, month, phone_number, score, comment, is_draft)
                 );
                 ALTER TABLE calls
+                    ADD COLUMN IF NOT EXISTS comment_visible_to_operator BOOLEAN NOT NULL DEFAULT TRUE,
                     ADD COLUMN IF NOT EXISTS sv_request BOOLEAN NOT NULL DEFAULT FALSE,
                     ADD COLUMN IF NOT EXISTS sv_request_comment TEXT,
                     ADD COLUMN IF NOT EXISTS sv_request_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
@@ -2154,6 +2155,7 @@ class Database:
                             phone_number,
                             score,
                             comment=None,
+                            comment_visible_to_operator=True,
                             month=None,
                             audio_path=None,
                             is_draft=False,
@@ -2228,6 +2230,7 @@ class Database:
                         SET phone_number = %s,
                             score = %s,
                             comment = %s,
+                            comment_visible_to_operator = %s,
                             audio_path = COALESCE(%s, audio_path),
                             created_at = CURRENT_TIMESTAMP,
                             scores = %s,
@@ -2237,7 +2240,7 @@ class Database:
                         WHERE id = %s
                         RETURNING id
                     """, (
-                        phone_number, score, comment, audio_path,
+                        phone_number, score, comment, bool(comment_visible_to_operator), audio_path,
                         scores_json, criterion_comments_json,
                         False,
                         direction_id,
@@ -2286,14 +2289,14 @@ class Database:
             cursor.execute("""
                 INSERT INTO calls (
                     evaluator_id, operator_id, month, phone_number, score, comment,
-                    audio_path, is_draft, is_correction, previous_version_id,
+                    comment_visible_to_operator, audio_path, is_draft, is_correction, previous_version_id,
                     scores, criterion_comments, direction_id, appeal_date
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, (
                 evaluator_id, operator_id, month, phone_number, score, comment,
-                audio_path, is_draft, is_correction, previous_version_id,
+                bool(comment_visible_to_operator), audio_path, is_draft, is_correction, previous_version_id,
                 scores_json, criterion_comments_json, direction_id, appeal_date
             ))
             call_id = cursor.fetchone()[0]
@@ -3239,7 +3242,8 @@ class Database:
                 apu.name AS sv_request_approved_by_name,
                 TO_CHAR(c.sv_request_approved_at, 'YYYY-MM-DD HH24:MI') AS sv_request_approved_at,
                 NULL::numeric AS duration, -- у оценённых нет длительности
-                FALSE AS is_imported
+                FALSE AS is_imported,
+                COALESCE(c.comment_visible_to_operator, TRUE) AS comment_visible_to_operator
             FROM calls c
             JOIN latest_calls lc ON c.id::text = lc.id_text
             LEFT JOIN directions d ON c.direction_id = d.id  
@@ -3285,7 +3289,8 @@ class Database:
                 NULL::text AS sv_request_approved_by_name,
                 NULL::text AS sv_request_approved_at,
                 ic.duration_sec::numeric AS duration, -- берем из imported_calls
-                TRUE AS is_imported
+                TRUE AS is_imported,
+                TRUE AS comment_visible_to_operator
             FROM imported_calls ic
             WHERE ic.operator_id = %s AND ic.status = 'not_evaluated'
         """
@@ -3340,6 +3345,7 @@ class Database:
                     "sv_request_approved_at": row[26],
                     "duration": float(row[27]) if row[27] is not None else None,
                     "is_imported": bool(row[28]),
+                    "comment_visible_to_operator": bool(row[29]) if row[29] is not None else True,
                 }
                 for row in rows
             ]

@@ -173,6 +173,21 @@
         .textarea { resize: vertical; min-height: 80px; line-height: 1.5; }
         .label { font-size: 12px; font-weight: 500; color: var(--text-2); margin-bottom: 5px; display: block; letter-spacing: 0.01em; }
         .field { margin-bottom: 16px; }
+        .comment-visibility-toggle {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 6px;
+            font-size: 13px;
+            color: var(--text-2);
+            user-select: none;
+        }
+        .comment-visibility-toggle input[type="checkbox"] {
+            width: 15px;
+            height: 15px;
+            accent-color: var(--accent);
+            cursor: pointer;
+        }
         .error-text { font-size: 12px; color: var(--red); margin-top: 4px; }
 
         /* ── Card ── */
