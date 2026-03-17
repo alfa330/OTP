@@ -1116,6 +1116,7 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
         { headers: buildHeaders() }
       );
       notify(res?.data?.message || 'Статус обновлён');
+      if (res?.data?.warning) notify(res.data.warning, 'error');
       await fetchTasks();
     } catch (e) {
       notify(e?.response?.data?.error || 'Не удалось обновить статус', 'error');
@@ -1154,6 +1155,7 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
         { headers: buildHeaders() }
       );
       notify(res?.data?.message || 'Задача выполнена');
+      if (res?.data?.warning) notify(res.data.warning, 'error');
       closeCompleteModal();
       await fetchTasks();
     } catch (e) {

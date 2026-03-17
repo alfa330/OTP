@@ -801,6 +801,9 @@ TASK_ALLOWED_ACTIONS = {'in_progress', 'completed', 'accepted', 'returned', 'reo
 TASK_MAX_FILES = 10
 TASK_MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024
 TASK_ATTACHMENTS_UPLOAD_FOLDER = (os.getenv('TASK_ATTACHMENTS_UPLOAD_FOLDER') or 'TaskAttachments/').strip()
+TELEGRAM_MAX_MESSAGE_CHARS = 4096
+TELEGRAM_MAX_CAPTION_CHARS = 1024
+TASK_TELEGRAM_TIMEOUT_SECONDS = 20
 AVATAR_MAX_UPLOAD_BYTES = int(os.getenv('AVATAR_MAX_UPLOAD_BYTES', str(2 * 1024 * 1024)))
 AVATAR_MAX_ORIGINAL_UPLOAD_BYTES = int(os.getenv('AVATAR_MAX_ORIGINAL_UPLOAD_BYTES', str(10 * 1024 * 1024)))
 AVATAR_SIGNED_URL_TTL_SECONDS = int(os.getenv('AVATAR_SIGNED_URL_TTL_SECONDS', str(24 * 60 * 60)))
@@ -815,6 +818,132 @@ TASK_TAG_LABELS = {
     'problem': 'Проблема',
     'suggestion': 'Предложение'
 }
+
+
+def _truncate_for_telegram(text, max_chars):
+    value = str(text or '').strip()
+    if not value:
+        return ''
+    if len(value) <= max_chars:
+        return value
+    suffix = '...'
+    available = max(0, max_chars - len(suffix))
+    return f"{value[:available].rstrip()}{suffix}"
+
+
+def _get_telegram_error_text(response):
+    try:
+        payload = response.json()
+        if isinstance(payload, dict):
+            description = payload.get('description')
+            if description:
+                return str(description)
+    except Exception:
+        pass
+    raw_text = (response.text or '').strip()
+    if raw_text:
+        return _truncate_for_telegram(raw_text, 300)
+    return f"HTTP {response.status_code}"
+
+
+def _send_telegram_text_message(chat_id, text):
+    telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": int(chat_id),
+        "text": _truncate_for_telegram(text, TELEGRAM_MAX_MESSAGE_CHARS)
+    }
+    return requests.post(telegram_url, json=payload, timeout=TASK_TELEGRAM_TIMEOUT_SECONDS)
+
+
+def _fetch_task_notification_context(task_id):
+    with db._get_cursor() as cursor:
+        cursor.execute("""
+            SELECT
+                t.id, t.subject, t.tag, t.created_by,
+                creator.telegram_id, creator.name
+            FROM tasks t
+            LEFT JOIN users creator ON creator.id = t.created_by
+            WHERE t.id = %s
+            LIMIT 1
+        """, (int(task_id),))
+        row = cursor.fetchone()
+    if not row:
+        return None
+    return {
+        "id": row[0],
+        "subject": row[1],
+        "tag": row[2],
+        "created_by": row[3],
+        "creator_telegram_id": row[4],
+        "creator_name": row[5]
+    }
+
+
+def _send_task_completion_attachments_to_telegram(chat_id, task_subject, attachments):
+    warnings = []
+    if not chat_id or not attachments:
+        return warnings
+
+    telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendDocument"
+    gcs_client = None
+
+    for idx, attachment in enumerate(attachments, start=1):
+        try:
+            storage_type = str(attachment.get('storage_type') or 'gcs').strip().lower() or 'gcs'
+            file_name = (attachment.get('file_name') or f'attachment_{idx}').strip() or f'attachment_{idx}'
+            content_type = (attachment.get('content_type') or '').strip() or 'application/octet-stream'
+
+            if storage_type == 'gcs':
+                bucket_name = (attachment.get('gcs_bucket') or '').strip()
+                blob_path = (attachment.get('gcs_blob_path') or '').strip()
+                if not bucket_name or not blob_path:
+                    warnings.append(f"Не удалось отправить файл '{file_name}': отсутствуют метаданные хранилища")
+                    continue
+                if gcs_client is None:
+                    gcs_client = get_gcs_client()
+                blob = gcs_client.bucket(bucket_name).blob(blob_path)
+                if not blob.exists():
+                    warnings.append(f"Не удалось отправить файл '{file_name}': файл не найден в хранилище")
+                    continue
+                file_bytes = blob.download_as_bytes()
+            else:
+                file_data = attachment.get('file_data')
+                if isinstance(file_data, memoryview):
+                    file_bytes = file_data.tobytes()
+                elif isinstance(file_data, bytearray):
+                    file_bytes = bytes(file_data)
+                elif isinstance(file_data, bytes):
+                    file_bytes = file_data
+                else:
+                    warnings.append(f"Не удалось отправить файл '{file_name}': неподдерживаемый формат данных")
+                    continue
+
+            files = {
+                'document': (file_name, file_bytes, content_type)
+            }
+            data = {
+                'chat_id': int(chat_id)
+            }
+            if idx == 1:
+                caption = _truncate_for_telegram(
+                    f"Файлы по задаче: {task_subject or 'Без названия'}",
+                    TELEGRAM_MAX_CAPTION_CHARS
+                )
+                if caption:
+                    data['caption'] = caption
+
+            response = requests.post(
+                telegram_url,
+                files=files,
+                data=data,
+                timeout=TASK_TELEGRAM_TIMEOUT_SECONDS
+            )
+            if response.status_code != 200:
+                warnings.append(f"Не удалось отправить файл '{file_name}': {_get_telegram_error_text(response)}")
+        except Exception as attachment_error:
+            warnings.append(f"Не удалось отправить файл '{attachment.get('file_name') or idx}': {attachment_error}")
+
+    return warnings
 
 
 def _build_avatar_signed_url(bucket_name, blob_path):
@@ -6075,6 +6204,58 @@ def update_task_status(task_id):
             _cleanup_task_uploaded_blobs(gcs_bucket, uploaded_blob_paths)
             raise
 
+        telegram_warnings = []
+        try:
+            should_notify_creator = action in ('in_progress', 'completed') and result.get('history_id')
+            if should_notify_creator:
+                task_ctx = _fetch_task_notification_context(task_id)
+                creator_id = task_ctx.get('created_by') if task_ctx else None
+                creator_chat_id = task_ctx.get('creator_telegram_id') if task_ctx else None
+                if creator_chat_id and (creator_id is None or int(creator_id) != requester_id):
+                    task_subject = (task_ctx.get('subject') or f"Задача #{task_id}").strip()
+                    task_tag = (task_ctx.get('tag') or 'task').strip().lower() or 'task'
+                    tag_label = TASK_TAG_LABELS.get(task_tag, 'Задача')
+                    actor_name = requester[2] if requester and len(requester) > 2 else 'Сотрудник'
+
+                    if action == 'in_progress':
+                        text = (
+                            "📥 Задача принята в работу\n\n"
+                            f"Тип: {tag_label}\n"
+                            f"Тема: {task_subject}\n"
+                            f"Исполнитель: {actor_name}"
+                        )
+                        response = _send_telegram_text_message(creator_chat_id, text)
+                        if response.status_code != 200:
+                            telegram_warnings.append(
+                                f"Не удалось отправить уведомление о принятии задачи: {_get_telegram_error_text(response)}"
+                            )
+
+                    elif action == 'completed':
+                        summary_text = completion_summary or "Итоги выполнения не указаны."
+                        completion_count = len(completion_attachments)
+                        text = (
+                            "✅ Задача выполнена\n\n"
+                            f"Тип: {tag_label}\n"
+                            f"Тема: {task_subject}\n"
+                            f"Исполнитель: {actor_name}\n"
+                            f"Файлов: {completion_count}\n\n"
+                            f"Итоги выполнения:\n{summary_text}"
+                        )
+                        response = _send_telegram_text_message(creator_chat_id, text)
+                        if response.status_code != 200:
+                            telegram_warnings.append(
+                                f"Не удалось отправить итоги выполнения: {_get_telegram_error_text(response)}"
+                            )
+                        telegram_warnings.extend(
+                            _send_task_completion_attachments_to_telegram(
+                                creator_chat_id,
+                                task_subject,
+                                completion_attachments
+                            )
+                        )
+        except Exception as notify_error:
+            telegram_warnings.append(f"Ошибка отправки Telegram-уведомления: {notify_error}")
+
         action_messages = {
             'in_progress': 'Task moved to in progress',
             'completed': 'Task marked as completed',
@@ -6082,11 +6263,14 @@ def update_task_status(task_id):
             'returned': 'Task returned for rework',
             'reopened': 'Task reopened'
         }
-        return jsonify({
+        response_payload = {
             "status": "success",
             "message": action_messages.get(action, 'Task status updated'),
             "task": result
-        }), 200
+        }
+        if telegram_warnings:
+            response_payload["warning"] = _truncate_for_telegram(" | ".join(telegram_warnings), 1000)
+        return jsonify(response_payload), 200
 
     except Exception as e:
         logging.error(f"Error in update_task_status: {e}")
