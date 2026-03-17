@@ -409,6 +409,31 @@ class Database:
                     ADD COLUMN IF NOT EXISTS avatar_file_size INTEGER,
                     ADD COLUMN IF NOT EXISTS avatar_updated_at TIMESTAMP;
             """)
+            cursor.execute("""
+                ALTER TABLE users
+                    ADD COLUMN IF NOT EXISTS phone VARCHAR(50),
+                    ADD COLUMN IF NOT EXISTS email VARCHAR(255),
+                    ADD COLUMN IF NOT EXISTS instagram VARCHAR(255),
+                    ADD COLUMN IF NOT EXISTS company_name VARCHAR(255),
+                    ADD COLUMN IF NOT EXISTS employment_type VARCHAR(10),
+                    ADD COLUMN IF NOT EXISTS has_proxy BOOLEAN NOT NULL DEFAULT FALSE,
+                    ADD COLUMN IF NOT EXISTS sip_number VARCHAR(64);
+            """)
+            cursor.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1
+                        FROM pg_constraint
+                        WHERE conname = 'users_employment_type_check'
+                          AND conrelid = 'users'::regclass
+                    ) THEN
+                        ALTER TABLE users
+                            ADD CONSTRAINT users_employment_type_check
+                            CHECK (employment_type IN ('gph', 'of') OR employment_type IS NULL);
+                    END IF;
+                END $$;
+            """)
             # Calls table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS operator_activity_logs (
@@ -1187,7 +1212,28 @@ class Database:
                     CREATE INDEX IF NOT EXISTS idx_baiga_daily_scores_operator ON baiga_daily_scores(operator_id);
             """)
 
-    def create_user(self, telegram_id, name, role, direction_id=None, rate=None, hire_date=None, supervisor_id=None, login=None, password=None, hours_table_url=None, gender=None, birth_date=None):
+    def create_user(
+        self,
+        telegram_id,
+        name,
+        role,
+        direction_id=None,
+        rate=None,
+        hire_date=None,
+        supervisor_id=None,
+        login=None,
+        password=None,
+        hours_table_url=None,
+        gender=None,
+        birth_date=None,
+        phone=None,
+        email=None,
+        instagram=None,
+        company_name=None,
+        employment_type=None,
+        has_proxy=None,
+        sip_number=None
+    ):
         if login is None:
             base_login = f"user_{str(uuid.uuid4())[:8]}"
             with self._get_cursor() as cursor:
@@ -1203,9 +1249,26 @@ class Database:
         password = password or "123456"
         password_hash = pbkdf2_sha256.hash(password)
         role_norm = str(role or '').strip().lower()
+        phone = str(phone).strip() if phone is not None else ""
+        email = str(email).strip() if email is not None else ""
+        instagram = str(instagram).strip() if instagram is not None else ""
+        company_name = str(company_name).strip() if company_name is not None else ""
+        employment_type = str(employment_type).strip().lower() if employment_type is not None else ""
+        sip_number = str(sip_number).strip() if sip_number is not None else ""
+
+        phone = phone or None
+        email = email or None
+        instagram = instagram or None
+        company_name = company_name or None
+        employment_type = employment_type or None
+        sip_number = sip_number or None
+        if employment_type not in (None, 'gph', 'of'):
+            raise ValueError("Invalid employment_type")
+        has_proxy_value = None if has_proxy is None else bool(has_proxy)
         if role_norm == 'trainer':
             direction_id = None
             supervisor_id = None
+            sip_number = None
 
         with self._get_cursor() as cursor:
             def _clear_trainer_links(target_user_id):
@@ -1218,10 +1281,20 @@ class Database:
             cursor.execute("SAVEPOINT before_insert")
             try:
                 cursor.execute("""
-                    INSERT INTO users (telegram_id, name, role, direction_id, rate, hire_date, supervisor_id, login, password_hash, hours_table_url, gender, birth_date)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO users (
+                        telegram_id, name, role, direction_id, rate, hire_date, supervisor_id,
+                        login, password_hash, hours_table_url, gender, birth_date, phone, email,
+                        instagram, company_name, employment_type, has_proxy, sip_number
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
-                """, (telegram_id, name, role, direction_id, rate, hire_date, supervisor_id, login, password_hash, hours_table_url, gender, birth_date))
+                """, (
+                    telegram_id, name, role, direction_id, rate, hire_date, supervisor_id,
+                    login, password_hash, hours_table_url, gender, birth_date, phone, email,
+                    instagram, company_name, employment_type,
+                    (has_proxy_value if has_proxy_value is not None else False),
+                    sip_number
+                ))
                 created_user_id = cursor.fetchone()[0]
                 _clear_trainer_links(created_user_id)
                 return created_user_id
@@ -1234,10 +1307,21 @@ class Database:
                             supervisor_id = COALESCE(%s, supervisor_id),
                             hours_table_url = COALESCE(%s, hours_table_url),
                             gender = COALESCE(%s, gender),
-                            birth_date = COALESCE(%s, birth_date)
+                            birth_date = COALESCE(%s, birth_date),
+                            phone = COALESCE(%s, phone),
+                            email = COALESCE(%s, email),
+                            instagram = COALESCE(%s, instagram),
+                            company_name = COALESCE(%s, company_name),
+                            employment_type = COALESCE(%s, employment_type),
+                            has_proxy = COALESCE(%s, has_proxy),
+                            sip_number = COALESCE(%s, sip_number)
                         WHERE name = %s AND role = %s
                         RETURNING id
-                    """, (direction_id, supervisor_id, hours_table_url, gender, birth_date, name, role))
+                    """, (
+                        direction_id, supervisor_id, hours_table_url, gender, birth_date,
+                        phone, email, instagram, company_name, employment_type, has_proxy_value, sip_number,
+                        name, role
+                    ))
                     result = cursor.fetchone()
                     if result:
                         updated_user_id = result[0]
@@ -1257,10 +1341,21 @@ class Database:
                             password_hash = %s,
                             hours_table_url = COALESCE(%s, hours_table_url),
                             gender = COALESCE(%s, gender),
-                            birth_date = COALESCE(%s, birth_date)
+                            birth_date = COALESCE(%s, birth_date),
+                            phone = COALESCE(%s, phone),
+                            email = COALESCE(%s, email),
+                            instagram = COALESCE(%s, instagram),
+                            company_name = COALESCE(%s, company_name),
+                            employment_type = COALESCE(%s, employment_type),
+                            has_proxy = COALESCE(%s, has_proxy),
+                            sip_number = COALESCE(%s, sip_number)
                         WHERE telegram_id = %s
                         RETURNING id
-                    """, (name, role, direction_id, hire_date, supervisor_id, login, password_hash, hours_table_url, gender, birth_date, telegram_id))
+                    """, (
+                        name, role, direction_id, hire_date, supervisor_id, login, password_hash, hours_table_url,
+                        gender, birth_date, phone, email, instagram, company_name, employment_type,
+                        has_proxy_value, sip_number, telegram_id
+                    ))
                     updated_user_id = cursor.fetchone()[0]
                     _clear_trainer_links(updated_user_id)
                     return updated_user_id
@@ -3432,7 +3527,23 @@ class Database:
             ]
 
     def update_user(self, user_id, field, value, changed_by=None):
-        allowed_fields = ['direction_id', 'supervisor_id', 'status', 'rate', 'hire_date', 'name', 'gender', 'birth_date']
+        allowed_fields = [
+            'direction_id',
+            'supervisor_id',
+            'status',
+            'rate',
+            'hire_date',
+            'name',
+            'gender',
+            'birth_date',
+            'phone',
+            'email',
+            'instagram',
+            'company_name',
+            'employment_type',
+            'has_proxy',
+            'sip_number'
+        ]
         if field not in allowed_fields:
             raise ValueError("Invalid field to update")
         

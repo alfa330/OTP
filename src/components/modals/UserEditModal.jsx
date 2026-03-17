@@ -262,6 +262,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         const base = userToEdit || {};
         const baseRole = String(base.role || '').trim().toLowerCase();
         const isTrainerBase = baseRole === 'trainer';
+        const isOperatorBase = baseRole === 'operator';
         const initialStatus = normalizeModalStatusValue(base.status);
         const initialDate = todayInputDate();
         const defaults = {
@@ -276,6 +277,13 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         status_period_dismissal_reason: "",
         status_period_is_blacklist: !!(base.status_period_is_blacklist ?? base.isBlacklist ?? base.is_blacklist),
         status_period_comment: "",
+        phone: base.phone ?? "",
+        email: base.email ?? "",
+        instagram: base.instagram ?? "",
+        company_name: base.company_name ?? "",
+        employment_type: base.employment_type ?? "",
+        has_proxy: !!base.has_proxy,
+        sip_number: base.sip_number ?? "",
         use_schedule_status_period: false,
         ...base,
         };
@@ -283,6 +291,15 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
             defaults.direction_id = "";
             defaults.supervisor_id = "";
         }
+        defaults.phone = String(defaults.phone ?? '').trim();
+        defaults.email = String(defaults.email ?? '').trim();
+        defaults.instagram = String(defaults.instagram ?? '').trim();
+        defaults.company_name = String(defaults.company_name ?? '').trim();
+        defaults.employment_type = ['gph', 'of'].includes(String(defaults.employment_type || '').trim().toLowerCase())
+            ? String(defaults.employment_type || '').trim().toLowerCase()
+            : "";
+        defaults.has_proxy = !!defaults.has_proxy;
+        defaults.sip_number = isOperatorBase ? String(defaults.sip_number ?? '').trim() : "";
         if (defaults.status === 'unpaid_leave' || defaults.status === 'dismissal') {
             defaults.status = normalizeModalStatusValue(defaults.status);
             defaults.use_schedule_status_period = true;
@@ -478,6 +495,13 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         status_period_dismissal_reason: "",
         status_period_is_blacklist: false,
         status_period_comment: "",
+        phone: "",
+        email: "",
+        instagram: "",
+        company_name: "",
+        employment_type: "",
+        has_proxy: false,
+        sip_number: "",
         use_schedule_status_period: false,
         });
         setModalError("");
@@ -529,6 +553,12 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         return;
         }
 
+        const normalizedEmail = String(editedUser?.email || '').trim();
+        if (normalizedEmail && !normalizedEmail.includes('@')) {
+        setModalError("Введите корректную почту.");
+        return;
+        }
+
         if (usesScheduleStatusPeriodForm(editedUser?.status) && editedUser?.use_schedule_status_period) {
         const startDate = String(editedUser?.status_period_start_date || "").trim();
         const endDate = String(editedUser?.status_period_end_date || "").trim();
@@ -561,9 +591,21 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         setIsLoading(true);
 
         try {
+        const normalizedUserDraft = {
+            ...editedUser,
+            phone: String(editedUser?.phone || '').trim(),
+            email: normalizedEmail,
+            instagram: String(editedUser?.instagram || '').trim(),
+            company_name: String(editedUser?.company_name || '').trim(),
+            employment_type: ['gph', 'of'].includes(String(editedUser?.employment_type || '').trim().toLowerCase())
+                ? String(editedUser?.employment_type || '').trim().toLowerCase()
+                : '',
+            has_proxy: !!editedUser?.has_proxy,
+            sip_number: isOperatorUser ? String(editedUser?.sip_number || '').trim() : ''
+        };
         const normalizedUser = isTrainerUser
-            ? { ...editedUser, supervisor_id: null, direction_id: null }
-            : editedUser;
+            ? { ...normalizedUserDraft, supervisor_id: null, direction_id: null, sip_number: '' }
+            : normalizedUserDraft;
         const result = await onSave({
             ...normalizedUser,
             avatar_file: avatarUploadFile || null,
@@ -830,6 +872,90 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         disabled={isLoading || !!createdCredentials}
                     />
                     </div>
+
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Номер телефона</label>
+                        <input
+                        type="text"
+                        value={editedUser?.phone || ""}
+                        onChange={(e) => setEditedUser({ ...editedUser, phone: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        disabled={isLoading || !!createdCredentials}
+                        />
+                    </div>
+
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Почта</label>
+                        <input
+                        type="email"
+                        value={editedUser?.email || ""}
+                        onChange={(e) => setEditedUser({ ...editedUser, email: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        disabled={isLoading || !!createdCredentials}
+                        />
+                    </div>
+
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Инстаграм</label>
+                        <input
+                        type="text"
+                        value={editedUser?.instagram || ""}
+                        onChange={(e) => setEditedUser({ ...editedUser, instagram: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        disabled={isLoading || !!createdCredentials}
+                        />
+                    </div>
+
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Наименование ТОО/ИП</label>
+                        <input
+                        type="text"
+                        value={editedUser?.company_name || ""}
+                        onChange={(e) => setEditedUser({ ...editedUser, company_name: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        disabled={isLoading || !!createdCredentials}
+                        />
+                    </div>
+
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Оформлен ГПХ/ОФ</label>
+                        <select
+                        value={editedUser?.employment_type || ""}
+                        onChange={(e) => setEditedUser({ ...editedUser, employment_type: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        disabled={isLoading || !!createdCredentials}
+                        >
+                        <option value="">Не указано</option>
+                        <option value="gph">ГПХ</option>
+                        <option value="of">ОФ</option>
+                        </select>
+                    </div>
+
+                    <div>
+                        <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
+                        <input
+                            type="checkbox"
+                            checked={!!editedUser?.has_proxy}
+                            onChange={(e) => setEditedUser({ ...editedUser, has_proxy: e.target.checked })}
+                            className="rounded border-gray-300"
+                            disabled={isLoading || !!createdCredentials}
+                        />
+                        <span>Наличие прокси</span>
+                        </label>
+                    </div>
+
+                    {isOperatorDraft(editedUser) && (
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">SIP номер</label>
+                        <input
+                        type="text"
+                        value={editedUser?.sip_number || ""}
+                        onChange={(e) => setEditedUser({ ...editedUser, sip_number: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        disabled={isLoading || !!createdCredentials}
+                        />
+                    </div>
+                    )}
                     </>
                 )}
 
@@ -1101,6 +1227,90 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             )}
                             </div>
                         </div>
+
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Номер телефона</label>
+                            <input
+                            type="text"
+                            value={editedUser?.phone || ""}
+                            onChange={(e) => setEditedUser({ ...editedUser, phone: e.target.value })}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            disabled={isLoading}
+                            />
+                        </div>
+
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Почта</label>
+                            <input
+                            type="email"
+                            value={editedUser?.email || ""}
+                            onChange={(e) => setEditedUser({ ...editedUser, email: e.target.value })}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            disabled={isLoading}
+                            />
+                        </div>
+
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Инстаграм</label>
+                            <input
+                            type="text"
+                            value={editedUser?.instagram || ""}
+                            onChange={(e) => setEditedUser({ ...editedUser, instagram: e.target.value })}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            disabled={isLoading}
+                            />
+                        </div>
+
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Наименование ТОО/ИП</label>
+                            <input
+                            type="text"
+                            value={editedUser?.company_name || ""}
+                            onChange={(e) => setEditedUser({ ...editedUser, company_name: e.target.value })}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            disabled={isLoading}
+                            />
+                        </div>
+
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Оформлен ГПХ/ОФ</label>
+                            <select
+                            value={editedUser?.employment_type || ""}
+                            onChange={(e) => setEditedUser({ ...editedUser, employment_type: e.target.value })}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            disabled={isLoading}
+                            >
+                            <option value="">Не указано</option>
+                            <option value="gph">ГПХ</option>
+                            <option value="of">ОФ</option>
+                            </select>
+                        </div>
+
+                        <div>
+                            <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
+                            <input
+                                type="checkbox"
+                                checked={!!editedUser?.has_proxy}
+                                onChange={(e) => setEditedUser({ ...editedUser, has_proxy: e.target.checked })}
+                                className="rounded border-gray-300"
+                                disabled={isLoading}
+                            />
+                            <span>Наличие прокси</span>
+                            </label>
+                        </div>
+
+                        {isOperatorDraft(editedUser) && (
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">SIP номер</label>
+                            <input
+                            type="text"
+                            value={editedUser?.sip_number || ""}
+                            onChange={(e) => setEditedUser({ ...editedUser, sip_number: e.target.value })}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            disabled={isLoading}
+                            />
+                        </div>
+                        )}
                         </>
                     )}
 
