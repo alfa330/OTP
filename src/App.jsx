@@ -10591,7 +10591,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 className="px-3.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium inline-flex items-center gap-1.5 transition-colors shadow-sm"
                                             >
                                                 <FaIcon className="fas fa-plus text-xs"></FaIcon>
-                                                Новый запрос+
+                                                Новый запрос
                                             </button>
                                             <button
                                                 onClick={() => loadSwapRequests({ silent: false })}
