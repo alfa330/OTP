@@ -19611,18 +19611,30 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 );
             };
 
-            const buildWhatsAppLink = (phoneValue) => {
+            const normalizeKzPhoneDigits = (phoneValue) => {
                 const raw = String(phoneValue || '').trim();
                 if (!raw) return null;
                 let digits = raw.replace(/\D/g, '');
                 if (!digits) return null;
                 if (digits.length === 12 && digits.startsWith('77')) digits = digits.slice(1);
                 if (digits.length === 11 && digits.startsWith('8')) digits = `7${digits.slice(1)}`;
-                if (digits.length === 10 && !digits.startsWith('7')) digits = `7${digits}`;
-                const isKzLong = /^7\d{10}$/.test(digits);
-                const isKzShort = /^7\d{9}$/.test(digits);
-                if (!isKzLong && !isKzShort) return null;
-                return `https://wa.me/${digits}`;
+                if (digits.length === 10) digits = `7${digits}`;
+                if (!/^7\d{10}$/.test(digits)) return null;
+                return digits;
+            };
+
+            const formatKzPhoneForDisplay = (phoneValue) => {
+                const digits = normalizeKzPhoneDigits(phoneValue);
+                if (digits) return `+${digits}`;
+                const fallback = String(phoneValue || '').trim();
+                if (!fallback) return '-';
+                return fallback.replace(/^\+7\s+/, '+7');
+            };
+
+            const buildWhatsAppLink = (phoneValue) => {
+                const digits = normalizeKzPhoneDigits(phoneValue);
+                if (!digits) return null;
+                return `https://web.whatsapp.com/send?phone=${digits}`;
             };
 
             const parseTelegramNick = (nickValue) => {
@@ -19637,20 +19649,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
 
             const renderEmployeePhoneLink = (phoneValue) => {
-                const raw = String(phoneValue || '').trim();
-                if (!raw) return '-';
-                const waLink = buildWhatsAppLink(raw);
-                if (!waLink) return raw;
+                const displayPhone = formatKzPhoneForDisplay(phoneValue);
+                if (displayPhone === '-') return '-';
+                const waLink = buildWhatsAppLink(phoneValue);
+                if (!waLink) return displayPhone;
                 return (
                     <a
                         href={waLink}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="inline-flex items-center gap-1 text-emerald-700 hover:text-emerald-800 hover:underline"
-                        title="Открыть в WhatsApp"
+                        title="Открыть в WhatsApp Web"
                     >
                         <FaIcon className="fa-solid fa-phone" />
-                        <span>{raw}</span>
+                        <span>{displayPhone}</span>
                     </a>
                 );
             };
@@ -19672,7 +19684,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
 
             const formatEmployeeCloseContact = (relation, fullName, phone) => {
-                const parts = [relation, fullName, phone]
+                const normalizedPhone = formatKzPhoneForDisplay(phone);
+                const parts = [relation, fullName, normalizedPhone === '-' ? '' : normalizedPhone]
                     .map((item) => String(item || '').trim())
                     .filter(Boolean);
                 return parts.length > 0 ? parts.join(' | ') : '-';

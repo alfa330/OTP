@@ -514,7 +514,7 @@ def _mask_phone_number(phone_number):
     return ('*' * (len(digits) - 4)) + digits[-4:]
 
 
-KZ_PHONE_REGEX = re.compile(r'^\+7\d{9}$')
+KZ_PHONE_REGEX = re.compile(r'^\+7\d{10}$')
 
 
 def _is_valid_kz_phone(phone_number):
@@ -2418,7 +2418,7 @@ def admin_update_user():
             if field == 'sip_number' and target_role != 'operator':
                 value = None
             if field in ['phone', 'close_contact_1_phone', 'close_contact_2_phone'] and value and not _is_valid_kz_phone(value):
-                return jsonify({"error": f"Invalid {field} format. Use +7XXXXXXXXX"}), 400
+                return jsonify({"error": f"Invalid {field} format. Use +7XXXXXXXXXX"}), 400
             if field == 'email' and value and '@' not in value:
                 return jsonify({"error": "Invalid email value"}), 400
         elif field == 'employment_type':
@@ -5344,11 +5344,11 @@ def add_user():
         taxipro_id = str(data.get('taxipro_id') or '').strip() or None
 
         if phone and not _is_valid_kz_phone(phone):
-            return jsonify({"error": "Invalid phone format. Use +7XXXXXXXXX"}), 400
+            return jsonify({"error": "Invalid phone format. Use +7XXXXXXXXXX"}), 400
         if close_contact_1_phone and not _is_valid_kz_phone(close_contact_1_phone):
-            return jsonify({"error": "Invalid close_contact_1_phone format. Use +7XXXXXXXXX"}), 400
+            return jsonify({"error": "Invalid close_contact_1_phone format. Use +7XXXXXXXXXX"}), 400
         if close_contact_2_phone and not _is_valid_kz_phone(close_contact_2_phone):
-            return jsonify({"error": "Invalid close_contact_2_phone format. Use +7XXXXXXXXX"}), 400
+            return jsonify({"error": "Invalid close_contact_2_phone format. Use +7XXXXXXXXXX"}), 400
 
         internship_in_company_raw = data.get('internship_in_company')
         if isinstance(internship_in_company_raw, bool):
