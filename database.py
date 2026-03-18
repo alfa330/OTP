@@ -17,6 +17,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import gc
 from psycopg2.pool import ThreadedConnectionPool  # Added for connection pooling
+from psycopg2.extras import execute_values
 import calendar
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Border, Side, Alignment
@@ -900,6 +901,100 @@ class Database:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_op_sched_status_periods_operator_end
                 ON operator_schedule_status_periods(operator_id, end_date);
+            """)
+            # Status timeline imports (CSV transitions -> events/segments for analytics and KPI calculations)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS operator_status_import_batches (
+                    id UUID PRIMARY KEY,
+                    source_file_name VARCHAR(255),
+                    imported_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                    source_rows INTEGER NOT NULL DEFAULT 0,
+                    valid_events INTEGER NOT NULL DEFAULT 0,
+                    matched_events INTEGER NOT NULL DEFAULT 0,
+                    segments_saved INTEGER NOT NULL DEFAULT 0,
+                    deleted_events INTEGER NOT NULL DEFAULT 0,
+                    deleted_segments INTEGER NOT NULL DEFAULT 0,
+                    invalid_rows_count INTEGER NOT NULL DEFAULT 0,
+                    parse_errors_count INTEGER NOT NULL DEFAULT 0,
+                    operators_count INTEGER NOT NULL DEFAULT 0,
+                    open_tail_events INTEGER NOT NULL DEFAULT 0,
+                    zero_or_negative_transitions INTEGER NOT NULL DEFAULT 0,
+                    date_from DATE NULL,
+                    date_to DATE NULL,
+                    meta_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS operator_status_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    event_at TIMESTAMP NOT NULL,
+                    event_date DATE NOT NULL,
+                    status_name VARCHAR(128) NOT NULL,
+                    status_key VARCHAR(128) NOT NULL,
+                    raw_state_name VARCHAR(128) NULL,
+                    raw_state_key VARCHAR(128) NULL,
+                    state_note VARCHAR(255) NULL,
+                    source_row INTEGER NULL,
+                    source_file_name VARCHAR(255) NULL,
+                    import_batch_id UUID NULL REFERENCES operator_status_import_batches(id) ON DELETE SET NULL,
+                    imported_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS operator_status_segments (
+                    id BIGSERIAL PRIMARY KEY,
+                    operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    status_date DATE NOT NULL,
+                    start_at TIMESTAMP NOT NULL,
+                    end_at TIMESTAMP NOT NULL,
+                    duration_sec INTEGER NOT NULL,
+                    status_name VARCHAR(128) NOT NULL,
+                    status_key VARCHAR(128) NOT NULL,
+                    raw_state_name VARCHAR(128) NULL,
+                    raw_state_key VARCHAR(128) NULL,
+                    state_note VARCHAR(255) NULL,
+                    source_row INTEGER NULL,
+                    is_work BOOLEAN NOT NULL DEFAULT FALSE,
+                    is_break BOOLEAN NOT NULL DEFAULT FALSE,
+                    is_no_phone BOOLEAN NOT NULL DEFAULT FALSE,
+                    source_file_name VARCHAR(255) NULL,
+                    import_batch_id UUID NULL REFERENCES operator_status_import_batches(id) ON DELETE SET NULL,
+                    imported_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CHECK (end_at > start_at),
+                    CHECK (duration_sec > 0)
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_operator_status_events_operator_time
+                ON operator_status_events(operator_id, event_at);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_operator_status_events_operator_date
+                ON operator_status_events(operator_id, event_date);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_operator_status_events_batch
+                ON operator_status_events(import_batch_id);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_operator_status_segments_operator_date
+                ON operator_status_segments(operator_id, status_date);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_operator_status_segments_operator_start
+                ON operator_status_segments(operator_id, start_at);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_operator_status_segments_status_key
+                ON operator_status_segments(status_key);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_operator_status_segments_batch
+                ON operator_status_segments(import_batch_id);
             """)
 
             # AI feedback cache table
@@ -6328,6 +6423,104 @@ class Database:
             target['scheduleStatusPeriods'] = data.get('scheduleStatusPeriods', [])
             target['scheduleStatusDays'] = data.get('scheduleStatusDays', {})
 
+    def _load_imported_status_segments_for_operators(self, cursor, operator_ids, start_date_obj=None, end_date_obj=None):
+        operator_ids = [int(v) for v in (operator_ids or []) if v is not None]
+        result = {op_id: {} for op_id in operator_ids}
+        if not operator_ids:
+            return result
+
+        query = """
+            SELECT
+                operator_id,
+                status_date,
+                start_at,
+                end_at,
+                duration_sec,
+                status_name,
+                status_key,
+                raw_state_name,
+                raw_state_key,
+                state_note,
+                source_row,
+                COALESCE(is_work, FALSE),
+                COALESCE(is_break, FALSE),
+                COALESCE(is_no_phone, FALSE)
+            FROM operator_status_segments
+            WHERE operator_id = ANY(%s)
+        """
+        params = [operator_ids]
+
+        if start_date_obj and end_date_obj:
+            query += " AND status_date >= %s AND status_date <= %s"
+            params.extend([start_date_obj, end_date_obj])
+        elif start_date_obj:
+            query += " AND status_date >= %s"
+            params.append(start_date_obj)
+        elif end_date_obj:
+            query += " AND status_date <= %s"
+            params.append(end_date_obj)
+
+        query += " ORDER BY operator_id, status_date, start_at, end_at, id"
+        cursor.execute(query, params)
+        rows = cursor.fetchall() or []
+
+        for row in rows:
+            (
+                operator_id,
+                status_date_value,
+                start_at_value,
+                end_at_value,
+                duration_sec,
+                status_name,
+                status_key,
+                raw_state_name,
+                raw_state_key,
+                state_note,
+                source_row,
+                is_work,
+                is_break,
+                is_no_phone
+            ) = row
+            op_id = int(operator_id)
+            target = result.get(op_id)
+            if target is None:
+                continue
+
+            day_key = status_date_value.strftime('%Y-%m-%d') if hasattr(status_date_value, 'strftime') else str(status_date_value or '')
+            if not day_key:
+                continue
+
+            target.setdefault(day_key, []).append({
+                'statusDate': day_key,
+                'start': start_at_value.isoformat() if hasattr(start_at_value, 'isoformat') else str(start_at_value or ''),
+                'end': end_at_value.isoformat() if hasattr(end_at_value, 'isoformat') else str(end_at_value or ''),
+                'durationSec': int(duration_sec or 0),
+                'stateName': str(status_name or ''),
+                'stateKey': str(status_key or ''),
+                'rawStateName': str(raw_state_name or ''),
+                'rawStateKey': str(raw_state_key or ''),
+                'stateNote': str(state_note or ''),
+                'sourceRow': int(source_row) if source_row is not None else None,
+                'isWork': bool(is_work),
+                'isBreak': bool(is_break),
+                'isNoPhone': bool(is_no_phone)
+            })
+
+        return result
+
+    def _attach_imported_status_segments_to_operators(self, cursor, operators_map, operator_ids, start_date_obj=None, end_date_obj=None):
+        timeline_map = self._load_imported_status_segments_for_operators(
+            cursor=cursor,
+            operator_ids=operator_ids,
+            start_date_obj=start_date_obj,
+            end_date_obj=end_date_obj
+        )
+        for op_id in (operator_ids or []):
+            target = operators_map.get(op_id)
+            if target is None:
+                continue
+            target['importedStatusTimelineDays'] = timeline_map.get(int(op_id), {})
+
     def _sync_user_statuses_from_schedule_periods_tx(self, cursor, operator_ids=None, as_of_date=None):
         """
         Синхронизировать users.status по активным периодным статусам на дату.
@@ -6468,7 +6661,8 @@ class Database:
                     'shifts': {},
                     'daysOff': [],
                     'scheduleStatusPeriods': [],
-                    'scheduleStatusDays': {}
+                    'scheduleStatusDays': {},
+                    'importedStatusTimelineDays': {}
                 }
 
             shifts_query = """
@@ -6552,6 +6746,13 @@ class Database:
                 start_date_obj=start_date_obj,
                 end_date_obj=end_date_obj
             )
+            self._attach_imported_status_segments_to_operators(
+                cursor=cursor,
+                operators_map=result_map,
+                operator_ids=operator_ids,
+                start_date_obj=start_date_obj,
+                end_date_obj=end_date_obj
+            )
 
             return [result_map[row[0]] for row in operators]
 
@@ -6591,7 +6792,8 @@ class Database:
                 'shifts': {},
                 'daysOff': [],
                 'scheduleStatusPeriods': [],
-                'scheduleStatusDays': {}
+                'scheduleStatusDays': {},
+                'importedStatusTimelineDays': {}
             }
 
             shifts_query = """
@@ -6661,6 +6863,13 @@ class Database:
                 result['daysOff'].append(day_off_date.strftime('%Y-%m-%d'))
 
             self._attach_schedule_status_periods_to_operators(
+                cursor=cursor,
+                operators_map={operator_id: result},
+                operator_ids=[operator_id],
+                start_date_obj=start_date_obj,
+                end_date_obj=end_date_obj
+            )
+            self._attach_imported_status_segments_to_operators(
                 cursor=cursor,
                 operators_map={operator_id: result},
                 operator_ids=[operator_id],
@@ -8532,6 +8741,356 @@ class Database:
 
         summary['affected_operator_ids'] = sorted(affected_operator_ids)
         return summary
+
+    def save_operator_status_import(self, events, segments, imported_by=None, source_file_name=None, summary=None):
+        """
+        Сохранить импорт статусов операторов:
+        - сырые события переключений (operator_status_events)
+        - рассчитанные интервалы/сегменты для аналитики (operator_status_segments)
+
+        Перед вставкой удаляет существующие данные по затронутым операторам и датам,
+        чтобы импорт работал как "replace" в рамках импортированного диапазона.
+        """
+        if not isinstance(events, list):
+            raise ValueError("events must be a list")
+        if not isinstance(segments, list):
+            raise ValueError("segments must be a list")
+
+        summary_payload = summary if isinstance(summary, dict) else {}
+
+        def _safe_int(value, default=0):
+            try:
+                return int(value)
+            except Exception:
+                return int(default)
+
+        imported_by_id = int(imported_by) if imported_by is not None else None
+        source_file_name_norm = str(source_file_name or '').strip() or None
+        batch_id = uuid.uuid4()
+
+        normalized_events = []
+        normalized_segments = []
+
+        event_ranges_map = {}
+        segment_ranges_map = {}
+        affected_operator_ids = set()
+
+        def _extend_range(ranges_map, operator_id, day_value):
+            prev = ranges_map.get(operator_id)
+            if prev is None:
+                ranges_map[operator_id] = [day_value, day_value]
+                return
+            if day_value < prev[0]:
+                prev[0] = day_value
+            if day_value > prev[1]:
+                prev[1] = day_value
+
+        for item in events:
+            if not isinstance(item, dict):
+                continue
+            try:
+                operator_id = int(item.get('operator_id'))
+            except Exception:
+                continue
+
+            event_at_raw = item.get('event_at')
+            if isinstance(event_at_raw, datetime):
+                event_at_obj = event_at_raw
+            elif isinstance(event_at_raw, str):
+                text = str(event_at_raw).strip()
+                if not text:
+                    continue
+                try:
+                    event_at_obj = datetime.fromisoformat(text)
+                except Exception:
+                    continue
+            else:
+                continue
+
+            event_date_obj = event_at_obj.date()
+            status_name = str(item.get('status_name') or item.get('state_name') or '').strip()
+            status_key = str(item.get('status_key') or item.get('state_key') or '').strip().lower()
+            if not status_name or not status_key:
+                continue
+
+            raw_state_name = str(item.get('raw_state_name') or '').strip() or None
+            raw_state_key = str(item.get('raw_state_key') or '').strip().lower() or None
+            state_note = str(item.get('state_note') or '').strip() or None
+            source_row = item.get('source_row')
+            try:
+                source_row = int(source_row) if source_row is not None else None
+            except Exception:
+                source_row = None
+
+            normalized_events.append((
+                operator_id,
+                event_at_obj,
+                event_date_obj,
+                status_name,
+                status_key,
+                raw_state_name,
+                raw_state_key,
+                state_note,
+                source_row,
+                source_file_name_norm,
+                str(batch_id),
+                imported_by_id
+            ))
+            affected_operator_ids.add(operator_id)
+            _extend_range(event_ranges_map, operator_id, event_date_obj)
+
+        for item in segments:
+            if not isinstance(item, dict):
+                continue
+            try:
+                operator_id = int(item.get('operator_id'))
+            except Exception:
+                continue
+
+            status_date_raw = item.get('status_date')
+            if isinstance(status_date_raw, date):
+                status_date_obj = status_date_raw
+            elif isinstance(status_date_raw, str):
+                text = str(status_date_raw).strip()
+                if not text:
+                    continue
+                try:
+                    status_date_obj = datetime.strptime(text, '%Y-%m-%d').date()
+                except Exception:
+                    continue
+            else:
+                continue
+
+            start_at_raw = item.get('start_at')
+            end_at_raw = item.get('end_at')
+            if isinstance(start_at_raw, datetime):
+                start_at_obj = start_at_raw
+            elif isinstance(start_at_raw, str):
+                text = str(start_at_raw).strip()
+                if not text:
+                    continue
+                try:
+                    start_at_obj = datetime.fromisoformat(text)
+                except Exception:
+                    continue
+            else:
+                continue
+
+            if isinstance(end_at_raw, datetime):
+                end_at_obj = end_at_raw
+            elif isinstance(end_at_raw, str):
+                text = str(end_at_raw).strip()
+                if not text:
+                    continue
+                try:
+                    end_at_obj = datetime.fromisoformat(text)
+                except Exception:
+                    continue
+            else:
+                continue
+
+            if end_at_obj <= start_at_obj:
+                continue
+
+            duration_sec = _safe_int(item.get('duration_sec'), default=0)
+            if duration_sec <= 0:
+                duration_sec = int((end_at_obj - start_at_obj).total_seconds())
+            if duration_sec <= 0:
+                continue
+
+            status_name = str(item.get('status_name') or item.get('state_name') or '').strip()
+            status_key = str(item.get('status_key') or item.get('state_key') or '').strip().lower()
+            if not status_name or not status_key:
+                continue
+
+            raw_state_name = str(item.get('raw_state_name') or '').strip() or None
+            raw_state_key = str(item.get('raw_state_key') or '').strip().lower() or None
+            state_note = str(item.get('state_note') or '').strip() or None
+            source_row = item.get('source_row')
+            try:
+                source_row = int(source_row) if source_row is not None else None
+            except Exception:
+                source_row = None
+
+            is_work = bool(item.get('is_work'))
+            is_break = bool(item.get('is_break'))
+            is_no_phone = bool(item.get('is_no_phone'))
+
+            normalized_segments.append((
+                operator_id,
+                status_date_obj,
+                start_at_obj,
+                end_at_obj,
+                duration_sec,
+                status_name,
+                status_key,
+                raw_state_name,
+                raw_state_key,
+                state_note,
+                source_row,
+                is_work,
+                is_break,
+                is_no_phone,
+                source_file_name_norm,
+                str(batch_id),
+                imported_by_id
+            ))
+            affected_operator_ids.add(operator_id)
+            _extend_range(segment_ranges_map, operator_id, status_date_obj)
+
+        event_ranges = sorted(
+            [(int(op_id), bounds[0], bounds[1]) for op_id, bounds in event_ranges_map.items()],
+            key=lambda x: (x[0], x[1], x[2])
+        )
+        segment_ranges = sorted(
+            [(int(op_id), bounds[0], bounds[1]) for op_id, bounds in segment_ranges_map.items()],
+            key=lambda x: (x[0], x[1], x[2])
+        )
+        # Для segment-данных используем объединение диапазонов:
+        # даже если после новых событий не получилось сегментов (например, одиночное событие),
+        # старые сегменты за этот период нужно очистить, чтобы не оставались устаревшие данные.
+        segment_delete_ranges_map = {}
+        for op_id, bounds in segment_ranges_map.items():
+            segment_delete_ranges_map[int(op_id)] = [bounds[0], bounds[1]]
+        for op_id, bounds in event_ranges_map.items():
+            op_id_int = int(op_id)
+            prev = segment_delete_ranges_map.get(op_id_int)
+            if prev is None:
+                segment_delete_ranges_map[op_id_int] = [bounds[0], bounds[1]]
+                continue
+            if bounds[0] < prev[0]:
+                prev[0] = bounds[0]
+            if bounds[1] > prev[1]:
+                prev[1] = bounds[1]
+        segment_delete_ranges = sorted(
+            [(int(op_id), bounds[0], bounds[1]) for op_id, bounds in segment_delete_ranges_map.items()],
+            key=lambda x: (x[0], x[1], x[2])
+        )
+
+        range_source = segment_delete_ranges if segment_delete_ranges else event_ranges
+        date_from_obj = min((r[1] for r in range_source), default=None)
+        date_to_obj = max((r[2] for r in range_source), default=None)
+
+        deleted_events = 0
+        deleted_segments = 0
+
+        with self._get_cursor() as cursor:
+            for operator_id, start_date_obj, end_date_obj in event_ranges:
+                cursor.execute(
+                    """
+                    DELETE FROM operator_status_events
+                    WHERE operator_id = %s
+                      AND event_date >= %s
+                      AND event_date <= %s
+                    """,
+                    (operator_id, start_date_obj, end_date_obj)
+                )
+                deleted_events += max(0, int(cursor.rowcount or 0))
+
+            for operator_id, start_date_obj, end_date_obj in segment_delete_ranges:
+                cursor.execute(
+                    """
+                    DELETE FROM operator_status_segments
+                    WHERE operator_id = %s
+                      AND status_date >= %s
+                      AND status_date <= %s
+                    """,
+                    (operator_id, start_date_obj, end_date_obj)
+                )
+                deleted_segments += max(0, int(cursor.rowcount or 0))
+
+            batch_meta = summary_payload.get('meta')
+            if not isinstance(batch_meta, dict):
+                batch_meta = {}
+            batch_meta_json = json.dumps(batch_meta, ensure_ascii=False)
+
+            cursor.execute(
+                """
+                INSERT INTO operator_status_import_batches (
+                    id, source_file_name, imported_by,
+                    source_rows, valid_events, matched_events, segments_saved,
+                    deleted_events, deleted_segments,
+                    invalid_rows_count, parse_errors_count,
+                    operators_count, open_tail_events, zero_or_negative_transitions,
+                    date_from, date_to, meta_json
+                )
+                VALUES (
+                    %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s, %s,
+                    %s, %s,
+                    %s, %s, %s,
+                    %s, %s, %s::jsonb
+                )
+                """,
+                (
+                    str(batch_id),
+                    source_file_name_norm,
+                    imported_by_id,
+                    _safe_int(summary_payload.get('source_rows'), default=0),
+                    _safe_int(summary_payload.get('valid_events'), default=0),
+                    len(normalized_events),
+                    len(normalized_segments),
+                    deleted_events,
+                    deleted_segments,
+                    _safe_int(summary_payload.get('invalid_rows_count'), default=0),
+                    _safe_int(summary_payload.get('parse_errors_count'), default=0),
+                    len(affected_operator_ids),
+                    _safe_int(summary_payload.get('open_tail_events'), default=0),
+                    _safe_int(summary_payload.get('zero_or_negative_transitions'), default=0),
+                    date_from_obj,
+                    date_to_obj,
+                    batch_meta_json
+                )
+            )
+
+            if normalized_events:
+                execute_values(
+                    cursor,
+                    """
+                    INSERT INTO operator_status_events (
+                        operator_id, event_at, event_date,
+                        status_name, status_key, raw_state_name, raw_state_key, state_note,
+                        source_row, source_file_name, import_batch_id, imported_by
+                    )
+                    VALUES %s
+                    """,
+                    normalized_events,
+                    page_size=5000
+                )
+
+            if normalized_segments:
+                execute_values(
+                    cursor,
+                    """
+                    INSERT INTO operator_status_segments (
+                        operator_id, status_date, start_at, end_at, duration_sec,
+                        status_name, status_key, raw_state_name, raw_state_key, state_note,
+                        source_row, is_work, is_break, is_no_phone,
+                        source_file_name, import_batch_id, imported_by
+                    )
+                    VALUES %s
+                    """,
+                    normalized_segments,
+                    page_size=5000
+                )
+
+        return {
+            'batch_id': str(batch_id),
+            'source_rows': _safe_int(summary_payload.get('source_rows'), default=0),
+            'valid_events': _safe_int(summary_payload.get('valid_events'), default=0),
+            'matched_events': len(normalized_events),
+            'segments_saved': len(normalized_segments),
+            'deleted_events': int(deleted_events),
+            'deleted_segments': int(deleted_segments),
+            'invalid_rows_count': _safe_int(summary_payload.get('invalid_rows_count'), default=0),
+            'parse_errors_count': _safe_int(summary_payload.get('parse_errors_count'), default=0),
+            'operators_count': len(affected_operator_ids),
+            'open_tail_events': _safe_int(summary_payload.get('open_tail_events'), default=0),
+            'zero_or_negative_transitions': _safe_int(summary_payload.get('zero_or_negative_transitions'), default=0),
+            'date_from': date_from_obj.strftime('%Y-%m-%d') if date_from_obj else None,
+            'date_to': date_to_obj.strftime('%Y-%m-%d') if date_to_obj else None
+        }
 
     def save_schedule_status_period(
         self,

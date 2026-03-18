@@ -5255,6 +5255,113 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 days: daysArr
             };
             };
+            const buildPlannerStatusAnalysisFromOperators = (operatorsList = []) => {
+            const days = new Map();
+            const overallByOperator = new Map();
+            let overallNoPhoneSec = 0;
+            let overallNoPhoneAnomalies = 0;
+            let validSegments = 0;
+            const addTotals = (obj, state, sec) => { obj.statusTotals[state] = (obj.statusTotals[state] || 0) + sec; };
+            const ensureOverall = (name) => {
+                if (!overallByOperator.has(name)) overallByOperator.set(name, { operatorName: name, totalObservedSec: 0, noPhoneSec: 0, noPhoneAnomalyCount: 0, statusTotals: {} });
+                return overallByOperator.get(name);
+            };
+            const ensureDay = (dateKey) => {
+                if (!days.has(dateKey)) days.set(dateKey, { dateKey, totalObservedSec: 0, noPhoneSec: 0, noPhoneAnomalyCount: 0, statusTotals: {}, operators: new Map() });
+                return days.get(dateKey);
+            };
+            const ensureDayOperator = (dayObj, name) => {
+                if (!dayObj.operators.has(name)) dayObj.operators.set(name, { operatorName: name, totalObservedSec: 0, noPhoneSec: 0, noPhoneAnomalyCount: 0, statusTotals: {}, timeline: [] });
+                return dayObj.operators.get(name);
+            };
+            (Array.isArray(operatorsList) ? operatorsList : []).forEach(op => {
+                const operatorName = String(op?.name || op?.login || (op?.id ? `Оператор ${op.id}` : '')).trim();
+                if (!operatorName) return;
+                const timelineByDay = (op?.importedStatusTimelineDays && typeof op.importedStatusTimelineDays === 'object') ? op.importedStatusTimelineDays : {};
+                Object.entries(timelineByDay).forEach(([dateKeyRaw, dayTimelineRaw]) => {
+                    const dateKey = String(dateKeyRaw || '').trim();
+                    if (!dateKey) return;
+                    (Array.isArray(dayTimelineRaw) ? dayTimelineRaw : []).forEach(seg => {
+                        const start = seg?.start instanceof Date ? seg.start : new Date(seg?.start);
+                        const end = seg?.end instanceof Date ? seg.end : new Date(seg?.end);
+                        if (Number.isNaN(start?.getTime?.()) || Number.isNaN(end?.getTime?.()) || end <= start) return;
+                        const statusName = String(seg?.stateName || seg?.statusName || seg?.stateKey || seg?.statusKey || 'Статус').trim() || 'Статус';
+                        const statusKey = plannerStatusNormalizeKey(seg?.stateKey || seg?.statusKey || statusName);
+                        const rawStateName = String(seg?.rawStateName || seg?.raw_state_name || statusName).trim() || statusName;
+                        const rawStateKey = plannerStatusNormalizeKey(seg?.rawStateKey || seg?.raw_state_key || rawStateName);
+                        const stateNote = String(seg?.stateNote || seg?.state_note || '').trim();
+                        let durationSec = Math.round(Number(seg?.durationSec ?? seg?.duration_sec ?? 0));
+                        if (!Number.isFinite(durationSec) || durationSec <= 0) durationSec = Math.max(0, Math.round((end - start) / 1000));
+                        if (durationSec <= 0) return;
+                        const isNoPhone = statusKey === PLANNER_STATUS_NO_PHONE_KEY;
+                        const isNoPhoneAnomaly = isNoPhone && durationSec > PLANNER_STATUS_NO_PHONE_ANOMALY_SECONDS;
+                        const preparedSeg = {
+                            operatorName,
+                            stateName: statusName,
+                            stateKey: statusKey,
+                            rawStateName,
+                            rawStateKey,
+                            stateNote,
+                            dateKey,
+                            start,
+                            end,
+                            durationSec,
+                            isNoPhone,
+                            isNoPhoneAnomaly
+                        };
+                        validSegments += 1;
+                        const overall = ensureOverall(operatorName);
+                        overall.totalObservedSec += durationSec;
+                        addTotals(overall, statusName, durationSec);
+                        if (isNoPhone) overall.noPhoneSec += durationSec;
+                        if (isNoPhoneAnomaly) overall.noPhoneAnomalyCount += 1;
+                        const day = ensureDay(dateKey);
+                        day.totalObservedSec += durationSec;
+                        addTotals(day, statusName, durationSec);
+                        if (isNoPhone) day.noPhoneSec += durationSec;
+                        if (isNoPhoneAnomaly) day.noPhoneAnomalyCount += 1;
+                        const dayOp = ensureDayOperator(day, operatorName);
+                        dayOp.totalObservedSec += durationSec;
+                        addTotals(dayOp, statusName, durationSec);
+                        if (isNoPhone) dayOp.noPhoneSec += durationSec;
+                        if (isNoPhoneAnomaly) dayOp.noPhoneAnomalyCount += 1;
+                        dayOp.timeline.push(preparedSeg);
+                        if (isNoPhone) overallNoPhoneSec += durationSec;
+                        if (isNoPhoneAnomaly) overallNoPhoneAnomalies += 1;
+                    });
+                });
+            });
+            const daysArr = Array.from(days.values()).map(day => ({
+                ...day,
+                operators: Array.from(day.operators.values())
+                    .map(op => ({
+                        ...op,
+                        timeline: [...op.timeline].sort((a, b) => a.start - b.start),
+                        statusTotalsEntries: Object.entries(op.statusTotals).sort((a, b) => b[1] - a[1])
+                    }))
+                    .sort((a, b) => (b.noPhoneSec - a.noPhoneSec) || a.operatorName.localeCompare(b.operatorName, 'ru')),
+                statusTotalsEntries: Object.entries(day.statusTotals).sort((a, b) => b[1] - a[1])
+            })).sort((a, b) => b.dateKey.localeCompare(a.dateKey));
+            const overallOperators = Array.from(overallByOperator.values())
+                .map(op => ({ ...op, statusTotalsEntries: Object.entries(op.statusTotals).sort((a, b) => b[1] - a[1]) }))
+                .sort((a, b) => (b.noPhoneSec - a.noPhoneSec) || a.operatorName.localeCompare(b.operatorName, 'ru'));
+            return {
+                sourceRows: validSegments,
+                validEvents: validSegments,
+                invalidRowsCount: 0,
+                invalidRowsPreview: [],
+                parseErrorsCount: 0,
+                parseErrorsPreview: [],
+                operatorsCount: overallOperators.length,
+                daysCount: daysArr.length,
+                openTailEvents: 0,
+                zeroOrNegativeTransitions: 0,
+                overallNoPhoneSec,
+                overallNoPhoneAnomalies,
+                overallOperators,
+                days: daysArr
+            };
+            };
 
             function buildOccupiedIntervalsForDate(allOperators, dateStr, excludeOpId, directionScope, getDirectionBreakScopeKey) {
             const occupied = [];
@@ -5509,6 +5616,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     scheduleStatusPeriods: Array.isArray(next.scheduleStatusPeriods) ? next.scheduleStatusPeriods.map(p => ({ ...(p || {}) })) : [],
                     scheduleStatusDays: next.scheduleStatusDays ? Object.fromEntries(
                         Object.entries(next.scheduleStatusDays).map(([k, v]) => [k, { ...(v || {}) }])
+                    ) : {},
+                    importedStatusTimelineDays: next.importedStatusTimelineDays ? Object.fromEntries(
+                        Object.entries(next.importedStatusTimelineDays).map(([dayKey, list]) => [
+                            dayKey,
+                            (Array.isArray(list) ? list : []).map(seg => ({ ...(seg || {}) }))
+                        ])
                     ) : {}
                 };
             }
@@ -5520,7 +5633,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     shifts: {},
                     daysOff: [],
                     scheduleStatusPeriods: [],
-                    scheduleStatusDays: {}
+                    scheduleStatusDays: {},
+                    importedStatusTimelineDays: {}
                 };
             }
 
@@ -5534,7 +5648,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         shifts: existing.shifts,
                         daysOff: existing.daysOff,
                         scheduleStatusPeriods: existing.scheduleStatusPeriods ?? base.scheduleStatusPeriods,
-                        scheduleStatusDays: existing.scheduleStatusDays ?? base.scheduleStatusDays
+                        scheduleStatusDays: existing.scheduleStatusDays ?? base.scheduleStatusDays,
+                        importedStatusTimelineDays: existing.importedStatusTimelineDays ?? base.importedStatusTimelineDays
                     });
                 });
 
@@ -5594,6 +5709,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [plannerStatusAnomalyLoading, setPlannerStatusAnomalyLoading] = useState(false);
             const [plannerStatusAnomalyError, setPlannerStatusAnomalyError] = useState('');
             const [plannerStatusAnomalyFileName, setPlannerStatusAnomalyFileName] = useState('');
+            const [plannerStatusImportSummary, setPlannerStatusImportSummary] = useState(null);
             const [plannerStatusAnomalyAnalysis, setPlannerStatusAnomalyAnalysis] = useState(null);
             const [plannerStatusAnomalyExpandedDays, setPlannerStatusAnomalyExpandedDays] = useState({});
             const [plannerStatusAnomalyOnly, setPlannerStatusAnomalyOnly] = useState(false);
@@ -5969,6 +6085,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             ...(op?.scheduleStatusDays || {}),
                             ...(serverOp?.scheduleStatusDays || {})
                         };
+                        const mergedImportedStatusTimelineDays = {
+                            ...(op?.importedStatusTimelineDays || {}),
+                            ...(serverOp?.importedStatusTimelineDays || {})
+                        };
                         const periodMap = new Map();
                         (Array.isArray(op?.scheduleStatusPeriods) ? op.scheduleStatusPeriods : []).forEach((period, idx) => {
                             periodMap.set(plannerStatusPeriodMergeKey(period, idx), period);
@@ -5986,7 +6106,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             shifts: mergedShifts,
                             daysOff: mergedDaysOff,
                             scheduleStatusPeriods: mergedPeriods,
-                            scheduleStatusDays: mergedStatusDays
+                            scheduleStatusDays: mergedStatusDays,
+                            importedStatusTimelineDays: mergedImportedStatusTimelineDays
                         });
                     });
                     const seen = new Set(merged.map(op => plannerOperatorIdKey(op?.id)));
@@ -6590,9 +6711,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 () => new Set(selectedCells.map(target => target.opId)).size,
                 [selectedCells]
             );
+            const plannerStatusServerAnalysis = useMemo(() => {
+                const built = buildPlannerStatusAnalysisFromOperators(operators);
+                if (!Array.isArray(built?.days) || built.days.length === 0) return null;
+                return built;
+            }, [operators]);
+            const plannerStatusEffectiveAnalysis = useMemo(
+                () => (plannerStatusAnomalyAnalysis || plannerStatusServerAnalysis || null),
+                [plannerStatusAnomalyAnalysis, plannerStatusServerAnalysis]
+            );
             const importedStatusTimelineByOperatorDateKey = useMemo(() => {
                 const map = new Map();
-                const days = Array.isArray(plannerStatusAnomalyAnalysis?.days) ? plannerStatusAnomalyAnalysis.days : [];
+                const days = Array.isArray(plannerStatusEffectiveAnalysis?.days) ? plannerStatusEffectiveAnalysis.days : [];
                 days.forEach(day => {
                     const dateKey = String(day?.dateKey || '');
                     if (!dateKey) return;
@@ -6615,7 +6745,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     });
                 });
                 return map;
-            }, [plannerStatusAnomalyAnalysis]);
+            }, [plannerStatusEffectiveAnalysis]);
 
             const buildEditTimelineStatusFocusKey = (seg, idx = 0) => (
                 `${Number(seg?.startMin ?? seg?.start ?? 0)}:${Number(seg?.endMin ?? seg?.end ?? 0)}:${plannerStatusNormalizeKey(seg?.stateName || seg?.stateKey || '')}:${idx}`
@@ -7482,7 +7612,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
 
             useEffect(() => {
-                const canHandleZoomHotkeys = !!plannerStatusAnomalyAnalysis && (plannerStatusSpecialDayViewEnabled || !!showPlannerStatusAnomalyModal);
+                const canHandleZoomHotkeys = !!plannerStatusEffectiveAnalysis && (plannerStatusSpecialDayViewEnabled || !!showPlannerStatusAnomalyModal);
                 if (!canHandleZoomHotkeys || typeof window === 'undefined') return;
 
                 const isEditableTarget = (target) => {
@@ -7522,7 +7652,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 window.addEventListener('keydown', onKeyDown, true);
                 return () => window.removeEventListener('keydown', onKeyDown, true);
             }, [
-                plannerStatusAnomalyAnalysis,
+                plannerStatusEffectiveAnalysis,
                 plannerStatusSpecialDayViewEnabled,
                 showPlannerStatusAnomalyModal,
                 changePlannerStatusTimelineZoom
@@ -7559,7 +7689,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
 
             const openPlannerStatusTransitionsModalForCell = (op, dateKey) => {
-                if (!plannerStatusAnomalyAnalysis || !dateKey) return;
+                if (!plannerStatusEffectiveAnalysis || !dateKey) return;
                 setPlannerStatusModalFocus({
                     dateKey: String(dateKey),
                     operatorName: String(op?.name || '').trim()
@@ -7575,13 +7705,32 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (!file) return;
                 setPlannerStatusAnomalyLoading(true);
                 setPlannerStatusAnomalyError('');
+                setPlannerStatusImportSummary(null);
                 setPlannerStatusAnomalyOnly(false);
                 try {
                     const csvText = await file.text();
                     if (!String(csvText || '').trim()) {
                         throw new Error('Файл пустой');
                     }
+
                     const analysis = analyzePlannerStatusTransitionsCsv(csvText);
+                    const formData = new FormData();
+                    formData.append('file', file);
+                    const saveResponse = await fetch(`${API_BASE_URL}/api/work_schedules/import_statuses_csv`, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: withAccessTokenHeader(),
+                        body: formData
+                    });
+                    const savePayload = await saveResponse.json().catch(() => ({}));
+                    if (!saveResponse.ok) {
+                        throw new Error(savePayload?.error || `HTTP ${saveResponse.status}`);
+                    }
+
+                    setPlannerStatusImportSummary({
+                        ...(savePayload?.import || {}),
+                        message: savePayload?.message || ''
+                    });
                     setPlannerStatusAnomalyFileName(file.name || '');
                     setPlannerStatusAnomalyAnalysis(analysis);
                     setPlannerStatusModalFocus(null);
@@ -7595,6 +7744,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setPlannerStatusAnomalyExpandedDays((firstAnomalyDay || firstDay) ? { [firstAnomalyDay || firstDay]: true } : {});
                 } catch (error) {
                     console.error('Error analyzing status anomaly csv:', error);
+                    setPlannerStatusImportSummary(null);
                     setPlannerStatusAnomalyAnalysis(null);
                     setPlannerStatusModalFocus(null);
                     setPlannerStatusHourlyDayKey('');
@@ -11762,7 +11912,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 Настройка перерывов
                                             </button>
 
-                                            {plannerStatusAnomalyAnalysis && (
+                                            {plannerStatusEffectiveAnalysis && (
                                                 <button
                                                     onClick={() => {
                                                         setShowPlannerTopActionsMenu(false);
@@ -11774,11 +11924,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     Открыть отчет статусов
                                                 </button>
                                             )}
-                                            {plannerStatusAnomalyAnalysis && (
+                                            {plannerStatusEffectiveAnalysis && (
                                                 <button
                                                     onClick={() => {
                                                         setShowPlannerTopActionsMenu(false);
-                                                        setPlannerStatusHourlyDayKey(prev => prev || (plannerStatusAnomalyAnalysis?.days?.[0]?.dateKey ? String(plannerStatusAnomalyAnalysis.days[0].dateKey) : ''));
+                                                        setPlannerStatusHourlyDayKey(prev => prev || (plannerStatusEffectiveAnalysis?.days?.[0]?.dateKey ? String(plannerStatusEffectiveAnalysis.days[0].dateKey) : ''));
                                                         setPlannerStatusHourlyExpandedKey('');
                                                         setShowPlannerStatusGroupingModal(true);
                                                     }}
@@ -11810,9 +11960,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             {viewMode === 'day' && (
                                                 <button
                                                     onClick={() => setPlannerStatusSpecialViewEnabled(v => !v)}
-                                                    disabled={!plannerStatusAnomalyAnalysis}
+                                                    disabled={!plannerStatusEffectiveAnalysis}
                                                     className={`w-full px-3 py-2 rounded-xl border text-sm font-medium flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed ${plannerStatusSpecialViewEnabled ? 'border-rose-300 bg-rose-100 text-rose-800' : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'}`}
-                                                    title={plannerStatusAnomalyAnalysis ? 'Включить/выключить спецрежим просмотра статусов' : 'Сначала загрузите CSV со статусами'}
+                                                    title={plannerStatusEffectiveAnalysis ? 'Включить/выключить спецрежим просмотра статусов' : 'Сначала загрузите CSV со статусами'}
                                                 >
                                                     <FaIcon className={`fas ${plannerStatusSpecialViewEnabled ? 'fa-toggle-on' : 'fa-toggle-off'}`}></FaIcon>
                                                     Режим статусов
@@ -11850,7 +12000,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             )}
                                         </div>
 
-                                        {plannerStatusAnomalyAnalysis && (
+                                        {plannerStatusEffectiveAnalysis && (
                                             <div className="border-t border-slate-200 p-2">
                                                 <button
                                                     onClick={() => {
@@ -11901,6 +12051,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 <>
                                     <FaIcon className="fas fa-file-csv mr-1"></FaIcon>
                                     Загружены статусы: <strong>{plannerStatusAnomalyFileName}</strong>
+                                    {plannerStatusImportSummary && (
+                                        <span className="ml-2 text-rose-700">
+                                            • БД: {Number(plannerStatusImportSummary?.matched_events || 0)} событий, {Number(plannerStatusImportSummary?.segments_saved || 0)} сегментов
+                                        </span>
+                                    )}
                                     {plannerStatusSpecialDayViewEnabled ? (
                                         <span className="ml-2 text-rose-700">• спецрежим включен</span>
                                     ) : (
@@ -12253,10 +12408,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                 />
                                                                             );
                                                                         })}
-                                                                        {plannerStatusAnomalyAnalysis && importedStatusBarsForCell.length === 0 && (
+                                                                        {plannerStatusEffectiveAnalysis && importedStatusBarsForCell.length === 0 && (
                                                                             <div className="absolute inset-0 flex items-center justify-center text-[11px] text-slate-400">Нет статусов</div>
                                                                         )}
-                                                                        {!plannerStatusAnomalyAnalysis && (
+                                                                        {!plannerStatusEffectiveAnalysis && (
                                                                             <div className="absolute inset-0 flex items-center justify-center text-[11px] text-slate-400">Загрузите статусы</div>
                                                                         )}
                                                                     </div>
@@ -12459,9 +12614,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         onClick={() => {
                                             setShowEditStatusJournal(v => !v);
                                         }}
-                                        disabled={!plannerStatusAnomalyAnalysis}
+                                        disabled={!plannerStatusEffectiveAnalysis}
                                         className="px-2.5 py-1 rounded-md border border-slate-200 bg-white hover:bg-slate-50 text-xs font-medium text-slate-700 flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
-                                        title={plannerStatusAnomalyAnalysis ? 'Открыть журнал переключений статусов за выбранный день' : 'Сначала загрузите статусы (CSV)'}
+                                        title={plannerStatusEffectiveAnalysis ? 'Открыть журнал переключений статусов за выбранный день' : 'Сначала загрузите статусы (CSV)'}
                                     >
                                         <FaIcon className="fas fa-list-ul text-[10px]"></FaIcon>
                                         {showEditStatusJournal ? 'Скрыть журнал' : 'Журнал статусов'}
@@ -13388,10 +13543,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             />
                                                         );
                                                     })}
-                                                    {plannerStatusAnomalyAnalysis && previewStatusBars.length === 0 && (
+                                                    {plannerStatusEffectiveAnalysis && previewStatusBars.length === 0 && (
                                                         <div className="absolute inset-0 flex items-center justify-center text-[11px] text-slate-400">Нет статусов</div>
                                                     )}
-                                                    {!plannerStatusAnomalyAnalysis && (
+                                                    {!plannerStatusEffectiveAnalysis && (
                                                         <div className="absolute inset-0 flex items-center justify-center text-[11px] text-slate-400">Загрузите статусы</div>
                                                     )}
                                                 </div>
@@ -13821,7 +13976,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     panelClassName="w-[calc(100vw-2rem)] max-w-[1180px]"
                 >
                     {(() => {
-                        const analysis = plannerStatusAnomalyAnalysis;
+                        const analysis = plannerStatusEffectiveAnalysis;
                         const hasAnalysis = !!analysis;
                         const dayOptions = hasAnalysis
                             ? (Array.isArray(analysis?.days) ? analysis.days : [])
@@ -14301,7 +14456,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     panelClassName="w-[calc(100vw-2rem)] max-w-[1400px]"
                 >
                     {(() => {
-                        const analysis = plannerStatusAnomalyAnalysis;
+                        const analysis = plannerStatusEffectiveAnalysis;
                         const hasAnalysis = !!analysis;
                         const invalidRowsPreview = Array.isArray(analysis?.invalidRowsPreview) ? analysis.invalidRowsPreview : [];
                         const parseErrorsPreview = Array.isArray(analysis?.parseErrorsPreview) ? analysis.parseErrorsPreview : [];
