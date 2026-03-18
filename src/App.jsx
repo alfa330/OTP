@@ -19553,11 +19553,23 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return raw;
             };
 
-            const formatEmployeeGenderLabel = (value) => {
+            const renderEmployeeGenderIcon = (value) => {
                 const normalized = String(value || '').trim().toLowerCase();
-                if (normalized === 'male') return 'Мужской';
-                if (normalized === 'female') return 'Женский';
-                return '-';
+                if (normalized === 'male') {
+                    return (
+                        <span className="inline-flex items-center justify-center text-blue-600" title="Мужской" aria-label="Мужской">
+                            <FaIcon className="fa-solid fa-user" />
+                        </span>
+                    );
+                }
+                if (normalized === 'female') {
+                    return (
+                        <span className="inline-flex items-center justify-center text-pink-600" title="Женский" aria-label="Женский">
+                            <FaIcon className="fa-solid fa-user-circle" />
+                        </span>
+                    );
+                }
+                return <span className="text-gray-400">-</span>;
             };
 
             const formatEmployeeEmploymentTypeLabel = (value) => {
@@ -19576,6 +19588,77 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
 
             const formatEmployeeBoolLabel = (value) => (isEmployeeTruthy(value) ? 'Да' : 'Нет');
+            const renderEmployeeBoolIcon = (value, yesLabel = 'Есть', noLabel = 'Нет') => {
+                const isOn = isEmployeeTruthy(value);
+                return (
+                    <span
+                        className={`inline-flex items-center justify-center ${
+                            isOn ? 'text-emerald-600' : 'text-red-600'
+                        }`}
+                        title={isOn ? yesLabel : noLabel}
+                        aria-label={isOn ? yesLabel : noLabel}
+                    >
+                        <FaIcon className={isOn ? 'fa-solid fa-check' : 'fa-solid fa-times'} />
+                    </span>
+                );
+            };
+
+            const buildWhatsAppLink = (phoneValue) => {
+                const raw = String(phoneValue || '').trim();
+                if (!raw) return null;
+                let digits = raw.replace(/\D/g, '');
+                if (!digits) return null;
+                if (digits.length === 10) digits = `7${digits}`;
+                if (digits.length === 11 && digits.startsWith('8')) digits = `7${digits.slice(1)}`;
+                if (!/^7\d{10}$/.test(digits)) return null;
+                return `https://wa.me/${digits}`;
+            };
+
+            const parseTelegramNick = (nickValue) => {
+                const raw = String(nickValue || '').trim();
+                if (!raw) return null;
+                const username = raw.replace(/^@+/, '').trim();
+                if (!/^[a-zA-Z0-9_]{3,}$/.test(username)) return null;
+                return {
+                    username,
+                    display: raw.startsWith('@') ? raw : `@${username}`
+                };
+            };
+
+            const renderEmployeePhoneLink = (phoneValue) => {
+                const raw = String(phoneValue || '').trim();
+                if (!raw) return '-';
+                const waLink = buildWhatsAppLink(raw);
+                if (!waLink) return raw;
+                return (
+                    <a
+                        href={waLink}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 text-emerald-700 hover:text-emerald-800 hover:underline"
+                        title="Открыть в WhatsApp"
+                    >
+                        <FaIcon className="fa-solid fa-phone" />
+                        <span>{raw}</span>
+                    </a>
+                );
+            };
+
+            const renderEmployeeTelegramLink = (nickValue) => {
+                const parsed = parseTelegramNick(nickValue);
+                if (!parsed) return String(nickValue || '').trim() || '-';
+                return (
+                    <a
+                        href={`https://t.me/${parsed.username}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-blue-700 hover:text-blue-800 hover:underline"
+                        title="Открыть в Telegram"
+                    >
+                        {parsed.display}
+                    </a>
+                );
+            };
 
             const formatEmployeeCloseContact = (relation, fullName, phone) => {
                 const parts = [relation, fullName, phone]
@@ -19611,7 +19694,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         {
                             key: 'gender',
                             label: 'Пол',
-                            render: (employee) => formatEmployeeGenderLabel(employee?.gender)
+                            headerClassName: 'text-center',
+                            cellClassName: 'text-center',
+                            render: (employee) => renderEmployeeGenderIcon(employee?.gender)
                         },
                         {
                             key: 'birth_date',
@@ -19642,7 +19727,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         {
                             key: 'phone',
                             label: 'Телефон',
-                            render: (employee) => employee?.phone || '-'
+                            render: (employee) => renderEmployeePhoneLink(employee?.phone)
                         },
                         {
                             key: 'email',
@@ -19657,7 +19742,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         {
                             key: 'telegram_nick',
                             label: 'Telegram',
-                            render: (employee) => employee?.telegram_nick || '-'
+                            render: (employee) => renderEmployeeTelegramLink(employee?.telegram_nick)
                         },
                         {
                             key: 'close_contact_1',
@@ -19763,7 +19848,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     {
                         key: 'has_proxy',
                         label: 'Прокси',
-                        render: (employee) => formatEmployeeBoolLabel(employee?.has_proxy)
+                        headerClassName: 'text-center',
+                        cellClassName: 'text-center',
+                        render: (employee) => renderEmployeeBoolIcon(employee?.has_proxy, 'Есть', 'Нет')
                     },
                     {
                         key: 'sip_number',
