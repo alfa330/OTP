@@ -28,8 +28,8 @@ const AVATAR_MAX_BYTES = 512 * 1024;
 const AVATAR_CROP_PREVIEW_SIZE = 256;
 const AVATAR_MIN_ZOOM = 1;
 const AVATAR_MAX_ZOOM_CAP = 6;
-const KZ_PHONE_REGEX = /^\+7\d{9}$/;
-const KZ_PHONE_PLACEHOLDER = '+7XXXXXXXXX';
+const KZ_PHONE_REGEX = /^\+7\d{10}$/;
+const KZ_PHONE_PLACEHOLDER = '+7XXXXXXXXXX';
 
 const isValidKzPhone = (value) => {
     const normalized = String(value || '').trim();
@@ -1004,7 +1004,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                         disabled={isLoading || !!createdCredentials}
                         placeholder={KZ_PHONE_PLACEHOLDER}
-                        maxLength={11}
+                        maxLength={12}
                         inputMode="tel"
                         />
                     </div>
@@ -1075,7 +1075,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                                 disabled={isLoading || !!createdCredentials}
                                 placeholder={KZ_PHONE_PLACEHOLDER}
-                                maxLength={11}
+                                maxLength={12}
                                 inputMode="tel"
                                 />
                             </div>
@@ -1114,7 +1114,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                                 disabled={isLoading || !!createdCredentials}
                                 placeholder={KZ_PHONE_PLACEHOLDER}
-                                maxLength={11}
+                                maxLength={12}
                                 inputMode="tel"
                                 />
                             </div>
@@ -1537,7 +1537,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                             disabled={isLoading}
                             placeholder={KZ_PHONE_PLACEHOLDER}
-                            maxLength={11}
+                            maxLength={12}
                             inputMode="tel"
                             />
                         </div>
@@ -1608,7 +1608,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                                     disabled={isLoading}
                                     placeholder={KZ_PHONE_PLACEHOLDER}
-                                    maxLength={11}
+                                    maxLength={12}
                                     inputMode="tel"
                                     />
                                 </div>
@@ -1647,7 +1647,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                                     disabled={isLoading}
                                     placeholder={KZ_PHONE_PLACEHOLDER}
-                                    maxLength={11}
+                                    maxLength={12}
                                     inputMode="tel"
                                     />
                                 </div>
