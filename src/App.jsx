@@ -19557,15 +19557,23 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const normalized = String(value || '').trim().toLowerCase();
                 if (normalized === 'male') {
                     return (
-                        <span className="inline-flex items-center justify-center text-blue-600" title="Мужской" aria-label="Мужской">
-                            <FaIcon className="fa-solid fa-user" />
+                        <span
+                            className="inline-flex items-center justify-center rounded-full border border-blue-400 bg-blue-50 px-2 py-0.5 text-xs font-semibold text-blue-700"
+                            title="Мужской"
+                            aria-label="Мужской"
+                        >
+                            Муж
                         </span>
                     );
                 }
                 if (normalized === 'female') {
                     return (
-                        <span className="inline-flex items-center justify-center text-pink-600" title="Женский" aria-label="Женский">
-                            <FaIcon className="fa-solid fa-user-circle" />
+                        <span
+                            className="inline-flex items-center justify-center rounded-full border border-pink-400 bg-pink-50 px-2 py-0.5 text-xs font-semibold text-pink-700"
+                            title="Женский"
+                            aria-label="Женский"
+                        >
+                            Жен
                         </span>
                     );
                 }
