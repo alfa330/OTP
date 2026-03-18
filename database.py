@@ -39,6 +39,7 @@ time.tzset()
 MIN_CONN = 1
 MAX_CONN = 20  # Adjust based on expected load
 POOL = None
+STATUS_IMPORT_INSERT_PAGE_SIZE = max(200, int(os.getenv('STATUS_IMPORT_INSERT_PAGE_SIZE', '2000')))
 
 # Вставьте/адаптируйте этот helper в ваш модуль
 def _normalize_phone(phone: Optional[str]) -> Optional[str]:
@@ -6612,7 +6613,7 @@ class Database:
                 as_of_date=as_of_date
             )
 
-    def get_operators_with_shifts(self, start_date=None, end_date=None, direction_name=None):
+    def get_operators_with_shifts(self, start_date=None, end_date=None, direction_name=None, include_imported_statuses=False):
         """
         Получить всех операторов со сменами и выходными днями за период.
         Если direction_name задан — только операторы этого направления.
@@ -6746,17 +6747,18 @@ class Database:
                 start_date_obj=start_date_obj,
                 end_date_obj=end_date_obj
             )
-            self._attach_imported_status_segments_to_operators(
-                cursor=cursor,
-                operators_map=result_map,
-                operator_ids=operator_ids,
-                start_date_obj=start_date_obj,
-                end_date_obj=end_date_obj
-            )
+            if include_imported_statuses:
+                self._attach_imported_status_segments_to_operators(
+                    cursor=cursor,
+                    operators_map=result_map,
+                    operator_ids=operator_ids,
+                    start_date_obj=start_date_obj,
+                    end_date_obj=end_date_obj
+                )
 
             return [result_map[row[0]] for row in operators]
 
-    def get_operator_with_shifts(self, operator_id, start_date=None, end_date=None):
+    def get_operator_with_shifts(self, operator_id, start_date=None, end_date=None, include_imported_statuses=False):
         """
         Получить одного оператора с его сменами/перерывами/выходными за период.
         Возвращает структуру, совместимую с get_operators_with_shifts()[i].
@@ -6869,13 +6871,14 @@ class Database:
                 start_date_obj=start_date_obj,
                 end_date_obj=end_date_obj
             )
-            self._attach_imported_status_segments_to_operators(
-                cursor=cursor,
-                operators_map={operator_id: result},
-                operator_ids=[operator_id],
-                start_date_obj=start_date_obj,
-                end_date_obj=end_date_obj
-            )
+            if include_imported_statuses:
+                self._attach_imported_status_segments_to_operators(
+                    cursor=cursor,
+                    operators_map={operator_id: result},
+                    operator_ids=[operator_id],
+                    start_date_obj=start_date_obj,
+                    end_date_obj=end_date_obj
+                )
 
             return result
 
@@ -8768,8 +8771,8 @@ class Database:
         source_file_name_norm = str(source_file_name or '').strip() or None
         batch_id = uuid.uuid4()
 
-        normalized_events = []
-        normalized_segments = []
+        normalized_events = events
+        normalized_segments = segments
 
         event_ranges_map = {}
         segment_ranges_map = {}
@@ -8785,6 +8788,7 @@ class Database:
             if day_value > prev[1]:
                 prev[1] = day_value
 
+        event_write_idx = 0
         for item in events:
             if not isinstance(item, dict):
                 continue
@@ -8822,7 +8826,7 @@ class Database:
             except Exception:
                 source_row = None
 
-            normalized_events.append((
+            normalized_events[event_write_idx] = (
                 operator_id,
                 event_at_obj,
                 event_date_obj,
@@ -8835,10 +8839,13 @@ class Database:
                 source_file_name_norm,
                 str(batch_id),
                 imported_by_id
-            ))
+            )
+            event_write_idx += 1
             affected_operator_ids.add(operator_id)
             _extend_range(event_ranges_map, operator_id, event_date_obj)
+        del normalized_events[event_write_idx:]
 
+        segment_write_idx = 0
         for item in segments:
             if not isinstance(item, dict):
                 continue
@@ -8916,7 +8923,7 @@ class Database:
             is_break = bool(item.get('is_break'))
             is_no_phone = bool(item.get('is_no_phone'))
 
-            normalized_segments.append((
+            normalized_segments[segment_write_idx] = (
                 operator_id,
                 status_date_obj,
                 start_at_obj,
@@ -8934,9 +8941,11 @@ class Database:
                 source_file_name_norm,
                 str(batch_id),
                 imported_by_id
-            ))
+            )
+            segment_write_idx += 1
             affected_operator_ids.add(operator_id)
             _extend_range(segment_ranges_map, operator_id, status_date_obj)
+        del normalized_segments[segment_write_idx:]
 
         event_ranges = sorted(
             [(int(op_id), bounds[0], bounds[1]) for op_id, bounds in event_ranges_map.items()],
@@ -9056,7 +9065,7 @@ class Database:
                     VALUES %s
                     """,
                     normalized_events,
-                    page_size=5000
+                    page_size=STATUS_IMPORT_INSERT_PAGE_SIZE
                 )
 
             if normalized_segments:
@@ -9072,7 +9081,7 @@ class Database:
                     VALUES %s
                     """,
                     normalized_segments,
-                    page_size=5000
+                    page_size=STATUS_IMPORT_INSERT_PAGE_SIZE
                 )
 
         return {
