@@ -6814,6 +6814,13 @@ class Database:
                     created_at = CURRENT_TIMESTAMP
                 """,
                 upsert_rows,
+                template="""(
+                    %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s,
+                    %s, %s, %s,
+                    TRUE, CURRENT_TIMESTAMP
+                )""",
                 page_size=2000
             )
 
