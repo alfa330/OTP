@@ -7992,6 +7992,11 @@ def _parse_schedule_excel_cell_value(raw_value):
 STATUS_IMPORT_WORK_KEYS = {'готов', 'занят', 'занята', 'перезвон'}
 STATUS_IMPORT_BREAK_KEYS = {'перерыв', 'авто'}
 STATUS_IMPORT_NO_PHONE_KEY = 'без телефона'
+STATUS_IMPORT_MAX_FILE_SIZE_MB = max(1, int(os.getenv('STATUS_IMPORT_MAX_FILE_SIZE_MB', '12')))
+STATUS_IMPORT_MAX_FILE_SIZE_BYTES = STATUS_IMPORT_MAX_FILE_SIZE_MB * 1024 * 1024
+STATUS_IMPORT_MAX_SOURCE_ROWS = max(1, int(os.getenv('STATUS_IMPORT_MAX_SOURCE_ROWS', '120000')))
+STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT = max(1, int(os.getenv('STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT', '30')))
+STATUS_IMPORT_LOCK = threading.Lock()
 
 
 def _status_import_normalize_key(value):
@@ -8105,16 +8110,15 @@ def _status_import_build_operator_lookup():
     return lookup
 
 
-def _status_import_parse_csv(csv_text, operator_lookup):
+def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, invalid_rows_preview_limit=None):
     if not isinstance(csv_text, str):
         raise ValueError("CSV text is required")
 
     reader = csv.reader(StringIO(csv_text), delimiter=';', quotechar='"')
-    rows = list(reader)
-    if not rows:
+    header = next(reader, None)
+    if not header:
         raise ValueError("Файл пустой")
 
-    header = rows[0] if rows else []
     normalized_header = [_status_import_normalize_header(h) for h in header]
 
     def _find_col(candidates):
@@ -8131,6 +8135,22 @@ def _status_import_parse_csv(csv_text, operator_lookup):
     if operator_col is None or state_col is None or time_col is None:
         raise ValueError("CSV должен содержать колонки OperatorName;StateName;TimeChange")
 
+    max_rows_value = None
+    if max_source_rows is not None:
+        try:
+            max_rows_value = int(max_source_rows)
+        except Exception:
+            max_rows_value = None
+        if max_rows_value is not None and max_rows_value <= 0:
+            max_rows_value = None
+
+    preview_limit_value = STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT
+    if invalid_rows_preview_limit is not None:
+        try:
+            preview_limit_value = max(1, int(invalid_rows_preview_limit))
+        except Exception:
+            preview_limit_value = STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT
+
     def _cell(cols, idx):
         if idx is None:
             return ''
@@ -8138,12 +8158,32 @@ def _status_import_parse_csv(csv_text, operator_lookup):
             return ''
         return str(cols[idx] or '').strip()
 
-    source_rows = max(0, len(rows) - 1)
+    source_rows = 0
     valid_events = 0
-    invalid_rows = []
-    parsed_events = []
+    invalid_rows_count = 0
+    invalid_rows_preview = []
+    events_by_operator = {}
+    source_order_stats = {}
 
-    for row_num, cols in enumerate(rows[1:], start=2):
+    def _push_invalid(row_num, reason, operator_name, raw_state_name, state_note, time_change):
+        nonlocal invalid_rows_count
+        invalid_rows_count += 1
+        if len(invalid_rows_preview) >= preview_limit_value:
+            return
+        invalid_rows_preview.append({
+            'row': int(row_num),
+            'reason': str(reason or '').strip() or 'Некорректная строка',
+            'operator_name': str(operator_name or '').strip(),
+            'state_name': str(raw_state_name or '').strip(),
+            'state_note': str(state_note or '').strip(),
+            'time_change': str(time_change or '').strip()
+        })
+
+    for row_num, cols in enumerate(reader, start=2):
+        source_rows += 1
+        if max_rows_value is not None and source_rows > max_rows_value:
+            raise OverflowError(f"Лимит строк CSV превышен ({max_rows_value})")
+
         operator_name = _cell(cols, operator_col)
         raw_state_name = _cell(cols, state_col)
         state_note = _cell(cols, note_col)
@@ -8153,26 +8193,26 @@ def _status_import_parse_csv(csv_text, operator_lookup):
             continue
 
         if not operator_name or not raw_state_name or not time_change:
-            invalid_rows.append({
-                'row': row_num,
-                'reason': 'Отсутствуют обязательные поля',
-                'operator_name': operator_name,
-                'state_name': raw_state_name,
-                'state_note': state_note,
-                'time_change': time_change
-            })
+            _push_invalid(
+                row_num=row_num,
+                reason='Отсутствуют обязательные поля',
+                operator_name=operator_name,
+                raw_state_name=raw_state_name,
+                state_note=state_note,
+                time_change=time_change
+            )
             continue
 
         ts = _status_import_parse_datetime(time_change)
         if not ts:
-            invalid_rows.append({
-                'row': row_num,
-                'reason': 'Некорректный формат TimeChange',
-                'operator_name': operator_name,
-                'state_name': raw_state_name,
-                'state_note': state_note,
-                'time_change': time_change
-            })
+            _push_invalid(
+                row_num=row_num,
+                reason='Некорректный формат TimeChange',
+                operator_name=operator_name,
+                raw_state_name=raw_state_name,
+                state_note=state_note,
+                time_change=time_change
+            )
             continue
 
         valid_events += 1
@@ -8180,63 +8220,62 @@ def _status_import_parse_csv(csv_text, operator_lookup):
         operator_key = _status_import_normalize_operator_name(operator_name)
         operator_matches = operator_lookup.get(operator_key) or []
         if len(operator_matches) != 1:
-            invalid_rows.append({
-                'row': row_num,
-                'reason': 'Оператор не найден' if len(operator_matches) == 0 else 'Найдено несколько операторов с таким именем',
-                'operator_name': operator_name,
-                'state_name': raw_state_name,
-                'state_note': state_note,
-                'time_change': time_change
-            })
+            _push_invalid(
+                row_num=row_num,
+                reason='Оператор не найден' if len(operator_matches) == 0 else 'Найдено несколько операторов с таким именем',
+                operator_name=operator_name,
+                raw_state_name=raw_state_name,
+                state_note=state_note,
+                time_change=time_change
+            )
             continue
 
         resolved = _status_import_resolve_display_state(raw_state_name, state_note)
         operator_info = operator_matches[0]
-        parsed_events.append({
-            'row': row_num,
-            'operator_id': int(operator_info['id']),
-            'operator_name': str(operator_info.get('name') or operator_name).strip() or operator_name,
+        operator_id = int(operator_info['id'])
+
+        order_stats = source_order_stats.setdefault(operator_id, {'asc': 0, 'desc': 0, 'last_ts': None})
+        prev_ts = order_stats.get('last_ts')
+        if isinstance(prev_ts, datetime):
+            diff = (ts - prev_ts).total_seconds()
+            if diff > 0:
+                order_stats['asc'] = int(order_stats.get('asc') or 0) + 1
+            elif diff < 0:
+                order_stats['desc'] = int(order_stats.get('desc') or 0) + 1
+        order_stats['last_ts'] = ts
+
+        events_by_operator.setdefault(operator_id, []).append({
+            'operator_id': operator_id,
             'event_at': ts,
-            'state_name': resolved.get('label') or (raw_state_name or '—'),
-            'state_key': resolved.get('key') or _status_import_normalize_key(raw_state_name),
+            'status_name': resolved.get('label') or (raw_state_name or '—'),
+            'status_key': resolved.get('key') or _status_import_normalize_key(raw_state_name),
             'raw_state_name': raw_state_name,
             'raw_state_key': _status_import_normalize_key(raw_state_name),
-            'state_note': state_note
+            'state_note': state_note,
+            'source_row': int(row_num)
         })
-
-    source_order_hint = {}
-    source_events_by_operator = {}
-    for ev in parsed_events:
-        source_events_by_operator.setdefault(int(ev['operator_id']), []).append(ev)
-    for operator_id, events_list in source_events_by_operator.items():
-        asc_count = 0
-        desc_count = 0
-        for idx in range(1, len(events_list)):
-            diff = (events_list[idx]['event_at'] - events_list[idx - 1]['event_at']).total_seconds()
-            if diff > 0:
-                asc_count += 1
-            elif diff < 0:
-                desc_count += 1
-        source_order_hint[operator_id] = 'desc' if desc_count > asc_count else 'asc'
-
-    parsed_events.sort(
-        key=lambda ev: (
-            int(ev['operator_id']),
-            ev['event_at'],
-            -int(ev['row']) if source_order_hint.get(int(ev['operator_id'])) == 'desc' else int(ev['row'])
-        )
-    )
-
-    events_by_operator = {}
-    for ev in parsed_events:
-        events_by_operator.setdefault(int(ev['operator_id']), []).append(ev)
 
     open_tail_events = 0
     zero_or_negative_transitions = 0
     segments = []
+    events_for_db = []
+
     for operator_id, events_list in events_by_operator.items():
         if not events_list:
             continue
+
+        order_stats = source_order_stats.get(int(operator_id)) or {}
+        prefer_desc = int(order_stats.get('desc') or 0) > int(order_stats.get('asc') or 0)
+        if len(events_list) > 1:
+            events_list.sort(
+                key=lambda ev: (
+                    ev['event_at'],
+                    -int(ev.get('source_row') or 0) if prefer_desc else int(ev.get('source_row') or 0)
+                )
+            )
+
+        events_for_db.extend(events_list)
+
         if len(events_list) == 1:
             open_tail_events += 1
             continue
@@ -8250,24 +8289,24 @@ def _status_import_parse_csv(csv_text, operator_lookup):
                 zero_or_negative_transitions += 1
                 continue
 
-            status_key_norm = _status_import_normalize_key(cur.get('state_key') or cur.get('state_name'))
+            status_key_norm = _status_import_normalize_key(cur.get('status_key') or cur.get('status_name'))
             is_work = status_key_norm in STATUS_IMPORT_WORK_KEYS
             is_break = status_key_norm in STATUS_IMPORT_BREAK_KEYS
             is_no_phone = status_key_norm == STATUS_IMPORT_NO_PHONE_KEY
 
             for part in _status_import_split_segment_by_day(cur_ts, next_ts):
                 segments.append({
-                    'operator_id': operator_id,
+                    'operator_id': int(operator_id),
                     'status_date': part['date'].strftime('%Y-%m-%d'),
                     'start_at': part['start'],
                     'end_at': part['end'],
                     'duration_sec': int(part['duration_sec']),
-                    'status_name': cur.get('state_name'),
-                    'status_key': cur.get('state_key'),
+                    'status_name': cur.get('status_name'),
+                    'status_key': cur.get('status_key'),
                     'raw_state_name': cur.get('raw_state_name'),
                     'raw_state_key': cur.get('raw_state_key'),
                     'state_note': cur.get('state_note'),
-                    'source_row': cur.get('row'),
+                    'source_row': cur.get('source_row'),
                     'is_work': is_work,
                     'is_break': is_break,
                     'is_no_phone': is_no_phone
@@ -8275,23 +8314,12 @@ def _status_import_parse_csv(csv_text, operator_lookup):
 
         open_tail_events += 1
 
-    events_for_db = [{
-        'operator_id': int(ev['operator_id']),
-        'event_at': ev['event_at'],
-        'status_name': str(ev.get('state_name') or '').strip(),
-        'status_key': _status_import_normalize_key(ev.get('state_key') or ev.get('state_name')),
-        'raw_state_name': str(ev.get('raw_state_name') or '').strip(),
-        'raw_state_key': _status_import_normalize_key(ev.get('raw_state_key') or ev.get('raw_state_name')),
-        'state_note': str(ev.get('state_note') or '').strip(),
-        'source_row': int(ev.get('row') or 0)
-    } for ev in parsed_events]
-
     return {
         'source_rows': int(source_rows),
         'valid_events': int(valid_events),
         'matched_events': len(events_for_db),
-        'invalid_rows_count': len(invalid_rows),
-        'invalid_rows_preview': invalid_rows[:30],
+        'invalid_rows_count': int(invalid_rows_count),
+        'invalid_rows_preview': invalid_rows_preview,
         'parse_errors_count': 0,
         'operators_count': len(events_by_operator),
         'open_tail_events': int(open_tail_events),
@@ -8681,6 +8709,13 @@ def _work_schedule_operator_requester():
     return requester_id, user_data, None
 
 
+def _ws_query_bool(name, default=False):
+    raw = request.args.get(name)
+    if raw is None:
+        return bool(default)
+    return str(raw).strip().lower() in ('1', 'true', 'yes', 'on', 'y')
+
+
 @app.route('/api/work_schedules/my', methods=['GET'])
 @require_api_key
 def get_my_work_schedules():
@@ -8703,7 +8738,13 @@ def get_my_work_schedules():
 
         start_date = request.args.get('start_date')
         end_date = request.args.get('end_date')
-        operator_schedule = db.get_operator_with_shifts(requester_id, start_date, end_date)
+        include_imported_statuses = _ws_query_bool('include_imported_statuses', default=False)
+        operator_schedule = db.get_operator_with_shifts(
+            requester_id,
+            start_date,
+            end_date,
+            include_imported_statuses=include_imported_statuses
+        )
         if not operator_schedule:
             return jsonify({"error": "Operator not found"}), 404
 
@@ -8735,11 +8776,13 @@ def get_direction_work_schedules():
 
         start_date = request.args.get('start_date')
         end_date = request.args.get('end_date')
+        include_imported_statuses = _ws_query_bool('include_imported_statuses', default=False)
 
         operators = db.get_operators_with_shifts(
             start_date=start_date,
             end_date=end_date,
-            direction_name=direction_name
+            direction_name=direction_name,
+            include_imported_statuses=include_imported_statuses
         )
         return jsonify({"operators": operators, "direction": direction_name}), 200
 
@@ -8952,6 +8995,7 @@ def get_operators_with_schedules():
       - start_date, end_date (optional, format: YYYY-MM-DD)
       - anchor_date (optional, format: YYYY-MM-DD; fallback for default range)
       - view_mode (optional: day/week/month; fallback for default range)
+      - include_imported_statuses (optional: 1/true/yes/on)
     """
     try:
         user = request.headers.get('X-User-Id')
@@ -9009,7 +9053,12 @@ def get_operators_with_schedules():
             if end_date_obj < start_date_obj:
                 return jsonify({"error": "end_date must be >= start_date"}), 400
         
-        operators = db.get_operators_with_shifts(start_date, end_date)
+        include_imported_statuses = _ws_query_bool('include_imported_statuses', default=False)
+        operators = db.get_operators_with_shifts(
+            start_date,
+            end_date,
+            include_imported_statuses=include_imported_statuses
+        )
         
         return jsonify({
             "operators": operators,
@@ -9880,6 +9929,8 @@ def import_work_schedules_statuses_csv():
     - operator_status_events (сырые события)
     - operator_status_segments (дневные интервалы для аналитики)
     """
+    lock_acquired = False
+    raw_bytes = b''
     try:
         requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
         if not requester_id:
@@ -9900,9 +9951,29 @@ def import_work_schedules_statuses_csv():
         if not file_name.lower().endswith('.csv'):
             return jsonify({"error": "Only .csv files are supported"}), 400
 
-        raw_bytes = file_storage.read()
+        content_length = request.content_length
+        if content_length is not None and int(content_length) > STATUS_IMPORT_MAX_FILE_SIZE_BYTES:
+            return jsonify({
+                "error": f"Файл слишком большой. Лимит: {STATUS_IMPORT_MAX_FILE_SIZE_MB} MB"
+            }), 413
+
+        if not STATUS_IMPORT_LOCK.acquire(blocking=False):
+            return jsonify({
+                "error": "Импорт статусов уже выполняется другим пользователем. Повторите через несколько секунд."
+            }), 429
+        lock_acquired = True
+
+        read_limit = int(STATUS_IMPORT_MAX_FILE_SIZE_BYTES) + 1
+        if getattr(file_storage, 'stream', None) is not None:
+            raw_bytes = file_storage.stream.read(read_limit)
+        else:
+            raw_bytes = file_storage.read(read_limit)
         if not raw_bytes:
             return jsonify({"error": "Файл пустой"}), 400
+        if len(raw_bytes) > STATUS_IMPORT_MAX_FILE_SIZE_BYTES:
+            return jsonify({
+                "error": f"Файл слишком большой. Лимит: {STATUS_IMPORT_MAX_FILE_SIZE_MB} MB"
+            }), 413
 
         csv_text = None
         for enc in ('utf-8-sig', 'cp1251'):
@@ -9915,7 +9986,12 @@ def import_work_schedules_statuses_csv():
             return jsonify({"error": "Не удалось декодировать CSV (поддерживаются UTF-8 и CP1251)"}), 400
 
         operator_lookup = _status_import_build_operator_lookup()
-        parsed = _status_import_parse_csv(csv_text, operator_lookup)
+        parsed = _status_import_parse_csv(
+            csv_text,
+            operator_lookup,
+            max_source_rows=STATUS_IMPORT_MAX_SOURCE_ROWS,
+            invalid_rows_preview_limit=STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT
+        )
 
         if not parsed.get('events'):
             return jsonify({
@@ -9955,7 +10031,8 @@ def import_work_schedules_statuses_csv():
                 'zero_or_negative_transitions': int(parsed.get('zero_or_negative_transitions') or 0),
                 'meta': {
                     'api': 'import_statuses_csv',
-                    'source_file_name': file_name
+                    'source_file_name': file_name,
+                    'file_size_bytes': len(raw_bytes or b'')
                 }
             }
         )
@@ -9968,11 +10045,16 @@ def import_work_schedules_statuses_csv():
             }
         }), 200
 
+    except OverflowError as e:
+        return jsonify({"error": str(e)}), 413
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error importing statuses csv: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
+    finally:
+        if lock_acquired:
+            STATUS_IMPORT_LOCK.release()
 
 
 def run_flask():
