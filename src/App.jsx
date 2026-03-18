@@ -5840,6 +5840,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const plannerLoadingMonthKeysRef = useRef(new Set());
             const plannerLoadedStatusRangeKeysRef = useRef(new Set());
             const plannerLoadingStatusRangeKeysRef = useRef(new Set());
+            const plannerActiveStatusWindowKeyRef = useRef('');
             const normalizedInitialOperatorsRef = useRef(normalizedInitialOperators);
             const editTimelineScrollRef = useRef(null);
             const editTimelineStatusNodeMapRef = useRef(new Map());
@@ -6327,6 +6328,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 plannerLoadingMonthKeysRef.current = new Set();
                 plannerLoadedStatusRangeKeysRef.current = new Set();
                 plannerLoadingStatusRangeKeysRef.current = new Set();
+                plannerActiveStatusWindowKeyRef.current = '';
             }, [user?.id, user?.role]);
 
             // Синхронизация метаданных операторов из parent (`users`) без потери графиков
@@ -6725,25 +6727,57 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, [currentDate]);
 
             const visibleRange = useMemo(() => (viewMode === 'day' ? dayRange : viewMode === 'week' ? weekRange : monthRange), [viewMode, dayRange, weekRange, monthRange]);
+            const plannerStatusFetchRange = useMemo(() => {
+                const baseDate = (currentDate instanceof Date && !Number.isNaN(currentDate.getTime()))
+                    ? currentDate
+                    : new Date();
+                const anchor = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate());
+                return {
+                    start: todayDateStr(addDays(anchor, -1)),
+                    end: todayDateStr(addDays(anchor, 1))
+                };
+            }, [currentDate]);
+            const plannerStatusFetchRangeKey = useMemo(
+                () => plannerStatusRangeKey(plannerStatusFetchRange?.start, plannerStatusFetchRange?.end),
+                [plannerStatusRangeKey, plannerStatusFetchRange?.start, plannerStatusFetchRange?.end]
+            );
             useEffect(() => {
                 if (!user?.id) return;
                 if (user?.role === 'operator') return;
                 if (plannerStatusAnomalyAnalysis) return;
-                if (!Array.isArray(visibleRange) || visibleRange.length === 0) return;
+                const rangeStart = String(plannerStatusFetchRange?.start || '').trim();
+                const rangeEnd = String(plannerStatusFetchRange?.end || '').trim();
+                const rangeKey = String(plannerStatusFetchRangeKey || '').trim();
+                if (!rangeStart || !rangeEnd || !rangeKey) return;
 
-                const rangeStart = String(visibleRange[0] || '').trim();
-                const rangeEnd = String(visibleRange[visibleRange.length - 1] || '').trim();
-                if (!rangeStart || !rangeEnd) return;
+                if (plannerActiveStatusWindowKeyRef.current !== rangeKey) {
+                    plannerActiveStatusWindowKeyRef.current = rangeKey;
+                    plannerLoadedStatusRangeKeysRef.current = new Set();
+                    plannerLoadingStatusRangeKeysRef.current = new Set();
+                    setOperators(prevOps => prevOps.map(op => clonePlannerOperator({
+                        ...op,
+                        importedStatusTimelineDays: {}
+                    })));
+                }
 
                 const abortController = new AbortController();
                 fetchPlannerImportedStatusesForRange(rangeStart, rangeEnd, {
-                    signal: abortController.signal
+                    signal: abortController.signal,
+                    force: true
                 }).catch(error => {
                     if (error?.name === 'AbortError') return;
                     console.error('Error loading imported statuses:', error);
                 });
                 return () => abortController.abort();
-            }, [user?.id, user?.role, visibleRange, plannerStatusAnomalyAnalysis, fetchPlannerImportedStatusesForRange]);
+            }, [
+                user?.id,
+                user?.role,
+                plannerStatusAnomalyAnalysis,
+                plannerStatusFetchRange?.start,
+                plannerStatusFetchRange?.end,
+                plannerStatusFetchRangeKey,
+                fetchPlannerImportedStatusesForRange
+            ]);
             const minutesInDay = 24 * 60;
             const computeLeftPercent = (m) => (m / minutesInDay) * 100;
             const cellMinWidth = viewMode === 'month' ? 110 : viewMode === 'week' ? 110 : undefined;
@@ -7460,9 +7494,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const reloadPlannerSchedulesFromServer = async () => {
                 plannerLoadedStatusRangeKeysRef.current = new Set();
                 plannerLoadingStatusRangeKeysRef.current = new Set();
+                plannerActiveStatusWindowKeyRef.current = '';
                 const schedulesPayload = await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
-                const rangeStart = String(visibleRange?.[0] || '').trim();
-                const rangeEnd = String(visibleRange?.[visibleRange.length - 1] || '').trim();
+                const rangeStart = String(plannerStatusFetchRange?.start || '').trim();
+                const rangeEnd = String(plannerStatusFetchRange?.end || '').trim();
                 if (rangeStart && rangeEnd) {
                     await fetchPlannerImportedStatusesForRange(rangeStart, rangeEnd, { force: true });
                 }
@@ -7815,8 +7850,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setPlannerStatusSpecialViewEnabled(true);
                     plannerLoadedStatusRangeKeysRef.current = new Set();
                     plannerLoadingStatusRangeKeysRef.current = new Set();
-                    const currentRangeStart = String(visibleRange?.[0] || '').trim();
-                    const currentRangeEnd = String(visibleRange?.[visibleRange.length - 1] || '').trim();
+                    plannerActiveStatusWindowKeyRef.current = '';
+                    const currentRangeStart = String(plannerStatusFetchRange?.start || '').trim();
+                    const currentRangeEnd = String(plannerStatusFetchRange?.end || '').trim();
                     if (currentRangeStart && currentRangeEnd) {
                         await fetchPlannerImportedStatusesForRange(currentRangeStart, currentRangeEnd, { force: true });
                     }
