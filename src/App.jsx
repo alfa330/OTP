@@ -21959,6 +21959,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             telegram_nick: normalizeTextForApi(editedUser.telegram_nick),
                             study_place: normalizeTextForApi(editedUser.study_place),
                             study_course: normalizeTextForApi(editedUser.study_course),
+                            card_number: normalizeTextForApi(editedUser.card_number),
                             close_contact_1_relation: normalizeTextForApi(editedUser.close_contact_1_relation),
                             close_contact_1_full_name: normalizeTextForApi(editedUser.close_contact_1_full_name),
                             close_contact_1_phone: normalizeTextForApi(editedUser.close_contact_1_phone),
@@ -21967,6 +21968,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             close_contact_2_phone: normalizeTextForApi(editedUser.close_contact_2_phone),
                             company_name: normalizeTextForApi(editedUser.company_name),
                             employment_type: normalizeEmploymentTypeForApi(editedUser.employment_type),
+                            internship_in_company: normalizeBoolForApi(editedUser.internship_in_company),
+                            front_office_training: normalizeBoolForApi(editedUser.front_office_training),
+                            front_office_training_date: normalizeBoolForApi(editedUser.front_office_training)
+                                ? normalizeDateForApi(editedUser.front_office_training_date)
+                                : null,
+                            taxipro_id: normalizeTextForApi(editedUser.taxipro_id),
                             has_proxy: normalizeBoolForApi(editedUser.has_proxy),
                             sip_number: isCreatedOperator ? normalizeTextForApi(editedUser.sip_number) : null,
                             status: isPeriodStatusValue(editedUser?.status) ? "working" : (editedUser.status || "working"),
@@ -22231,6 +22238,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
                         });
                     }
+                    const nextCardNumber = normalizeTextForApi(editedUser?.card_number);
+                    const prevCardNumber = normalizeTextForApi(userToEdit?.card_number);
+                    if (nextCardNumber !== prevCardNumber) {
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'card_number',
+                            value: nextCardNumber
+                        }, {
+                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        });
+                    }
                     const nextCloseContact1Relation = normalizeTextForApi(editedUser?.close_contact_1_relation);
                     const prevCloseContact1Relation = normalizeTextForApi(userToEdit?.close_contact_1_relation);
                     if (nextCloseContact1Relation !== prevCloseContact1Relation) {
@@ -22315,6 +22333,54 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             user_id: editedUser.id,
                             field: 'employment_type',
                             value: nextEmploymentType
+                        }, {
+                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        });
+                    }
+                    const nextInternshipInCompany = normalizeBoolForApi(editedUser?.internship_in_company);
+                    const prevInternshipInCompany = normalizeBoolForApi(userToEdit?.internship_in_company);
+                    if (nextInternshipInCompany !== prevInternshipInCompany) {
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'internship_in_company',
+                            value: nextInternshipInCompany
+                        }, {
+                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        });
+                    }
+                    const nextFrontOfficeTraining = normalizeBoolForApi(editedUser?.front_office_training);
+                    const prevFrontOfficeTraining = normalizeBoolForApi(userToEdit?.front_office_training);
+                    if (nextFrontOfficeTraining !== prevFrontOfficeTraining) {
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'front_office_training',
+                            value: nextFrontOfficeTraining
+                        }, {
+                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        });
+                    }
+                    const nextFrontOfficeTrainingDate = nextFrontOfficeTraining
+                        ? normalizeDateForApi(editedUser?.front_office_training_date)
+                        : null;
+                    const prevFrontOfficeTrainingDate = prevFrontOfficeTraining
+                        ? normalizeDateForApi(userToEdit?.front_office_training_date)
+                        : null;
+                    if (nextFrontOfficeTrainingDate !== prevFrontOfficeTrainingDate) {
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'front_office_training_date',
+                            value: nextFrontOfficeTrainingDate
+                        }, {
+                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        });
+                    }
+                    const nextTaxiproId = normalizeTextForApi(editedUser?.taxipro_id);
+                    const prevTaxiproId = normalizeTextForApi(userToEdit?.taxipro_id);
+                    if (nextTaxiproId !== prevTaxiproId) {
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'taxipro_id',
+                            value: nextTaxiproId
                         }, {
                             headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
                         });

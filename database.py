@@ -444,7 +444,12 @@ class Database:
                     ADD COLUMN IF NOT EXISTS close_contact_1_phone VARCHAR(50),
                     ADD COLUMN IF NOT EXISTS close_contact_2_relation VARCHAR(100),
                     ADD COLUMN IF NOT EXISTS close_contact_2_full_name VARCHAR(255),
-                    ADD COLUMN IF NOT EXISTS close_contact_2_phone VARCHAR(50);
+                    ADD COLUMN IF NOT EXISTS close_contact_2_phone VARCHAR(50),
+                    ADD COLUMN IF NOT EXISTS card_number VARCHAR(64),
+                    ADD COLUMN IF NOT EXISTS internship_in_company BOOLEAN NOT NULL DEFAULT FALSE,
+                    ADD COLUMN IF NOT EXISTS front_office_training BOOLEAN NOT NULL DEFAULT FALSE,
+                    ADD COLUMN IF NOT EXISTS front_office_training_date DATE,
+                    ADD COLUMN IF NOT EXISTS taxipro_id VARCHAR(128);
             """)
             cursor.execute("""
                 DO $$
@@ -1418,7 +1423,12 @@ class Database:
         close_contact_1_phone=None,
         close_contact_2_relation=None,
         close_contact_2_full_name=None,
-        close_contact_2_phone=None
+        close_contact_2_phone=None,
+        card_number=None,
+        internship_in_company=None,
+        front_office_training=None,
+        front_office_training_date=None,
+        taxipro_id=None
     ):
         if login is None:
             base_login = f"user_{str(uuid.uuid4())[:8]}"
@@ -1450,6 +1460,8 @@ class Database:
         close_contact_2_relation = str(close_contact_2_relation).strip() if close_contact_2_relation is not None else ""
         close_contact_2_full_name = str(close_contact_2_full_name).strip() if close_contact_2_full_name is not None else ""
         close_contact_2_phone = str(close_contact_2_phone).strip() if close_contact_2_phone is not None else ""
+        card_number = str(card_number).strip() if card_number is not None else ""
+        taxipro_id = str(taxipro_id).strip() if taxipro_id is not None else ""
 
         phone = phone or None
         email = email or None
@@ -1466,9 +1478,15 @@ class Database:
         close_contact_2_relation = close_contact_2_relation or None
         close_contact_2_full_name = close_contact_2_full_name or None
         close_contact_2_phone = close_contact_2_phone or None
+        card_number = card_number or None
+        taxipro_id = taxipro_id or None
         if employment_type not in (None, 'gph', 'of'):
             raise ValueError("Invalid employment_type")
         has_proxy_value = None if has_proxy is None else bool(has_proxy)
+        internship_in_company_value = None if internship_in_company is None else bool(internship_in_company)
+        front_office_training_value = None if front_office_training is None else bool(front_office_training)
+        if not front_office_training_value:
+            front_office_training_date = None
         if role_norm == 'trainer':
             direction_id = None
             supervisor_id = None
@@ -1491,9 +1509,10 @@ class Database:
                         instagram, telegram_nick, company_name, employment_type, has_proxy, sip_number,
                         study_place, study_course,
                         close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
-                        close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone
+                        close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
+                        card_number, internship_in_company, front_office_training, front_office_training_date, taxipro_id
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                 """, (
                     telegram_id, name, role, direction_id, rate, hire_date, supervisor_id,
@@ -1503,7 +1522,12 @@ class Database:
                     sip_number,
                     study_place, study_course,
                     close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
-                    close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone
+                    close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
+                    card_number,
+                    (internship_in_company_value if internship_in_company_value is not None else False),
+                    (front_office_training_value if front_office_training_value is not None else False),
+                    front_office_training_date,
+                    taxipro_id
                 ))
                 created_user_id = cursor.fetchone()[0]
                 _clear_trainer_links(created_user_id)
@@ -1533,7 +1557,12 @@ class Database:
                             close_contact_1_phone = COALESCE(%s, close_contact_1_phone),
                             close_contact_2_relation = COALESCE(%s, close_contact_2_relation),
                             close_contact_2_full_name = COALESCE(%s, close_contact_2_full_name),
-                            close_contact_2_phone = COALESCE(%s, close_contact_2_phone)
+                            close_contact_2_phone = COALESCE(%s, close_contact_2_phone),
+                            card_number = COALESCE(%s, card_number),
+                            internship_in_company = COALESCE(%s, internship_in_company),
+                            front_office_training = COALESCE(%s, front_office_training),
+                            front_office_training_date = COALESCE(%s, front_office_training_date),
+                            taxipro_id = COALESCE(%s, taxipro_id)
                         WHERE name = %s AND role = %s
                         RETURNING id
                     """, (
@@ -1542,6 +1571,7 @@ class Database:
                         study_place, study_course,
                         close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
                         close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
+                        card_number, internship_in_company_value, front_office_training_value, front_office_training_date, taxipro_id,
                         name, role
                     ))
                     result = cursor.fetchone()
@@ -1579,7 +1609,12 @@ class Database:
                             close_contact_1_phone = COALESCE(%s, close_contact_1_phone),
                             close_contact_2_relation = COALESCE(%s, close_contact_2_relation),
                             close_contact_2_full_name = COALESCE(%s, close_contact_2_full_name),
-                            close_contact_2_phone = COALESCE(%s, close_contact_2_phone)
+                            close_contact_2_phone = COALESCE(%s, close_contact_2_phone),
+                            card_number = COALESCE(%s, card_number),
+                            internship_in_company = COALESCE(%s, internship_in_company),
+                            front_office_training = COALESCE(%s, front_office_training),
+                            front_office_training_date = COALESCE(%s, front_office_training_date),
+                            taxipro_id = COALESCE(%s, taxipro_id)
                         WHERE telegram_id = %s
                         RETURNING id
                     """, (
@@ -1589,6 +1624,7 @@ class Database:
                         study_place, study_course,
                         close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
                         close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
+                        card_number, internship_in_company_value, front_office_training_value, front_office_training_date, taxipro_id,
                         telegram_id
                     ))
                     updated_user_id = cursor.fetchone()[0]
@@ -3712,7 +3748,12 @@ class Database:
             'close_contact_1_phone',
             'close_contact_2_relation',
             'close_contact_2_full_name',
-            'close_contact_2_phone'
+            'close_contact_2_phone',
+            'card_number',
+            'internship_in_company',
+            'front_office_training',
+            'front_office_training_date',
+            'taxipro_id'
         ]
         if field not in allowed_fields:
             raise ValueError("Invalid field to update")
@@ -4773,6 +4814,11 @@ class Database:
                         u.close_contact_2_relation,
                         u.close_contact_2_full_name,
                         u.close_contact_2_phone,
+                        u.card_number,
+                        COALESCE(u.internship_in_company, FALSE) as internship_in_company,
+                        COALESCE(u.front_office_training, FALSE) as front_office_training,
+                        u.front_office_training_date,
+                        u.taxipro_id,
                         u.supervisor_id
                     FROM users u
                     LEFT JOIN directions d ON u.direction_id = d.id
@@ -4815,8 +4861,13 @@ class Database:
                 "Ник Telegram",
                 "Место учебы",
                 "Курс",
+                "Номер карты",
                 "Наименование ТОО/ИП",
                 "Оформлен ГПХ/ОФ",
+                "Практика в компании",
+                "Обучение во фронт офисе",
+                "Дата обучения во фронт офисе",
+                "ID таксипро",
                 "Наличие прокси",
                 "SIP номер",
                 "Близкий 1: Кем приходится",
@@ -4835,8 +4886,8 @@ class Database:
                 (
                     name, login, role, direction, supervisor, status, rate, hire_date,
                     phone, email, instagram, telegram_nick,
-                    study_place, study_course,
-                    company_name, employment_type, has_proxy, sip_number,
+                    study_place, study_course, card_number,
+                    company_name, employment_type, internship_in_company, front_office_training, front_office_training_date, taxipro_id, has_proxy, sip_number,
                     close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
                     close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
                     sup_id
@@ -4857,8 +4908,13 @@ class Database:
                     telegram_nick or "",
                     study_place or "",
                     study_course or "",
+                    card_number or "",
                     company_name or "",
                     _format_employment(employment_type),
+                    _format_proxy(internship_in_company),
+                    _format_proxy(front_office_training),
+                    _format_date(front_office_training_date),
+                    taxipro_id or "",
                     _format_proxy(has_proxy),
                     sip_number or "",
                     close_contact_1_relation or "",
