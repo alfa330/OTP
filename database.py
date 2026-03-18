@@ -6975,6 +6975,122 @@ class Database:
                 'fine_sync': fine_sync_result
             }
 
+    def add_manual_fine_for_day(self, operator_id, day, amount, reason, comment=None):
+        operator_id_int = int(operator_id)
+        day_obj = self._normalize_schedule_date(day)
+
+        amount_value = round(float(amount or 0.0), 2)
+        if amount_value <= 0:
+            raise ValueError("amount must be greater than 0")
+
+        reason_norm = str(reason or '').strip()
+        if not reason_norm:
+            raise ValueError("reason is required")
+
+        comment_norm = str(comment or '').strip() or None
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id
+                FROM daily_hours
+                WHERE operator_id = %s AND day = %s
+                FOR UPDATE
+            """, (operator_id_int, day_obj))
+            row = cursor.fetchone()
+
+            if row:
+                daily_id = row[0]
+            else:
+                cursor.execute("""
+                    INSERT INTO daily_hours (
+                        operator_id,
+                        day,
+                        work_time,
+                        break_time,
+                        talk_time,
+                        calls,
+                        efficiency,
+                        training_time,
+                        late_minutes,
+                        early_leave_minutes,
+                        overtime_minutes,
+                        training_minutes,
+                        auto_aggregated,
+                        auto_aggregated_at
+                    )
+                    VALUES (
+                        %s, %s,
+                        0, 0, 0, 0, 0,
+                        0, 0, 0, 0, 0,
+                        TRUE, CURRENT_TIMESTAMP
+                    )
+                    ON CONFLICT (operator_id, day)
+                    DO UPDATE SET operator_id = EXCLUDED.operator_id
+                    RETURNING id
+                """, (operator_id_int, day_obj))
+                daily_id = cursor.fetchone()[0]
+
+            cursor.execute("""
+                INSERT INTO daily_fines (daily_hours_id, operator_id, day, amount, reason, comment)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (
+                daily_id,
+                operator_id_int,
+                day_obj,
+                amount_value,
+                reason_norm,
+                comment_norm
+            ))
+            fine_id = int(cursor.fetchone()[0])
+
+            cursor.execute("""
+                SELECT COALESCE(SUM(amount), 0)
+                FROM daily_fines
+                WHERE daily_hours_id = %s
+            """, (daily_id,))
+            total_fine_amount = float(cursor.fetchone()[0] or 0.0)
+
+            cursor.execute("""
+                SELECT reason, comment
+                FROM daily_fines
+                WHERE daily_hours_id = %s
+                ORDER BY id DESC
+                LIMIT 1
+            """, (daily_id,))
+            latest_fine_row = cursor.fetchone() or (None, None)
+            latest_reason = latest_fine_row[0]
+            latest_comment = latest_fine_row[1]
+
+            cursor.execute("""
+                UPDATE daily_hours
+                SET fine_amount = %s,
+                    fine_reason = %s,
+                    fine_comment = %s,
+                    created_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+            """, (
+                total_fine_amount,
+                latest_reason,
+                latest_comment,
+                daily_id
+            ))
+
+            self._aggregate_month_from_daily_tx(cursor, operator_id_int, day_obj.strftime('%Y-%m'))
+
+            return {
+                'operator_id': operator_id_int,
+                'day': day_obj.strftime('%Y-%m-%d'),
+                'daily_hours_id': str(daily_id),
+                'fine': {
+                    'id': fine_id,
+                    'amount': float(amount_value),
+                    'reason': reason_norm,
+                    'comment': comment_norm
+                },
+                'fine_total_for_day': float(total_fine_amount)
+            }
+
     def _resolve_breaks_for_day_replacement_tx(self, cursor, operator_id, shift_date, start_time, end_time, breaks):
         """
         Для replace-сценариев (bulk set_shift): если клиент прислал старые автоперерывы

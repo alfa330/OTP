@@ -5708,6 +5708,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [isLoading, setIsLoading] = useState(false);
             const [bulkActionState, setBulkActionState] = useState({ loading: false, action: '' });
             const [dayAggregateLoading, setDayAggregateLoading] = useState(false);
+            const [plannerAutoFlagActionLoading, setPlannerAutoFlagActionLoading] = useState('');
+            const [plannerTrainingModalState, setPlannerTrainingModalState] = useState({ open: false, operatorId: null, date: null });
+            const [plannerTrainingActionLoading, setPlannerTrainingActionLoading] = useState(false);
+            const [plannerFineModalState, setPlannerFineModalState] = useState({
+                open: false,
+                operatorId: null,
+                date: null,
+                reason: '',
+                minutes: '',
+                amount: '',
+                comment: ''
+            });
+            const [plannerFineActionLoading, setPlannerFineActionLoading] = useState(false);
             const [excelTransferState, setExcelTransferState] = useState({ importing: false, exporting: false });
             const [excelImportReport, setExcelImportReport] = useState(null);
             const [showPlannerStatusAnomalyModal, setShowPlannerStatusAnomalyModal] = useState(false);
@@ -8221,6 +8234,214 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             };
 
+            const resolvePlannerAutoFlag = async (flagType, action) => {
+                const operatorId = Number(modalState?.opId);
+                const dayKey = String(modalState?.date || '').trim();
+                if (!Number.isFinite(operatorId) || !dayKey || isBulkSelectionModal) return;
+
+                const actionKey = `${String(flagType || '').trim()}:${String(action || '').trim()}`;
+                setPlannerAutoFlagActionLoading(actionKey);
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/auto_flags/resolve`, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: withAccessTokenHeader({
+                            'Content-Type': 'application/json'
+                        }),
+                        body: JSON.stringify({
+                            operator_id: operatorId,
+                            day: dayKey,
+                            flag_type: flagType,
+                            action
+                        })
+                    });
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(payload?.error || `HTTP ${response.status}`);
+                    }
+
+                    await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
+                    emitAppToast('Статус флага обновлен', 'success');
+                } catch (error) {
+                    console.error('Error resolving planner auto flag:', error);
+                    emitAppToast(`Ошибка подтверждения: ${error?.message || error}`, 'error');
+                } finally {
+                    setPlannerAutoFlagActionLoading('');
+                }
+            };
+
+            const openPlannerTrainingModalForCurrentDay = () => {
+                const operatorId = Number(modalState?.opId);
+                const dayKey = String(modalState?.date || '').trim();
+                if (!Number.isFinite(operatorId) || !dayKey || isBulkSelectionModal) return;
+                setPlannerTrainingModalState({
+                    open: true,
+                    operatorId,
+                    date: dayKey
+                });
+            };
+
+            const closePlannerTrainingModal = () => {
+                setPlannerTrainingModalState({
+                    open: false,
+                    operatorId: null,
+                    date: null
+                });
+            };
+
+            const handlePlannerTrainingSave = async (data) => {
+                const operatorId = Number(plannerTrainingModalState?.operatorId);
+                if (!Number.isFinite(operatorId)) return;
+
+                setPlannerTrainingActionLoading(true);
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/trainings`, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: withAccessTokenHeader({
+                            'Content-Type': 'application/json'
+                        }),
+                        body: JSON.stringify({
+                            ...data,
+                            operator_id: operatorId
+                        })
+                    });
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(payload?.error || `HTTP ${response.status}`);
+                    }
+                    emitAppToast('Тренинг добавлен', 'success');
+                    closePlannerTrainingModal();
+                } catch (error) {
+                    console.error('Error saving planner training:', error);
+                    emitAppToast(`Ошибка сохранения тренинга: ${error?.message || error}`, 'error');
+                    throw error;
+                } finally {
+                    setPlannerTrainingActionLoading(false);
+                }
+            };
+
+            const openPlannerFineModalForCurrentDay = () => {
+                const operatorId = Number(modalState?.opId);
+                const dayKey = String(modalState?.date || '').trim();
+                if (!Number.isFinite(operatorId) || !dayKey || isBulkSelectionModal) return;
+                setPlannerFineModalState({
+                    open: true,
+                    operatorId,
+                    date: dayKey,
+                    reason: '',
+                    minutes: '',
+                    amount: '',
+                    comment: ''
+                });
+            };
+
+            const closePlannerFineModal = () => {
+                setPlannerFineModalState({
+                    open: false,
+                    operatorId: null,
+                    date: null,
+                    reason: '',
+                    minutes: '',
+                    amount: '',
+                    comment: ''
+                });
+            };
+
+            const updatePlannerFineDraftField = (field, value) => {
+                setPlannerFineModalState(prev => {
+                    const next = { ...(prev || {}) };
+                    if (field === 'reason') {
+                        next.reason = String(value || '');
+                        if (next.reason === 'Не выход') {
+                            next.minutes = '';
+                            next.amount = '10000';
+                        } else if (next.reason === 'Прокси карта') {
+                            next.minutes = '';
+                            next.amount = '5000';
+                        } else if (next.reason === 'Опоздание') {
+                            const mins = Math.max(0, Number(next.minutes || 0));
+                            next.amount = String(Math.round(mins * 50));
+                        }
+                        return next;
+                    }
+                    if (field === 'minutes') {
+                        const mins = Math.max(0, Number(value || 0));
+                        next.minutes = String(Math.round(mins));
+                        if (String(next.reason || '') === 'Опоздание') {
+                            next.amount = String(Math.round(mins * 50));
+                        }
+                        return next;
+                    }
+                    next[field] = value;
+                    return next;
+                });
+            };
+
+            const submitPlannerFineForCurrentDay = async () => {
+                const operatorId = Number(plannerFineModalState?.operatorId);
+                const dayKey = String(plannerFineModalState?.date || '').trim();
+                const reason = String(plannerFineModalState?.reason || '').trim();
+                const comment = String(plannerFineModalState?.comment || '').trim();
+                if (!Number.isFinite(operatorId) || !dayKey) {
+                    emitAppToast('Не удалось определить оператора или дату', 'error');
+                    return;
+                }
+                if (!reason) {
+                    emitAppToast('Выберите причину штрафа', 'error');
+                    return;
+                }
+
+                let amount = Number(plannerFineModalState?.amount || 0);
+                if (reason === 'Опоздание') {
+                    const mins = Math.max(0, Number(plannerFineModalState?.minutes || 0));
+                    if (!Number.isFinite(mins) || mins <= 0) {
+                        emitAppToast('Укажите минуты опоздания', 'error');
+                        return;
+                    }
+                    amount = mins * 50;
+                } else if (reason === 'Не выход') {
+                    amount = 10000;
+                } else if (reason === 'Прокси карта') {
+                    amount = 5000;
+                }
+                amount = Number(amount);
+                if (!Number.isFinite(amount) || amount <= 0) {
+                    emitAppToast('Сумма штрафа должна быть больше нуля', 'error');
+                    return;
+                }
+
+                setPlannerFineActionLoading(true);
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/fines`, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: withAccessTokenHeader({
+                            'Content-Type': 'application/json'
+                        }),
+                        body: JSON.stringify({
+                            operator_id: operatorId,
+                            day: dayKey,
+                            amount,
+                            reason,
+                            comment: comment || null
+                        })
+                    });
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(payload?.error || `HTTP ${response.status}`);
+                    }
+
+                    emitAppToast('Штраф добавлен', 'success');
+                    closePlannerFineModal();
+                } catch (error) {
+                    console.error('Error saving planner fine:', error);
+                    emitAppToast(`Ошибка сохранения штрафа: ${error?.message || error}`, 'error');
+                } finally {
+                    setPlannerFineActionLoading(false);
+                }
+            };
+
             const saveSegment = async ({ opId, date, start, end, editIndex = null, breaks = null }) => {
                 try {
                   // найдём оператора в текущем state
@@ -8584,6 +8805,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (!modalState?.opId || !modalState?.date) return null;
                 const op = operators.find(o => o.id === modalState.opId);
                 return getPlannerScheduleStatusForDate(op, modalState.date);
+            }, [isBulkSelectionModal, modalState?.opId, modalState?.date, operators]);
+            const modalAggregatedFlags = useMemo(() => {
+                if (isBulkSelectionModal) return null;
+                if (!modalState?.opId || !modalState?.date) return null;
+                const op = operators.find(o => o.id === modalState.opId);
+                return getPlannerAggregatedFlagsForDate(op, modalState.date);
             }, [isBulkSelectionModal, modalState?.opId, modalState?.date, operators]);
             const dayViewBreaksDateStr = todayDateStr(new Date(currentDate));
             const dayBreaksByOperator = useMemo(() => {
@@ -13115,6 +13342,121 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     </div>
                     )}
 
+                    {!isBulkSelectionModal && !modalState.multipleDates && (
+                    <div className="mb-6 p-4 rounded-xl border border-amber-200 bg-amber-50/60">
+                        <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+                            <h4 className="text-sm font-semibold text-slate-900 flex items-center gap-2">
+                                <FaIcon className="fas fa-shield-alt text-amber-600"></FaIcon>
+                                Подтверждение и санкции
+                            </h4>
+                            <div className="flex flex-wrap items-center gap-2">
+                                <button
+                                    type="button"
+                                    onClick={openPlannerTrainingModalForCurrentDay}
+                                    disabled={plannerTrainingActionLoading}
+                                    className="px-3 py-1.5 rounded-md border border-blue-200 bg-white hover:bg-blue-50 text-blue-700 text-xs font-semibold disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-1.5"
+                                >
+                                    <FaIcon className={`fas ${plannerTrainingActionLoading ? 'fa-spinner fa-spin' : 'fa-chalkboard-teacher'}`}></FaIcon>
+                                    Добавить тренинг
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={openPlannerFineModalForCurrentDay}
+                                    disabled={plannerFineActionLoading}
+                                    className="px-3 py-1.5 rounded-md border border-rose-200 bg-white hover:bg-rose-50 text-rose-700 text-xs font-semibold disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-1.5"
+                                >
+                                    <FaIcon className={`fas ${plannerFineActionLoading ? 'fa-spinner fa-spin' : 'fa-exclamation-triangle'}`}></FaIcon>
+                                    Добавить штраф
+                                </button>
+                            </div>
+                        </div>
+
+                        <div className="space-y-2">
+                            {[
+                                {
+                                    key: 'late',
+                                    label: 'Опоздание',
+                                    minutes: Number(modalAggregatedFlags?.lateMinutes || 0),
+                                    status: modalAggregatedFlags?.lateStatus || null
+                                },
+                                {
+                                    key: 'early_leave',
+                                    label: 'Ранний уход',
+                                    minutes: Number(modalAggregatedFlags?.earlyLeaveMinutes || 0),
+                                    status: modalAggregatedFlags?.earlyLeaveStatus || null
+                                },
+                                {
+                                    key: 'training',
+                                    label: 'Тренинг (по статусам)',
+                                    minutes: Number(modalAggregatedFlags?.trainingMinutes || 0),
+                                    status: modalAggregatedFlags?.trainingStatus || null
+                                }
+                            ].map(item => {
+                                const minutes = Math.max(0, Math.round(item.minutes || 0));
+                                const status = String(item.status || '').trim().toLowerCase();
+                                const hasMinutes = minutes > 0;
+                                const busyConfirm = plannerAutoFlagActionLoading === `${item.key}:confirm`;
+                                const busyReject = plannerAutoFlagActionLoading === `${item.key}:reject`;
+                                const anyBusy = Boolean(plannerAutoFlagActionLoading);
+                                const statusLabel = status === 'confirmed'
+                                    ? 'Подтверждено'
+                                    : status === 'rejected'
+                                        ? 'Отклонено'
+                                        : hasMinutes
+                                            ? 'Не подтверждено'
+                                            : 'Нет данных';
+                                const statusClass = status === 'confirmed'
+                                    ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                                    : status === 'rejected'
+                                        ? 'border-slate-300 bg-slate-100 text-slate-600'
+                                        : hasMinutes
+                                            ? 'border-amber-200 bg-amber-50 text-amber-700'
+                                            : 'border-slate-200 bg-white text-slate-500';
+
+                                return (
+                                    <div key={`planner-auto-flag-${item.key}`} className="rounded-lg border border-slate-200 bg-white px-3 py-2 flex flex-wrap items-center gap-2">
+                                        <div className="min-w-[180px] text-sm font-medium text-slate-800">{item.label}</div>
+                                        <div className="text-xs text-slate-600 tabular-nums">{minutes} мин</div>
+                                        <span className={`px-2 py-0.5 rounded-full border text-[11px] font-semibold ${statusClass}`}>
+                                            {statusLabel}
+                                        </span>
+                                        <div className="ml-auto flex items-center gap-2">
+                                            <button
+                                                type="button"
+                                                onClick={() => resolvePlannerAutoFlag(item.key, 'confirm')}
+                                                disabled={!hasMinutes || anyBusy}
+                                                className="px-2.5 py-1 rounded-md border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
+                                            >
+                                                <FaIcon className={`fas ${busyConfirm ? 'fa-spinner fa-spin' : 'fa-check'}`}></FaIcon>
+                                                Подтвердить
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={() => resolvePlannerAutoFlag(item.key, 'reject')}
+                                                disabled={!hasMinutes || anyBusy}
+                                                className="px-2.5 py-1 rounded-md border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
+                                            >
+                                                <FaIcon className={`fas ${busyReject ? 'fa-spinner fa-spin' : 'fa-times'}`}></FaIcon>
+                                                Отклонить
+                                            </button>
+                                        </div>
+                                    </div>
+                                );
+                            })}
+
+                            <div className="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2">
+                                <div className="min-w-[180px] text-sm font-medium text-slate-800">Переработка</div>
+                                <div className="text-xs text-slate-600 tabular-nums">
+                                    {Math.max(0, Math.round(Number(modalAggregatedFlags?.overtimeMinutes || 0)))} мин
+                                </div>
+                                <span className="px-2 py-0.5 rounded-full border border-slate-200 bg-slate-50 text-[11px] font-semibold text-slate-600">
+                                    Без подтверждения
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+                    )}
+
                     {isBulkSelectionModal && (
                     <div className="mb-6">
                         <h4 className="text-sm font-semibold text-slate-900 mb-4 flex items-center gap-2">
@@ -13468,6 +13810,125 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     </div>
                     </>
                 </SimpleModal>
+
+                {(() => {
+                    const PlannerTrainingModalComponent = (typeof window !== 'undefined') ? window.TrainingModal : null;
+                    if (!PlannerTrainingModalComponent || !plannerTrainingModalState?.open) return null;
+                    return (
+                        <PlannerTrainingModalComponent
+                            isOpen={plannerTrainingModalState.open}
+                            onClose={closePlannerTrainingModal}
+                            onSave={handlePlannerTrainingSave}
+                            initialData={{ date: plannerTrainingModalState.date || '' }}
+                        />
+                    );
+                })()}
+
+                {plannerFineModalState.open && (
+                    <SimpleModal
+                        open={plannerFineModalState.open}
+                        onClose={closePlannerFineModal}
+                        panelClassName="w-[560px] max-w-[calc(100vw-1rem)]"
+                    >
+                        <div className="mb-4 pb-3 border-b border-slate-200">
+                            <div className="flex items-center justify-between gap-3">
+                                <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                                    <FaIcon className="fas fa-exclamation-triangle text-rose-600"></FaIcon>
+                                    Добавить штраф
+                                </h3>
+                                <button
+                                    type="button"
+                                    onClick={closePlannerFineModal}
+                                    className="w-8 h-8 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 flex items-center justify-center"
+                                >
+                                    <FaIcon className="fas fa-times"></FaIcon>
+                                </button>
+                            </div>
+                            <div className="mt-1 text-xs text-slate-500">
+                                Дата: {plannerFineModalState.date || '—'}
+                            </div>
+                        </div>
+
+                        <div className="space-y-3">
+                            <div>
+                                <label className="block text-xs font-medium text-slate-600 mb-1">Причина</label>
+                                <select
+                                    value={plannerFineModalState.reason || ''}
+                                    onChange={(e) => updatePlannerFineDraftField('reason', e.target.value)}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                >
+                                    <option value="">Выберите причину</option>
+                                    <option value="Корп такси">Корп такси</option>
+                                    <option value="Опоздание">Опоздание</option>
+                                    <option value="Прокси карта">Прокси карта</option>
+                                    <option value="Не выход">Не выход</option>
+                                    <option value="Другое">Другое</option>
+                                </select>
+                            </div>
+
+                            {String(plannerFineModalState.reason || '') === 'Опоздание' && (
+                                <div>
+                                    <label className="block text-xs font-medium text-slate-600 mb-1">Минут опоздания</label>
+                                    <input
+                                        type="number"
+                                        min="0"
+                                        value={plannerFineModalState.minutes}
+                                        onChange={(e) => updatePlannerFineDraftField('minutes', e.target.value)}
+                                        className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        placeholder="0"
+                                    />
+                                    <div className="mt-1 text-[11px] text-slate-500">
+                                        Сумма считается автоматически: минуты × 50
+                                    </div>
+                                </div>
+                            )}
+
+                            <div>
+                                <label className="block text-xs font-medium text-slate-600 mb-1">Сумма</label>
+                                <input
+                                    type="number"
+                                    min="0"
+                                    value={plannerFineModalState.amount}
+                                    onChange={(e) => updatePlannerFineDraftField('amount', e.target.value)}
+                                    disabled={String(plannerFineModalState.reason || '') === 'Опоздание' || String(plannerFineModalState.reason || '') === 'Не выход' || String(plannerFineModalState.reason || '') === 'Прокси карта'}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-slate-100 disabled:text-slate-500"
+                                    placeholder="0"
+                                />
+                            </div>
+
+                            <div>
+                                <label className="block text-xs font-medium text-slate-600 mb-1">Комментарий</label>
+                                <textarea
+                                    rows={3}
+                                    value={plannerFineModalState.comment || ''}
+                                    onChange={(e) => updatePlannerFineDraftField('comment', e.target.value)}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y"
+                                    placeholder="Комментарий (необязательно)"
+                                />
+                            </div>
+                        </div>
+
+                        <div className="mt-5 pt-4 border-t border-slate-200 flex items-center justify-end gap-2">
+                            <button
+                                type="button"
+                                onClick={closePlannerFineModal}
+                                disabled={plannerFineActionLoading}
+                                className="px-4 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed"
+                            >
+                                Отмена
+                            </button>
+                            <button
+                                type="button"
+                                onClick={submitPlannerFineForCurrentDay}
+                                disabled={plannerFineActionLoading}
+                                className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
+                            >
+                                <FaIcon className={`fas ${plannerFineActionLoading ? 'fa-spinner fa-spin' : 'fa-save'}`}></FaIcon>
+                                {plannerFineActionLoading ? 'Сохраняем...' : 'Сохранить штраф'}
+                            </button>
+                        </div>
+                    </SimpleModal>
+                )}
 
                 {showEditStatusJournal && modalState.open && !isBulkSelectionModal && modalState.opId && modalState.date && (() => {
                     const journalOp = operators.find(o => o.id === modalState.opId);

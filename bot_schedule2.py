@@ -9678,6 +9678,78 @@ def resolve_work_schedule_auto_flag():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/work_schedules/fines', methods=['POST'])
+@require_api_key
+def add_work_schedule_fine():
+    """
+    Добавить ручной штраф за день оператору из интерфейса графиков.
+    Body: {
+        "operator_id": int,
+        "day": "YYYY-MM-DD" | "date": "YYYY-MM-DD",
+        "amount": number,
+        "reason": string,
+        "comment": string(optional)
+    }
+    """
+    try:
+        requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        requester_id = int(requester_id)
+        user_data = db.get_user(id=requester_id)
+        if not user_data:
+            return jsonify({"error": "User not found"}), 404
+
+        requester_role = str(user_data[3] or '').strip().lower()
+        if requester_role not in ('admin', 'sv'):
+            return jsonify({"error": "Forbidden"}), 403
+
+        data = request.get_json(silent=True) or {}
+        operator_id = data.get('operator_id')
+        day = data.get('day') or data.get('date')
+        amount = data.get('amount')
+        reason = data.get('reason')
+        comment = data.get('comment')
+
+        if operator_id is None or not day:
+            return jsonify({"error": "operator_id and day are required"}), 400
+
+        operator_id_int = int(operator_id)
+        operator_data = db.get_user(id=operator_id_int)
+        if not operator_data or str(operator_data[3] or '').strip().lower() != 'operator':
+            return jsonify({"error": "Operator not found"}), 404
+
+        # supervisor_id в get_user находится в позиции 6
+        operator_supervisor_id = operator_data[6]
+        if requester_role == 'sv' and operator_supervisor_id != requester_id:
+            return jsonify({"error": "Forbidden for this operator"}), 403
+
+        allowed_reasons = {'Корп такси', 'Опоздание', 'Прокси карта', 'Не выход', 'Другое'}
+        reason_text = str(reason or '').strip()
+        if reason_text not in allowed_reasons:
+            return jsonify({"error": "Invalid fine reason"}), 400
+
+        result = db.add_manual_fine_for_day(
+            operator_id=operator_id_int,
+            day=day,
+            amount=amount,
+            reason=reason_text,
+            comment=comment
+        )
+
+        return jsonify({
+            "message": "Fine added successfully",
+            "result": result
+        }), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error adding work schedule fine: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/api/work_schedules/export_excel', methods=['GET'])
 @require_api_key
 def export_work_schedules_excel():
