@@ -10481,7 +10481,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 className="px-3.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium inline-flex items-center gap-1.5 transition-colors shadow-sm"
                                             >
                                                 <FaIcon className="fas fa-plus text-xs"></FaIcon>
-                                                Новый запрос
+                                                Новый запрос+
                                             </button>
                                             <button
                                                 onClick={() => loadSwapRequests({ silent: false })}
@@ -11083,29 +11083,34 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     )}
                                     {operatorSelfTab === 'swaps' && (
                                         <div className="space-y-0 sm:space-y-3 pb-2">
-                                            <div className="bg-white rounded-none sm:rounded-xl border-y sm:border border-slate-200 shadow-sm overflow-hidden mb-3 sm:mb-0">
-                                                <button
-                                                    type="button"
-                                                    onClick={() => {
-                                                        setShowSwapCreateModal(v => !v);
-                                                        if (showSwapCreateModal) setSwapCandidatesSearch('');
-                                                    }}
-                                                    className="w-full flex items-center justify-between px-4 py-3 hover:bg-slate-50 transition-colors text-left"
-                                                >
-                                                    <div className="flex items-center gap-2.5 min-w-0">
-                                                        <div className="w-7 h-7 rounded-lg bg-blue-50 border border-blue-200 flex items-center justify-center flex-shrink-0">
-                                                            <FaIcon className="fas fa-plus text-blue-600 text-xs"></FaIcon>
-                                                        </div>
+                                            <SimpleModal
+                                                open={showSwapCreateModal}
+                                                onClose={() => {
+                                                    setShowSwapCreateModal(false);
+                                                    setSwapCandidatesSearch('');
+                                                }}
+                                                panelClassName="w-[calc(100vw-1rem)] max-w-[1200px] p-0 rounded-xl"
+                                            >
+                                                <div className="p-4 sm:p-5 space-y-4">
+                                                    <div className="flex items-start justify-between gap-3 pb-3 border-b border-slate-200">
                                                         <div className="min-w-0">
-                                                            <div className="text-sm font-semibold text-slate-900">Создать запрос на замену</div>
-                                                            <div className="text-xs text-slate-500">{swapDraftRequests.length > 0 ? `В очереди: ${swapDraftRequests.length} запр.` : `Доступных дат: ${mySwapSourceShiftDays.length}`}</div>
+                                                            <div className="text-base font-semibold text-slate-900">Создать запрос на замену</div>
+                                                            <div className="text-xs text-slate-500">
+                                                                {swapDraftRequests.length > 0 ? `В очереди: ${swapDraftRequests.length} запр.` : `Доступных дат: ${mySwapSourceShiftDays.length}`}
+                                                            </div>
                                                         </div>
-                                                        {swapDraftRequests.length > 0 && <span className="px-1.5 py-0.5 rounded-full bg-amber-500 text-white text-[10px] font-bold leading-none ml-2">{swapDraftRequests.length}</span>}
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => {
+                                                                setShowSwapCreateModal(false);
+                                                                setSwapCandidatesSearch('');
+                                                            }}
+                                                            className="w-8 h-8 rounded-md border border-slate-300 text-slate-500 hover:bg-slate-100 inline-flex items-center justify-center"
+                                                            aria-label="Закрыть окно создания запроса"
+                                                        >
+                                                            <FaIcon className="fas fa-times text-sm"></FaIcon>
+                                                        </button>
                                                     </div>
-                                                    <FaIcon className={`fas fa-chevron-${showSwapCreateModal ? 'up' : 'down'} text-xs text-slate-400 flex-shrink-0`}></FaIcon>
-                                                </button>
-                                                {showSwapCreateModal && (
-                                                <div className="border-t border-slate-100 p-4 space-y-4">
                                                 <div>
                                                 <div className="flex items-center gap-2 mb-2.5">
                                                     <span className="w-5 h-5 rounded-full bg-blue-600 text-white text-[10px] font-bold flex items-center justify-center flex-shrink-0 leading-none">1</span>
@@ -11671,8 +11676,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     )}
                                                 </div>
                                                 </div>
-                                                )}
-                                            </div>
+                                            </SimpleModal>
 
                                             {swapRequestsError && (
                                                 <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl p-4 text-sm">
