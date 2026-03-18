@@ -5571,7 +5571,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             );
             }
 
-            function SimpleModal({ open, onClose, children, panelClassName = '' }) {
+            function SimpleModal({ open, onClose, children, panelClassName = '', fullScreenOnMobile = false }) {
             const [mounted, setMounted] = useState(open);
             const [show, setShow] = useState(false);
             useEffect(() => {
@@ -5588,14 +5588,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             if (!mounted) return null;
 
+            const wrapperClass = fullScreenOnMobile
+                ? 'fixed inset-0 z-50 flex items-stretch sm:items-center sm:justify-center'
+                : 'fixed inset-0 z-50 flex items-center justify-center';
+
+            const panelBaseClass = fullScreenOnMobile
+                ? `bg-white z-60 w-full h-full sm:h-auto rounded-none sm:rounded p-0 sm:max-h-[calc(100vh-2rem)] overflow-y-auto overflow-x-hidden shadow-lg transform transition-all duration-200 ${show ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-3 scale-95'}`
+                : `bg-white rounded p-4 z-60 max-h-[calc(100vh-2rem)] overflow-y-auto overflow-x-hidden shadow-lg transform transition-all duration-200 ${show ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-3 scale-95'}`;
+
+            const panelResolvedClass = panelClassName || (fullScreenOnMobile ? 'sm:w-[720px] sm:max-w-[calc(100vw-1rem)]' : 'w-[720px] max-w-[calc(100vw-1rem)]');
+
             return (
-                <div className="fixed inset-0 z-50 flex items-center justify-center">
+                <div className={wrapperClass}>
                 <div
                     className={`absolute inset-0 bg-black/40 transition-opacity duration-200 ${show ? 'opacity-100' : 'opacity-0'}`}
                     onClick={onClose}
                 />
                 <div
-                    className={`bg-white rounded p-4 z-60 ${panelClassName || 'w-[720px] max-w-[calc(100vw-1rem)]'} max-h-[calc(100vh-2rem)] overflow-y-auto overflow-x-hidden shadow-lg transform transition-all duration-200 ${show ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-3 scale-95'}`}
+                    className={`${panelBaseClass} ${panelResolvedClass}`}
                     role="dialog"
                     aria-modal="true"
                 >
@@ -11189,7 +11199,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     setShowSwapCreateModal(false);
                                                     setSwapCandidatesSearch('');
                                                 }}
-                                                panelClassName="w-[calc(100vw-1rem)] max-w-[1200px] p-0 rounded-xl"
+                                                fullScreenOnMobile={true}
+                                                panelClassName="sm:w-[calc(100vw-1rem)] max-w-[1200px] p-0 sm:rounded-xl"
                                             >
                                                 <div className="p-4 sm:p-5 space-y-4">
                                                     <div className="flex items-start justify-between gap-3 pb-3 border-b border-slate-200">
