@@ -2247,7 +2247,12 @@ def get_admin_users():
                         u.close_contact_1_phone,
                         u.close_contact_2_relation,
                         u.close_contact_2_full_name,
-                        u.close_contact_2_phone
+                        u.close_contact_2_phone,
+                        u.card_number,
+                        COALESCE(u.internship_in_company, FALSE) as internship_in_company,
+                        COALESCE(u.front_office_training, FALSE) as front_office_training,
+                        u.front_office_training_date,
+                        u.taxipro_id
                     FROM users u
                     LEFT JOIN directions d ON u.direction_id = d.id
                     LEFT JOIN users s ON u.supervisor_id = s.id
@@ -2320,7 +2325,12 @@ def get_admin_users():
                         "close_contact_1_phone": row[33] or "",
                         "close_contact_2_relation": row[34] or "",
                         "close_contact_2_full_name": row[35] or "",
-                        "close_contact_2_phone": row[36] or ""
+                        "close_contact_2_phone": row[36] or "",
+                        "card_number": row[37] or "",
+                        "internship_in_company": bool(row[38]) if row[38] is not None else False,
+                        "front_office_training": bool(row[39]) if row[39] is not None else False,
+                        "front_office_training_date": row[40].strftime('%Y-%m-%d') if row[40] else None,
+                        "taxipro_id": row[41] or ""
                     })
         return jsonify({"status": "success", "users": users}), 200
     except Exception as e:
@@ -2372,7 +2382,7 @@ def admin_update_user():
                     return jsonify({"error": "Invalid rate value"}), 400
             except ValueError:
                 return jsonify({"error": "Invalid rate format"}), 400
-        elif field in ['hire_date', 'birth_date']:
+        elif field in ['hire_date', 'birth_date', 'front_office_training_date']:
             if value:
                 try:
                     datetime.strptime(value, '%Y-%m-%d')
@@ -2399,7 +2409,9 @@ def admin_update_user():
             'close_contact_1_phone',
             'close_contact_2_relation',
             'close_contact_2_full_name',
-            'close_contact_2_phone'
+            'close_contact_2_phone',
+            'card_number',
+            'taxipro_id'
         ]:
             value = str(value).strip() if value is not None else ''
             value = value or None
@@ -2414,7 +2426,7 @@ def admin_update_user():
             value = value or None
             if value not in [None, 'gph', 'of']:
                 return jsonify({"error": "Invalid employment_type value"}), 400
-        elif field == 'has_proxy':
+        elif field in ['has_proxy', 'internship_in_company', 'front_office_training']:
             if isinstance(value, bool):
                 pass
             elif isinstance(value, (int, float)):
@@ -2426,11 +2438,11 @@ def admin_update_user():
                 elif value_normalized in ['0', 'false', 'no', 'n', 'off', '']:
                     value = False
                 else:
-                    return jsonify({"error": "Invalid has_proxy value"}), 400
+                    return jsonify({"error": f"Invalid {field} value"}), 400
             elif value is None:
                 value = False
             else:
-                return jsonify({"error": "Invalid has_proxy value"}), 400
+                return jsonify({"error": f"Invalid {field} value"}), 400
         else:
             return jsonify({"error": "Invalid field"}), 400
 
@@ -5328,6 +5340,8 @@ def add_user():
         close_contact_2_relation = str(data.get('close_contact_2_relation') or '').strip() or None
         close_contact_2_full_name = str(data.get('close_contact_2_full_name') or '').strip() or None
         close_contact_2_phone = str(data.get('close_contact_2_phone') or '').strip() or None
+        card_number = str(data.get('card_number') or '').strip() or None
+        taxipro_id = str(data.get('taxipro_id') or '').strip() or None
 
         if phone and not _is_valid_kz_phone(phone):
             return jsonify({"error": "Invalid phone format. Use +7XXXXXXXXX"}), 400
@@ -5335,6 +5349,53 @@ def add_user():
             return jsonify({"error": "Invalid close_contact_1_phone format. Use +7XXXXXXXXX"}), 400
         if close_contact_2_phone and not _is_valid_kz_phone(close_contact_2_phone):
             return jsonify({"error": "Invalid close_contact_2_phone format. Use +7XXXXXXXXX"}), 400
+
+        internship_in_company_raw = data.get('internship_in_company')
+        if isinstance(internship_in_company_raw, bool):
+            internship_in_company = internship_in_company_raw
+        elif isinstance(internship_in_company_raw, (int, float)):
+            internship_in_company = bool(internship_in_company_raw)
+        elif isinstance(internship_in_company_raw, str):
+            internship_in_company_value = internship_in_company_raw.strip().lower()
+            if internship_in_company_value in ['1', 'true', 'yes', 'y', 'on']:
+                internship_in_company = True
+            elif internship_in_company_value in ['0', 'false', 'no', 'n', 'off', '']:
+                internship_in_company = False
+            else:
+                return jsonify({"error": "Invalid internship_in_company value"}), 400
+        elif internship_in_company_raw is None:
+            internship_in_company = False
+        else:
+            return jsonify({"error": "Invalid internship_in_company value"}), 400
+
+        front_office_training_raw = data.get('front_office_training')
+        if isinstance(front_office_training_raw, bool):
+            front_office_training = front_office_training_raw
+        elif isinstance(front_office_training_raw, (int, float)):
+            front_office_training = bool(front_office_training_raw)
+        elif isinstance(front_office_training_raw, str):
+            front_office_training_value = front_office_training_raw.strip().lower()
+            if front_office_training_value in ['1', 'true', 'yes', 'y', 'on']:
+                front_office_training = True
+            elif front_office_training_value in ['0', 'false', 'no', 'n', 'off', '']:
+                front_office_training = False
+            else:
+                return jsonify({"error": "Invalid front_office_training value"}), 400
+        elif front_office_training_raw is None:
+            front_office_training = False
+        else:
+            return jsonify({"error": "Invalid front_office_training value"}), 400
+
+        front_office_training_date = data.get('front_office_training_date')
+        if front_office_training_date:
+            try:
+                datetime.strptime(front_office_training_date, '%Y-%m-%d')
+            except ValueError:
+                return jsonify({"error": "Invalid front_office_training_date format. Use YYYY-MM-DD"}), 400
+        else:
+            front_office_training_date = None
+        if not front_office_training:
+            front_office_training_date = None
 
         employment_type = str(data.get('employment_type') or '').strip().lower() or None
         if employment_type not in [None, 'gph', 'of']:
@@ -5393,7 +5454,12 @@ def add_user():
             close_contact_1_phone=close_contact_1_phone,
             close_contact_2_relation=close_contact_2_relation,
             close_contact_2_full_name=close_contact_2_full_name,
-            close_contact_2_phone=close_contact_2_phone
+            close_contact_2_phone=close_contact_2_phone,
+            card_number=card_number,
+            internship_in_company=internship_in_company,
+            front_office_training=front_office_training,
+            front_office_training_date=front_office_training_date,
+            taxipro_id=taxipro_id
         )
 
         requester_header = request.headers.get('X-User-Id')

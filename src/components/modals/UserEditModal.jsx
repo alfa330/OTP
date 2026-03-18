@@ -291,6 +291,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         telegram_nick: base.telegram_nick ?? "",
         study_place: base.study_place ?? "",
         study_course: base.study_course ?? "",
+        card_number: base.card_number ?? "",
         close_contact_1_relation: base.close_contact_1_relation ?? "",
         close_contact_1_full_name: base.close_contact_1_full_name ?? "",
         close_contact_1_phone: base.close_contact_1_phone ?? "",
@@ -299,6 +300,10 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         close_contact_2_phone: base.close_contact_2_phone ?? "",
         company_name: base.company_name ?? "",
         employment_type: base.employment_type ?? "",
+        internship_in_company: !!base.internship_in_company,
+        front_office_training: !!base.front_office_training,
+        front_office_training_date: base.front_office_training_date ?? "",
+        taxipro_id: base.taxipro_id ?? "",
         has_proxy: !!base.has_proxy,
         sip_number: base.sip_number ?? "",
         use_schedule_status_period: false,
@@ -314,6 +319,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         defaults.telegram_nick = String(defaults.telegram_nick ?? '').trim();
         defaults.study_place = String(defaults.study_place ?? '').trim();
         defaults.study_course = String(defaults.study_course ?? '').trim();
+        defaults.card_number = String(defaults.card_number ?? '').trim();
         defaults.close_contact_1_relation = String(defaults.close_contact_1_relation ?? '').trim();
         defaults.close_contact_1_full_name = String(defaults.close_contact_1_full_name ?? '').trim();
         defaults.close_contact_1_phone = String(defaults.close_contact_1_phone ?? '').trim();
@@ -324,6 +330,12 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         defaults.employment_type = ['gph', 'of'].includes(String(defaults.employment_type || '').trim().toLowerCase())
             ? String(defaults.employment_type || '').trim().toLowerCase()
             : "";
+        defaults.internship_in_company = !!defaults.internship_in_company;
+        defaults.front_office_training = !!defaults.front_office_training;
+        defaults.front_office_training_date = defaults.front_office_training
+            ? String(defaults.front_office_training_date ?? '').trim()
+            : "";
+        defaults.taxipro_id = String(defaults.taxipro_id ?? '').trim();
         defaults.has_proxy = !!defaults.has_proxy;
         defaults.sip_number = isOperatorBase ? String(defaults.sip_number ?? '').trim() : "";
         if (defaults.status === 'unpaid_leave' || defaults.status === 'dismissal') {
@@ -527,6 +539,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         telegram_nick: "",
         study_place: "",
         study_course: "",
+        card_number: "",
         close_contact_1_relation: "",
         close_contact_1_full_name: "",
         close_contact_1_phone: "",
@@ -535,6 +548,10 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         close_contact_2_phone: "",
         company_name: "",
         employment_type: "",
+        internship_in_company: false,
+        front_office_training: false,
+        front_office_training_date: "",
+        taxipro_id: "",
         has_proxy: false,
         sip_number: "",
         use_schedule_status_period: false,
@@ -609,6 +626,10 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         setModalError(`Телефон близкого контакта 2 должен быть в формате ${KZ_PHONE_PLACEHOLDER}`);
         return;
         }
+        if (editedUser?.front_office_training && !toDateInputValue(editedUser?.front_office_training_date)) {
+        setModalError("Если сотрудник был на обучении во фронт офисе, укажите дату.");
+        return;
+        }
 
         if (usesScheduleStatusPeriodForm(editedUser?.status) && editedUser?.use_schedule_status_period) {
         const startDate = String(editedUser?.status_period_start_date || "").trim();
@@ -650,6 +671,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
             telegram_nick: String(editedUser?.telegram_nick || '').trim(),
             study_place: String(editedUser?.study_place || '').trim(),
             study_course: String(editedUser?.study_course || '').trim(),
+            card_number: String(editedUser?.card_number || '').trim(),
             close_contact_1_relation: String(editedUser?.close_contact_1_relation || '').trim(),
             close_contact_1_full_name: String(editedUser?.close_contact_1_full_name || '').trim(),
             close_contact_1_phone: String(editedUser?.close_contact_1_phone || '').trim(),
@@ -660,6 +682,12 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
             employment_type: ['gph', 'of'].includes(String(editedUser?.employment_type || '').trim().toLowerCase())
                 ? String(editedUser?.employment_type || '').trim().toLowerCase()
                 : '',
+            internship_in_company: !!editedUser?.internship_in_company,
+            front_office_training: !!editedUser?.front_office_training,
+            front_office_training_date: !!editedUser?.front_office_training
+                ? String(editedUser?.front_office_training_date || '').trim()
+                : '',
+            taxipro_id: String(editedUser?.taxipro_id || '').trim(),
             has_proxy: !!editedUser?.has_proxy,
             sip_number: isOperatorUser ? String(editedUser?.sip_number || '').trim() : ''
         };
@@ -951,6 +979,17 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         disabled={isLoading || !!createdCredentials}
                         />
                     </div>
+
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Номер карты</label>
+                        <input
+                        type="text"
+                        value={editedUser?.card_number || ""}
+                        onChange={(e) => setEditedUser({ ...editedUser, card_number: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        disabled={isLoading || !!createdCredentials}
+                        />
+                    </div>
                     </>
                 )}
 
@@ -1120,6 +1159,60 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         <option value="gph">ГПХ</option>
                         <option value="of">ОФ</option>
                         </select>
+                    </div>
+
+                    <div>
+                        <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
+                        <input
+                            type="checkbox"
+                            checked={!!editedUser?.internship_in_company}
+                            onChange={(e) => setEditedUser({ ...editedUser, internship_in_company: e.target.checked })}
+                            className="rounded border-gray-300"
+                            disabled={isLoading || !!createdCredentials}
+                        />
+                        <span>Проходил практику в компании</span>
+                        </label>
+                    </div>
+
+                    <div>
+                        <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
+                        <input
+                            type="checkbox"
+                            checked={!!editedUser?.front_office_training}
+                            onChange={(e) => setEditedUser({
+                                ...editedUser,
+                                front_office_training: e.target.checked,
+                                front_office_training_date: e.target.checked ? (editedUser?.front_office_training_date || "") : ""
+                            })}
+                            className="rounded border-gray-300"
+                            disabled={isLoading || !!createdCredentials}
+                        />
+                        <span>Был во фронт офисе на обучении</span>
+                        </label>
+                    </div>
+
+                    {editedUser?.front_office_training && (
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Когда был на обучении</label>
+                        <input
+                        type="date"
+                        value={toDateInputValue(editedUser?.front_office_training_date)}
+                        onChange={(e) => setEditedUser({ ...editedUser, front_office_training_date: e.target.value || "" })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        disabled={isLoading || !!createdCredentials}
+                        />
+                    </div>
+                    )}
+
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">ID таксипро</label>
+                        <input
+                        type="text"
+                        value={editedUser?.taxipro_id || ""}
+                        onChange={(e) => setEditedUser({ ...editedUser, taxipro_id: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        disabled={isLoading || !!createdCredentials}
+                        />
                     </div>
                     </>
                 )}
@@ -1419,6 +1512,17 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             disabled={isLoading}
                             />
                         </div>
+
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Номер карты</label>
+                            <input
+                            type="text"
+                            value={editedUser?.card_number || ""}
+                            onChange={(e) => setEditedUser({ ...editedUser, card_number: e.target.value })}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            disabled={isLoading}
+                            />
+                        </div>
                         </>
                     )}
 
@@ -1598,6 +1702,60 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             <option value="gph">ГПХ</option>
                             <option value="of">ОФ</option>
                             </select>
+                        </div>
+
+                        <div>
+                            <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
+                            <input
+                                type="checkbox"
+                                checked={!!editedUser?.internship_in_company}
+                                onChange={(e) => setEditedUser({ ...editedUser, internship_in_company: e.target.checked })}
+                                className="rounded border-gray-300"
+                                disabled={isLoading}
+                            />
+                            <span>Проходил практику в компании</span>
+                            </label>
+                        </div>
+
+                        <div>
+                            <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
+                            <input
+                                type="checkbox"
+                                checked={!!editedUser?.front_office_training}
+                                onChange={(e) => setEditedUser({
+                                    ...editedUser,
+                                    front_office_training: e.target.checked,
+                                    front_office_training_date: e.target.checked ? (editedUser?.front_office_training_date || "") : ""
+                                })}
+                                className="rounded border-gray-300"
+                                disabled={isLoading}
+                            />
+                            <span>Был во фронт офисе на обучении</span>
+                            </label>
+                        </div>
+
+                        {editedUser?.front_office_training && (
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Когда был на обучении</label>
+                            <input
+                            type="date"
+                            value={toDateInputValue(editedUser?.front_office_training_date)}
+                            onChange={(e) => setEditedUser({ ...editedUser, front_office_training_date: e.target.value || "" })}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            disabled={isLoading}
+                            />
+                        </div>
+                        )}
+
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">ID таксипро</label>
+                            <input
+                            type="text"
+                            value={editedUser?.taxipro_id || ""}
+                            onChange={(e) => setEditedUser({ ...editedUser, taxipro_id: e.target.value })}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            disabled={isLoading}
+                            />
                         </div>
                         </>
                     )}
