@@ -4761,7 +4761,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const noteKey = plannerStatusNormalizeKey(stateNoteRaw);
             if (!noteKey) return 'Перерыв';
             if (noteKey === 'вышел') return 'Вышел';
-            if (noteKey === 'авто') return 'Авто';
+            // "Авто" в рамках "Перерыв" считаем обычным перерывом.
+            if (noteKey === 'авто') return 'Перерыв';
             if (noteKey === 'перезвон') return 'Перезвон';
             if (noteKey === 'тех причина' || noteKey === 'техпричина') return 'Тех причина';
             if (noteKey === 'тренинг') return 'Тренинг';
@@ -4794,7 +4795,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 case 'готов':
                 case 'занят':
                 case 'занята':
-                case 'авто':
                 case 'перезвон':
                     return byKey({
                         chip: 'border-sky-200 bg-sky-50 text-sky-700',
@@ -4808,6 +4808,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         bar: '#64748b'
                     });
                 case 'перерыв':
+                case 'авто':
                     return byKey({
                         chip: 'border-amber-200 bg-amber-50 text-amber-800',
                         row: 'border-amber-100 bg-amber-50/60 text-amber-900',
@@ -4839,8 +4840,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     });
             }
             };
-            const PLANNER_IMPORTED_WORK_STATUS_KEYS = new Set(['готов', 'занят', 'занята', 'авто', 'перезвон']);
-            const PLANNER_IMPORTED_BREAK_STATUS_KEYS = new Set(['перерыв']);
+            const PLANNER_IMPORTED_WORK_STATUS_KEYS = new Set(['готов', 'занят', 'занята', 'перезвон']);
+            const PLANNER_IMPORTED_BREAK_STATUS_KEYS = new Set(['перерыв', 'авто']);
             const PLANNER_IMPORTED_NOT_ON_SHIFT_STATUS_KEYS = new Set(['нет статуса', 'отключен', 'отключена', 'отключено']);
             const plannerImportedStatusCountsAsOnShift = (statusKeyRaw) => {
             const key = plannerStatusNormalizeKey(statusKeyRaw);
