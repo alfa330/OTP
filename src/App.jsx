@@ -5617,6 +5617,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     scheduleStatusDays: next.scheduleStatusDays ? Object.fromEntries(
                         Object.entries(next.scheduleStatusDays).map(([k, v]) => [k, { ...(v || {}) }])
                     ) : {},
+                    aggregatedScheduleFlagsDays: next.aggregatedScheduleFlagsDays ? Object.fromEntries(
+                        Object.entries(next.aggregatedScheduleFlagsDays).map(([k, v]) => [k, { ...(v || {}) }])
+                    ) : {},
                     importedStatusTimelineDays: next.importedStatusTimelineDays ? Object.fromEntries(
                         Object.entries(next.importedStatusTimelineDays).map(([dayKey, list]) => [
                             dayKey,
@@ -5634,6 +5637,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     daysOff: [],
                     scheduleStatusPeriods: [],
                     scheduleStatusDays: {},
+                    aggregatedScheduleFlagsDays: {},
                     importedStatusTimelineDays: {}
                 };
             }
@@ -5649,6 +5653,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         daysOff: existing.daysOff,
                         scheduleStatusPeriods: existing.scheduleStatusPeriods ?? base.scheduleStatusPeriods,
                         scheduleStatusDays: existing.scheduleStatusDays ?? base.scheduleStatusDays,
+                        aggregatedScheduleFlagsDays: existing.aggregatedScheduleFlagsDays ?? base.aggregatedScheduleFlagsDays,
                         importedStatusTimelineDays: existing.importedStatusTimelineDays ?? base.importedStatusTimelineDays
                     });
                 });
@@ -5702,6 +5707,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [showDayBreaksModal, setShowDayBreaksModal] = useState(false);
             const [isLoading, setIsLoading] = useState(false);
             const [bulkActionState, setBulkActionState] = useState({ loading: false, action: '' });
+            const [dayAggregateLoading, setDayAggregateLoading] = useState(false);
             const [excelTransferState, setExcelTransferState] = useState({ importing: false, exporting: false });
             const [excelImportReport, setExcelImportReport] = useState(null);
             const [showPlannerStatusAnomalyModal, setShowPlannerStatusAnomalyModal] = useState(false);
@@ -6000,6 +6006,58 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     isBlacklist: !!(found.isBlacklist ?? found.is_blacklist)
                 } : null;
             };
+            const normalizePlannerAutoFlagStatus = (value) => {
+                const normalized = String(value || '').trim().toLowerCase();
+                if (normalized === 'pending' || normalized === 'confirmed' || normalized === 'rejected') return normalized;
+                return null;
+            };
+            const getPlannerAggregatedFlagsForDate = (op, dateStr) => {
+                if (!op || !dateStr) return null;
+                const dayMap = (op.aggregatedScheduleFlagsDays && typeof op.aggregatedScheduleFlagsDays === 'object')
+                    ? op.aggregatedScheduleFlagsDays
+                    : {};
+                const raw = dayMap?.[dateStr];
+                if (!raw || typeof raw !== 'object') return null;
+
+                const lateMinutes = Math.max(0, Math.round(Number(raw?.lateMinutes ?? raw?.late_minutes ?? 0) || 0));
+                const earlyLeaveMinutes = Math.max(0, Math.round(Number(raw?.earlyLeaveMinutes ?? raw?.early_leave_minutes ?? 0) || 0));
+                const overtimeMinutes = Math.max(0, Math.round(Number(raw?.overtimeMinutes ?? raw?.overtime_minutes ?? 0) || 0));
+                const trainingMinutes = Math.max(0, Math.round(Number(raw?.trainingMinutes ?? raw?.training_minutes ?? 0) || 0));
+
+                const lateStatus = (lateMinutes > 0)
+                    ? (normalizePlannerAutoFlagStatus(raw?.lateStatus ?? raw?.late_status) || 'pending')
+                    : null;
+                const earlyLeaveStatus = (earlyLeaveMinutes > 0)
+                    ? (normalizePlannerAutoFlagStatus(raw?.earlyLeaveStatus ?? raw?.early_leave_status) || 'pending')
+                    : null;
+                const trainingStatus = (trainingMinutes > 0)
+                    ? (normalizePlannerAutoFlagStatus(raw?.trainingStatus ?? raw?.training_status) || 'pending')
+                    : null;
+
+                const lateActive = lateMinutes > 0 && lateStatus !== 'rejected';
+                const earlyLeaveActive = earlyLeaveMinutes > 0 && earlyLeaveStatus !== 'rejected';
+                const trainingActive = trainingMinutes > 0 && trainingStatus !== 'rejected';
+                const pendingLate = lateMinutes > 0 && lateStatus === 'pending';
+                const pendingEarlyLeave = earlyLeaveMinutes > 0 && earlyLeaveStatus === 'pending';
+                const pendingTraining = trainingMinutes > 0 && trainingStatus === 'pending';
+
+                return {
+                    lateMinutes,
+                    earlyLeaveMinutes,
+                    overtimeMinutes,
+                    trainingMinutes,
+                    lateStatus,
+                    earlyLeaveStatus,
+                    trainingStatus,
+                    lateActive,
+                    earlyLeaveActive,
+                    trainingActive,
+                    pendingLate,
+                    pendingEarlyLeave,
+                    pendingTraining,
+                    hasPending: pendingLate || pendingEarlyLeave || pendingTraining
+                };
+            };
             const paginatePlannerDates = useCallback((direction = 1) => {
                 const step = Number(direction) >= 0 ? 1 : -1;
                 setCurrentDate(prevDate => {
@@ -6088,6 +6146,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             ...(op?.scheduleStatusDays || {}),
                             ...(serverOp?.scheduleStatusDays || {})
                         };
+                        const mergedAggregatedScheduleFlagsDays = {
+                            ...(op?.aggregatedScheduleFlagsDays || {}),
+                            ...(serverOp?.aggregatedScheduleFlagsDays || {})
+                        };
                         const mergedImportedStatusTimelineDays = {
                             ...(op?.importedStatusTimelineDays || {}),
                             ...(serverOp?.importedStatusTimelineDays || {})
@@ -6110,6 +6172,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             daysOff: mergedDaysOff,
                             scheduleStatusPeriods: mergedPeriods,
                             scheduleStatusDays: mergedStatusDays,
+                            aggregatedScheduleFlagsDays: mergedAggregatedScheduleFlagsDays,
                             importedStatusTimelineDays: mergedImportedStatusTimelineDays
                         });
                     });
@@ -7015,7 +7078,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         shifts: operatorSnapshot.shifts || {},
                         daysOff: operatorSnapshot.daysOff || [],
                         scheduleStatusPeriods: operatorSnapshot.scheduleStatusPeriods || [],
-                        scheduleStatusDays: operatorSnapshot.scheduleStatusDays || {}
+                        scheduleStatusDays: operatorSnapshot.scheduleStatusDays || {},
+                        aggregatedScheduleFlagsDays: operatorSnapshot.aggregatedScheduleFlagsDays || {}
                     });
                 }));
             };
@@ -7988,7 +8052,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                       shifts: { ...(o.shifts || {}) },
                       daysOff: Array.isArray(o.daysOff) ? [...o.daysOff] : [],
                       scheduleStatusPeriods: Array.isArray(o.scheduleStatusPeriods) ? o.scheduleStatusPeriods.map(p => ({ ...(p || {}) })) : [],
-                      scheduleStatusDays: o.scheduleStatusDays ? Object.fromEntries(Object.entries(o.scheduleStatusDays).map(([k, v]) => [k, { ...(v || {}) }])) : {}
+                      scheduleStatusDays: o.scheduleStatusDays ? Object.fromEntries(Object.entries(o.scheduleStatusDays).map(([k, v]) => [k, { ...(v || {}) }])) : {},
+                      aggregatedScheduleFlagsDays: o.aggregatedScheduleFlagsDays ? Object.fromEntries(Object.entries(o.aggregatedScheduleFlagsDays).map(([k, v]) => [k, { ...(v || {}) }])) : {}
                     }));
                     const touchedPairs = new Set();
 
@@ -8018,6 +8083,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
               
                   clearSelectedDays();
                   setModalState(m => ({ ...m, open: false, multipleDates: null, multipleTargets: null, breaks: [], showAddPanel: false }));
+                  await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
                 } catch (error) {
                   console.error('Error saving multiple shifts:', error);
                   emitAppToast('Ошибка массового сохранения смен', 'error');
@@ -8068,6 +8134,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                     clearSelectedDays();
                     setModalState(m => ({ ...m, open: false, multipleDates: null, multipleTargets: null, breaks: [], showAddPanel: false }));
+                    await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
                 } catch (error) {
                     console.error('Error setting multiple day offs:', error);
                     emitAppToast('Ошибка массового назначения выходного', 'error');
@@ -8107,9 +8174,50 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                     clearSelectedDays();
                     setModalState(m => ({ ...m, open: false, multipleDates: null, multipleTargets: null, breaks: [], showAddPanel: false }));
+                    await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
                 } catch (error) {
                     console.error('Error deleting multiple shifts:', error);
                     emitAppToast('Ошибка массовой очистки дней', 'error');
+                }
+            };
+
+            const aggregateCurrentDayForAllOperators = async () => {
+                const dayKey = String(todayDateStr(new Date(currentDate)) || '').trim();
+                const operatorIds = Array.from(new Set(
+                    (operators || [])
+                        .map(op => Number(op?.id))
+                        .filter(id => Number.isFinite(id))
+                ));
+                if (!dayKey || operatorIds.length === 0) {
+                    emitAppToast('Нет операторов для агрегации', 'error');
+                    return;
+                }
+
+                setDayAggregateLoading(true);
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/aggregate`, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: withAccessTokenHeader({
+                            'Content-Type': 'application/json'
+                        }),
+                        body: JSON.stringify({
+                            operator_ids: operatorIds,
+                            date: dayKey
+                        })
+                    });
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(payload?.error || `HTTP ${response.status}`);
+                    }
+
+                    await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
+                    emitAppToast(`Агрегация дня ${dayKey} выполнена`, 'success');
+                } catch (error) {
+                    console.error('Error aggregating planner day:', error);
+                    emitAppToast(`Ошибка агрегации дня: ${error?.message || error}`, 'error');
+                } finally {
+                    setDayAggregateLoading(false);
                 }
             };
 
@@ -8154,7 +8262,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                       ...o,
                       shifts: { ...(o.shifts || {}) },
                       scheduleStatusPeriods: Array.isArray(o.scheduleStatusPeriods) ? o.scheduleStatusPeriods.map(p => ({ ...(p || {}) })) : [],
-                      scheduleStatusDays: o.scheduleStatusDays ? Object.fromEntries(Object.entries(o.scheduleStatusDays).map(([k, v]) => [k, { ...(v || {}) }])) : {}
+                      scheduleStatusDays: o.scheduleStatusDays ? Object.fromEntries(Object.entries(o.scheduleStatusDays).map(([k, v]) => [k, { ...(v || {}) }])) : {},
+                      aggregatedScheduleFlagsDays: o.aggregatedScheduleFlagsDays ? Object.fromEntries(Object.entries(o.aggregatedScheduleFlagsDays).map(([k, v]) => [k, { ...(v || {}) }])) : {}
                     }));
                     const op = copy.find(x => x.id === opId);
                     if (!op) return prev;
@@ -8177,6 +8286,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                   });
               
                   setModalState(m => ({ ...m, editIndex: null, multipleDates: null, multipleTargets: null, showAddPanel: false, breaks: [] }));
+                  await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
                 } catch (error) {
                   console.error('Error saving shift:', error);
                   emitAppToast('Ошибка сохранения смены', 'error');
@@ -8219,6 +8329,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     if (arr.length === 0) delete op.shifts[date]; else op.shifts[date] = mergeSegments(arr, op?.direction, getPlannerBreakRuleRangesForDirection);
                     return copy;
                     });
+                    await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
                 } catch (error) {
                     console.error('Error deleting shift:', error);
                     emitAppToast('Ошибка удаления смены', 'error');
@@ -11929,6 +12040,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </span>
                                     )}
                                 </button>
+                                <button
+                                    onClick={() => aggregateCurrentDayForAllOperators()}
+                                    disabled={dayAggregateLoading}
+                                    className="ml-3 px-3 py-1 rounded bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-800 text-sm font-medium flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
+                                    title="Ручной пересчет метрик за выбранный день для всех операторов"
+                                >
+                                    <FaIcon className={`fas ${dayAggregateLoading ? 'fa-spinner fa-spin' : 'fa-calculator'} text-emerald-600`}></FaIcon>
+                                    {dayAggregateLoading ? 'Агрегация...' : 'Агрегировать день (все)'}
+                                </button>
                                 <div className="ml-3 flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-2 py-1">
                                     <FaIcon className="fas fa-sort-amount-down text-slate-400 text-xs"></FaIcon>
                                     <span className="text-xs text-slate-500 whitespace-nowrap">Сортировка</span>
@@ -12258,6 +12378,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <div className="flex gap-2" style={{ whiteSpace: 'nowrap' }}>
                                         {visibleRange.map(d => {
                                             const parts = getShiftPartsForDate(op, d);
+                                            const aggregatedFlagsForCell = getPlannerAggregatedFlagsForDate(op, d);
                                             const importedStatusBarsForCell = importedStatusTimelineByOperatorDateKey.get(`${plannerStatusNormalizeOperatorName(op?.name)}|${d}`) || [];
                                             const breakPartsForCell = parts
                                                 .flatMap(p => getBreakPartsForPart(op, p, d))
@@ -12282,19 +12403,39 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             const specialStatusMatchMetrics = plannerStatusSpecialDayViewEnabled
                                                 ? statusMatchMetricsForCell
                                                 : null;
-                                            const defectLateMin = Number(statusMatchMetricsForCell?.lateTotalMin || 0);
-                                            const defectEarlyLeaveMin = Number(statusMatchMetricsForCell?.earlyLeaveTotalMin || 0);
-                                            const defectNoPhoneSec = Number(noPhoneShiftMetricsForCell?.noPhoneSec || 0);
-                                            const overtimeOutsideShiftMin = Number(statusMatchMetricsForCell?.workOutsideShiftMin || 0);
+                                            const liveLateMin = Number(statusMatchMetricsForCell?.lateTotalMin || 0);
+                                            const liveEarlyLeaveMin = Number(statusMatchMetricsForCell?.earlyLeaveTotalMin || 0);
+                                            const liveNoPhoneSec = Number(noPhoneShiftMetricsForCell?.noPhoneSec || 0);
+                                            const liveOvertimeOutsideShiftMin = Number(statusMatchMetricsForCell?.workOutsideShiftMin || 0);
+                                            let defectLateMin = shouldComputeDefectMetrics
+                                                ? liveLateMin
+                                                : Number(aggregatedFlagsForCell?.lateActive ? aggregatedFlagsForCell?.lateMinutes : 0);
+                                            let defectEarlyLeaveMin = shouldComputeDefectMetrics
+                                                ? liveEarlyLeaveMin
+                                                : Number(aggregatedFlagsForCell?.earlyLeaveActive ? aggregatedFlagsForCell?.earlyLeaveMinutes : 0);
+                                            if ((aggregatedFlagsForCell?.lateStatus || null) === 'rejected') defectLateMin = 0;
+                                            if ((aggregatedFlagsForCell?.earlyLeaveStatus || null) === 'rejected') defectEarlyLeaveMin = 0;
+                                            const defectTrainingMin = Number(aggregatedFlagsForCell?.trainingActive ? aggregatedFlagsForCell?.trainingMinutes : 0);
+                                            const defectNoPhoneSec = shouldComputeDefectMetrics ? liveNoPhoneSec : 0;
+                                            const overtimeOutsideShiftMin = Math.max(
+                                                shouldComputeDefectMetrics ? liveOvertimeOutsideShiftMin : 0,
+                                                Number(aggregatedFlagsForCell?.overtimeMinutes || 0)
+                                            );
+                                            const hasPendingDefectMarker = Boolean(aggregatedFlagsForCell?.hasPending);
                                             const hasDefectMarker = (viewMode === 'day' || viewMode === 'week' || viewMode === 'month') && (
                                                 defectLateMin > 0 ||
                                                 defectEarlyLeaveMin > 0 ||
+                                                defectTrainingMin > 0 ||
                                                 defectNoPhoneSec > 60
                                             );
                                             const hasOvertimeMarker = (viewMode === 'day' || viewMode === 'week' || viewMode === 'month') && overtimeOutsideShiftMin > 10;
+                                            const latePendingSuffix = aggregatedFlagsForCell?.pendingLate && defectLateMin > 0 ? ' (не подтверждено)' : '';
+                                            const earlyPendingSuffix = aggregatedFlagsForCell?.pendingEarlyLeave && defectEarlyLeaveMin > 0 ? ' (не подтверждено)' : '';
+                                            const trainingPendingSuffix = aggregatedFlagsForCell?.pendingTraining && defectTrainingMin > 0 ? ' (не подтверждено)' : '';
                                             const defectIssues = [
-                                                defectLateMin > 0 ? `Опоздание: ${Math.round(defectLateMin)} мин` : '',
-                                                defectEarlyLeaveMin > 0 ? `Ранний уход: ${Math.round(defectEarlyLeaveMin)} мин` : '',
+                                                defectLateMin > 0 ? `Опоздание: ${Math.round(defectLateMin)} мин${latePendingSuffix}` : '',
+                                                defectEarlyLeaveMin > 0 ? `Ранний уход: ${Math.round(defectEarlyLeaveMin)} мин${earlyPendingSuffix}` : '',
+                                                defectTrainingMin > 0 ? `Тренинг: ${Math.round(defectTrainingMin)} мин${trainingPendingSuffix}` : '',
                                                 defectNoPhoneSec > 60 ? `Без телефона в смене: ${Math.round(defectNoPhoneSec / 60)} мин` : ''
                                             ].filter(Boolean);
                                             const overtimeIssues = hasOvertimeMarker
@@ -12398,7 +12539,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         )}
                                                         {hasDefectMarker && (
                                                             <span
-                                                                className="w-2.5 h-2.5 rounded-full bg-rose-600 border border-white shadow-sm"
+                                                                className={`w-2.5 h-2.5 rounded-full bg-rose-600 border border-white shadow-sm${hasPendingDefectMarker ? ' animate-pulse' : ''}`}
                                                             />
                                                         )}
                                                     </span>
@@ -13272,8 +13413,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         <div className="flex gap-3 justify-end">
                             <button 
                                 className="px-5 py-3 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium transition-colors flex items-center gap-2"
-                                onClick={() => { if (bulkActionState.loading) return; setModalState((m) => ({ ...m, open: false })); setShowEditTimelineModal(false); setShowEditStatusJournal(false); setEditTimelineFocusedStatusKey(''); clearSelectedDays(); }}
-                                disabled={bulkActionState.loading}
+                                onClick={() => { if (bulkActionState.loading || dayAggregateLoading) return; setModalState((m) => ({ ...m, open: false })); setShowEditTimelineModal(false); setShowEditStatusJournal(false); setEditTimelineFocusedStatusKey(''); clearSelectedDays(); }}
+                                disabled={bulkActionState.loading || dayAggregateLoading}
                             >
                                 <FaIcon className="fas fa-times"></FaIcon>
                                 Закрыть

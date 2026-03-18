@@ -233,6 +233,21 @@ SCHEDULE_STATUS_TO_USER_STATUS: Dict[str, str] = {
     'dismissal': 'fired'
 }
 
+SCHEDULE_AUTO_AGGREGATION_START_DATE = date(2026, 3, 1)
+SCHEDULE_AUTO_FLAG_PENDING = 'pending'
+SCHEDULE_AUTO_FLAG_CONFIRMED = 'confirmed'
+SCHEDULE_AUTO_FLAG_REJECTED = 'rejected'
+SCHEDULE_AUTO_FLAG_ALLOWED = {
+    SCHEDULE_AUTO_FLAG_PENDING,
+    SCHEDULE_AUTO_FLAG_CONFIRMED,
+    SCHEDULE_AUTO_FLAG_REJECTED
+}
+SCHEDULE_AUTO_WORK_STATUS_KEYS = {'готов', 'занят', 'занята', 'перезвон'}
+SCHEDULE_AUTO_TALK_STATUS_KEYS = {'занят', 'занята'}
+SCHEDULE_AUTO_BREAK_STATUS_KEYS = {'перерыв', 'авто'}
+SCHEDULE_AUTO_TRAINING_STATUS_KEY = 'тренинг'
+SCHEDULE_AUTO_FINE_RATE_PER_MINUTE = float(os.getenv('SCHEDULE_AUTO_FINE_RATE_PER_MINUTE', '50'))
+
 def get_pool():
     global POOL
     if POOL is None:
@@ -679,6 +694,62 @@ class Database:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(operator_id, day)
                 );
+            """)
+            cursor.execute("""
+                ALTER TABLE daily_hours
+                ADD COLUMN IF NOT EXISTS training_time FLOAT NOT NULL DEFAULT 0;
+            """)
+            cursor.execute("""
+                ALTER TABLE daily_hours
+                ADD COLUMN IF NOT EXISTS late_minutes INTEGER NOT NULL DEFAULT 0;
+            """)
+            cursor.execute("""
+                ALTER TABLE daily_hours
+                ADD COLUMN IF NOT EXISTS early_leave_minutes INTEGER NOT NULL DEFAULT 0;
+            """)
+            cursor.execute("""
+                ALTER TABLE daily_hours
+                ADD COLUMN IF NOT EXISTS overtime_minutes INTEGER NOT NULL DEFAULT 0;
+            """)
+            cursor.execute("""
+                ALTER TABLE daily_hours
+                ADD COLUMN IF NOT EXISTS training_minutes INTEGER NOT NULL DEFAULT 0;
+            """)
+            cursor.execute("""
+                ALTER TABLE daily_hours
+                ADD COLUMN IF NOT EXISTS late_status VARCHAR(16);
+            """)
+            cursor.execute("""
+                ALTER TABLE daily_hours
+                ADD COLUMN IF NOT EXISTS early_leave_status VARCHAR(16);
+            """)
+            cursor.execute("""
+                ALTER TABLE daily_hours
+                ADD COLUMN IF NOT EXISTS training_status VARCHAR(16);
+            """)
+            cursor.execute("""
+                ALTER TABLE daily_hours
+                ADD COLUMN IF NOT EXISTS late_fine_id INTEGER;
+            """)
+            cursor.execute("""
+                ALTER TABLE daily_hours
+                ADD COLUMN IF NOT EXISTS early_leave_fine_id INTEGER;
+            """)
+            cursor.execute("""
+                ALTER TABLE daily_hours
+                ADD COLUMN IF NOT EXISTS training_fine_id INTEGER;
+            """)
+            cursor.execute("""
+                ALTER TABLE daily_hours
+                ADD COLUMN IF NOT EXISTS auto_aggregated BOOLEAN NOT NULL DEFAULT FALSE;
+            """)
+            cursor.execute("""
+                ALTER TABLE daily_hours
+                ADD COLUMN IF NOT EXISTS auto_aggregated_at TIMESTAMP;
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_daily_hours_operator_day
+                ON daily_hours(operator_id, day);
             """)
 
             # Table for multiple fines per day (new schema)
@@ -2011,88 +2082,14 @@ class Database:
 
     def aggregate_month_from_daily(self, operator_id, month):
         """
-        Суммирует daily_hours за месяц и обновляет work_hours:
-        - regular_hours <- SUM(work_time)
-        - total_break_time <- SUM(break_time)
-        - total_talk_time <- SUM(talk_time)
-        - total_calls <- SUM(calls)
-        - total_efficiency_hours <- SUM(efficiency)  <-- теперь суммируем часы
-        - calls_per_hour = total_calls / regular_hours (0 если regular_hours == 0)
-        Возвращает агрегаты.
+        Публичный wrapper месячной агрегации daily_hours -> work_hours.
         """
-        year, mon = map(int, month.split('-'))
-        start = date(year, mon, 1)
-        end = date(year, mon, calendar.monthrange(year, mon)[1])
         with self._get_cursor() as cursor:
-            # Sum daily_hours fields independently to avoid duplication when multiple fines exist per day.
-            cursor.execute("""
-                SELECT
-                    COALESCE(SUM(work_time),0),
-                    COALESCE(SUM(break_time),0),
-                    COALESCE(SUM(talk_time),0),
-                    COALESCE(SUM(calls),0),
-                    COALESCE(SUM(efficiency),0)
-                FROM daily_hours
-                WHERE operator_id = %s AND day >= %s AND day <= %s
-            """, (operator_id, start, end))
-            row = cursor.fetchone()
-            total_work_time, total_break_time, total_talk_time, total_calls, total_efficiency_hours = row
-
-            # Sum fines from daily_fines separately (join via daily_hours to respect day/operator filter)
-            cursor.execute("""
-                SELECT COALESCE(SUM(df.amount), 0)
-                FROM daily_fines df
-                JOIN daily_hours dh ON df.daily_hours_id = dh.id
-                WHERE dh.operator_id = %s AND dh.day >= %s AND dh.day <= %s
-            """, (operator_id, start, end))
-            total_fines = cursor.fetchone()[0] or 0.0
-
-            # Защита от деления на ноль
-            if total_work_time and float(total_work_time) > 0:
-                calls_per_hour = float(total_calls) / float(total_work_time)
-            else:
-                calls_per_hour = 0.0
-
-            # Вставляем/обновляем work_hours:
-            cursor.execute("""
-                INSERT INTO work_hours (
-                    operator_id, month, regular_hours, training_hours, fines, total_break_time,
-                    total_talk_time, total_calls, total_efficiency_hours, calls_per_hour
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (operator_id, month)
-                DO UPDATE SET
-                    regular_hours = EXCLUDED.regular_hours,
-                    training_hours = EXCLUDED.training_hours,
-                    fines = EXCLUDED.fines,
-                    total_break_time = EXCLUDED.total_break_time,
-                    total_talk_time = EXCLUDED.total_talk_time,
-                    total_calls = EXCLUDED.total_calls,
-                    total_efficiency_hours = EXCLUDED.total_efficiency_hours,
-                    calls_per_hour = EXCLUDED.calls_per_hour,
-                    created_at = CURRENT_TIMESTAMP
-            """, (
-                operator_id,
-                month,
-                float(total_work_time),
-                0.0,  # training_hours — если считаешь отдельно, можно заполнять позже
-                float(total_fines),
-                float(total_break_time),
-                float(total_talk_time),
-                int(total_calls),
-                float(total_efficiency_hours),
-                float(calls_per_hour)
-            ))
-
-        return {
-            "regular_hours": float(total_work_time),
-            "total_break_time": float(total_break_time),
-            "total_talk_time": float(total_talk_time),
-            "total_calls": int(total_calls),
-            "total_efficiency_hours": float(total_efficiency_hours),
-            "calls_per_hour": float(calls_per_hour),
-            "fines": float(total_fines)
-        }
+            return self._aggregate_month_from_daily_tx(
+                cursor=cursor,
+                operator_id=int(operator_id),
+                month=str(month)
+            )
 
     def auto_fill_norm_hours(self, month):
         """
@@ -6112,6 +6109,875 @@ class Database:
 
         return new_breaks
 
+    def _schedule_auto_normalize_flag_status(self, value):
+        status = str(value or '').strip().lower()
+        if status in SCHEDULE_AUTO_FLAG_ALLOWED:
+            return status
+        return None
+
+    def _schedule_auto_clamp_range(self, start_date_obj, end_date_obj):
+        if start_date_obj is None or end_date_obj is None:
+            return None, None
+        if end_date_obj < SCHEDULE_AUTO_AGGREGATION_START_DATE:
+            return None, None
+        return max(start_date_obj, SCHEDULE_AUTO_AGGREGATION_START_DATE), end_date_obj
+
+    def _schedule_auto_total_minutes(self, intervals):
+        total = 0.0
+        for item in (intervals or []):
+            start = float(item.get('start', 0))
+            end = float(item.get('end', 0))
+            if end > start:
+                total += (end - start)
+        return float(total)
+
+    def _schedule_auto_subtract_intervals(self, source_intervals, blocked_intervals):
+        source = self._merge_break_intervals(source_intervals or [])
+        blocked = self._merge_break_intervals(blocked_intervals or [])
+        if not source:
+            return []
+        if not blocked:
+            return source
+
+        current = source
+        for block in blocked:
+            b_start = int(block.get('start', 0))
+            b_end = int(block.get('end', 0))
+            if b_end <= b_start:
+                continue
+            next_items = []
+            for seg in current:
+                s_start = int(seg.get('start', 0))
+                s_end = int(seg.get('end', 0))
+                if s_end <= s_start:
+                    continue
+                if s_end <= b_start or s_start >= b_end:
+                    next_items.append({'start': s_start, 'end': s_end})
+                    continue
+                if s_start < b_start:
+                    next_items.append({'start': s_start, 'end': b_start})
+                if s_end > b_end:
+                    next_items.append({'start': b_end, 'end': s_end})
+            current = self._merge_break_intervals(next_items)
+            if not current:
+                break
+        return current
+
+    def _schedule_auto_overlap_minutes(self, a_intervals, b_intervals):
+        a_list = self._merge_break_intervals(a_intervals or [])
+        b_list = self._merge_break_intervals(b_intervals or [])
+        if not a_list or not b_list:
+            return 0.0
+
+        total = 0.0
+        i = 0
+        j = 0
+        while i < len(a_list) and j < len(b_list):
+            a = a_list[i]
+            b = b_list[j]
+            start = max(int(a['start']), int(b['start']))
+            end = min(int(a['end']), int(b['end']))
+            if end > start:
+                total += (end - start)
+            if int(a['end']) <= int(b['end']):
+                i += 1
+            else:
+                j += 1
+        return float(total)
+
+    def _schedule_auto_intersect_interval_with_list(self, interval, intervals):
+        start = int(interval.get('start', 0))
+        end = int(interval.get('end', 0))
+        if end <= start:
+            return []
+        result = []
+        for seg in self._merge_break_intervals(intervals or []):
+            seg_start = int(seg.get('start', 0))
+            seg_end = int(seg.get('end', 0))
+            if seg_end <= seg_start:
+                continue
+            overlap_start = max(start, seg_start)
+            overlap_end = min(end, seg_end)
+            if overlap_end > overlap_start:
+                result.append({'start': overlap_start, 'end': overlap_end})
+        return self._merge_break_intervals(result)
+
+    def _schedule_auto_minute_of_day(self, dt_value):
+        if not isinstance(dt_value, datetime):
+            return None
+        minute = (dt_value.hour * 60) + dt_value.minute
+        if dt_value.second >= 30:
+            minute += 1
+        return int(minute)
+
+    def _schedule_auto_flag_status_for_minutes(self, status_value, minutes_value):
+        minutes_int = max(0, int(minutes_value or 0))
+        if minutes_int <= 0:
+            return None
+        normalized = self._schedule_auto_normalize_flag_status(status_value)
+        return normalized or SCHEDULE_AUTO_FLAG_PENDING
+
+    def _schedule_auto_flag_meta(self, flag_type):
+        key = str(flag_type or '').strip().lower()
+        if key == 'late':
+            return {
+                'reason': 'Опоздание',
+                'label': 'Опоздание'
+            }
+        if key == 'early_leave':
+            return {
+                'reason': 'Опоздание',
+                'label': 'Ранний уход'
+            }
+        if key == 'training':
+            return {
+                'reason': 'Тренинг',
+                'label': 'Тренинг'
+            }
+        raise ValueError("Unsupported auto flag type")
+
+    def _schedule_auto_build_fine_payload(self, flag_type, minutes_value):
+        meta = self._schedule_auto_flag_meta(flag_type)
+        minutes_int = max(0, int(minutes_value or 0))
+        rate_per_minute = float(SCHEDULE_AUTO_FINE_RATE_PER_MINUTE or 0.0)
+        amount = round(float(minutes_int) * rate_per_minute, 2)
+        comment = f"Автоагрегация: {meta['label']} {minutes_int} мин"
+        return {
+            'amount': float(amount),
+            'reason': meta['reason'],
+            'comment': comment
+        }
+
+    def _schedule_auto_sync_flag_fines_for_range_tx(self, cursor, operator_ids, start_date, end_date):
+        op_ids = sorted({int(v) for v in (operator_ids or []) if v is not None})
+        if not op_ids:
+            return {'inserted': 0, 'updated': 0, 'deleted': 0}
+
+        start_date_obj = self._normalize_schedule_date(start_date)
+        end_date_obj = self._normalize_schedule_date(end_date)
+        if end_date_obj < start_date_obj:
+            start_date_obj, end_date_obj = end_date_obj, start_date_obj
+
+        cursor.execute("""
+            SELECT
+                id,
+                operator_id,
+                day,
+                COALESCE(late_minutes, 0),
+                COALESCE(early_leave_minutes, 0),
+                COALESCE(training_minutes, 0),
+                late_status,
+                early_leave_status,
+                training_status,
+                late_fine_id,
+                early_leave_fine_id,
+                training_fine_id
+            FROM daily_hours
+            WHERE operator_id = ANY(%s)
+              AND day >= %s
+              AND day <= %s
+        """, (op_ids, start_date_obj, end_date_obj))
+        rows = cursor.fetchall() or []
+        if not rows:
+            return {'inserted': 0, 'updated': 0, 'deleted': 0}
+
+        inserted_count = 0
+        updated_count = 0
+        deleted_count = 0
+
+        def sync_one_flag(daily_id, operator_id, day_value, flag_type, minutes_value, status_value, fine_id_value):
+            nonlocal inserted_count, updated_count, deleted_count
+
+            minutes_int = max(0, int(minutes_value or 0))
+            status_norm = self._schedule_auto_flag_status_for_minutes(status_value, minutes_int)
+            fine_id_norm = int(fine_id_value) if fine_id_value is not None else None
+
+            should_keep_fine = (minutes_int > 0 and status_norm == SCHEDULE_AUTO_FLAG_CONFIRMED)
+            if should_keep_fine:
+                payload = self._schedule_auto_build_fine_payload(flag_type, minutes_int)
+                if fine_id_norm is None:
+                    cursor.execute("""
+                        INSERT INTO daily_fines (daily_hours_id, operator_id, day, amount, reason, comment)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        RETURNING id
+                    """, (
+                        daily_id,
+                        int(operator_id),
+                        day_value,
+                        float(payload['amount']),
+                        payload['reason'],
+                        payload['comment']
+                    ))
+                    fine_id_norm = int(cursor.fetchone()[0])
+                    inserted_count += 1
+                else:
+                    cursor.execute("""
+                        UPDATE daily_fines
+                        SET daily_hours_id = %s,
+                            operator_id = %s,
+                            day = %s,
+                            amount = %s,
+                            reason = %s,
+                            comment = %s
+                        WHERE id = %s
+                    """, (
+                        daily_id,
+                        int(operator_id),
+                        day_value,
+                        float(payload['amount']),
+                        payload['reason'],
+                        payload['comment'],
+                        fine_id_norm
+                    ))
+                    if int(cursor.rowcount or 0) > 0:
+                        updated_count += 1
+                    else:
+                        cursor.execute("""
+                            INSERT INTO daily_fines (daily_hours_id, operator_id, day, amount, reason, comment)
+                            VALUES (%s, %s, %s, %s, %s, %s)
+                            RETURNING id
+                        """, (
+                            daily_id,
+                            int(operator_id),
+                            day_value,
+                            float(payload['amount']),
+                            payload['reason'],
+                            payload['comment']
+                        ))
+                        fine_id_norm = int(cursor.fetchone()[0])
+                        inserted_count += 1
+            else:
+                if fine_id_norm is not None:
+                    cursor.execute("DELETE FROM daily_fines WHERE id = %s", (fine_id_norm,))
+                    if int(cursor.rowcount or 0) > 0:
+                        deleted_count += 1
+                fine_id_norm = None
+
+            return status_norm, fine_id_norm
+
+        for row in rows:
+            (
+                daily_id,
+                operator_id,
+                day_value,
+                late_minutes,
+                early_leave_minutes,
+                training_minutes,
+                late_status,
+                early_status,
+                training_status,
+                late_fine_id,
+                early_fine_id,
+                training_fine_id
+            ) = row
+
+            late_status_norm, late_fine_id_norm = sync_one_flag(
+                daily_id=daily_id,
+                operator_id=operator_id,
+                day_value=day_value,
+                flag_type='late',
+                minutes_value=late_minutes,
+                status_value=late_status,
+                fine_id_value=late_fine_id
+            )
+            early_status_norm, early_fine_id_norm = sync_one_flag(
+                daily_id=daily_id,
+                operator_id=operator_id,
+                day_value=day_value,
+                flag_type='early_leave',
+                minutes_value=early_leave_minutes,
+                status_value=early_status,
+                fine_id_value=early_fine_id
+            )
+            training_status_norm, training_fine_id_norm = sync_one_flag(
+                daily_id=daily_id,
+                operator_id=operator_id,
+                day_value=day_value,
+                flag_type='training',
+                minutes_value=training_minutes,
+                status_value=training_status,
+                fine_id_value=training_fine_id
+            )
+
+            if (
+                self._schedule_auto_normalize_flag_status(late_status) != late_status_norm
+                or self._schedule_auto_normalize_flag_status(early_status) != early_status_norm
+                or self._schedule_auto_normalize_flag_status(training_status) != training_status_norm
+                or (int(late_fine_id) if late_fine_id is not None else None) != late_fine_id_norm
+                or (int(early_fine_id) if early_fine_id is not None else None) != early_fine_id_norm
+                or (int(training_fine_id) if training_fine_id is not None else None) != training_fine_id_norm
+            ):
+                cursor.execute("""
+                    UPDATE daily_hours
+                    SET late_status = %s,
+                        early_leave_status = %s,
+                        training_status = %s,
+                        late_fine_id = %s,
+                        early_leave_fine_id = %s,
+                        training_fine_id = %s,
+                        created_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                """, (
+                    late_status_norm,
+                    early_status_norm,
+                    training_status_norm,
+                    late_fine_id_norm,
+                    early_fine_id_norm,
+                    training_fine_id_norm,
+                    daily_id
+                ))
+
+        return {
+            'inserted': int(inserted_count),
+            'updated': int(updated_count),
+            'deleted': int(deleted_count)
+        }
+
+    def _aggregate_month_from_daily_tx(self, cursor, operator_id, month):
+        operator_id = int(operator_id)
+        year, mon = map(int, str(month).split('-'))
+        start = date(year, mon, 1)
+        end = date(year, mon, calendar.monthrange(year, mon)[1])
+
+        cursor.execute("""
+            SELECT
+                COALESCE(SUM(work_time),0),
+                COALESCE(SUM(training_time),0),
+                COALESCE(SUM(break_time),0),
+                COALESCE(SUM(talk_time),0),
+                COALESCE(SUM(calls),0),
+                COALESCE(SUM(efficiency),0)
+            FROM daily_hours
+            WHERE operator_id = %s AND day >= %s AND day <= %s
+        """, (operator_id, start, end))
+        row = cursor.fetchone()
+        total_work_time, total_training_time, total_break_time, total_talk_time, total_calls, total_efficiency_hours = row
+
+        cursor.execute("""
+            SELECT COALESCE(SUM(df.amount), 0)
+            FROM daily_fines df
+            JOIN daily_hours dh ON df.daily_hours_id = dh.id
+            WHERE dh.operator_id = %s AND dh.day >= %s AND dh.day <= %s
+        """, (operator_id, start, end))
+        total_fines = cursor.fetchone()[0] or 0.0
+
+        if total_work_time and float(total_work_time) > 0:
+            calls_per_hour = float(total_calls) / float(total_work_time)
+        else:
+            calls_per_hour = 0.0
+
+        cursor.execute("""
+            INSERT INTO work_hours (
+                operator_id, month, regular_hours, training_hours, fines, total_break_time,
+                total_talk_time, total_calls, total_efficiency_hours, calls_per_hour
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (operator_id, month)
+            DO UPDATE SET
+                regular_hours = EXCLUDED.regular_hours,
+                training_hours = EXCLUDED.training_hours,
+                fines = EXCLUDED.fines,
+                total_break_time = EXCLUDED.total_break_time,
+                total_talk_time = EXCLUDED.total_talk_time,
+                total_calls = EXCLUDED.total_calls,
+                total_efficiency_hours = EXCLUDED.total_efficiency_hours,
+                calls_per_hour = EXCLUDED.calls_per_hour,
+                created_at = CURRENT_TIMESTAMP
+        """, (
+            operator_id,
+            month,
+            float(total_work_time or 0.0),
+            float(total_training_time or 0.0),
+            float(total_fines or 0.0),
+            float(total_break_time or 0.0),
+            float(total_talk_time or 0.0),
+            int(total_calls or 0),
+            float(total_efficiency_hours or 0.0),
+            float(calls_per_hour or 0.0)
+        ))
+
+        return {
+            "regular_hours": float(total_work_time or 0.0),
+            "training_hours": float(total_training_time or 0.0),
+            "total_break_time": float(total_break_time or 0.0),
+            "total_talk_time": float(total_talk_time or 0.0),
+            "total_calls": int(total_calls or 0),
+            "total_efficiency_hours": float(total_efficiency_hours or 0.0),
+            "calls_per_hour": float(calls_per_hour or 0.0),
+            "fines": float(total_fines or 0.0)
+        }
+
+    def _recalculate_auto_daily_hours_tx(self, cursor, operator_ids, start_date, end_date):
+        op_ids = sorted({int(v) for v in (operator_ids or []) if v is not None})
+        if not op_ids:
+            return {'updated_days': 0, 'aggregated_months': 0}
+
+        start_date_obj = self._normalize_schedule_date(start_date)
+        end_date_obj = self._normalize_schedule_date(end_date)
+        if end_date_obj < start_date_obj:
+            start_date_obj, end_date_obj = end_date_obj, start_date_obj
+
+        start_date_obj, end_date_obj = self._schedule_auto_clamp_range(start_date_obj, end_date_obj)
+        if start_date_obj is None or end_date_obj is None:
+            return {'updated_days': 0, 'aggregated_months': 0}
+
+        cursor.execute("""
+            SELECT id, operator_id, shift_date, start_time, end_time
+            FROM work_shifts
+            WHERE operator_id = ANY(%s)
+              AND shift_date >= %s
+              AND shift_date <= %s
+            ORDER BY operator_id, shift_date, start_time, end_time
+        """, (op_ids, start_date_obj, end_date_obj))
+        shifts_rows = cursor.fetchall() or []
+
+        shifts_by_day = {}
+        shift_id_to_item = {}
+        for shift_id, op_id, shift_date_value, start_time_value, end_time_value in shifts_rows:
+            start_min, end_min = self._schedule_interval_minutes(start_time_value, end_time_value)
+            item = {
+                'id': int(shift_id),
+                'start': int(start_min),
+                'end': int(end_min),
+                'breaks': []
+            }
+            key = (int(op_id), shift_date_value)
+            shifts_by_day.setdefault(key, []).append(item)
+            shift_id_to_item[int(shift_id)] = item
+
+        if shift_id_to_item:
+            cursor.execute("""
+                SELECT shift_id, start_minutes, end_minutes
+                FROM shift_breaks
+                WHERE shift_id = ANY(%s)
+                ORDER BY shift_id, start_minutes, end_minutes
+            """, (list(shift_id_to_item.keys()),))
+            for shift_id, b_start, b_end in cursor.fetchall() or []:
+                target = shift_id_to_item.get(int(shift_id))
+                if not target:
+                    continue
+                target['breaks'].append({
+                    'start': int(b_start),
+                    'end': int(b_end)
+                })
+
+        for day_items in shifts_by_day.values():
+            for shift in day_items:
+                shift_interval = [{'start': int(shift['start']), 'end': int(shift['end'])}]
+                clipped_breaks = []
+                for b in self._merge_break_intervals(shift.get('breaks') or []):
+                    b_start = max(int(shift['start']), int(b.get('start', 0)))
+                    b_end = min(int(shift['end']), int(b.get('end', 0)))
+                    if b_end > b_start:
+                        clipped_breaks.append({'start': b_start, 'end': b_end})
+                shift['breaks'] = self._merge_break_intervals(clipped_breaks)
+                shift['work_intervals'] = self._schedule_auto_subtract_intervals(shift_interval, shift['breaks'])
+
+        status_end_for_query = end_date_obj + timedelta(days=1)
+        cursor.execute("""
+            SELECT
+                operator_id,
+                status_date,
+                start_at,
+                end_at,
+                status_key,
+                COALESCE(is_work, FALSE),
+                COALESCE(is_break, FALSE)
+            FROM operator_status_segments
+            WHERE operator_id = ANY(%s)
+              AND status_date >= %s
+              AND status_date <= %s
+            ORDER BY operator_id, status_date, start_at, end_at, id
+        """, (op_ids, start_date_obj, status_end_for_query))
+        status_rows = cursor.fetchall() or []
+        statuses_by_day = {}
+        for op_id, status_date_value, start_at_value, end_at_value, status_key, is_work, is_break in status_rows:
+            start_min = self._schedule_auto_minute_of_day(start_at_value)
+            end_min = self._schedule_auto_minute_of_day(end_at_value)
+            if start_min is None or end_min is None:
+                continue
+            if end_min <= start_min:
+                continue
+            day_key = (int(op_id), status_date_value)
+            statuses_by_day.setdefault(day_key, []).append({
+                'start': int(start_min),
+                'end': int(end_min),
+                'status_key': str(status_key or '').strip().lower(),
+                'is_work': bool(is_work),
+                'is_break': bool(is_break)
+            })
+
+        cursor.execute("""
+            SELECT
+                operator_id,
+                day,
+                COALESCE(auto_aggregated, FALSE),
+                late_status,
+                early_leave_status,
+                training_status,
+                late_fine_id,
+                early_leave_fine_id,
+                training_fine_id
+            FROM daily_hours
+            WHERE operator_id = ANY(%s)
+              AND day >= %s
+              AND day <= %s
+        """, (op_ids, start_date_obj, end_date_obj))
+        existing_rows = cursor.fetchall() or []
+        existing_by_day = {}
+        for row in existing_rows:
+            op_id = int(row[0])
+            day_value = row[1]
+            existing_by_day[(op_id, day_value)] = {
+                'auto_aggregated': bool(row[2]),
+                'late_status': self._schedule_auto_normalize_flag_status(row[3]),
+                'early_leave_status': self._schedule_auto_normalize_flag_status(row[4]),
+                'training_status': self._schedule_auto_normalize_flag_status(row[5]),
+                'late_fine_id': int(row[6]) if row[6] is not None else None,
+                'early_leave_fine_id': int(row[7]) if row[7] is not None else None,
+                'training_fine_id': int(row[8]) if row[8] is not None else None
+            }
+
+        target_days = set(shifts_by_day.keys())
+        for key, item in existing_by_day.items():
+            if item.get('auto_aggregated') or item.get('late_status') or item.get('early_leave_status') or item.get('training_status'):
+                target_days.add(key)
+
+        if not target_days:
+            return {'updated_days': 0, 'aggregated_months': 0}
+
+        upsert_rows = []
+        affected_months = set()
+
+        for op_id, day_value in sorted(target_days, key=lambda x: (x[0], x[1])):
+            shifts = shifts_by_day.get((op_id, day_value)) or []
+            day_statuses = statuses_by_day.get((op_id, day_value)) or []
+            next_statuses_raw = statuses_by_day.get((op_id, day_value + timedelta(days=1))) or []
+            next_statuses = [{
+                **seg,
+                'start': int(seg.get('start', 0)) + 1440,
+                'end': int(seg.get('end', 0)) + 1440
+            } for seg in next_statuses_raw if int(seg.get('end', 0)) > int(seg.get('start', 0))]
+
+            def pick_status_intervals(source_items, predicate_fn):
+                return self._merge_break_intervals([
+                    {'start': int(seg.get('start', 0)), 'end': int(seg.get('end', 0))}
+                    for seg in (source_items or [])
+                    if predicate_fn(seg)
+                ])
+
+            day_work_status = pick_status_intervals(
+                day_statuses,
+                lambda seg: bool(seg.get('is_work')) or str(seg.get('status_key') or '') in SCHEDULE_AUTO_WORK_STATUS_KEYS
+            )
+            day_talk_status = pick_status_intervals(
+                day_statuses,
+                lambda seg: str(seg.get('status_key') or '') in SCHEDULE_AUTO_TALK_STATUS_KEYS
+            )
+            day_break_status = pick_status_intervals(
+                day_statuses,
+                lambda seg: bool(seg.get('is_break')) or str(seg.get('status_key') or '') in SCHEDULE_AUTO_BREAK_STATUS_KEYS
+            )
+            day_training_status = pick_status_intervals(
+                day_statuses,
+                lambda seg: str(seg.get('status_key') or '') == SCHEDULE_AUTO_TRAINING_STATUS_KEY
+            )
+
+            next_work_status = pick_status_intervals(
+                next_statuses,
+                lambda seg: bool(seg.get('is_work')) or str(seg.get('status_key') or '') in SCHEDULE_AUTO_WORK_STATUS_KEYS
+            )
+            next_talk_status = pick_status_intervals(
+                next_statuses,
+                lambda seg: str(seg.get('status_key') or '') in SCHEDULE_AUTO_TALK_STATUS_KEYS
+            )
+            next_break_status = pick_status_intervals(
+                next_statuses,
+                lambda seg: bool(seg.get('is_break')) or str(seg.get('status_key') or '') in SCHEDULE_AUTO_BREAK_STATUS_KEYS
+            )
+            next_training_status = pick_status_intervals(
+                next_statuses,
+                lambda seg: str(seg.get('status_key') or '') == SCHEDULE_AUTO_TRAINING_STATUS_KEY
+            )
+
+            work_status_for_shift = self._merge_break_intervals((day_work_status or []) + (next_work_status or []))
+            talk_status_for_shift = self._merge_break_intervals((day_talk_status or []) + (next_talk_status or []))
+            break_status_for_shift = self._merge_break_intervals((day_break_status or []) + (next_break_status or []))
+            training_status_for_shift = self._merge_break_intervals((day_training_status or []) + (next_training_status or []))
+
+            work_minutes = 0.0
+            talk_minutes = 0.0
+            break_minutes = 0.0
+            training_minutes_in_shift = 0.0
+            late_minutes_total = 0.0
+            early_leave_minutes_total = 0.0
+
+            day_shift_intervals = []
+            for shift in shifts:
+                shift_interval = {'start': int(shift['start']), 'end': int(shift['end'])}
+                shift_intervals = [shift_interval]
+                work_minutes += self._schedule_auto_overlap_minutes(shift.get('work_intervals') or [], work_status_for_shift)
+                talk_minutes += self._schedule_auto_overlap_minutes(shift.get('work_intervals') or [], talk_status_for_shift)
+                break_minutes += self._schedule_auto_overlap_minutes(shift.get('breaks') or [], break_status_for_shift)
+                training_minutes_in_shift += self._schedule_auto_overlap_minutes(shift_intervals, training_status_for_shift)
+
+                shift_work_status = self._schedule_auto_intersect_interval_with_list(shift_interval, work_status_for_shift)
+                if shift_work_status:
+                    first_work_start = int(shift_work_status[0].get('start', shift_interval['start']))
+                    last_work_end = int(shift_work_status[-1].get('end', shift_interval['end']))
+                    late_minutes_total += max(0, first_work_start - int(shift_interval['start']))
+                    early_leave_minutes_total += max(0, int(shift_interval['end']) - last_work_end)
+
+                day_seg_start = max(0, min(1440, int(shift_interval['start'])))
+                day_seg_end = max(0, min(1440, int(shift_interval['end'])))
+                if day_seg_end > day_seg_start:
+                    day_shift_intervals.append({'start': day_seg_start, 'end': day_seg_end})
+
+            day_shift_intervals = self._merge_break_intervals(day_shift_intervals)
+            work_inside_shift_day = self._schedule_auto_overlap_minutes(day_work_status, day_shift_intervals)
+            overtime_minutes_total = max(0.0, self._schedule_auto_total_minutes(day_work_status) - work_inside_shift_day)
+
+            work_time_hours = round(work_minutes / 60.0, 4)
+            break_time_hours = round(break_minutes / 60.0, 4)
+            talk_time_hours = round(talk_minutes / 60.0, 4)
+            efficiency_hours = round(talk_minutes / 60.0, 4)
+            training_time_hours = round(training_minutes_in_shift / 60.0, 4)
+
+            late_minutes_int = max(0, int(round(late_minutes_total)))
+            early_leave_minutes_int = max(0, int(round(early_leave_minutes_total)))
+            overtime_minutes_int = max(0, int(round(overtime_minutes_total)))
+            training_minutes_int = max(0, int(round(training_minutes_in_shift)))
+
+            existing = existing_by_day.get((op_id, day_value)) or {}
+            prev_late_status = self._schedule_auto_normalize_flag_status(existing.get('late_status'))
+            prev_early_status = self._schedule_auto_normalize_flag_status(existing.get('early_leave_status'))
+            prev_training_status = self._schedule_auto_normalize_flag_status(existing.get('training_status'))
+
+            late_status = self._schedule_auto_flag_status_for_minutes(prev_late_status, late_minutes_int)
+            early_status = self._schedule_auto_flag_status_for_minutes(prev_early_status, early_leave_minutes_int)
+            training_status = self._schedule_auto_flag_status_for_minutes(prev_training_status, training_minutes_int)
+
+            upsert_rows.append((
+                int(op_id),
+                day_value,
+                float(work_time_hours),
+                float(break_time_hours),
+                float(talk_time_hours),
+                int(0),
+                float(efficiency_hours),
+                float(training_time_hours),
+                int(late_minutes_int),
+                int(early_leave_minutes_int),
+                int(overtime_minutes_int),
+                int(training_minutes_int),
+                late_status,
+                early_status,
+                training_status,
+                existing.get('late_fine_id'),
+                existing.get('early_leave_fine_id'),
+                existing.get('training_fine_id')
+            ))
+            affected_months.add((int(op_id), day_value.strftime('%Y-%m')))
+
+        if upsert_rows:
+            execute_values(
+                cursor,
+                """
+                INSERT INTO daily_hours (
+                    operator_id, day, work_time, break_time, talk_time, calls, efficiency,
+                    training_time, late_minutes, early_leave_minutes, overtime_minutes, training_minutes,
+                    late_status, early_leave_status, training_status,
+                    late_fine_id, early_leave_fine_id, training_fine_id,
+                    auto_aggregated, auto_aggregated_at
+                )
+                VALUES %s
+                ON CONFLICT (operator_id, day)
+                DO UPDATE SET
+                    work_time = EXCLUDED.work_time,
+                    break_time = EXCLUDED.break_time,
+                    talk_time = EXCLUDED.talk_time,
+                    calls = EXCLUDED.calls,
+                    efficiency = EXCLUDED.efficiency,
+                    training_time = EXCLUDED.training_time,
+                    late_minutes = EXCLUDED.late_minutes,
+                    early_leave_minutes = EXCLUDED.early_leave_minutes,
+                    overtime_minutes = EXCLUDED.overtime_minutes,
+                    training_minutes = EXCLUDED.training_minutes,
+                    late_status = EXCLUDED.late_status,
+                    early_leave_status = EXCLUDED.early_leave_status,
+                    training_status = EXCLUDED.training_status,
+                    late_fine_id = EXCLUDED.late_fine_id,
+                    early_leave_fine_id = EXCLUDED.early_leave_fine_id,
+                    training_fine_id = EXCLUDED.training_fine_id,
+                    auto_aggregated = TRUE,
+                    auto_aggregated_at = CURRENT_TIMESTAMP,
+                    created_at = CURRENT_TIMESTAMP
+                """,
+                upsert_rows,
+                page_size=2000
+            )
+
+        fine_sync_result = self._schedule_auto_sync_flag_fines_for_range_tx(
+            cursor=cursor,
+            operator_ids=op_ids,
+            start_date=start_date_obj,
+            end_date=end_date_obj
+        )
+
+        for op_id, month_key in sorted(affected_months):
+            self._aggregate_month_from_daily_tx(cursor, op_id, month_key)
+
+        return {
+            'updated_days': len(upsert_rows),
+            'aggregated_months': len(affected_months),
+            'auto_flag_fines': fine_sync_result
+        }
+
+    def recalculate_auto_daily_hours(self, operator_ids, start_date, end_date):
+        with self._get_cursor() as cursor:
+            return self._recalculate_auto_daily_hours_tx(
+                cursor=cursor,
+                operator_ids=operator_ids,
+                start_date=start_date,
+                end_date=end_date
+            )
+
+    def _schedule_auto_flag_columns(self, flag_type):
+        flag_key = str(flag_type or '').strip().lower()
+        if flag_key == 'late':
+            return ('late_minutes', 'late_status', 'late_fine_id')
+        if flag_key in ('early', 'early_leave'):
+            return ('early_leave_minutes', 'early_leave_status', 'early_leave_fine_id')
+        if flag_key == 'training':
+            return ('training_minutes', 'training_status', 'training_fine_id')
+        raise ValueError("Unsupported flag_type. Allowed: late, early_leave, training")
+
+    def resolve_auto_schedule_flag(self, operator_id, day, flag_type, action):
+        operator_id_int = int(operator_id)
+        day_obj = self._normalize_schedule_date(day)
+        _, status_col, _ = self._schedule_auto_flag_columns(flag_type)
+
+        action_norm = str(action or '').strip().lower()
+        if action_norm in ('confirm', 'confirmed'):
+            target_status = SCHEDULE_AUTO_FLAG_CONFIRMED
+        elif action_norm in ('reject', 'rejected'):
+            target_status = SCHEDULE_AUTO_FLAG_REJECTED
+        elif action_norm in ('pending', 'reset'):
+            target_status = SCHEDULE_AUTO_FLAG_PENDING
+        else:
+            raise ValueError("Unsupported action. Allowed: confirm, reject, pending")
+
+        with self._get_cursor() as cursor:
+            self._recalculate_auto_daily_hours_tx(
+                cursor=cursor,
+                operator_ids=[operator_id_int],
+                start_date=day_obj,
+                end_date=day_obj
+            )
+
+            cursor.execute("""
+                SELECT
+                    id,
+                    COALESCE(late_minutes, 0),
+                    COALESCE(early_leave_minutes, 0),
+                    COALESCE(training_minutes, 0),
+                    late_status,
+                    early_leave_status,
+                    training_status
+                FROM daily_hours
+                WHERE operator_id = %s
+                  AND day = %s
+                FOR UPDATE
+            """, (operator_id_int, day_obj))
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError("Нет агрегированных данных за выбранный день")
+
+            (
+                daily_id,
+                late_minutes,
+                early_leave_minutes,
+                training_minutes,
+                late_status,
+                early_status,
+                training_status
+            ) = row
+
+            late_minutes_int = max(0, int(late_minutes or 0))
+            early_minutes_int = max(0, int(early_leave_minutes or 0))
+            training_minutes_int = max(0, int(training_minutes or 0))
+
+            status_map = {
+                'late_status': self._schedule_auto_flag_status_for_minutes(late_status, late_minutes_int),
+                'early_leave_status': self._schedule_auto_flag_status_for_minutes(early_status, early_minutes_int),
+                'training_status': self._schedule_auto_flag_status_for_minutes(training_status, training_minutes_int)
+            }
+            minutes_by_status_col = {
+                'late_status': late_minutes_int,
+                'early_leave_status': early_minutes_int,
+                'training_status': training_minutes_int
+            }
+
+            current_minutes = minutes_by_status_col.get(status_col, 0)
+            if target_status == SCHEDULE_AUTO_FLAG_CONFIRMED and current_minutes <= 0:
+                raise ValueError("Нельзя подтвердить флаг без рассчитанного времени")
+
+            if current_minutes <= 0:
+                status_map[status_col] = None
+            else:
+                status_map[status_col] = target_status
+
+            cursor.execute("""
+                UPDATE daily_hours
+                SET late_status = %s,
+                    early_leave_status = %s,
+                    training_status = %s,
+                    created_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+            """, (
+                status_map['late_status'],
+                status_map['early_leave_status'],
+                status_map['training_status'],
+                daily_id
+            ))
+
+            fine_sync_result = self._schedule_auto_sync_flag_fines_for_range_tx(
+                cursor=cursor,
+                operator_ids=[operator_id_int],
+                start_date=day_obj,
+                end_date=day_obj
+            )
+            self._aggregate_month_from_daily_tx(cursor, operator_id_int, day_obj.strftime('%Y-%m'))
+
+            flags_map = self._load_auto_schedule_flags_for_operators(
+                cursor=cursor,
+                operator_ids=[operator_id_int],
+                start_date_obj=day_obj,
+                end_date_obj=day_obj
+            )
+            day_key = day_obj.strftime('%Y-%m-%d')
+            day_flags = (flags_map.get(operator_id_int) or {}).get(day_key, {})
+
+            resolved_minutes = int(day_flags.get({
+                'late_status': 'lateMinutes',
+                'early_leave_status': 'earlyLeaveMinutes',
+                'training_status': 'trainingMinutes'
+            }.get(status_col, ''), 0))
+
+            return {
+                'operator_id': operator_id_int,
+                'day': day_key,
+                'flag_type': str(flag_type),
+                'status': day_flags.get({
+                    'late_status': 'lateStatus',
+                    'early_leave_status': 'earlyLeaveStatus',
+                    'training_status': 'trainingStatus'
+                }.get(status_col, ''), None),
+                'minutes': resolved_minutes,
+                'day_flags': day_flags,
+                'fine_sync': fine_sync_result
+            }
+
     def _resolve_breaks_for_day_replacement_tx(self, cursor, operator_id, shift_date, start_time, end_time, breaks):
         """
         Для replace-сценариев (bulk set_shift): если клиент прислал старые автоперерывы
@@ -6424,6 +7290,126 @@ class Database:
             target['scheduleStatusPeriods'] = data.get('scheduleStatusPeriods', [])
             target['scheduleStatusDays'] = data.get('scheduleStatusDays', {})
 
+    def _load_auto_schedule_flags_for_operators(self, cursor, operator_ids, start_date_obj=None, end_date_obj=None):
+        op_ids = [int(v) for v in (operator_ids or []) if v is not None]
+        result = {op_id: {} for op_id in op_ids}
+        if not op_ids:
+            return result
+
+        query = """
+            SELECT
+                operator_id,
+                day,
+                COALESCE(late_minutes, 0),
+                COALESCE(early_leave_minutes, 0),
+                COALESCE(overtime_minutes, 0),
+                COALESCE(training_minutes, 0),
+                late_status,
+                early_leave_status,
+                training_status,
+                late_fine_id,
+                early_leave_fine_id,
+                training_fine_id
+            FROM daily_hours
+            WHERE operator_id = ANY(%s)
+              AND (
+                    COALESCE(late_minutes, 0) > 0
+                 OR COALESCE(early_leave_minutes, 0) > 0
+                 OR COALESCE(overtime_minutes, 0) > 0
+                 OR COALESCE(training_minutes, 0) > 0
+                 OR late_status IS NOT NULL
+                 OR early_leave_status IS NOT NULL
+                 OR training_status IS NOT NULL
+              )
+        """
+        params = [op_ids]
+
+        if start_date_obj and end_date_obj:
+            query += " AND day >= %s AND day <= %s"
+            params.extend([start_date_obj, end_date_obj])
+        elif start_date_obj:
+            query += " AND day >= %s"
+            params.append(start_date_obj)
+        elif end_date_obj:
+            query += " AND day <= %s"
+            params.append(end_date_obj)
+
+        query += " ORDER BY operator_id, day"
+        cursor.execute(query, params)
+        rows = cursor.fetchall() or []
+
+        for row in rows:
+            (
+                operator_id,
+                day_value,
+                late_minutes,
+                early_leave_minutes,
+                overtime_minutes,
+                training_minutes,
+                late_status,
+                early_status,
+                training_status,
+                late_fine_id,
+                early_fine_id,
+                training_fine_id
+            ) = row
+            op_id = int(operator_id)
+            day_key = day_value.strftime('%Y-%m-%d') if hasattr(day_value, 'strftime') else str(day_value or '')
+            if not day_key:
+                continue
+
+            late_minutes_int = max(0, int(late_minutes or 0))
+            early_leave_minutes_int = max(0, int(early_leave_minutes or 0))
+            overtime_minutes_int = max(0, int(overtime_minutes or 0))
+            training_minutes_int = max(0, int(training_minutes or 0))
+
+            late_status_norm = self._schedule_auto_flag_status_for_minutes(late_status, late_minutes_int)
+            early_status_norm = self._schedule_auto_flag_status_for_minutes(early_status, early_leave_minutes_int)
+            training_status_norm = self._schedule_auto_flag_status_for_minutes(training_status, training_minutes_int)
+
+            has_late = late_minutes_int > 0 and late_status_norm != SCHEDULE_AUTO_FLAG_REJECTED
+            has_early_leave = early_leave_minutes_int > 0 and early_status_norm != SCHEDULE_AUTO_FLAG_REJECTED
+            has_training = training_minutes_int > 0 and training_status_norm != SCHEDULE_AUTO_FLAG_REJECTED
+            has_pending = (
+                (late_status_norm == SCHEDULE_AUTO_FLAG_PENDING and late_minutes_int > 0)
+                or (early_status_norm == SCHEDULE_AUTO_FLAG_PENDING and early_leave_minutes_int > 0)
+                or (training_status_norm == SCHEDULE_AUTO_FLAG_PENDING and training_minutes_int > 0)
+            )
+
+            result.setdefault(op_id, {})[day_key] = {
+                'lateMinutes': late_minutes_int,
+                'earlyLeaveMinutes': early_leave_minutes_int,
+                'overtimeMinutes': overtime_minutes_int,
+                'trainingMinutes': training_minutes_int,
+                'lateStatus': late_status_norm,
+                'earlyLeaveStatus': early_status_norm,
+                'trainingStatus': training_status_norm,
+                'lateFineId': int(late_fine_id) if late_fine_id is not None else None,
+                'earlyLeaveFineId': int(early_fine_id) if early_fine_id is not None else None,
+                'trainingFineId': int(training_fine_id) if training_fine_id is not None else None,
+                'hasLate': bool(has_late),
+                'hasEarlyLeave': bool(has_early_leave),
+                'hasTraining': bool(has_training),
+                'hasDefect': bool(has_late or has_early_leave or has_training),
+                'hasOvertime': bool(overtime_minutes_int > 0),
+                'hasPending': bool(has_pending)
+            }
+
+        return result
+
+    def _attach_auto_schedule_flags_to_operators(self, cursor, operators_map, operator_ids, start_date_obj=None, end_date_obj=None):
+        flags_map = self._load_auto_schedule_flags_for_operators(
+            cursor=cursor,
+            operator_ids=operator_ids,
+            start_date_obj=start_date_obj,
+            end_date_obj=end_date_obj
+        )
+        for op_id in (operator_ids or []):
+            target = operators_map.get(op_id)
+            if target is None:
+                continue
+            target['aggregatedScheduleFlagsDays'] = flags_map.get(int(op_id), {})
+
     def _load_imported_status_segments_for_operators(self, cursor, operator_ids, start_date_obj=None, end_date_obj=None):
         operator_ids = [int(v) for v in (operator_ids or []) if v is not None]
         result = {op_id: {} for op_id in operator_ids}
@@ -6663,6 +7649,7 @@ class Database:
                     'daysOff': [],
                     'scheduleStatusPeriods': [],
                     'scheduleStatusDays': {},
+                    'aggregatedScheduleFlagsDays': {},
                     'importedStatusTimelineDays': {}
                 }
 
@@ -6747,6 +7734,13 @@ class Database:
                 start_date_obj=start_date_obj,
                 end_date_obj=end_date_obj
             )
+            self._attach_auto_schedule_flags_to_operators(
+                cursor=cursor,
+                operators_map=result_map,
+                operator_ids=operator_ids,
+                start_date_obj=start_date_obj,
+                end_date_obj=end_date_obj
+            )
             if include_imported_statuses:
                 self._attach_imported_status_segments_to_operators(
                     cursor=cursor,
@@ -6795,6 +7789,7 @@ class Database:
                 'daysOff': [],
                 'scheduleStatusPeriods': [],
                 'scheduleStatusDays': {},
+                'aggregatedScheduleFlagsDays': {},
                 'importedStatusTimelineDays': {}
             }
 
@@ -6865,6 +7860,13 @@ class Database:
                 result['daysOff'].append(day_off_date.strftime('%Y-%m-%d'))
 
             self._attach_schedule_status_periods_to_operators(
+                cursor=cursor,
+                operators_map={operator_id: result},
+                operator_ids=[operator_id],
+                start_date_obj=start_date_obj,
+                end_date_obj=end_date_obj
+            )
+            self._attach_auto_schedule_flags_to_operators(
                 cursor=cursor,
                 operators_map={operator_id: result},
                 operator_ids=[operator_id],
@@ -8384,6 +9386,14 @@ class Database:
                 """,
                 (response_comment_norm, responder_operator_id, request_id)
             )
+            all_affected_dates = sorted(set(requester_affected_dates + target_affected_dates))
+            if all_affected_dates:
+                self._recalculate_auto_daily_hours_tx(
+                    cursor=cursor,
+                    operator_ids=[requester_operator_id, target_operator_id],
+                    start_date=all_affected_dates[0],
+                    end_date=all_affected_dates[-1]
+                )
             row = self._select_shift_swap_request_by_id_tx(cursor, request_id)
             return self._serialize_shift_swap_request_row(row)
 
@@ -8408,7 +9418,7 @@ class Database:
         end_time_obj = self._normalize_schedule_time(end_time, 'end_time')
 
         with self._get_cursor() as cursor:
-            return self._save_shift_tx(
+            shift_id = self._save_shift_tx(
                 cursor=cursor,
                 operator_id=int(operator_id),
                 shift_date=shift_date_obj,
@@ -8418,6 +9428,13 @@ class Database:
                 previous_start_time=previous_start_time,
                 previous_end_time=previous_end_time
             )
+            self._recalculate_auto_daily_hours_tx(
+                cursor=cursor,
+                operator_ids=[int(operator_id)],
+                start_date=shift_date_obj,
+                end_date=shift_date_obj
+            )
+            return shift_id
 
     def delete_shift(self, operator_id, shift_date, start_time, end_time):
         """
@@ -8434,7 +9451,15 @@ class Database:
                   AND start_time = %s AND end_time = %s
                 RETURNING id
             """, (int(operator_id), shift_date_obj, start_time_obj, end_time_obj))
-            return cursor.fetchone() is not None
+            deleted = cursor.fetchone() is not None
+            if deleted:
+                self._recalculate_auto_daily_hours_tx(
+                    cursor=cursor,
+                    operator_ids=[int(operator_id)],
+                    start_date=shift_date_obj,
+                    end_date=shift_date_obj
+                )
+            return deleted
 
     def toggle_day_off(self, operator_id, day_off_date):
         """
@@ -8458,6 +9483,12 @@ class Database:
                     DELETE FROM days_off
                     WHERE operator_id = %s AND day_off_date = %s
                 """, (operator_id, day_off_date_obj))
+                self._recalculate_auto_daily_hours_tx(
+                    cursor=cursor,
+                    operator_ids=[operator_id],
+                    start_date=day_off_date_obj,
+                    end_date=day_off_date_obj
+                )
                 return False
 
             cursor.execute("""
@@ -8469,6 +9500,12 @@ class Database:
                 DELETE FROM work_shifts
                 WHERE operator_id = %s AND shift_date = %s
             """, (operator_id, day_off_date_obj))
+            self._recalculate_auto_daily_hours_tx(
+                cursor=cursor,
+                operator_ids=[operator_id],
+                start_date=day_off_date_obj,
+                end_date=day_off_date_obj
+            )
             return True
 
     def _delete_all_shifts_for_day_tx(self, cursor, operator_id, shift_date):
@@ -8588,6 +9625,18 @@ class Database:
             'affected_operator_ids': []
         }
         affected_operator_ids = set()
+        affected_range_by_operator = {}
+
+        def register_affected_day(op_id, day_obj):
+            op_id_int = int(op_id)
+            prev = affected_range_by_operator.get(op_id_int)
+            if prev is None:
+                affected_range_by_operator[op_id_int] = [day_obj, day_obj]
+                return
+            if day_obj < prev[0]:
+                prev[0] = day_obj
+            if day_obj > prev[1]:
+                prev[1] = day_obj
 
         with self._get_cursor() as cursor:
             for item in actions:
@@ -8608,6 +9657,7 @@ class Database:
                 operator_id = int(operator_id)
                 date_obj = self._normalize_schedule_date(date_value)
                 affected_operator_ids.add(operator_id)
+                register_affected_day(operator_id, date_obj)
 
                 if action_type == 'set_day_off':
                     result = self._set_day_off_tx(cursor, operator_id, date_obj)
@@ -8652,6 +9702,14 @@ class Database:
 
                 raise ValueError(f"Unsupported action type: {action_type}")
 
+            for op_id, bounds in affected_range_by_operator.items():
+                self._recalculate_auto_daily_hours_tx(
+                    cursor=cursor,
+                    operator_ids=[op_id],
+                    start_date=bounds[0],
+                    end_date=bounds[1]
+                )
+
         summary['affected_operator_ids'] = sorted(affected_operator_ids)
         return summary
 
@@ -8680,6 +9738,18 @@ class Database:
             'affected_operator_ids': []
         }
         affected_operator_ids = set()
+        affected_range_by_operator = {}
+
+        def register_affected_day(op_id, day_obj):
+            op_id_int = int(op_id)
+            prev = affected_range_by_operator.get(op_id_int)
+            if prev is None:
+                affected_range_by_operator[op_id_int] = [day_obj, day_obj]
+                return
+            if day_obj < prev[0]:
+                prev[0] = day_obj
+            if day_obj > prev[1]:
+                prev[1] = day_obj
 
         with self._get_cursor() as cursor:
             for item in entries:
@@ -8703,6 +9773,7 @@ class Database:
                 operator_id = int(operator_id)
                 date_obj = self._normalize_schedule_date(date_value)
                 affected_operator_ids.add(operator_id)
+                register_affected_day(operator_id, date_obj)
 
                 cleared = self._clear_day_schedule_tx(cursor, operator_id, date_obj)
                 summary['deleted_shift_rows'] += int(cleared.get('deleted_shifts') or 0)
@@ -8741,6 +9812,14 @@ class Database:
 
                 summary['set_shift_days'] += 1
                 summary['days_processed'] += 1
+
+            for op_id, bounds in affected_range_by_operator.items():
+                self._recalculate_auto_daily_hours_tx(
+                    cursor=cursor,
+                    operator_ids=[op_id],
+                    start_date=bounds[0],
+                    end_date=bounds[1]
+                )
 
         summary['affected_operator_ids'] = sorted(affected_operator_ids)
         return summary
@@ -8982,6 +10061,15 @@ class Database:
 
         deleted_events = 0
         deleted_segments = 0
+        auto_aggregation_summary = {
+            'updated_days': 0,
+            'aggregated_months': 0,
+            'auto_flag_fines': {
+                'inserted': 0,
+                'updated': 0,
+                'deleted': 0
+            }
+        }
 
         with self._get_cursor() as cursor:
             for operator_id, start_date_obj, end_date_obj in event_ranges:
@@ -9084,6 +10172,14 @@ class Database:
                     page_size=STATUS_IMPORT_INSERT_PAGE_SIZE
                 )
 
+            if affected_operator_ids and date_from_obj and date_to_obj:
+                auto_aggregation_summary = self._recalculate_auto_daily_hours_tx(
+                    cursor=cursor,
+                    operator_ids=sorted(int(v) for v in affected_operator_ids),
+                    start_date=(date_from_obj - timedelta(days=1)),
+                    end_date=date_to_obj
+                )
+
         return {
             'batch_id': str(batch_id),
             'source_rows': _safe_int(summary_payload.get('source_rows'), default=0),
@@ -9098,7 +10194,8 @@ class Database:
             'open_tail_events': _safe_int(summary_payload.get('open_tail_events'), default=0),
             'zero_or_negative_transitions': _safe_int(summary_payload.get('zero_or_negative_transitions'), default=0),
             'date_from': date_from_obj.strftime('%Y-%m-%d') if date_from_obj else None,
-            'date_to': date_to_obj.strftime('%Y-%m-%d') if date_to_obj else None
+            'date_to': date_to_obj.strftime('%Y-%m-%d') if date_to_obj else None,
+            'auto_aggregation': auto_aggregation_summary
         }
 
     def save_schedule_status_period(
@@ -9260,6 +10357,12 @@ class Database:
                 start_date=start_date_obj,
                 end_date=end_date_obj
             )
+            self._recalculate_auto_daily_hours_tx(
+                cursor=cursor,
+                operator_ids=[operator_id],
+                start_date=start_date_obj,
+                end_date=end_date_obj
+            )
             self._sync_user_statuses_from_schedule_periods_tx(cursor, operator_ids=[operator_id])
             return self._serialize_schedule_status_period(saved_row)
 
@@ -9356,11 +10459,17 @@ class Database:
             raise ValueError("shifts must be a list")
 
         result_ids = []
+        min_date_obj = None
+        max_date_obj = None
         with self._get_cursor() as cursor:
             for shift in shifts_data:
                 if not isinstance(shift, dict):
                     raise ValueError("Each shift must be an object")
                 shift_date_obj = self._normalize_schedule_date(shift.get('date'))
+                if min_date_obj is None or shift_date_obj < min_date_obj:
+                    min_date_obj = shift_date_obj
+                if max_date_obj is None or shift_date_obj > max_date_obj:
+                    max_date_obj = shift_date_obj
                 start_time_obj = self._normalize_schedule_time(shift.get('start'), 'start')
                 end_time_obj = self._normalize_schedule_time(shift.get('end'), 'end')
                 shift_id = self._save_shift_tx(
@@ -9372,6 +10481,14 @@ class Database:
                     breaks=shift.get('breaks')
                 )
                 result_ids.append(shift_id)
+
+            if min_date_obj is not None and max_date_obj is not None:
+                self._recalculate_auto_daily_hours_tx(
+                    cursor=cursor,
+                    operator_ids=[operator_id],
+                    start_date=min_date_obj,
+                    end_date=max_date_obj
+                )
 
         return result_ids
 
