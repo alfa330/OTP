@@ -6517,9 +6517,19 @@ class Database:
         if end_date_obj < start_date_obj:
             start_date_obj, end_date_obj = end_date_obj, start_date_obj
 
-        start_date_obj, end_date_obj = self._schedule_auto_clamp_range(start_date_obj, end_date_obj)
-        if start_date_obj is None or end_date_obj is None:
+        # Для ночных смен (например, 20:00-08:00) досчитываем следующий календарный день,
+        # чтобы хвост после полуночи попадал в "день+1".
+        calc_start_date_obj, calc_end_date_obj = self._schedule_auto_clamp_range(
+            start_date_obj,
+            end_date_obj + timedelta(days=1)
+        )
+        if calc_start_date_obj is None or calc_end_date_obj is None:
             return {'updated_days': 0, 'aggregated_months': 0}
+
+        # Для корректного расчета текущего дня учитываем смены, начавшиеся днем ранее
+        # и перешедшие через полночь.
+        shifts_source_start = calc_start_date_obj - timedelta(days=1)
+        shifts_source_end = calc_end_date_obj
 
         cursor.execute("""
             SELECT id, operator_id, shift_date, start_time, end_time
@@ -6528,52 +6538,47 @@ class Database:
               AND shift_date >= %s
               AND shift_date <= %s
             ORDER BY operator_id, shift_date, start_time, end_time
-        """, (op_ids, start_date_obj, end_date_obj))
+        """, (op_ids, shifts_source_start, shifts_source_end))
         shifts_rows = cursor.fetchall() or []
 
-        shifts_by_day = {}
-        shift_id_to_item = {}
+        shifts_by_start_day = {}
+        shifts_segments_by_day = {}
         for shift_id, op_id, shift_date_value, start_time_value, end_time_value in shifts_rows:
             start_min, end_min = self._schedule_interval_minutes(start_time_value, end_time_value)
             item = {
                 'id': int(shift_id),
                 'start': int(start_min),
-                'end': int(end_min),
-                'breaks': []
+                'end': int(end_min)
             }
-            key = (int(op_id), shift_date_value)
-            shifts_by_day.setdefault(key, []).append(item)
-            shift_id_to_item[int(shift_id)] = item
+            start_key = (int(op_id), shift_date_value)
+            shifts_by_start_day.setdefault(start_key, []).append(item)
 
-        if shift_id_to_item:
-            cursor.execute("""
-                SELECT shift_id, start_minutes, end_minutes
-                FROM shift_breaks
-                WHERE shift_id = ANY(%s)
-                ORDER BY shift_id, start_minutes, end_minutes
-            """, (list(shift_id_to_item.keys()),))
-            for shift_id, b_start, b_end in cursor.fetchall() or []:
-                target = shift_id_to_item.get(int(shift_id))
-                if not target:
+            shift_start_abs = int(start_min)
+            shift_end_abs = int(end_min)
+            first_day_offset = int(shift_start_abs // 1440)
+            last_day_offset = int((shift_end_abs - 1) // 1440)
+            for day_offset in range(first_day_offset, last_day_offset + 1):
+                day_floor = int(day_offset) * 1440
+                day_ceil = day_floor + 1440
+                segment_abs_start = max(shift_start_abs, day_floor)
+                segment_abs_end = min(shift_end_abs, day_ceil)
+                if segment_abs_end <= segment_abs_start:
                     continue
-                target['breaks'].append({
-                    'start': int(b_start),
-                    'end': int(b_end)
+
+                day_value = shift_date_value + timedelta(days=int(day_offset))
+                if day_value < calc_start_date_obj or day_value > calc_end_date_obj:
+                    continue
+
+                local_start = int(segment_abs_start - day_floor)
+                local_end = int(segment_abs_end - day_floor)
+                if local_end <= local_start:
+                    continue
+                shifts_segments_by_day.setdefault((int(op_id), day_value), []).append({
+                    'start': local_start,
+                    'end': local_end
                 })
 
-        for day_items in shifts_by_day.values():
-            for shift in day_items:
-                shift_interval = [{'start': int(shift['start']), 'end': int(shift['end'])}]
-                clipped_breaks = []
-                for b in self._merge_break_intervals(shift.get('breaks') or []):
-                    b_start = max(int(shift['start']), int(b.get('start', 0)))
-                    b_end = min(int(shift['end']), int(b.get('end', 0)))
-                    if b_end > b_start:
-                        clipped_breaks.append({'start': b_start, 'end': b_end})
-                shift['breaks'] = self._merge_break_intervals(clipped_breaks)
-                shift['work_intervals'] = self._schedule_auto_subtract_intervals(shift_interval, shift['breaks'])
-
-        status_end_for_query = end_date_obj + timedelta(days=1)
+        status_end_for_query = calc_end_date_obj + timedelta(days=1)
         cursor.execute("""
             SELECT
                 operator_id,
@@ -6588,7 +6593,7 @@ class Database:
               AND status_date >= %s
               AND status_date <= %s
             ORDER BY operator_id, status_date, start_at, end_at, id
-        """, (op_ids, start_date_obj, status_end_for_query))
+        """, (op_ids, calc_start_date_obj, status_end_for_query))
         status_rows = cursor.fetchall() or []
         statuses_by_day = {}
         for op_id, status_date_value, start_at_value, end_at_value, status_key, is_work, is_break in status_rows:
@@ -6622,7 +6627,7 @@ class Database:
             WHERE operator_id = ANY(%s)
               AND day >= %s
               AND day <= %s
-        """, (op_ids, start_date_obj, end_date_obj))
+        """, (op_ids, calc_start_date_obj, calc_end_date_obj))
         existing_rows = cursor.fetchall() or []
         existing_by_day = {}
         for row in existing_rows:
@@ -6638,7 +6643,7 @@ class Database:
                 'training_fine_id': int(row[8]) if row[8] is not None else None
             }
 
-        target_days = set(shifts_by_day.keys())
+        target_days = set(shifts_segments_by_day.keys())
         for key, item in existing_by_day.items():
             if item.get('auto_aggregated') or item.get('late_status') or item.get('early_leave_status') or item.get('training_status'):
                 target_days.add(key)
@@ -6650,14 +6655,7 @@ class Database:
         affected_months = set()
 
         for op_id, day_value in sorted(target_days, key=lambda x: (x[0], x[1])):
-            shifts = shifts_by_day.get((op_id, day_value)) or []
             day_statuses = statuses_by_day.get((op_id, day_value)) or []
-            next_statuses_raw = statuses_by_day.get((op_id, day_value + timedelta(days=1))) or []
-            next_statuses = [{
-                **seg,
-                'start': int(seg.get('start', 0)) + 1440,
-                'end': int(seg.get('end', 0)) + 1440
-            } for seg in next_statuses_raw if int(seg.get('end', 0)) > int(seg.get('start', 0))]
 
             def pick_status_intervals(source_items, predicate_fn):
                 return self._merge_break_intervals([
@@ -6683,55 +6681,47 @@ class Database:
                 lambda seg: str(seg.get('status_key') or '') == SCHEDULE_AUTO_TRAINING_STATUS_KEY
             )
 
-            next_work_status = pick_status_intervals(
-                next_statuses,
-                lambda seg: bool(seg.get('is_work')) or str(seg.get('status_key') or '') in SCHEDULE_AUTO_WORK_STATUS_KEYS
+            day_shift_intervals = self._merge_break_intervals(
+                shifts_segments_by_day.get((op_id, day_value)) or []
             )
-            next_talk_status = pick_status_intervals(
-                next_statuses,
-                lambda seg: str(seg.get('status_key') or '') in SCHEDULE_AUTO_TALK_STATUS_KEYS
-            )
-            next_break_status = pick_status_intervals(
-                next_statuses,
-                lambda seg: bool(seg.get('is_break')) or str(seg.get('status_key') or '') in SCHEDULE_AUTO_BREAK_STATUS_KEYS
-            )
-            next_training_status = pick_status_intervals(
-                next_statuses,
-                lambda seg: str(seg.get('status_key') or '') == SCHEDULE_AUTO_TRAINING_STATUS_KEY
-            )
+            work_minutes = self._schedule_auto_overlap_minutes(day_shift_intervals, day_work_status)
+            talk_minutes = self._schedule_auto_overlap_minutes(day_shift_intervals, day_talk_status)
+            # Перерывы считаем по фактическим статусам в пределах смены, независимо от
+            # запланированных break-интервалов графика.
+            break_minutes = self._schedule_auto_overlap_minutes(day_shift_intervals, day_break_status)
+            training_minutes_in_shift = self._schedule_auto_overlap_minutes(day_shift_intervals, day_training_status)
 
-            work_status_for_shift = self._merge_break_intervals((day_work_status or []) + (next_work_status or []))
-            talk_status_for_shift = self._merge_break_intervals((day_talk_status or []) + (next_talk_status or []))
-            break_status_for_shift = self._merge_break_intervals((day_break_status or []) + (next_break_status or []))
-            training_status_for_shift = self._merge_break_intervals((day_training_status or []) + (next_training_status or []))
-
-            work_minutes = 0.0
-            talk_minutes = 0.0
-            break_minutes = 0.0
-            training_minutes_in_shift = 0.0
             late_minutes_total = 0.0
             early_leave_minutes_total = 0.0
-
-            day_shift_intervals = []
-            for shift in shifts:
-                shift_interval = {'start': int(shift['start']), 'end': int(shift['end'])}
-                shift_intervals = [shift_interval]
-                work_minutes += self._schedule_auto_overlap_minutes(shift.get('work_intervals') or [], work_status_for_shift)
-                talk_minutes += self._schedule_auto_overlap_minutes(shift.get('work_intervals') or [], talk_status_for_shift)
-                break_minutes += self._schedule_auto_overlap_minutes(shift.get('breaks') or [], break_status_for_shift)
-                training_minutes_in_shift += self._schedule_auto_overlap_minutes(shift_intervals, training_status_for_shift)
-
-                shift_work_status = self._schedule_auto_intersect_interval_with_list(shift_interval, work_status_for_shift)
-                if shift_work_status:
+            shifts_started_today = shifts_by_start_day.get((op_id, day_value)) or []
+            if shifts_started_today:
+                next_day_work_status = pick_status_intervals(
+                    statuses_by_day.get((op_id, day_value + timedelta(days=1))) or [],
+                    lambda seg: bool(seg.get('is_work')) or str(seg.get('status_key') or '') in SCHEDULE_AUTO_WORK_STATUS_KEYS
+                )
+                shifted_next_day_work_status = [
+                    {
+                        'start': int(seg.get('start', 0)) + 1440,
+                        'end': int(seg.get('end', 0)) + 1440
+                    }
+                    for seg in (next_day_work_status or [])
+                    if int(seg.get('end', 0)) > int(seg.get('start', 0))
+                ]
+                work_status_for_shift = self._merge_break_intervals(
+                    (day_work_status or []) + shifted_next_day_work_status
+                )
+                for shift in shifts_started_today:
+                    shift_interval = {'start': int(shift['start']), 'end': int(shift['end'])}
+                    shift_work_status = self._schedule_auto_intersect_interval_with_list(
+                        shift_interval,
+                        work_status_for_shift
+                    )
+                    if not shift_work_status:
+                        continue
                     first_work_start = int(shift_work_status[0].get('start', shift_interval['start']))
                     last_work_end = int(shift_work_status[-1].get('end', shift_interval['end']))
                     late_minutes_total += max(0, first_work_start - int(shift_interval['start']))
                     early_leave_minutes_total += max(0, int(shift_interval['end']) - last_work_end)
-
-                day_seg_start = max(0, min(1440, int(shift_interval['start'])))
-                day_seg_end = max(0, min(1440, int(shift_interval['end'])))
-                if day_seg_end > day_seg_start:
-                    day_shift_intervals.append({'start': day_seg_start, 'end': day_seg_end})
 
             day_shift_intervals = self._merge_break_intervals(day_shift_intervals)
             work_inside_shift_day = self._schedule_auto_overlap_minutes(day_work_status, day_shift_intervals)
@@ -6827,8 +6817,8 @@ class Database:
         fine_sync_result = self._schedule_auto_sync_flag_fines_for_range_tx(
             cursor=cursor,
             operator_ids=op_ids,
-            start_date=start_date_obj,
-            end_date=end_date_obj
+            start_date=calc_start_date_obj,
+            end_date=calc_end_date_obj
         )
 
         for op_id, month_key in sorted(affected_months):
