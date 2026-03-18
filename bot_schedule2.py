@@ -9543,6 +9543,141 @@ def apply_work_schedule_bulk_actions():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/work_schedules/aggregate', methods=['POST'])
+@require_api_key
+def aggregate_work_schedule_metrics():
+    """
+    Ручной запуск автоагрегации метрик по графикам/статусам.
+    Body: {
+        "operator_id": int,                 # optional if operator_ids provided
+        "operator_ids": [int, ...],         # optional
+        "start_date": "YYYY-MM-DD",         # required (or date)
+        "end_date": "YYYY-MM-DD",           # optional (default=start_date)
+        "date": "YYYY-MM-DD"                # optional alias for one-day range
+    }
+    """
+    try:
+        requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        requester_id = int(requester_id)
+        user_data = db.get_user(id=requester_id)
+        if not user_data:
+            return jsonify({"error": "User not found"}), 404
+        if user_data[3] not in ['admin', 'sv']:
+            return jsonify({"error": "Forbidden"}), 403
+
+        data = request.get_json(silent=True) or {}
+        operator_id = data.get('operator_id')
+        operator_ids_raw = data.get('operator_ids')
+        day_value = data.get('date')
+        start_date = data.get('start_date') or day_value
+        end_date = data.get('end_date') or start_date
+
+        operator_ids = []
+        if isinstance(operator_ids_raw, list) and operator_ids_raw:
+            for value in operator_ids_raw:
+                operator_ids.append(int(value))
+        elif operator_id is not None:
+            operator_ids = [int(operator_id)]
+        else:
+            return jsonify({"error": "operator_id or operator_ids is required"}), 400
+
+        if not start_date:
+            return jsonify({"error": "start_date (or date) is required"}), 400
+        if not end_date:
+            end_date = start_date
+
+        result = db.recalculate_auto_daily_hours(
+            operator_ids=operator_ids,
+            start_date=start_date,
+            end_date=end_date
+        )
+
+        return jsonify({
+            "message": "Aggregation completed",
+            "result": result,
+            "range": {
+                "start_date": start_date,
+                "end_date": end_date
+            },
+            "operator_ids": operator_ids
+        }), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error aggregating work schedule metrics: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/work_schedules/auto_flags/resolve', methods=['POST'])
+@require_api_key
+def resolve_work_schedule_auto_flag():
+    """
+    Подтверждение/отклонение авто-флага по дню.
+    Body: {
+        "operator_id": int,
+        "day": "YYYY-MM-DD",
+        "flag_type": "late" | "early_leave" | "training",
+        "action": "confirm" | "reject" | "pending",
+        "range_start": "YYYY-MM-DD",   # optional
+        "range_end": "YYYY-MM-DD"      # optional
+    }
+    """
+    try:
+        requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        requester_id = int(requester_id)
+        user_data = db.get_user(id=requester_id)
+        if not user_data:
+            return jsonify({"error": "User not found"}), 404
+        if user_data[3] not in ['admin', 'sv']:
+            return jsonify({"error": "Forbidden"}), 403
+
+        data = request.get_json(silent=True) or {}
+        operator_id = data.get('operator_id')
+        day = data.get('day') or data.get('date')
+        flag_type = data.get('flag_type')
+        action = data.get('action')
+        range_start = data.get('range_start')
+        range_end = data.get('range_end')
+
+        if not operator_id or not day or not flag_type or not action:
+            return jsonify({"error": "Missing required fields"}), 400
+
+        result = db.resolve_auto_schedule_flag(
+            operator_id=operator_id,
+            day=day,
+            flag_type=flag_type,
+            action=action
+        )
+
+        operator_snapshot = None
+        if range_start and range_end:
+            operator_snapshot = db.get_operator_with_shifts(
+                int(operator_id),
+                range_start,
+                range_end,
+                include_imported_statuses=False
+            )
+
+        return jsonify({
+            "message": "Auto flag resolved successfully",
+            "result": result,
+            "operator": operator_snapshot
+        }), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error resolving work schedule auto flag: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/api/work_schedules/export_excel', methods=['GET'])
 @require_api_key
 def export_work_schedules_excel():
