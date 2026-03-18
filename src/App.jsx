@@ -5709,8 +5709,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [bulkActionState, setBulkActionState] = useState({ loading: false, action: '' });
             const [dayAggregateLoading, setDayAggregateLoading] = useState(false);
             const [plannerAutoFlagActionLoading, setPlannerAutoFlagActionLoading] = useState('');
-            const [plannerTrainingModalState, setPlannerTrainingModalState] = useState({ open: false, operatorId: null, date: null });
+            const [plannerTrainingModalState, setPlannerTrainingModalState] = useState({
+                open: false,
+                operatorId: null,
+                date: null,
+                mode: 'add',
+                startTime: '09:00',
+                endTime: '10:00',
+                reason: '',
+                comment: '',
+                countInHours: true
+            });
             const [plannerTrainingActionLoading, setPlannerTrainingActionLoading] = useState(false);
+            const [plannerTrainingModalError, setPlannerTrainingModalError] = useState('');
             const [plannerFineModalState, setPlannerFineModalState] = useState({
                 open: false,
                 operatorId: null,
@@ -8270,30 +8281,79 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             };
 
-            const openPlannerTrainingModalForCurrentDay = () => {
+            const openPlannerTrainingModalForCurrentDay = (mode = 'add') => {
                 const operatorId = Number(modalState?.opId);
                 const dayKey = String(modalState?.date || '').trim();
                 if (!Number.isFinite(operatorId) || !dayKey || isBulkSelectionModal) return;
+                const trainingMinutes = Math.max(0, Math.round(Number(modalAggregatedFlags?.trainingMinutes || 0)));
+                const startSeed = '09:00';
+                const endSeed = minutesToTime(Math.min(timeToMinutes(startSeed) + (trainingMinutes > 0 ? trainingMinutes : 60), (24 * 60) - 1));
+                setPlannerTrainingModalError('');
                 setPlannerTrainingModalState({
                     open: true,
                     operatorId,
-                    date: dayKey
+                    date: dayKey,
+                    mode: String(mode || 'add'),
+                    startTime: startSeed,
+                    endTime: endSeed,
+                    reason: '',
+                    comment: '',
+                    countInHours: true
                 });
             };
 
             const closePlannerTrainingModal = () => {
+                setPlannerTrainingModalError('');
                 setPlannerTrainingModalState({
                     open: false,
                     operatorId: null,
-                    date: null
+                    date: null,
+                    mode: 'add',
+                    startTime: '09:00',
+                    endTime: '10:00',
+                    reason: '',
+                    comment: '',
+                    countInHours: true
                 });
             };
 
-            const handlePlannerTrainingSave = async (data) => {
+            const updatePlannerTrainingDraftField = (field, value) => {
+                setPlannerTrainingModalState(prev => ({
+                    ...(prev || {}),
+                    [field]: value
+                }));
+            };
+
+            const submitPlannerTrainingModal = async () => {
                 const operatorId = Number(plannerTrainingModalState?.operatorId);
-                if (!Number.isFinite(operatorId)) return;
+                const dayKey = String(plannerTrainingModalState?.date || '').trim();
+                const startTime = String(plannerTrainingModalState?.startTime || '').trim();
+                const endTime = String(plannerTrainingModalState?.endTime || '').trim();
+                const reason = String(plannerTrainingModalState?.reason || '').trim();
+                const comment = String(plannerTrainingModalState?.comment || '').trim();
+                const mode = String(plannerTrainingModalState?.mode || 'add').trim();
+
+                if (!Number.isFinite(operatorId) || !dayKey) {
+                    setPlannerTrainingModalError('Не удалось определить оператора или дату.');
+                    return;
+                }
+                if (!startTime || !endTime) {
+                    setPlannerTrainingModalError('Укажите время начала и окончания.');
+                    return;
+                }
+                if (!reason) {
+                    setPlannerTrainingModalError('Выберите причину тренинга.');
+                    return;
+                }
+                const startMinutes = timeToMinutes(startTime);
+                const endMinutes = timeToMinutes(endTime);
+                if (!Number.isFinite(startMinutes) || !Number.isFinite(endMinutes) || endMinutes <= startMinutes) {
+                    setPlannerTrainingModalError('Время окончания должно быть позже времени начала.');
+                    return;
+                }
 
                 setPlannerTrainingActionLoading(true);
+                setPlannerTrainingModalError('');
                 try {
                     const response = await fetch(`${API_BASE_URL}/api/trainings`, {
                         method: 'POST',
@@ -8302,20 +8362,47 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             'Content-Type': 'application/json'
                         }),
                         body: JSON.stringify({
-                            ...data,
-                            operator_id: operatorId
+                            operator_id: operatorId,
+                            date: dayKey,
+                            start_time: startTime,
+                            end_time: endTime,
+                            reason,
+                            comment: comment || null,
+                            count_in_hours: !!plannerTrainingModalState?.countInHours
                         })
                     });
                     const payload = await response.json().catch(() => ({}));
                     if (!response.ok) {
                         throw new Error(payload?.error || `HTTP ${response.status}`);
                     }
-                    emitAppToast('Тренинг добавлен', 'success');
+
+                    if (mode === 'confirm_training_flag') {
+                        const resolveResponse = await fetch(`${API_BASE_URL}/api/work_schedules/auto_flags/resolve`, {
+                            method: 'POST',
+                            credentials: 'include',
+                            headers: withAccessTokenHeader({
+                                'Content-Type': 'application/json'
+                            }),
+                            body: JSON.stringify({
+                                operator_id: operatorId,
+                                day: dayKey,
+                                flag_type: 'training',
+                                action: 'confirm'
+                            })
+                        });
+                        const resolvePayload = await resolveResponse.json().catch(() => ({}));
+                        if (!resolveResponse.ok) {
+                            throw new Error(resolvePayload?.error || `HTTP ${resolveResponse.status}`);
+                        }
+                    }
+
+                    await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
+                    emitAppToast(mode === 'confirm_training_flag' ? 'Тренинг добавлен и подтвержден' : 'Тренинг добавлен', 'success');
                     closePlannerTrainingModal();
                 } catch (error) {
                     console.error('Error saving planner training:', error);
+                    setPlannerTrainingModalError(String(error?.message || error || 'Не удалось сохранить тренинг.'));
                     emitAppToast(`Ошибка сохранения тренинга: ${error?.message || error}`, 'error');
-                    throw error;
                 } finally {
                     setPlannerTrainingActionLoading(false);
                 }
@@ -8812,6 +8899,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const op = operators.find(o => o.id === modalState.opId);
                 return getPlannerAggregatedFlagsForDate(op, modalState.date);
             }, [isBulkSelectionModal, modalState?.opId, modalState?.date, operators]);
+            const plannerTrainingReasonOptions = useMemo(() => ([
+                "Обратная связь",
+                "Собрание",
+                "Тех. сбой",
+                "Мотивационная беседа",
+                "Дисциплинарный тренинг",
+                "Тренинг по качеству. Разбор ошибок",
+                "Тренинг по качеству. Объяснение МШ",
+                "Тренинг по продукту",
+                "Мониторинг",
+                "Практика в офисе таксопарка",
+                "Другое"
+            ]), []);
             const dayViewBreaksDateStr = todayDateStr(new Date(currentDate));
             const dayBreaksByOperator = useMemo(() => {
                 if (viewMode !== 'day') return [];
@@ -13356,7 +13456,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             <div className="flex flex-wrap items-center gap-2">
                                 <button
                                     type="button"
-                                    onClick={openPlannerTrainingModalForCurrentDay}
+                                    onClick={() => openPlannerTrainingModalForCurrentDay('add')}
                                     disabled={plannerTrainingActionLoading}
                                     className="px-3 py-1.5 rounded-md border border-blue-200 bg-white hover:bg-blue-50 text-blue-700 text-xs font-semibold disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-1.5"
                                 >
@@ -13427,7 +13527,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         <div className="ml-auto flex items-center gap-2">
                                             <button
                                                 type="button"
-                                                onClick={() => resolvePlannerAutoFlag(item.key, 'confirm')}
+                                                onClick={() => {
+                                                    if (item.key === 'training') {
+                                                        openPlannerTrainingModalForCurrentDay('confirm_training_flag');
+                                                        return;
+                                                    }
+                                                    resolvePlannerAutoFlag(item.key, 'confirm');
+                                                }}
                                                 disabled={!hasMinutes || anyBusy}
                                                 className="px-2.5 py-1 rounded-md border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
                                             >
@@ -13815,18 +13921,118 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     </>
                 </SimpleModal>
 
-                {(() => {
-                    const PlannerTrainingModalComponent = (typeof window !== 'undefined') ? window.TrainingModal : null;
-                    if (!PlannerTrainingModalComponent || !plannerTrainingModalState?.open) return null;
-                    return (
-                        <PlannerTrainingModalComponent
-                            isOpen={plannerTrainingModalState.open}
-                            onClose={closePlannerTrainingModal}
-                            onSave={handlePlannerTrainingSave}
-                            initialData={{ date: plannerTrainingModalState.date || '' }}
-                        />
-                    );
-                })()}
+                {plannerTrainingModalState.open && (
+                    <SimpleModal
+                        open={plannerTrainingModalState.open}
+                        onClose={closePlannerTrainingModal}
+                        panelClassName="w-[560px] max-w-[calc(100vw-1rem)]"
+                    >
+                        <div className="mb-4 pb-3 border-b border-slate-200">
+                            <div className="flex items-center justify-between gap-3">
+                                <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                                    <FaIcon className="fas fa-chalkboard-teacher text-blue-600"></FaIcon>
+                                    {String(plannerTrainingModalState.mode || '') === 'confirm_training_flag'
+                                        ? 'Подтвердить тренинг'
+                                        : 'Добавить тренинг'}
+                                </h3>
+                                <button
+                                    type="button"
+                                    onClick={closePlannerTrainingModal}
+                                    className="w-8 h-8 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 flex items-center justify-center"
+                                >
+                                    <FaIcon className="fas fa-times"></FaIcon>
+                                </button>
+                            </div>
+                            <div className="mt-1 text-xs text-slate-500">
+                                Дата: {plannerTrainingModalState.date || '—'}
+                            </div>
+                        </div>
+
+                        <div className="space-y-3">
+                            <div>
+                                <label className="block text-xs font-medium text-slate-600 mb-1">Дата</label>
+                                <input
+                                    type="date"
+                                    value={plannerTrainingModalState.date || ''}
+                                    onChange={(e) => updatePlannerTrainingDraftField('date', e.target.value)}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                />
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label className="block text-xs font-medium text-slate-600 mb-1">Начало</label>
+                                    <input
+                                        type="time"
+                                        value={plannerTrainingModalState.startTime || ''}
+                                        onChange={(e) => updatePlannerTrainingDraftField('startTime', e.target.value)}
+                                        className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-medium text-slate-600 mb-1">Конец</label>
+                                    <input
+                                        type="time"
+                                        value={plannerTrainingModalState.endTime || ''}
+                                        onChange={(e) => updatePlannerTrainingDraftField('endTime', e.target.value)}
+                                        className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    />
+                                </div>
+                            </div>
+
+                            <div>
+                                <label className="block text-xs font-medium text-slate-600 mb-1">Причина</label>
+                                <select
+                                    value={plannerTrainingModalState.reason || ''}
+                                    onChange={(e) => updatePlannerTrainingDraftField('reason', e.target.value)}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                >
+                                    <option value="">Выберите причину</option>
+                                    {plannerTrainingReasonOptions.map(reason => (
+                                        <option key={`planner-training-reason-${reason}`} value={reason}>{reason}</option>
+                                    ))}
+                                </select>
+                            </div>
+
+                            <div>
+                                <label className="block text-xs font-medium text-slate-600 mb-1">Комментарий</label>
+                                <textarea
+                                    rows={3}
+                                    value={plannerTrainingModalState.comment || ''}
+                                    onChange={(e) => updatePlannerTrainingDraftField('comment', e.target.value)}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y"
+                                    placeholder="Комментарий (необязательно)"
+                                />
+                            </div>
+
+                            {plannerTrainingModalError && (
+                                <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                                    {plannerTrainingModalError}
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="mt-5 pt-4 border-t border-slate-200 flex items-center justify-end gap-2">
+                            <button
+                                type="button"
+                                onClick={closePlannerTrainingModal}
+                                disabled={plannerTrainingActionLoading}
+                                className="px-4 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed"
+                            >
+                                Отмена
+                            </button>
+                            <button
+                                type="button"
+                                onClick={submitPlannerTrainingModal}
+                                disabled={plannerTrainingActionLoading}
+                                className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
+                            >
+                                <FaIcon className={`fas ${plannerTrainingActionLoading ? 'fa-spinner fa-spin' : 'fa-save'}`}></FaIcon>
+                                {plannerTrainingActionLoading ? 'Сохраняем...' : 'Сохранить тренинг'}
+                            </button>
+                        </div>
+                    </SimpleModal>
+                )}
 
                 {plannerFineModalState.open && (
                     <SimpleModal
