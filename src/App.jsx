@@ -19210,6 +19210,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [activeOperatorsTab, setActiveOperatorsTab] = useState("active");
             const [activeSvTab, setActiveSvTab] = useState("active");
             const [activeTrainerTab, setActiveTrainerTab] = useState("active");
+            const [employeeTableSection, setEmployeeTableSection] = useState('general');
+            const EMPLOYEE_TABLE_SECTIONS = [
+                { key: 'general', label: 'Общее', icon: 'fa-solid fa-layer-group' },
+                { key: 'data', label: 'Данные', icon: 'fa-solid fa-id-card' },
+                { key: 'contacts', label: 'Контакты', icon: 'fa-solid fa-phone' },
+                { key: 'corporate', label: 'Корпоративное', icon: 'fa-solid fa-briefcase' }
+            ];
             const normalizeEmployeeStatusCode = (status) => {
                 const value = String(status || '').trim().toLowerCase();
                 if (!value) return 'working';
@@ -19527,6 +19534,271 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
             return res * dir;
             };
+
+            const formatEmployeeTableDate = (value) => {
+                const raw = String(value || '').trim();
+                if (!raw) return '-';
+                if (/^\d{2}-\d{2}-\d{4}$/.test(raw)) {
+                    const [day, month, year] = raw.split('-');
+                    return `${day}.${month}.${year}`;
+                }
+                if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+                    const [year, month, day] = raw.split('-');
+                    return `${day}.${month}.${year}`;
+                }
+                const parsed = new Date(raw);
+                if (!Number.isNaN(parsed.getTime())) {
+                    return parsed.toLocaleDateString('ru-RU');
+                }
+                return raw;
+            };
+
+            const formatEmployeeGenderLabel = (value) => {
+                const normalized = String(value || '').trim().toLowerCase();
+                if (normalized === 'male') return 'Мужской';
+                if (normalized === 'female') return 'Женский';
+                return '-';
+            };
+
+            const formatEmployeeEmploymentTypeLabel = (value) => {
+                const normalized = String(value || '').trim().toLowerCase();
+                if (!normalized) return '-';
+                if (normalized === 'gph') return 'ГПХ';
+                if (normalized === 'of') return 'ОФ';
+                return String(value);
+            };
+
+            const isEmployeeTruthy = (value) => {
+                if (typeof value === 'boolean') return value;
+                if (typeof value === 'number') return value !== 0;
+                const normalized = String(value || '').trim().toLowerCase();
+                return ['1', 'true', 'yes', 'y', 'on', 'да'].includes(normalized);
+            };
+
+            const formatEmployeeBoolLabel = (value) => (isEmployeeTruthy(value) ? 'Да' : 'Нет');
+
+            const formatEmployeeCloseContact = (relation, fullName, phone) => {
+                const parts = [relation, fullName, phone]
+                    .map((item) => String(item || '').trim())
+                    .filter(Boolean);
+                return parts.length > 0 ? parts.join(' | ') : '-';
+            };
+
+            const renderEmployeeNameCell = (employee) => (
+                <div className="flex items-center gap-3 min-w-0">
+                    <div className="h-9 w-9 rounded-full overflow-hidden border border-slate-200 bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-xs font-semibold text-white shrink-0">
+                        {employee?.avatar_url ? (
+                            <AvatarImage src={employee.avatar_url} alt={employee.name || 'avatar'} className="h-full w-full object-cover" />
+                        ) : (
+                            (employee?.name || 'U').charAt(0).toUpperCase()
+                        )}
+                    </div>
+                    <span className="truncate">{employee?.name || '-'}</span>
+                </div>
+            );
+
+            const employeeSectionColumns = (() => {
+                const nameColumn = {
+                    key: 'name',
+                    label: 'Имя',
+                    sortField: 'name',
+                    render: (employee) => renderEmployeeNameCell(employee)
+                };
+
+                if (employeeTableSection === 'data') {
+                    return [
+                        nameColumn,
+                        {
+                            key: 'gender',
+                            label: 'Пол',
+                            render: (employee) => formatEmployeeGenderLabel(employee?.gender)
+                        },
+                        {
+                            key: 'birth_date',
+                            label: 'Дата рождения',
+                            render: (employee) => formatEmployeeTableDate(employee?.birth_date)
+                        },
+                        {
+                            key: 'study_place',
+                            label: 'Место учебы',
+                            render: (employee) => employee?.study_place || '-'
+                        },
+                        {
+                            key: 'study_course',
+                            label: 'Курс',
+                            render: (employee) => employee?.study_course || '-'
+                        },
+                        {
+                            key: 'card_number',
+                            label: 'Номер карты',
+                            render: (employee) => employee?.card_number || '-'
+                        }
+                    ];
+                }
+
+                if (employeeTableSection === 'contacts') {
+                    return [
+                        nameColumn,
+                        {
+                            key: 'phone',
+                            label: 'Телефон',
+                            render: (employee) => employee?.phone || '-'
+                        },
+                        {
+                            key: 'email',
+                            label: 'Почта',
+                            render: (employee) => employee?.email || '-'
+                        },
+                        {
+                            key: 'instagram',
+                            label: 'Инстаграм',
+                            render: (employee) => employee?.instagram || '-'
+                        },
+                        {
+                            key: 'telegram_nick',
+                            label: 'Telegram',
+                            render: (employee) => employee?.telegram_nick || '-'
+                        },
+                        {
+                            key: 'close_contact_1',
+                            label: 'Близкий контакт 1',
+                            render: (employee) => formatEmployeeCloseContact(
+                                employee?.close_contact_1_relation,
+                                employee?.close_contact_1_full_name,
+                                employee?.close_contact_1_phone
+                            )
+                        },
+                        {
+                            key: 'close_contact_2',
+                            label: 'Близкий контакт 2',
+                            render: (employee) => formatEmployeeCloseContact(
+                                employee?.close_contact_2_relation,
+                                employee?.close_contact_2_full_name,
+                                employee?.close_contact_2_phone
+                            )
+                        }
+                    ];
+                }
+
+                if (employeeTableSection === 'corporate') {
+                    return [
+                        nameColumn,
+                        {
+                            key: 'hire_date',
+                            label: 'Дата найма',
+                            sortField: 'hire_date',
+                            render: (employee) => formatEmployeeTableDate(employee?.hire_date)
+                        },
+                        {
+                            key: 'company_name',
+                            label: 'ТОО/ИП',
+                            render: (employee) => employee?.company_name || '-'
+                        },
+                        {
+                            key: 'employment_type',
+                            label: 'ГПХ/ОФ',
+                            render: (employee) => formatEmployeeEmploymentTypeLabel(employee?.employment_type)
+                        },
+                        {
+                            key: 'internship_in_company',
+                            label: 'Практика',
+                            render: (employee) => formatEmployeeBoolLabel(employee?.internship_in_company)
+                        },
+                        {
+                            key: 'front_office_training',
+                            label: 'Обучение ФО',
+                            render: (employee) => formatEmployeeBoolLabel(employee?.front_office_training)
+                        },
+                        {
+                            key: 'front_office_training_date',
+                            label: 'Дата обучения',
+                            render: (employee) => formatEmployeeTableDate(employee?.front_office_training_date)
+                        },
+                        {
+                            key: 'taxipro_id',
+                            label: 'ID таксипро',
+                            render: (employee) => employee?.taxipro_id || '-'
+                        }
+                    ];
+                }
+
+                return [
+                    nameColumn,
+                    {
+                        key: 'supervisor_name',
+                        label: 'Супервайзер',
+                        sortField: 'supervisor',
+                        render: (employee) => employee?.supervisor_name || '-'
+                    },
+                    {
+                        key: 'direction',
+                        label: 'Направление',
+                        sortField: 'direction',
+                        render: (employee) => employee?.direction || '-'
+                    },
+                    {
+                        key: 'status',
+                        label: 'Статус',
+                        sortField: 'status',
+                        render: (employee) => renderEmployeeStatusBadge(employee?.status, employee)
+                    },
+                    {
+                        key: 'hire_date',
+                        label: 'Дата найма',
+                        sortField: 'hire_date',
+                        render: (employee) => formatEmployeeTableDate(employee?.hire_date)
+                    },
+                    {
+                        key: 'rate',
+                        label: 'Ставка',
+                        sortField: 'rate',
+                        headerClassName: 'text-center',
+                        cellClassName: 'text-center',
+                        render: (employee) => (
+                            <div className="inline-flex items-center justify-center">
+                                <RateCircle rate={employee?.rate || 1.0} />
+                            </div>
+                        )
+                    },
+                    {
+                        key: 'has_proxy',
+                        label: 'Прокси',
+                        render: (employee) => formatEmployeeBoolLabel(employee?.has_proxy)
+                    },
+                    {
+                        key: 'sip_number',
+                        label: 'SIP',
+                        render: (employee) => employee?.sip_number || '-'
+                    }
+                ];
+            })();
+
+            const activeEmployeeTableSection = EMPLOYEE_TABLE_SECTIONS.find((tab) => tab.key === employeeTableSection) || EMPLOYEE_TABLE_SECTIONS[0];
+
+            const renderEmployeeTableSectionSwitcher = () => (
+                <div className="fixed bottom-4 right-4 z-30 pointer-events-none">
+                    <div className="pointer-events-auto flex items-center gap-1 rounded-full border border-gray-200 bg-white/95 p-1 shadow-xl backdrop-blur-sm">
+                        {EMPLOYEE_TABLE_SECTIONS.map((tab) => {
+                            const isActive = employeeTableSection === tab.key;
+                            return (
+                                <button
+                                    key={tab.key}
+                                    type="button"
+                                    onClick={() => setEmployeeTableSection(tab.key)}
+                                    className={`inline-flex items-center gap-1 rounded-full px-3 py-1.5 text-xs font-medium transition ${
+                                        isActive ? 'bg-blue-600 text-white shadow-sm' : 'text-gray-600 hover:bg-gray-100'
+                                    }`}
+                                    aria-pressed={isActive}
+                                    title={tab.label}
+                                >
+                                    <FaIcon className={tab.icon} />
+                                    <span className="hidden sm:inline">{tab.label}</span>
+                                </button>
+                            );
+                        })}
+                    </div>
+                </div>
+            );
 
             const handleToggleDropdown = (forceClose = null) => {
             if (forceClose === true) {
@@ -25841,48 +26113,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     {svName}
                                                 </h3>
                                                 )}
-                                                <table className="min-w-full table-fixed border rounded-lg w-full">
-                                                    <colgroup>
-                                                    <col style={{ width: "30%" }} />
-                                                    <col style={{ width: "18%" }} />
-                                                    <col style={{ width: "15%" }} />
-                                                    <col style={{ width: "17%" }} />
-                                                    <col style={{ width: "15%" }} />
-                                                    <col style={{ width: "5%" }} />
-                                                    </colgroup>
-
+                                                <table className="min-w-full border rounded-lg w-full">
                                                     <thead className="bg-gray-50">
                                                     <tr>
-                                                        <th
-                                                        onClick={() => handleUsersSort('name')}
-                                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer"
-                                                        >
-                                                        Имя {getUsersSortIcon('name')}
-                                                        </th>
-                                                        <th
-                                                        onClick={() => handleUsersSort('direction')}
-                                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer"
-                                                        >
-                                                        Направление {getUsersSortIcon('direction')}
-                                                        </th>
-                                                        <th
-                                                        onClick={() => handleUsersSort('status')}
-                                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer"
-                                                        >
-                                                        Статус {getUsersSortIcon('status')}
-                                                        </th>
-                                                        <th
-                                                        onClick={() => handleUsersSort('hire_date')}
-                                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer"
-                                                        >
-                                                        Дата найма {getUsersSortIcon('hire_date')}
-                                                        </th>
-                                                        <th
-                                                        onClick={() => handleUsersSort('rate')}
-                                                        className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase cursor-pointer"
-                                                        >
-                                                        Ставка {getUsersSortIcon('rate')}
-                                                        </th>
+                                                        {employeeSectionColumns.map((column) => {
+                                                            const isSortable = !!column.sortField;
+                                                            return (
+                                                                <th
+                                                                    key={column.key}
+                                                                    onClick={isSortable ? () => handleUsersSort(column.sortField) : undefined}
+                                                                    className={`px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase ${
+                                                                        isSortable ? 'cursor-pointer select-none' : ''
+                                                                    } ${column.headerClassName || ''}`}
+                                                                >
+                                                                    {column.label}
+                                                                    {isSortable ? getUsersSortIcon(column.sortField) : null}
+                                                                </th>
+                                                            );
+                                                        })}
                                                         <th className="px-6 py-3"></th>
                                                     </tr>
                                                     </thead>
@@ -25899,108 +26147,86 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             }`}
                                                             title="Для мультивыбора: Ctrl + клик"
                                                         >
-                                                        <td className="px-6 py-4">
-                                                            <div className="flex items-center gap-3 min-w-0">
-                                                                <div className="h-9 w-9 rounded-full overflow-hidden border border-slate-200 bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-xs font-semibold text-white shrink-0">
-                                                                    {u.avatar_url ? (
-                                                                        <AvatarImage src={u.avatar_url} alt={u.name || 'avatar'} className="h-full w-full object-cover" />
-                                                                    ) : (
-                                                                        (u.name || 'U').charAt(0).toUpperCase()
-                                                                    )}
-                                                                </div>
-                                                                <span className="truncate">{u.name}</span>
-                                                            </div>
-                                                        </td>
-                                                        <td className="px-6 py-4">{u.direction || "-"}</td>
-                                                        <td className="px-6 py-4">
-                                                            {renderEmployeeStatusBadge(u.status, u)}
-                                                        </td>
-                                                        <td className="px-6 py-4">
-                                                            {u.hire_date
-                                                            ? (() => {
-                                                                const [day, month, year] = u.hire_date.split("-");
-                                                                const date = new Date(`${year}-${month}-${day}`);
-                                                                return date.toLocaleDateString("ru-RU");
-                                                                })()
-                                                            : "-"}
-                                                        </td>
-                                                        <td className="px-6 py-4 text-center">
-                                                            <div className="inline-flex items-center justify-center">
-                                                            <RateCircle rate={u.rate || 1.0} />
-                                                            </div>
-                                                        </td>
-                                                        <td
-                                                            onClick={(e) => e.stopPropagation()}
-                                                            className={`px-2 py-4 text-right transition-opacity duration-200 ${openMenuId === u.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
-                                                        >
-                                                            <div className="relative inline-block text-left">
-                                                            <button
-                                                                onClick={(e) => {
-                                                                    e.stopPropagation();
-                                                                    setOpenMenuId(openMenuId === u.id ? null : u.id);
-                                                                }}
-                                                                className="p-2 rounded-full hover:bg-gray-100"
+                                                            {employeeSectionColumns.map((column) => (
+                                                                <td
+                                                                    key={column.key}
+                                                                    className={`px-6 py-4 text-sm text-gray-900 align-top break-words ${column.cellClassName || ''}`}
+                                                                >
+                                                                    {column.render(u)}
+                                                                </td>
+                                                            ))}
+                                                            <td
+                                                                onClick={(e) => e.stopPropagation()}
+                                                                className={`px-2 py-4 text-right transition-opacity duration-200 ${openMenuId === u.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
                                                             >
-                                                                <FaIcon className="fas fa-ellipsis-v"></FaIcon>
-                                                            </button>
+                                                                <div className="relative inline-block text-left">
+                                                                <button
+                                                                    onClick={(e) => {
+                                                                        e.stopPropagation();
+                                                                        setOpenMenuId(openMenuId === u.id ? null : u.id);
+                                                                    }}
+                                                                    className="p-2 rounded-full hover:bg-gray-100"
+                                                                >
+                                                                    <FaIcon className="fas fa-ellipsis-v"></FaIcon>
+                                                                </button>
 
-                                                            {openMenuId === u.id && (
-                                                                <div className="absolute right-0 mt-2 w-52 bg-white border rounded-lg shadow-lg z-50">
-                                                                <button
-                                                                    onClick={() => {
-                                                                    setUserToEdit(u);
-                                                                    setShowUserEditModal(true);
-                                                                    setOpenMenuId(null);
-                                                                    }}
-                                                                    className="block w-full text-left px-4 py-2 hover:bg-gray-100"
-                                                                >
-                                                                    <FaIcon className="fas fa-edit mr-2"></FaIcon>Править
-                                                                </button>
-                                                                <button
-                                                                    onClick={() => {
-                                                                    setOpenMenuId(null);
-                                                                    promoteUserToSupervisor(u);
-                                                                    }}
-                                                                    disabled={promotingUserId === Number(u.id)}
-                                                                    className="block w-full text-left px-4 py-2 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
-                                                                >
-                                                                    {promotingUserId === Number(u.id) ? (
-                                                                    <>
-                                                                        <FaIcon className="fas fa-spinner fa-spin mr-2"></FaIcon>
-                                                                        Повышение...
-                                                                    </>
-                                                                    ) : (
-                                                                    <>
-                                                                        <FaIcon className="fas fa-user-shield mr-2"></FaIcon>
-                                                                        В супервайзеры
-                                                                    </>
-                                                                    )}
-                                                                </button>
-                                                                <button
-                                                                    onClick={() => {
-                                                                    setSelectedUserForHistory(u);
-                                                                    fetchUserHistory(u.id);
-                                                                    setOpenMenuId(null);
-                                                                    }}
-                                                                    disabled={loadingHistoryId === u.id}
-                                                                    className="block w-full text-left px-4 py-2 hover:bg-gray-100"
-                                                                >
-                                                                    {loadingHistoryId === u.id ? (
-                                                                    <>
-                                                                        <FaIcon className="fas fa-spinner fa-spin mr-2"></FaIcon>
-                                                                        Загрузка...
-                                                                    </>
-                                                                    ) : (
-                                                                    <>
-                                                                        <FaIcon className="fas fa-history mr-2"></FaIcon>
-                                                                        История
-                                                                    </>
-                                                                    )}
-                                                                </button>
+                                                                {openMenuId === u.id && (
+                                                                    <div className="absolute right-0 mt-2 w-52 bg-white border rounded-lg shadow-lg z-50">
+                                                                    <button
+                                                                        onClick={() => {
+                                                                        setUserToEdit(u);
+                                                                        setShowUserEditModal(true);
+                                                                        setOpenMenuId(null);
+                                                                        }}
+                                                                        className="block w-full text-left px-4 py-2 hover:bg-gray-100"
+                                                                    >
+                                                                        <FaIcon className="fas fa-edit mr-2"></FaIcon>Править
+                                                                    </button>
+                                                                    <button
+                                                                        onClick={() => {
+                                                                        setOpenMenuId(null);
+                                                                        promoteUserToSupervisor(u);
+                                                                        }}
+                                                                        disabled={promotingUserId === Number(u.id)}
+                                                                        className="block w-full text-left px-4 py-2 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
+                                                                    >
+                                                                        {promotingUserId === Number(u.id) ? (
+                                                                        <>
+                                                                            <FaIcon className="fas fa-spinner fa-spin mr-2"></FaIcon>
+                                                                            Повышение...
+                                                                        </>
+                                                                        ) : (
+                                                                        <>
+                                                                            <FaIcon className="fas fa-user-shield mr-2"></FaIcon>
+                                                                            В супервайзеры
+                                                                        </>
+                                                                        )}
+                                                                    </button>
+                                                                    <button
+                                                                        onClick={() => {
+                                                                        setSelectedUserForHistory(u);
+                                                                        fetchUserHistory(u.id);
+                                                                        setOpenMenuId(null);
+                                                                        }}
+                                                                        disabled={loadingHistoryId === u.id}
+                                                                        className="block w-full text-left px-4 py-2 hover:bg-gray-100"
+                                                                    >
+                                                                        {loadingHistoryId === u.id ? (
+                                                                        <>
+                                                                            <FaIcon className="fas fa-spinner fa-spin mr-2"></FaIcon>
+                                                                            Загрузка...
+                                                                        </>
+                                                                        ) : (
+                                                                        <>
+                                                                            <FaIcon className="fas fa-history mr-2"></FaIcon>
+                                                                            История
+                                                                        </>
+                                                                        )}
+                                                                    </button>
+                                                                    </div>
+                                                                )}
                                                                 </div>
-                                                            )}
-                                                            </div>
-                                                        </td>
+                                                            </td>
                                                         </tr>
                                                         );
                                                     })}
@@ -26008,40 +26234,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                                     <tfoot className="bg-gray-50">
                                                     <tr>
-                                                        <td className="px-6 py-3 font-medium text-gray-700">{svUsers.length} сотрудников</td>
-                                                        <td className="px-6 py-3 text-gray-700">
-                                                        {Array.from(new Set(svUsers.map((u) => u.direction || "-"))).join(", ")}
+                                                        <td className="px-6 py-3 font-medium text-gray-700">
+                                                            {svUsers.length} сотрудников
                                                         </td>
-                                                        <td className="px-6 py-3">
-                                                        <div className="flex gap-2 flex-wrap">
-                                                            {Object.entries(
-                                                            svUsers.reduce((acc, u) => {
-                                                                const st = u.status || "working";
-                                                                acc[st] = (acc[st] || 0) + 1;
-                                                                return acc;
-                                                            }, {})
-                                                            ).map(([status, count]) => (
-                                                            <span
-                                                                key={status}
-                                                                title={
-                                                                status === "working" || !status ? "Работает" : status === "unpaid_leave" ? "БС" : status === "fired" ? "Уволен" : status
-                                                                }
-                                                                className={`px-2 py-1 rounded-full text-xs font-medium border ${
-                                                                status === "working" || !status ? "border-green-500 text-green-700" :
-                                                                status === "unpaid_leave" ? "border-yellow-500 text-yellow-700" :
-                                                                status === "fired" ? "border-red-500 text-red-700" : "border-gray-500 text-gray-700"
-                                                                }`}
-                                                            >
-                                                                {count}
-                                                            </span>
-                                                            ))}
-                                                        </div>
+                                                        <td colSpan={employeeSectionColumns.length} className="px-6 py-3 text-sm text-gray-600">
+                                                            Показан раздел: {activeEmployeeTableSection.label}
                                                         </td>
-                                                        <td className="px-6 py-3"></td>
-                                                        <td className="px-6 py-3 text-center">
-                                                        <RateCircle rate={svUsers.reduce((sum, u) => sum + (u.rate || 0), 0)} len={svUsers.length} />
-                                                        </td>
-                                                        <td></td>
                                                     </tr>
                                                     </tfoot>
                                                 </table>
@@ -26052,6 +26250,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         );
                                     })()
                                     )}
+                                    {renderEmployeeTableSectionSwitcher()}
                                 </div>
                                 )}
                                 {view === 'manage_trainers' && (
@@ -26645,41 +26844,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 />
                                                 </div>
 
-                                                <table className="min-w-full table-fixed border rounded-lg w-full">
-                                                <colgroup>
-                                                    <col style={{ width: "36%" }} /> {/* Имя */}
-                                                    <col style={{ width: "18%" }} /> {/* Статус */}
-                                                    <col style={{ width: "18%" }} /> {/* Hire date */}
-                                                    <col style={{ width: "12%" }} /> {/* Ставка */}
-                                                    <col style={{ width: "16%" }} /> {/* Действия */}
-                                                </colgroup>
-
+                                                <table className="min-w-full border rounded-lg w-full">
                                                 <thead className="bg-gray-50">
                                                     <tr>
-                                                    <th
-                                                        onClick={() => handleSort('name')}
-                                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer select-none"
-                                                    >
-                                                        Имя {getSortIcon('name')}
-                                                    </th>
-                                                    <th
-                                                        onClick={() => handleSort('status')}
-                                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer select-none"
-                                                    >
-                                                        Статус {getSortIcon('status')}
-                                                    </th>
-                                                    <th
-                                                        onClick={() => handleSort('hire_date')}
-                                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer select-none"
-                                                    >
-                                                        Дата найма {getSortIcon('hire_date')}
-                                                    </th>
-                                                    <th
-                                                        onClick={() => handleSort('rate')}
-                                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer select-none"
-                                                    >
-                                                        Ставка {getSortIcon('rate')}
-                                                    </th>
+                                                    {employeeSectionColumns.map((column) => {
+                                                        const isSortable = !!column.sortField;
+                                                        return (
+                                                            <th
+                                                                key={column.key}
+                                                                onClick={isSortable ? () => handleSort(column.sortField) : undefined}
+                                                                className={`px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase ${
+                                                                    isSortable ? 'cursor-pointer select-none' : ''
+                                                                } ${column.headerClassName || ''}`}
+                                                            >
+                                                                {column.label}
+                                                                {isSortable ? getSortIcon(column.sortField) : null}
+                                                            </th>
+                                                        );
+                                                    })}
                                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Действия</th>
                                                     </tr>
                                                 </thead>
@@ -26687,48 +26869,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <tbody className="bg-white divide-y divide-gray-200">
                                                     {sortedDirectionNames.map((dirName) => (
                                                     <React.Fragment key={dirName}>
-                                                        {/* Заголовок группы направления (оставляем, но колонку направления убрали) */}
                                                         <tr className="bg-gray-100">
-                                                        <td colSpan={5} className="px-6 py-3 text-sm font-semibold text-gray-700">
+                                                        <td colSpan={employeeSectionColumns.length + 1} className="px-6 py-3 text-sm font-semibold text-gray-700">
                                                             {dirName} <span className="ml-2 text-xs text-gray-500">({grouped[dirName].length})</span>
                                                         </td>
                                                         </tr>
 
-                                                        {/* Операторы в группе */}
                                                         {grouped[dirName].map((op) => (
                                                         <tr key={op.id} className="hover:bg-gray-50 transition-colors duration-200">
-                                                            <td className="px-6 py-4 text-left">
-                                                                <div className="flex items-center gap-3 min-w-0">
-                                                                    <div className="h-9 w-9 rounded-full overflow-hidden border border-slate-200 bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-xs font-semibold text-white shrink-0">
-                                                                        {op.avatar_url ? (
-                                                                            <AvatarImage src={op.avatar_url} alt={op.name || 'avatar'} className="h-full w-full object-cover" />
-                                                                        ) : (
-                                                                            (op.name || 'U').charAt(0).toUpperCase()
-                                                                        )}
-                                                                    </div>
-                                                                    <span className="truncate">{op.name}</span>
-                                                                </div>
-                                                            </td>
-
-                                                            <td className="px-6 py-4 text-left">
-                                                            {renderEmployeeStatusBadge(op.status, op)}
-                                                            </td>
-
-                                                            <td className="px-6 py-4 text-left">
-                                                            {op.hire_date
-                                                                ? (() => {
-                                                                    const [day, month, year] = op.hire_date.split("-");
-                                                                    const date = new Date(`${year}-${month}-${day}`);
-                                                                    return date.toLocaleDateString("ru-RU");
-                                                                })()
-                                                                : "-"}
-                                                            </td>
-
-                                                            <td className="px-6 py-4 text-left">
-                                                            <div className="inline-flex items-center justify-start">
-                                                                <RateCircle rate={op.rate || 1.0} />
-                                                            </div>
-                                                            </td>
+                                                            {employeeSectionColumns.map((column) => (
+                                                                <td
+                                                                    key={column.key}
+                                                                    className={`px-6 py-4 text-sm text-gray-900 align-top break-words ${column.cellClassName || ''}`}
+                                                                >
+                                                                    {column.render(op)}
+                                                                </td>
+                                                            ))}
 
                                                             <td className="px-6 py-4 text-left">
                                                             <div className="flex space-x-2">
@@ -26773,32 +26929,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <tfoot className="bg-gray-50">
                                                     <tr>
                                                     <td className="px-6 py-3 font-medium text-gray-700">{matched.length} операторов</td>
-                                                    <td className="px-6 py-3">
-                                                        <div className="flex gap-2 flex-wrap">
-                                                        {Object.entries(matched.reduce((acc, u) => {
-                                                            const st = u.status || "working";
-                                                            acc[st] = (acc[st] || 0) + 1;
-                                                            return acc;
-                                                        }, {})).map(([status, count]) => (
-                                                            <span
-                                                            key={status}
-                                                            title={status}
-                                                            className={`px-2 py-1 rounded-full text-xs font-medium border ${
-                                                                status === "working" || !status ? "border-green-500 text-green-700" :
-                                                                status === "unpaid_leave" ? "border-yellow-500 text-yellow-700" :
-                                                                status === "fired" ? "border-red-500 text-red-700" : "border-gray-500 text-gray-700"
-                                                            }`}
-                                                            >
-                                                            {count}
-                                                            </span>
-                                                        ))}
-                                                        </div>
+                                                    <td colSpan={employeeSectionColumns.length} className="px-6 py-3 text-sm text-gray-600">
+                                                        Показан раздел: {activeEmployeeTableSection.label}
                                                     </td>
-                                                    <td className="px-6 py-3"></td>
-                                                    <td className="px-6 py-3">
-                                                        <RateCircle rate={matched.reduce((s, o) => s + (o.rate || 0), 0)} len={matched.length} />
-                                                    </td>
-                                                    <td className="px-6 py-3"></td>
                                                     </tr>
                                                 </tfoot>
                                                 </table>
@@ -26806,6 +26939,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             );
                                         })()
                                         )}
+                                        {renderEmployeeTableSectionSwitcher()}
                                     </div>
                                     )}
                                 {view === 'operators' && (
