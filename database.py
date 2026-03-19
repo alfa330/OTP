@@ -816,6 +816,27 @@ class Database:
                 ALTER TABLE operator_technical_issues
                 ADD COLUMN IF NOT EXISTS end_time TIME NOT NULL DEFAULT TIME '23:59:59';
             """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS operator_offline_activities (
+                    id SERIAL PRIMARY KEY,
+                    batch_id UUID NOT NULL,
+                    operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    activity_date DATE NOT NULL,
+                    start_time TIME NOT NULL DEFAULT TIME '00:00:00',
+                    end_time TIME NOT NULL DEFAULT TIME '23:59:59',
+                    comment TEXT,
+                    created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cursor.execute("""
+                ALTER TABLE operator_offline_activities
+                ADD COLUMN IF NOT EXISTS start_time TIME NOT NULL DEFAULT TIME '00:00:00';
+            """)
+            cursor.execute("""
+                ALTER TABLE operator_offline_activities
+                ADD COLUMN IF NOT EXISTS end_time TIME NOT NULL DEFAULT TIME '23:59:59';
+            """)
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS user_history (
@@ -1403,6 +1424,16 @@ class Database:
                 ON operator_technical_issues(created_by);
                 CREATE INDEX IF NOT EXISTS idx_operator_technical_issues_created_at
                 ON operator_technical_issues(created_at);
+                CREATE INDEX IF NOT EXISTS idx_operator_offline_activities_activity_date
+                ON operator_offline_activities(activity_date);
+                CREATE INDEX IF NOT EXISTS idx_operator_offline_activities_activity_date_time
+                ON operator_offline_activities(activity_date, start_time, end_time);
+                CREATE INDEX IF NOT EXISTS idx_operator_offline_activities_operator_id
+                ON operator_offline_activities(operator_id);
+                CREATE INDEX IF NOT EXISTS idx_operator_offline_activities_created_by
+                ON operator_offline_activities(created_by);
+                CREATE INDEX IF NOT EXISTS idx_operator_offline_activities_created_at
+                ON operator_offline_activities(created_at);
                 CREATE INDEX IF NOT EXISTS idx_work_shifts_operator_date ON work_shifts(operator_id, shift_date);
                 CREATE INDEX IF NOT EXISTS idx_work_shifts_date ON work_shifts(shift_date);
                 CREATE INDEX IF NOT EXISTS idx_days_off_operator_date ON days_off(operator_id, day_off_date);
@@ -1861,6 +1892,75 @@ class Database:
 
         return result, totals
 
+    def _load_offline_activities_by_operator_day_tx(self, cursor, operator_ids, start_date, end_date):
+        """
+        Возвращает:
+        - map: {operator_id: {day_num_str: [activities...]}}
+        - totals: {operator_id: total_hours}
+        """
+        op_ids = sorted({int(v) for v in (operator_ids or []) if v is not None})
+        result = {op_id: {} for op_id in op_ids}
+        totals = {op_id: 0.0 for op_id in op_ids}
+        if not op_ids:
+            return result, totals
+
+        cursor.execute(
+            """
+            SELECT
+                oa.id,
+                oa.operator_id,
+                oa.activity_date,
+                oa.start_time,
+                oa.end_time,
+                oa.comment,
+                cb.name,
+                oa.created_at
+            FROM operator_offline_activities oa
+            LEFT JOIN users cb ON cb.id = oa.created_by
+            WHERE oa.operator_id = ANY(%s)
+              AND oa.activity_date >= %s
+              AND oa.activity_date <= %s
+            ORDER BY oa.operator_id, oa.activity_date, oa.start_time, oa.end_time, oa.id
+            """,
+            (op_ids, start_date, end_date),
+        )
+        for activity_id, op_id, activity_date, start_time, end_time, comment, created_by_name, created_at in cursor.fetchall() or []:
+            try:
+                op_id_int = int(op_id)
+            except Exception:
+                continue
+            if op_id_int not in result or activity_date is None:
+                continue
+
+            start_text = start_time.strftime('%H:%M') if start_time else None
+            end_text = end_time.strftime('%H:%M') if end_time else None
+            duration_minutes = 0
+            try:
+                if start_time and end_time:
+                    start_min, end_min = self._schedule_interval_minutes(start_time, end_time)
+                    duration_minutes = max(0, int(end_min - start_min))
+            except Exception:
+                duration_minutes = 0
+            duration_hours = round(float(duration_minutes) / 60.0, 2)
+
+            day_key = str(int(activity_date.day))
+            comment_text = str(comment or '').strip()
+            result.setdefault(op_id_int, {}).setdefault(day_key, []).append({
+                "id": int(activity_id),
+                "date": activity_date.strftime('%Y-%m-%d'),
+                "start_time": start_text,
+                "end_time": end_text,
+                "time_range": f"{start_text} - {end_text}" if start_text and end_text else None,
+                "comment": comment_text,
+                "created_by_name": created_by_name,
+                "created_at": created_at.strftime('%Y-%m-%d %H:%M:%S') if created_at else None,
+                "duration_minutes": int(duration_minutes),
+                "duration_hours": float(duration_hours),
+            })
+            totals[op_id_int] = round(float(totals.get(op_id_int, 0.0)) + float(duration_hours), 2)
+
+        return result, totals
+
     def get_daily_hours_for_operator_month(self, operator_id: int, month: str):
         """
         Возвращает daily_hours для одного оператора за месяц YYYY-MM,
@@ -1955,6 +2055,12 @@ class Database:
                 start_date=start,
                 end_date=end
             )
+            offline_map_by_operator, offline_totals_by_operator = self._load_offline_activities_by_operator_day_tx(
+                cursor=cursor,
+                operator_ids=[operator_id],
+                start_date=start,
+                end_date=end
+            )
 
             # 2) Получаем имя/ставку + данные work_hours одним LEFT JOIN запросом (включая fines)
             cursor.execute(
@@ -1982,6 +2088,8 @@ class Database:
 
         technical_issues_by_day = technical_map_by_operator.get(int(operator_id), {}) if isinstance(technical_map_by_operator, dict) else {}
         technical_issue_hours = float(technical_totals_by_operator.get(int(operator_id), 0.0)) if isinstance(technical_totals_by_operator, dict) else 0.0
+        offline_activities_by_day = offline_map_by_operator.get(int(operator_id), {}) if isinstance(offline_map_by_operator, dict) else {}
+        offline_activity_hours = float(offline_totals_by_operator.get(int(operator_id), 0.0)) if isinstance(offline_totals_by_operator, dict) else 0.0
 
         # default values if user / work_hours not found
         if row:
@@ -2006,6 +2114,8 @@ class Database:
             "daily": daily_map,
             "technical_issues_by_day": technical_issues_by_day,
             "technical_issue_hours": round(float(technical_issue_hours), 2),
+            "offline_activities_by_day": offline_activities_by_day,
+            "offline_activity_hours": round(float(offline_activity_hours), 2),
             "aggregates": {
                 "regular_hours": float(regular_hours),
                 "total_break_time": float(total_break_time),
@@ -2117,6 +2227,12 @@ class Database:
                 start_date=start,
                 end_date=end
             )
+            offline_map_by_operator, offline_totals_by_operator = self._load_offline_activities_by_operator_day_tx(
+                cursor=cursor,
+                operator_ids=op_ids,
+                start_date=start,
+                end_date=end
+            )
 
             # Сбор финального списка операторов
             operators = []
@@ -2136,6 +2252,8 @@ class Database:
                     "daily": daily_map.get(op_id, {}),
                     "technical_issues_by_day": technical_map_by_operator.get(op_id, {}) if isinstance(technical_map_by_operator, dict) else {},
                     "technical_issue_hours": round(float(technical_totals_by_operator.get(op_id, 0.0)), 2) if isinstance(technical_totals_by_operator, dict) else 0.0,
+                    "offline_activities_by_day": offline_map_by_operator.get(op_id, {}) if isinstance(offline_map_by_operator, dict) else {},
+                    "offline_activity_hours": round(float(offline_totals_by_operator.get(op_id, 0.0)), 2) if isinstance(offline_totals_by_operator, dict) else 0.0,
                     "aggregates": {
                         "regular_hours": float(regular_hours),
                         "total_break_time": float(total_break_time),
@@ -2243,6 +2361,12 @@ class Database:
                 start_date=start,
                 end_date=end
             )
+            offline_map_by_operator, offline_totals_by_operator = self._load_offline_activities_by_operator_day_tx(
+                cursor=cursor,
+                operator_ids=op_ids,
+                start_date=start,
+                end_date=end
+            )
 
             operators = []
             for row in operator_rows:
@@ -2261,6 +2385,8 @@ class Database:
                     "daily": daily_map.get(op_id, {}),
                     "technical_issues_by_day": technical_map_by_operator.get(op_id, {}) if isinstance(technical_map_by_operator, dict) else {},
                     "technical_issue_hours": round(float(technical_totals_by_operator.get(op_id, 0.0)), 2) if isinstance(technical_totals_by_operator, dict) else 0.0,
+                    "offline_activities_by_day": offline_map_by_operator.get(op_id, {}) if isinstance(offline_map_by_operator, dict) else {},
+                    "offline_activity_hours": round(float(offline_totals_by_operator.get(op_id, 0.0)), 2) if isinstance(offline_totals_by_operator, dict) else 0.0,
                     "aggregates": {
                         "regular_hours": float(regular_hours),
                         "total_break_time": float(total_break_time),
@@ -3016,6 +3142,22 @@ class Database:
             tech_row = cursor.fetchone()
             technical_issue_hours = float(tech_row[0] or 0.0)
 
+            # 3.1) Рассчитываем офлайн-активность за месяц
+            cursor.execute("""
+                SELECT COALESCE(SUM(
+                    CASE
+                    WHEN oa.end_time <= oa.start_time
+                        THEN EXTRACT(EPOCH FROM (oa.end_time + INTERVAL '24 hours' - oa.start_time))
+                    ELSE EXTRACT(EPOCH FROM (oa.end_time - oa.start_time))
+                    END
+                ) / 3600.0, 0) AS offline_activity_hours_seconds
+                FROM operator_offline_activities oa
+                WHERE oa.operator_id = %s
+                AND TO_CHAR(oa.activity_date, 'YYYY-MM') = %s
+            """, (operator_id, current_month))
+            offline_row = cursor.fetchone()
+            offline_activity_hours = float(offline_row[0] or 0.0)
+
             # 4) Количество оценённых звонков и средняя оценка (как раньше)
             cursor.execute("""
                 SELECT 
@@ -3026,15 +3168,16 @@ class Database:
             call_count = int(calls_row[0] or 0)
             avg_score = float(calls_row[1]) if calls_row[1] is not None else 0.0
 
-            # 5) calls_per_hour: используем total_calls (из work_hours) делённые на regular_hours
-            #    Если регулярных часов нет — 0.0
-            if regular_hours and regular_hours > 0:
-                calls_per_hour = float(total_calls) / float(regular_hours)
+            # 5) calls_per_hour: total_calls / (regular_hours - offline_activity_hours)
+            #    Оффлайн активность не должна влиять на КВЗ.
+            effective_call_hours = max(0.0, float(regular_hours) - float(offline_activity_hours))
+            if effective_call_hours > 0:
+                calls_per_hour = float(total_calls) / float(effective_call_hours)
             else:
                 calls_per_hour = 0.0
 
-            # 6) percent_complete: считаем с учётом зачётных тренингов и техсбоев
-            accounted_hours = regular_hours + training_hours + technical_issue_hours
+            # 6) percent_complete: считаем с учётом зачётных тренингов, техсбоев и офлайн-активности
+            accounted_hours = regular_hours + training_hours + technical_issue_hours + offline_activity_hours
             if norm_hours and norm_hours > 0:
                 percent_complete = (accounted_hours / norm_hours) * 100.0
             else:
@@ -3046,6 +3189,7 @@ class Database:
                 'regular_hours': round(float(regular_hours), 2),
                 'training_hours': round(float(training_hours), 2),
                 'technical_issue_hours': round(float(technical_issue_hours), 2),
+                'offline_activity_hours': round(float(offline_activity_hours), 2),
                 'accounted_hours': round(float(accounted_hours), 2),
                 'fines': round(float(fines), 2),
                 'norm_hours': float(norm_hours),
@@ -3219,7 +3363,20 @@ class Database:
                     FROM operator_technical_issues ti
                     WHERE ti.operator_id = u.id
                     AND (%s IS NULL OR TO_CHAR(ti.issue_date, 'YYYY-MM') = %s)
-                ), 0) AS technical_issue_hours
+                ), 0) AS technical_issue_hours,
+
+                COALESCE((
+                    SELECT SUM(
+                        CASE
+                            WHEN oa.end_time <= oa.start_time
+                                THEN EXTRACT(EPOCH FROM (oa.end_time + INTERVAL '24 hours' - oa.start_time))
+                            ELSE EXTRACT(EPOCH FROM (oa.end_time - oa.start_time))
+                        END
+                    ) / 3600.0
+                    FROM operator_offline_activities oa
+                    WHERE oa.operator_id = u.id
+                    AND (%s IS NULL OR TO_CHAR(oa.activity_date, 'YYYY-MM') = %s)
+                ), 0) AS offline_activity_hours
 
             FROM users u
             LEFT JOIN work_hours wh
@@ -3228,7 +3385,7 @@ class Database:
             WHERE u.role = 'operator'
         """
 
-        params = [month, month, month, month, month, month]
+        params = [month, month, month, month, month, month, month, month]
 
         if operator_id:
             query += " AND u.id = %s"
@@ -3244,11 +3401,13 @@ class Database:
                 total_calls = int(row[6])
                 training_hours = round(float(row[7]), 2)
                 technical_issue_hours = round(float(row[8]), 2)
-                accounted_hours = round(regular_hours + training_hours + technical_issue_hours, 2)
+                offline_activity_hours = round(float(row[9]), 2)
+                accounted_hours = round(regular_hours + training_hours + technical_issue_hours + offline_activity_hours, 2)
 
+                effective_call_hours = max(0.0, float(regular_hours) - float(offline_activity_hours))
                 calls_per_hour = (
-                    round(total_calls / regular_hours, 2)
-                    if regular_hours > 0 else 0.0
+                    round(total_calls / effective_call_hours, 2)
+                    if effective_call_hours > 0 else 0.0
                 )
 
                 result.append({
@@ -3258,6 +3417,7 @@ class Database:
                     "regular_hours": regular_hours,
                     "training_hours": training_hours,
                     "technical_issue_hours": technical_issue_hours,
+                    "offline_activity_hours": offline_activity_hours,
                     "accounted_hours": accounted_hours,
                     "fines": float(row[4]),
                     "norm_hours": float(row[5]),
@@ -5433,6 +5593,228 @@ class Database:
                 'total': total,
                 'items': items
             }
+
+    def create_operator_offline_activity(
+        self,
+        requester_id,
+        requester_role,
+        activity_date,
+        start_time=None,
+        end_time=None,
+        comment=None,
+        operator_id=None
+    ):
+        role_norm = self._normalize_technical_issue_role(requester_role)
+        if role_norm not in ('admin', 'sv'):
+            raise ValueError("Only admin and sv can create offline activity")
+
+        issue_date_obj = self._parse_technical_issue_date(activity_date, field_name='date')
+        start_time_obj = self._parse_technical_issue_time(start_time, field_name='start_time', default_value='00:00')
+        end_time_obj = self._parse_technical_issue_time(end_time, field_name='end_time', default_value='23:59')
+        if start_time_obj == end_time_obj:
+            raise ValueError("start_time and end_time cannot be equal")
+
+        operator_ids_norm = self._coerce_int_list([operator_id])
+        if not operator_ids_norm:
+            raise ValueError("Field 'operator_id' is required")
+
+        comment_text = str(comment or '').strip() or None
+        requester_id_int = int(requester_id)
+
+        with self._get_cursor() as cursor:
+            target_operator_ids, _ = self._resolve_technical_issue_operator_ids_tx(
+                cursor=cursor,
+                requester_id=requester_id_int,
+                requester_role=role_norm,
+                operator_ids=operator_ids_norm,
+                direction_ids=None
+            )
+            target_operator_id = int(target_operator_ids[0])
+
+            overlaps_by_operator = self._find_shift_overlap_intervals_for_technical_issue_tx(
+                cursor=cursor,
+                operator_ids=[target_operator_id],
+                issue_date_obj=issue_date_obj,
+                start_time_obj=start_time_obj,
+                end_time_obj=end_time_obj
+            )
+            eligible_operator_ids = sorted(overlaps_by_operator.keys())
+            if not eligible_operator_ids:
+                raise ValueError("Selected operator has no shifts in the specified time range")
+
+            batch_id = str(uuid.uuid4())
+            activity_values = []
+            for resolved_operator_id in eligible_operator_ids:
+                day_chunks = self._split_absolute_minutes_intervals_by_day(
+                    overlaps_by_operator.get(resolved_operator_id) or [],
+                    issue_date_obj
+                )
+                for chunk in day_chunks:
+                    activity_values.append((
+                        batch_id,
+                        int(resolved_operator_id),
+                        chunk['date'],
+                        chunk['start_time'],
+                        chunk['end_time'],
+                        comment_text,
+                        requester_id_int
+                    ))
+
+            if not activity_values:
+                raise ValueError("No overlapping shift intervals were found")
+
+            execute_values(
+                cursor,
+                """
+                    INSERT INTO operator_offline_activities (
+                        batch_id,
+                        operator_id,
+                        activity_date,
+                        start_time,
+                        end_time,
+                        comment,
+                        created_by
+                    )
+                    VALUES %s
+                """,
+                activity_values
+            )
+
+            return {
+                'batch_id': batch_id,
+                'created_count': len(activity_values),
+                'created_operator_count': len(eligible_operator_ids),
+                'operator_ids': eligible_operator_ids,
+                'date': issue_date_obj.strftime('%Y-%m-%d'),
+                'start_time': start_time_obj.strftime('%H:%M'),
+                'end_time': end_time_obj.strftime('%H:%M'),
+                'comment': comment_text
+            }
+
+    def get_operator_offline_activities(
+        self,
+        requester_id,
+        requester_role,
+        activity_date=None,
+        date_from=None,
+        date_to=None,
+        operator_id=None,
+        limit=500,
+        offset=0
+    ):
+        role_norm = self._normalize_technical_issue_role(requester_role)
+        if role_norm not in ('admin', 'sv'):
+            raise ValueError("Only admin and sv can view offline activities")
+
+        limit_int = max(1, min(int(limit or 500), 5000))
+        offset_int = max(0, int(offset or 0))
+        requester_id_int = int(requester_id)
+
+        where_parts = []
+        params = []
+        if role_norm == 'sv':
+            where_parts.append("op.supervisor_id = %s")
+            params.append(requester_id_int)
+
+        if activity_date:
+            activity_date_obj = self._parse_technical_issue_date(activity_date, field_name='date')
+            where_parts.append("oa.activity_date = %s")
+            params.append(activity_date_obj)
+        else:
+            if date_from:
+                from_obj = self._parse_technical_issue_date(date_from, field_name='date_from')
+                where_parts.append("oa.activity_date >= %s")
+                params.append(from_obj)
+            if date_to:
+                to_obj = self._parse_technical_issue_date(date_to, field_name='date_to')
+                where_parts.append("oa.activity_date <= %s")
+                params.append(to_obj)
+
+        operator_id_int = None
+        if operator_id is not None and str(operator_id).strip() != '':
+            try:
+                operator_id_int = int(operator_id)
+            except (TypeError, ValueError):
+                raise ValueError("Invalid operator_id")
+            where_parts.append("oa.operator_id = %s")
+            params.append(operator_id_int)
+
+        where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+        base_sql = """
+            FROM operator_offline_activities oa
+            JOIN users op ON op.id = oa.operator_id
+            LEFT JOIN users sv ON sv.id = op.supervisor_id
+            LEFT JOIN users cb ON cb.id = oa.created_by
+            LEFT JOIN directions d ON d.id = op.direction_id
+        """
+
+        with self._get_cursor() as cursor:
+            cursor.execute(f"SELECT COUNT(*) {base_sql} {where_sql}", params)
+            total = int(cursor.fetchone()[0] or 0)
+
+            cursor.execute(
+                f"""
+                    SELECT
+                        oa.id,
+                        oa.batch_id::text,
+                        oa.operator_id,
+                        op.name,
+                        op.supervisor_id,
+                        sv.name,
+                        op.direction_id,
+                        d.name,
+                        oa.activity_date,
+                        oa.start_time,
+                        oa.end_time,
+                        oa.comment,
+                        oa.created_by,
+                        cb.name,
+                        oa.created_at
+                    {base_sql}
+                    {where_sql}
+                    ORDER BY oa.activity_date DESC, oa.start_time DESC, oa.created_at DESC, oa.id DESC
+                    LIMIT %s OFFSET %s
+                """,
+                params + [limit_int, offset_int]
+            )
+            rows = cursor.fetchall() or []
+
+            items = []
+            for row in rows:
+                start_time_text = row[9].strftime('%H:%M') if row[9] else None
+                end_time_text = row[10].strftime('%H:%M') if row[10] else None
+                duration_minutes = 0
+                try:
+                    if row[9] and row[10]:
+                        start_min, end_min = self._schedule_interval_minutes(row[9], row[10])
+                        duration_minutes = max(0, int(end_min - start_min))
+                except Exception:
+                    duration_minutes = 0
+                items.append({
+                    'id': int(row[0]),
+                    'batch_id': row[1],
+                    'operator_id': int(row[2]),
+                    'operator_name': row[3],
+                    'supervisor_id': int(row[4]) if row[4] is not None else None,
+                    'supervisor_name': row[5],
+                    'direction_id': int(row[6]) if row[6] is not None else None,
+                    'direction_name': row[7],
+                    'date': row[8].strftime('%Y-%m-%d') if row[8] else None,
+                    'start_time': start_time_text,
+                    'end_time': end_time_text,
+                    'time_range': f"{start_time_text} - {end_time_text}" if start_time_text and end_time_text else None,
+                    'comment': row[11],
+                    'created_by_id': int(row[12]) if row[12] is not None else None,
+                    'created_by_name': row[13],
+                    'created_at': row[14].strftime('%Y-%m-%d %H:%M:%S') if row[14] else None,
+                    'duration_minutes': int(duration_minutes),
+                    'duration_hours': round(float(duration_minutes) / 60.0, 2)
+                })
+
+            return {
+                'total': total,
+                'items': items
+            }
     
     def get_user_history(self, user_id):
         with self._get_cursor() as cursor:
@@ -5722,11 +6104,13 @@ class Database:
         trainings_map: Dict[int, Dict[int, List[Dict[str, Any]]]],
         technical_issues_map: Dict[int, Dict[int, List[Dict[str, Any]]]],
         month: str,  # 'YYYY-MM'
+        offline_activities_map: Dict[int, Dict[int, List[Dict[str, Any]]]] = None,
         filename: str = None,
         include_supervisor: bool = False
     ) -> Tuple[str, bytes]:
         """
-        Генерирует xlsx с листами: Отработанные часы, Перерыв, Звонки, Эффективность, Штрафы, Тренинги, Тех. сбои.
+        Генерирует xlsx с листами: Отработанные часы, Перерыв, Звонки, Эффективность,
+        Штрафы, Тренинги, Тех. сбои, Офлайн активность.
 
         Правила форматирования (по заданию пользователя):
         - Округлять все числа до 1 знака после запятой, КРОМЕ полей "Ставка" (rate) и "Норма часов" (norm_hours) — они оставляются как есть.
@@ -5739,6 +6123,7 @@ class Database:
 
         trainings_map = trainings_map or {}
         technical_issues_map = technical_issues_map or {}
+        offline_activities_map = offline_activities_map or {}
         operators = operators["operators"]
 
         # If requested, ensure each operator has `supervisor_name` populated.
@@ -5861,6 +6246,23 @@ class Database:
                 return 0.0
 
         def compute_technical_issue_duration_hours(item: Dict[str, Any]) -> float:
+            try:
+                if item.get('duration_minutes') is not None:
+                    return round(float(item['duration_minutes']) / 60.0, 2)
+                if item.get('duration_hours') is not None:
+                    return round(float(item['duration_hours']), 2)
+                s = parse_time_to_minutes(item.get('start_time'))
+                e = parse_time_to_minutes(item.get('end_time'))
+                if s is None or e is None:
+                    return 0.0
+                diff = e - s
+                if diff < 0:
+                    diff += 24 * 60
+                return round(diff / 60.0, 2)
+            except Exception:
+                return 0.0
+
+        def compute_offline_activity_duration_hours(item: Dict[str, Any]) -> float:
             try:
                 if item.get('duration_minutes') is not None:
                     return round(float(item['duration_minutes']) / 60.0, 2)
@@ -6011,7 +6413,7 @@ class Database:
             headers = ["Оператор"]
             if include_supervisor:
                 headers.append("Супервайзер")
-            headers += ["Ставка", "Норма часов (ч)"] + [f"{d:02d}.{mon:02d}" for d in days] + ["Итого часов", "База часов", "Тех. сбои (ч)", "Вып нормы (%)", "Выработка"]
+            headers += ["Ставка", "Норма часов (ч)"] + [f"{d:02d}.{mon:02d}" for d in days] + ["Итого часов", "База часов", "Тех. сбои (ч)", "Офлайн активность (ч)", "Вып нормы (%)", "Выработка"]
             _make_header(ws, headers)
             row = 2
             for op in operators:
@@ -6030,6 +6432,7 @@ class Database:
                 total_work = 0.0
                 total_counted_trainings = 0.0
                 total_technical_issues = 0.0
+                total_offline_activities = 0.0
 
                 day_start = norm_col + 1
                 for c_idx, day in enumerate(days, start=day_start):
@@ -6051,27 +6454,34 @@ class Database:
                     for item in technical_items_for_day:
                         technical_for_day += compute_technical_issue_duration_hours(item)
 
+                    offline_for_day = 0.0
+                    offline_items_for_day = offline_activities_map.get(op.get('operator_id'), {}).get(day, []) if offline_activities_map else []
+                    for item in offline_items_for_day:
+                        offline_for_day += compute_offline_activity_duration_hours(item)
+
                     # Сохраняем в суммарные показатели отдельно, итоговая ячейка по дню — work + trainings + technical
                     total_work += work_val
                     total_counted_trainings += counted_for_day
                     total_technical_issues += technical_for_day
-                    combined = work_val + counted_for_day + technical_for_day
+                    total_offline_activities += offline_for_day
+                    combined = work_val + counted_for_day + technical_for_day + offline_for_day
                     cell_val = fmt_day_value('work_time', combined)
                     fill = FILL_POS if (isinstance(cell_val, (int, float)) and cell_val > 0) else None
                     set_cell(ws, row, c_idx, cell_val, fill=fill)
 
-                itogo_chasov = total_work + total_counted_trainings + total_technical_issues
+                itogo_chasov = total_work + total_counted_trainings + total_technical_issues + total_offline_activities
                 base_total_col = day_start + len(days)
                 set_cell(ws, row, base_total_col, fmt_total_value('work_time', itogo_chasov))
                 set_cell(ws, row, base_total_col + 1, fmt_total_value('work_time', total_work))
                 set_cell(ws, row, base_total_col + 2, fmt_total_value('work_time', total_technical_issues))
+                set_cell(ws, row, base_total_col + 3, fmt_total_value('work_time', total_offline_activities))
                 if norm and norm != 0:
                     percent = round((itogo_chasov / norm) * 100, 2)
                     percent_display = f"{percent}%"
                 else:
                     percent_display = None
-                set_cell(ws, row, base_total_col + 3, percent_display)
-                set_cell(ws, row, base_total_col + 4, fmt_total_value('work_time', round(norm - itogo_chasov, 2) if norm is not None else None))
+                set_cell(ws, row, base_total_col + 4, percent_display)
+                set_cell(ws, row, base_total_col + 5, fmt_total_value('work_time', round(norm - itogo_chasov, 2) if norm is not None else None))
 
                 row += 1
 
@@ -6086,9 +6496,16 @@ class Database:
                 daily = op.get('daily', {})
                 for dnum in daily.values():
                     work_hours += float(dnum.get('work_time') or 0.0)
+                offline_hours = 0.0
+                op_offline = offline_activities_map.get(op.get('operator_id')) or {}
+                if isinstance(op_offline, dict):
+                    for day_items in op_offline.values():
+                        for item in (day_items or []):
+                            offline_hours += compute_offline_activity_duration_hours(item)
                 calls = totals.get('calls', 0)
-                if work_hours and work_hours != 0:
-                    return round(calls / work_hours, 1)
+                effective_hours = max(0.0, float(work_hours) - float(offline_hours))
+                if effective_hours > 0:
+                    return round(calls / effective_hours, 1)
                 return None
 
             build_generic_sheet('calls', 'Звонки', 'calls', is_hour=False, extra_cols=[('КВЗ', kvz_fn)])
@@ -6313,6 +6730,50 @@ class Database:
             col = ws_tech.cell(1, i).column_letter
             ws_tech.column_dimensions[col].width = 14
 
+        ws_offline = wb.create_sheet(title='Офлайн активность'[:31])
+        offline_headers = ["Оператор"]
+        if include_supervisor:
+            offline_headers.append("Супервайзер")
+        offline_headers += [f"{d:02d}.{mon:02d}" for d in days] + ["Всего (ч)"]
+        _make_header(ws_offline, offline_headers)
+
+        row_offline = 2
+        for op in operators:
+            name = op.get('name') or f"op_{op.get('operator_id')}"
+            op_id = op.get('operator_id')
+            op_activities = offline_activities_map.get(op_id) or {}
+
+            total_activity_hours = 0.0
+            for day in days:
+                arr = op_activities.get(day, []) if isinstance(op_activities, dict) else []
+                for item in arr:
+                    total_activity_hours += compute_offline_activity_duration_hours(item)
+
+            set_cell(ws_offline, row_offline, 1, name, align_center=False)
+            if include_supervisor:
+                sup_name = op.get('supervisor_name') or ""
+                set_cell(ws_offline, row_offline, 2, sup_name, align_center=False)
+
+            day_start = 2 + (1 if include_supervisor else 0)
+            for c_idx, day in enumerate(days, start=day_start):
+                arr = op_activities.get(day, []) if isinstance(op_activities, dict) else []
+                day_sum = 0.0
+                for item in arr:
+                    day_sum += compute_offline_activity_duration_hours(item)
+                if day_sum == 0:
+                    set_cell(ws_offline, row_offline, c_idx, "")
+                else:
+                    set_cell(ws_offline, row_offline, c_idx, fmt_num(day_sum), fill=FILL_POS)
+
+            total_col = len(offline_headers)
+            set_cell(ws_offline, row_offline, total_col, fmt_num(total_activity_hours))
+            row_offline += 1
+
+        ws_offline.column_dimensions['A'].width = 24
+        for i in range(2, 3 + len(days)):
+            col = ws_offline.cell(1, i).column_letter
+            ws_offline.column_dimensions[col].width = 14
+
         out = BytesIO()
         wb.save(out)
         out.seek(0)
@@ -6326,6 +6787,7 @@ class Database:
         trainings_map: Dict[int, Dict[int, List[Dict[str, Any]]]],
         technical_issues_map: Dict[int, Dict[int, List[Dict[str, Any]]]],
         month: str,  # 'YYYY-MM'
+        offline_activities_map: Dict[int, Dict[int, List[Dict[str, Any]]]] = None,
         filename: str = None
         ) -> Tuple[str, bytes]:
         """
@@ -6359,6 +6821,7 @@ class Database:
             trainings_map,
             technical_issues_map,
             month,
+            offline_activities_map=offline_activities_map,
             filename=filename,
             include_supervisor=True
         )
@@ -7319,8 +7782,25 @@ class Database:
         """, (operator_id, start, end))
         total_fines = cursor.fetchone()[0] or 0.0
 
-        if total_work_time and float(total_work_time) > 0:
-            calls_per_hour = float(total_calls) / float(total_work_time)
+        cursor.execute("""
+            SELECT COALESCE(SUM(
+                CASE
+                    WHEN oa.end_time <= oa.start_time
+                        THEN EXTRACT(EPOCH FROM (oa.end_time + INTERVAL '24 hours' - oa.start_time))
+                    ELSE EXTRACT(EPOCH FROM (oa.end_time - oa.start_time))
+                END
+            ) / 3600.0, 0)
+            FROM operator_offline_activities oa
+            WHERE oa.operator_id = %s
+              AND oa.activity_date >= %s
+              AND oa.activity_date <= %s
+        """, (operator_id, start, end))
+        total_offline_hours = float(cursor.fetchone()[0] or 0.0)
+
+        effective_hours_for_calls = max(0.0, float(total_work_time or 0.0) - float(total_offline_hours or 0.0))
+
+        if effective_hours_for_calls > 0:
+            calls_per_hour = float(total_calls) / float(effective_hours_for_calls)
         else:
             calls_per_hour = 0.0
 
@@ -7362,7 +7842,8 @@ class Database:
             "total_calls": int(total_calls or 0),
             "total_efficiency_hours": float(total_efficiency_hours or 0.0),
             "calls_per_hour": float(calls_per_hour or 0.0),
-            "fines": float(total_fines or 0.0)
+            "fines": float(total_fines or 0.0),
+            "offline_activity_hours": float(total_offline_hours or 0.0)
         }
 
     def _recalculate_auto_daily_hours_tx(self, cursor, operator_ids, start_date, end_date):
@@ -8573,6 +9054,97 @@ class Database:
                 continue
             target['technicalIssueTimelineDays'] = timeline_map.get(int(op_id), {})
 
+    def _load_offline_activity_segments_for_operators(self, cursor, operator_ids, start_date_obj=None, end_date_obj=None):
+        op_ids = [int(v) for v in (operator_ids or []) if v is not None]
+        result = {op_id: {} for op_id in op_ids}
+        if not op_ids:
+            return result
+
+        query = """
+            SELECT
+                id,
+                operator_id,
+                batch_id,
+                activity_date,
+                start_time,
+                end_time,
+                comment
+            FROM operator_offline_activities
+            WHERE operator_id = ANY(%s)
+        """
+        params = [op_ids]
+        if start_date_obj:
+            query += " AND activity_date >= %s"
+            params.append(start_date_obj - timedelta(days=1))
+        if end_date_obj:
+            query += " AND activity_date <= %s"
+            params.append(end_date_obj + timedelta(days=1))
+
+        query += " ORDER BY operator_id, activity_date, start_time, end_time, id"
+        cursor.execute(query, params)
+        rows = cursor.fetchall() or []
+
+        for row in rows:
+            activity_id, operator_id, batch_id, activity_date_value, start_time_value, end_time_value, comment = row
+            op_id = int(operator_id)
+            if op_id not in result or activity_date_value is None:
+                continue
+
+            start_min, end_min = self._schedule_interval_minutes(start_time_value, end_time_value)
+            day_chunks = self._split_absolute_minutes_intervals_by_day(
+                [{'start': int(start_min), 'end': int(end_min)}],
+                activity_date_value
+            )
+            for chunk in day_chunks:
+                chunk_date = chunk.get('date')
+                if not chunk_date:
+                    continue
+                if start_date_obj and chunk_date < start_date_obj:
+                    continue
+                if end_date_obj and chunk_date > end_date_obj:
+                    continue
+
+                day_key = chunk_date.strftime('%Y-%m-%d')
+                start_min_local = int(chunk.get('start_min') or 0)
+                end_min_local = int(chunk.get('end_min') or 0)
+                if end_min_local <= start_min_local:
+                    continue
+
+                comment_text = str(comment or '').strip()
+                result[op_id].setdefault(day_key, []).append({
+                    'id': int(activity_id),
+                    'batch_id': str(batch_id) if batch_id is not None else None,
+                    'date': day_key,
+                    'start': chunk.get('start_time') or _minutes_to_time(start_min_local),
+                    'end': chunk.get('end_time') or _minutes_to_time(end_min_local),
+                    'startMin': start_min_local,
+                    'endMin': end_min_local,
+                    'comment': comment_text
+                })
+
+        for op_id, days_map in result.items():
+            for day_key, items in list(days_map.items()):
+                items_sorted = sorted(
+                    (items or []),
+                    key=lambda seg: (int(seg.get('startMin', 0)), int(seg.get('endMin', 0)), int(seg.get('id', 0)))
+                )
+                days_map[day_key] = items_sorted
+
+        return result
+
+    def _attach_offline_activity_segments_to_operators(self, cursor, operators_map, operator_ids, start_date_obj=None, end_date_obj=None):
+        timeline_map = self._load_offline_activity_segments_for_operators(
+            cursor=cursor,
+            operator_ids=operator_ids,
+            start_date_obj=start_date_obj,
+            end_date_obj=end_date_obj
+        )
+        for op_id in (operator_ids or []):
+            target = operators_map.get(op_id)
+            if target is None:
+                continue
+            target['offlineActivityTimelineDays'] = timeline_map.get(int(op_id), {})
+
     def _sync_user_statuses_from_schedule_periods_tx(self, cursor, operator_ids=None, as_of_date=None):
         """
         Синхронизировать users.status по активным периодным статусам на дату.
@@ -8670,7 +9242,8 @@ class Database:
         end_date=None,
         direction_name=None,
         include_imported_statuses=False,
-        include_technical_issues=False
+        include_technical_issues=False,
+        include_offline_activities=False
     ):
         """
         Получить всех операторов со сменами и выходными днями за период.
@@ -8723,7 +9296,8 @@ class Database:
                     'scheduleStatusDays': {},
                     'aggregatedScheduleFlagsDays': {},
                     'importedStatusTimelineDays': {},
-                    'technicalIssueTimelineDays': {}
+                    'technicalIssueTimelineDays': {},
+                    'offlineActivityTimelineDays': {}
                 }
 
             shifts_query = """
@@ -8830,6 +9404,14 @@ class Database:
                     start_date_obj=start_date_obj,
                     end_date_obj=end_date_obj
                 )
+            if include_offline_activities:
+                self._attach_offline_activity_segments_to_operators(
+                    cursor=cursor,
+                    operators_map=result_map,
+                    operator_ids=operator_ids,
+                    start_date_obj=start_date_obj,
+                    end_date_obj=end_date_obj
+                )
 
             return [result_map[row[0]] for row in operators]
 
@@ -8839,7 +9421,8 @@ class Database:
         start_date=None,
         end_date=None,
         include_imported_statuses=False,
-        include_technical_issues=False
+        include_technical_issues=False,
+        include_offline_activities=False
     ):
         """
         Получить одного оператора с его сменами/перерывами/выходными за период.
@@ -8879,7 +9462,8 @@ class Database:
                 'scheduleStatusDays': {},
                 'aggregatedScheduleFlagsDays': {},
                 'importedStatusTimelineDays': {},
-                'technicalIssueTimelineDays': {}
+                'technicalIssueTimelineDays': {},
+                'offlineActivityTimelineDays': {}
             }
 
             shifts_query = """
@@ -8972,6 +9556,14 @@ class Database:
                 )
             if include_technical_issues:
                 self._attach_technical_issue_segments_to_operators(
+                    cursor=cursor,
+                    operators_map={operator_id: result},
+                    operator_ids=[operator_id],
+                    start_date_obj=start_date_obj,
+                    end_date_obj=end_date_obj
+                )
+            if include_offline_activities:
+                self._attach_offline_activity_segments_to_operators(
                     cursor=cursor,
                     operators_map={operator_id: result},
                     operator_ids=[operator_id],

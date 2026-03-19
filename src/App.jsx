@@ -357,6 +357,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         { key: "efficiency", label: "Эффективность", unit: "ч" },
         { key: "trainings", label: "Тренинги", unit: "" }, // новый таб
         { key: "technical_issues", label: "Тех причины", unit: "ч" },
+        { key: "offline_activity", label: "Офлайн активность", unit: "ч" },
         { key: "fines", label: "Штрафы", unit: "₸" }
         ];
 
@@ -391,6 +392,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         return Number((diff / 60).toFixed(2));
         }
 
+        function computeOfflineActivityDurationHours(item) {
+        if (item?.duration_minutes != null) return Number((Number(item.duration_minutes || 0) / 60).toFixed(2));
+        if (item?.duration_hours != null) return Number(Number(item.duration_hours || 0).toFixed(2));
+        const s = parseTimeToMinutes(item?.start_time);
+        const e = parseTimeToMinutes(item?.end_time);
+        if (s == null || e == null) return 0;
+        let diff = e - s;
+        if (diff < 0) diff += 24 * 60;
+        return Number((diff / 60).toFixed(2));
+        }
+
         const HoursAccountingView = ({ user, svList, onUploaded, showToast }) => {
         const [month, setMonth] = useState(() => {
             const d = new Date();
@@ -400,6 +412,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const [operators, setOperators] = useState([]);
         const [trainingsMap, setTrainingsMap] = useState({}); // { operatorId: { dayNum: [trainings...] } }
         const [technicalIssuesMap, setTechnicalIssuesMap] = useState({}); // { operatorId: { dayNum: [technicalIssues...] } }
+        const [offlineActivitiesMap, setOfflineActivitiesMap] = useState({}); // { operatorId: { dayNum: [offlineActivities...] } }
         const [trainingModalState, setTrainingModalState] = useState({ open: false, operatorId: null, date: null, training: null });
         const [isTrainingActionLoading, setIsTrainingActionLoading] = useState(false);
         const [selectedSvId, setSelectedSvId] = useState(user?.role === 'sv' ? user.id : '');
@@ -504,11 +517,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             technicalParams.append('date_to', `${month}-${String(daysInMonth).padStart(2, '0')}`);
             technicalParams.append('limit', '5000');
             const technicalIssuesUrl = `${API_BASE_URL}/api/technical_issues?${technicalParams.toString()}`;
+            const offlineParams = new URLSearchParams();
+            offlineParams.append('date_from', `${month}-01`);
+            offlineParams.append('date_to', `${month}-${String(daysInMonth).padStart(2, '0')}`);
+            offlineParams.append('limit', '5000');
+            const offlineActivitiesUrl = `${API_BASE_URL}/api/offline_activities?${offlineParams.toString()}`;
 
-            const [hoursResp, trainingsResp, technicalIssuesResp] = await Promise.all([
+            const [hoursResp, trainingsResp, technicalIssuesResp, offlineActivitiesResp] = await Promise.all([
                 axios.get(url, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } }),
                 axios.get(trainingsUrl, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } }),
-                axios.get(technicalIssuesUrl, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } })
+                axios.get(technicalIssuesUrl, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } }),
+                axios.get(offlineActivitiesUrl, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } })
             ]);
 
             const loadedOperators = (hoursResp.data && hoursResp.data.status === 'success' && Array.isArray(hoursResp.data.operators))
@@ -572,12 +591,43 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             });
             setTechnicalIssuesMap(techMap);
 
+            const offlineItems = Array.isArray(offlineActivitiesResp?.data?.items)
+                ? offlineActivitiesResp.data.items
+                : [];
+            const offlineMap = {};
+            for (const item of offlineItems) {
+                const op = Number(item?.operator_id);
+                if (!Number.isFinite(op) || op <= 0) continue;
+                if (visibleOperatorIds.size > 0 && !visibleOperatorIds.has(op)) continue;
+
+                let dayNum;
+                try {
+                dayNum = new Date(`${item.date || ''}T00:00:00`).getDate();
+                } catch (e) {
+                dayNum = parseInt(String(item.date || '').slice(-2), 10);
+                }
+                if (!Number.isFinite(dayNum) || dayNum <= 0) continue;
+
+                if (!offlineMap[op]) offlineMap[op] = {};
+                if (!offlineMap[op][dayNum]) offlineMap[op][dayNum] = [];
+                offlineMap[op][dayNum].push(item);
+            }
+            Object.keys(offlineMap).forEach(opId => {
+                Object.keys(offlineMap[opId]).forEach(dayKey => {
+                offlineMap[opId][dayKey] = (offlineMap[opId][dayKey] || []).sort((a, b) =>
+                    String(a?.start_time || '').localeCompare(String(b?.start_time || ''))
+                );
+                });
+            });
+            setOfflineActivitiesMap(offlineMap);
+
             } catch (err) {
             console.error('fetchDailyHoursAndTrainings error', err);
             fallbackToast('Ошибка загрузки данных', 'error');
             setOperators([]);
             setTrainingsMap({});
             setTechnicalIssuesMap({});
+            setOfflineActivitiesMap({});
             } finally {
             setIsLoading(false);
             }
@@ -1081,6 +1131,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             return Math.max(1, max);
         }, [technicalIssuesMap]);
 
+        const maxOfflineActivitiesHours = useMemo(() => {
+            let max = 0;
+            for (const opId of Object.keys(offlineActivitiesMap)) {
+            for (const dayKey of Object.keys(offlineActivitiesMap[opId] || {})) {
+                const sum = (offlineActivitiesMap[opId][dayKey] || []).reduce((acc, item) => acc + computeOfflineActivityDurationHours(item), 0);
+                if (sum > max) max = sum;
+            }
+            }
+            return Math.max(1, max);
+        }, [offlineActivitiesMap]);
+
         // Direction options derived from loaded operators (for filtering)
         const directionOptions = useMemo(() => {
             const s = new Set();
@@ -1314,6 +1375,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             let trainingsTotal = 0;
             let trainingsCounted = 0;
             let technicalIssuesTotal = 0;
+            let offlineActivitiesTotal = 0;
             let sumFines = 0;
 
             for (const op of filteredOperators) {
@@ -1343,7 +1405,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             }
 
-            const displayedTotal = regular + totalHoursCounted + technicalHoursTotal;
+            const offlineByDay = offlineActivitiesMap[op.operator_id] || {};
+            let offlineHoursTotal = 0;
+            for (const dKey of Object.keys(offlineByDay)) {
+                const arr = offlineByDay[dKey] || [];
+                for (const item of arr) {
+                offlineHoursTotal += computeOfflineActivityDurationHours(item) || 0;
+                }
+            }
+
+            const displayedTotal = regular + totalHoursCounted + technicalHoursTotal + offlineHoursTotal;
             const prodDiff = displayedTotal - norm;
 
             sumDisplayedTotal += displayedTotal;
@@ -1354,6 +1425,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             trainingsTotal += totalHoursAll;
             trainingsCounted += totalHoursCounted;
             technicalIssuesTotal += technicalHoursTotal;
+            offlineActivitiesTotal += offlineHoursTotal;
 
             // compute fines per operator (support both array of fines and legacy fine_amount)
             if (op.daily) {
@@ -1384,9 +1456,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             avgOcc,
             trainingsTotal,
             trainingsCounted,
-            technicalIssuesTotal
+            technicalIssuesTotal,
+            offlineActivitiesTotal
             };
-        }, [filteredOperators, trainingsMap, technicalIssuesMap]);
+        }, [filteredOperators, trainingsMap, technicalIssuesMap, offlineActivitiesMap]);
 
         // render cell with trainings marker and trainings-tab rendering
         function renderCellByMetricWithStyleAndMarker(op, day, metricKey) {
@@ -1405,6 +1478,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             const trainings = (trainingsMap[op.operator_id] && trainingsMap[op.operator_id][day]) || [];
             const technicalIssues = (technicalIssuesMap[op.operator_id] && technicalIssuesMap[op.operator_id][day]) || [];
+            const offlineActivities = (offlineActivitiesMap[op.operator_id] && offlineActivitiesMap[op.operator_id][day]) || [];
             const fines = (op.daily && op.daily[dayKey] && Array.isArray(op.daily[dayKey].fines)) ? op.daily[dayKey].fines : [];
 
             const fineIcons = (fines && fines.length > 0) ? (
@@ -1425,6 +1499,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     <span>—</span>
                     {trainings.length > 0 && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
                     {technicalIssues.length > 0 && <div className="absolute top-1 right-4 w-2 h-2 rounded-full bg-violet-500 ring-1 ring-violet-700" title={`Тех причины: ${technicalIssues.length}`}></div>}
+                    {offlineActivities.length > 0 && <div className="absolute top-1 right-7 w-2 h-2 rounded-full bg-emerald-500 ring-1 ring-emerald-700" title={`Офлайн активность: ${offlineActivities.length}`}></div>}
                     {fines.length > 0 && <div className="absolute top-4 right-1 w-2 h-2 rounded-full bg-red-400 ring-1 ring-red-500" title={`Штрафы: ${fines.length}`}></div>}
                 </div>
                 );
@@ -1435,6 +1510,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     <span>—</span>
                     {trainings.length > 0 && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
                     {technicalIssues.length > 0 && <div className="absolute top-1 right-4 w-2 h-2 rounded-full bg-violet-500 ring-1 ring-violet-700" title={`Тех причины: ${technicalIssues.length}`}></div>}
+                    {offlineActivities.length > 0 && <div className="absolute top-1 right-7 w-2 h-2 rounded-full bg-emerald-500 ring-1 ring-emerald-700" title={`Офлайн активность: ${offlineActivities.length}`}></div>}
                     {fines.length > 0 && <div className="absolute top-4 right-1 w-2 h-2 rounded-full bg-red-400 ring-1 ring-red-500" title={`Штрафы: ${fines.length}`}></div>}
                 </div>
                 );
@@ -1445,6 +1521,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     <span>—</span>
                     {trainings.length > 0 && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
                     {technicalIssues.length > 0 && <div className="absolute top-1 right-4 w-2 h-2 rounded-full bg-violet-500 ring-1 ring-violet-700" title={`Тех причины: ${technicalIssues.length}`}></div>}
+                    {offlineActivities.length > 0 && <div className="absolute top-1 right-7 w-2 h-2 rounded-full bg-emerald-500 ring-1 ring-emerald-700" title={`Офлайн активность: ${offlineActivities.length}`}></div>}
                     {fines.length > 0 && <div className="absolute top-4 right-1 w-2 h-2 rounded-full bg-red-400 ring-1 ring-red-500" title={`Штрафы: ${fines.length}`}></div>}
                 </div>
                 );
@@ -1461,6 +1538,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 <span className="text-xs font-medium truncate" style={{maxWidth: '110px', display: 'inline-block'}} title={display}>{display}</span>
                 {trainings.length > 0 && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
                 {technicalIssues.length > 0 && <div className="absolute top-1 right-4 w-2 h-2 rounded-full bg-violet-500 ring-1 ring-violet-700" title={`Тех причины: ${technicalIssues.length}`}></div>}
+                {offlineActivities.length > 0 && <div className="absolute top-1 right-7 w-2 h-2 rounded-full bg-emerald-500 ring-1 ring-emerald-700" title={`Офлайн активность: ${offlineActivities.length}`}></div>}
                 {fines.length > 0 && <div className="absolute top-4 right-1 w-2 h-2 rounded-full bg-red-400 ring-1 ring-red-500" title={`Штрафы: ${fines.length}`}></div>}
                 </div>
             );
@@ -1522,6 +1600,29 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             );
             }
 
+            if (selectedTab === 'offline_activity') {
+            if (!offlineActivities || offlineActivities.length === 0) return <div className="text-sm text-gray-400">—</div>;
+
+            const totalOfflineHours = offlineActivities.reduce((acc, item) => acc + computeOfflineActivityDurationHours(item), 0);
+            const ratio = Math.min(1, totalOfflineHours / maxOfflineActivitiesHours);
+            const alpha = 0.18 + 0.77 * ratio;
+            const title = offlineActivities
+                .map(item => `${item.start_time || '—'} — ${item.end_time || '—'}${item.comment ? ` • ${item.comment}` : ''}`)
+                .join('\n');
+
+            return (
+                <div className="relative flex items-center justify-center">
+                <div
+                    className="inline-flex items-center justify-center px-2 py-1 rounded-md text-sm font-medium"
+                    style={{ backgroundColor: `rgba(16,185,129,${alpha})` }}
+                    title={title}
+                >
+                    <span className={ratio > 0.5 ? 'text-white' : 'text-gray-900'}>{totalOfflineHours.toFixed(2)}</span>
+                </div>
+                </div>
+            );
+            }
+
             if (selectedTab === 'fines') {
                 if (!fines || fines.length === 0) 
                     return <div className="text-sm text-gray-400">—</div>;
@@ -1568,6 +1669,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         function getTechnicalIssuesFor(opId, day) {
             return (technicalIssuesMap[opId] && technicalIssuesMap[opId][day]) ? technicalIssuesMap[opId][day] : [];
+        }
+
+        function getOfflineActivitiesFor(opId, day) {
+            return (offlineActivitiesMap[opId] && offlineActivitiesMap[opId][day]) ? offlineActivitiesMap[opId][day] : [];
         }
 
         function getAllTrainingsForDay(day) {
@@ -1923,6 +2028,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Тех. сбои (ч)</div>
                     </>
                     )}
+                    {selectedTab === 'offline_activity' && (
+                    <>
+                        <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Офлайн активность (ч)</div>
+                    </>
+                    )}
                     {selectedTab === 'fines' && (
                     <>
                         <div className="w-44 p-2 text-center border-l bg-gray-50 text-sm font-medium">Штрафы (₸)</div>
@@ -1951,6 +2061,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             let totalHoursCounted = 0;
                             let totalHoursNotCounted = 0;
                             let totalTechnicalIssuesHours = 0;
+                            let totalOfflineActivityHours = 0;
 
                             const byDay = trainingsMap[op.operator_id] || {};
                             for (const dKey of Object.keys(byDay)) {
@@ -1969,12 +2080,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 totalTechnicalIssuesHours += computeTechnicalIssueDurationHours(item) || 0;
                             }
                             }
+                            const offlineByDay = offlineActivitiesMap[op.operator_id] || {};
+                            for (const dKey of Object.keys(offlineByDay)) {
+                            const arr = offlineByDay[dKey] || [];
+                            for (const item of arr) {
+                                totalOfflineActivityHours += computeOfflineActivityDurationHours(item) || 0;
+                            }
+                            }
 
-                            const displayedTotal = regular + totalHoursCounted + totalTechnicalIssuesHours;
+                            const displayedTotal = regular + totalHoursCounted + totalTechnicalIssuesHours + totalOfflineActivityHours;
                             const prodDiff = displayedTotal - norm;
 
                             const callsTotal = Number(aggr.total_calls || 0);
                             const effTotal = Number(aggr.total_efficiency_hours || 0);
+                            const effectiveCallHours = Math.max(0, regular - totalOfflineActivityHours);
 
                             // compute total fines for the operator across days
                             let finesTotal = 0;
@@ -2058,7 +2177,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                 {selectedTab === 'calls' && (
                                 <div className="w-36 p-2 text-sm text-center border-l">
-                                    {regular > 0 ? formatNumber(callsTotal / regular, 1) : '—'}
+                                    {effectiveCallHours > 0 ? formatNumber(callsTotal / effectiveCallHours, 1) : '—'}
                                 </div>
                                 )}
 
@@ -2077,6 +2196,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {selectedTab === 'technical_issues' && (
                                 <>
                                     <div className="w-36 p-2 text-sm text-center border-l">{totalTechnicalIssuesHours.toFixed(2)}</div>
+                                </>
+                                )}
+                                {selectedTab === 'offline_activity' && (
+                                <>
+                                    <div className="w-36 p-2 text-sm text-center border-l">{totalOfflineActivityHours.toFixed(2)}</div>
                                 </>
                                 )}
                                 {selectedTab === 'fines' && (
@@ -2138,6 +2262,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         {selectedTab === 'technical_issues' && (
                         <>
                             <div className="w-36 p-2 text-sm text-center border-l">{footerTotals.technicalIssuesTotal.toFixed(2)}</div>
+                        </>
+                        )}
+                        {selectedTab === 'offline_activity' && (
+                        <>
+                            <div className="w-36 p-2 text-sm text-center border-l">{footerTotals.offlineActivitiesTotal.toFixed(2)}</div>
                         </>
                         )}
                         {selectedTab === 'fines' && (
@@ -2423,6 +2552,37 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 </div>
                                 <div className="text-sm text-gray-700">{item.reason || '—'}</div>
                                 {item.comment && <div className="text-xs text-gray-600">{item.comment}</div>}
+                            </div>
+                            );
+                        })}
+                        </div>
+                    )}
+                    </div>
+
+                    <div className="mt-6">
+                    <div className="flex items-center justify-between mb-3">
+                        <h4 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
+                        <FaIcon className="fas fa-user-clock" aria-hidden="true" /> Офлайн активность
+                        </h4>
+                    </div>
+
+                    {getOfflineActivitiesFor(selectedCell.operator.operator_id, selectedCell.day).length === 0 ? (
+                        <div className="rounded-md border border-dashed p-4 text-sm text-gray-500">Офлайн активности нет.</div>
+                    ) : (
+                        <div className="space-y-2">
+                        {getOfflineActivitiesFor(selectedCell.operator.operator_id, selectedCell.day).map((item, idx) => {
+                            const dur = computeOfflineActivityDurationHours(item);
+                            return (
+                            <div key={`${item.id || 'offline'}-${idx}`} className="p-3 rounded-lg border border-emerald-200 bg-emerald-50/60 flex flex-col gap-2">
+                                <div className="flex items-center justify-between gap-2">
+                                <div className="text-sm font-medium flex items-center gap-3">
+                                    <FaIcon className="fas fa-clock" aria-hidden="true" />
+                                    <span>{item.start_time || '—'} — {item.end_time || '—'}</span>
+                                    <span className="text-xs text-gray-600">· {dur.toFixed(2)} ч</span>
+                                </div>
+                                <div className="text-xs text-gray-500">by {item.created_by_name || '—'}</div>
+                                </div>
+                                {item.comment && <div className="text-sm text-gray-700">{item.comment}</div>}
                             </div>
                             );
                         })}
@@ -5815,6 +5975,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             dayKey,
                             (Array.isArray(list) ? list : []).map(seg => ({ ...(seg || {}) }))
                         ])
+                    ) : {},
+                    offlineActivityTimelineDays: next.offlineActivityTimelineDays ? Object.fromEntries(
+                        Object.entries(next.offlineActivityTimelineDays).map(([dayKey, list]) => [
+                            dayKey,
+                            (Array.isArray(list) ? list : []).map(seg => ({ ...(seg || {}) }))
+                        ])
                     ) : {}
                 };
             }
@@ -5829,7 +5995,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     scheduleStatusDays: {},
                     aggregatedScheduleFlagsDays: {},
                     importedStatusTimelineDays: {},
-                    technicalIssueTimelineDays: {}
+                    technicalIssueTimelineDays: {},
+                    offlineActivityTimelineDays: {}
                 };
             }
 
@@ -5846,7 +6013,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         scheduleStatusDays: existing.scheduleStatusDays ?? base.scheduleStatusDays,
                         aggregatedScheduleFlagsDays: existing.aggregatedScheduleFlagsDays ?? base.aggregatedScheduleFlagsDays,
                         importedStatusTimelineDays: existing.importedStatusTimelineDays ?? base.importedStatusTimelineDays,
-                        technicalIssueTimelineDays: existing.technicalIssueTimelineDays ?? base.technicalIssueTimelineDays
+                        technicalIssueTimelineDays: existing.technicalIssueTimelineDays ?? base.technicalIssueTimelineDays,
+                        offlineActivityTimelineDays: existing.offlineActivityTimelineDays ?? base.offlineActivityTimelineDays
                     });
                 });
 
@@ -5914,6 +6082,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             });
             const [plannerTrainingActionLoading, setPlannerTrainingActionLoading] = useState(false);
             const [plannerTrainingModalError, setPlannerTrainingModalError] = useState('');
+            const [plannerOfflineActivityModalState, setPlannerOfflineActivityModalState] = useState({
+                open: false,
+                operatorId: null,
+                date: null,
+                startTime: '09:00',
+                endTime: '10:00',
+                comment: ''
+            });
+            const [plannerOfflineActivityActionLoading, setPlannerOfflineActivityActionLoading] = useState(false);
+            const [plannerOfflineActivityModalError, setPlannerOfflineActivityModalError] = useState('');
+            const [plannerOfflineDraftSelection, setPlannerOfflineDraftSelection] = useState({
+                opId: null,
+                date: '',
+                startMin: null
+            });
             const [plannerFineModalState, setPlannerFineModalState] = useState({
                 open: false,
                 operatorId: null,
@@ -6374,6 +6557,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             ...(op?.technicalIssueTimelineDays || {}),
                             ...(serverOp?.technicalIssueTimelineDays || {})
                         };
+                        const mergedOfflineActivityTimelineDays = {
+                            ...(op?.offlineActivityTimelineDays || {}),
+                            ...(serverOp?.offlineActivityTimelineDays || {})
+                        };
                         const periodMap = new Map();
                         (Array.isArray(op?.scheduleStatusPeriods) ? op.scheduleStatusPeriods : []).forEach((period, idx) => {
                             periodMap.set(plannerStatusPeriodMergeKey(period, idx), period);
@@ -6394,7 +6581,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             scheduleStatusDays: mergedStatusDays,
                             aggregatedScheduleFlagsDays: mergedAggregatedScheduleFlagsDays,
                             importedStatusTimelineDays: mergedImportedStatusTimelineDays,
-                            technicalIssueTimelineDays: mergedTechnicalIssueTimelineDays
+                            technicalIssueTimelineDays: mergedTechnicalIssueTimelineDays,
+                            offlineActivityTimelineDays: mergedOfflineActivityTimelineDays
                         });
                     });
                     const seen = new Set(merged.map(op => plannerOperatorIdKey(op?.id)));
@@ -6440,6 +6628,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     });
                     qs.set('include_imported_statuses', '0');
                     qs.set('include_technical_issues', '1');
+                    qs.set('include_offline_activities', '1');
                     const response = await fetch(`${API_BASE_URL}/api/work_schedules/operators?${qs.toString()}`, {
                         credentials: 'include',
                         headers: withAccessTokenHeader(),
@@ -6486,7 +6675,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         start_date: start,
                         end_date: end,
                         include_imported_statuses: '1',
-                        include_technical_issues: '1'
+                        include_technical_issues: '1',
+                        include_offline_activities: '1'
                     });
                     const response = await fetch(`${API_BASE_URL}/api/work_schedules/operators?${qs.toString()}`, {
                         credentials: 'include',
@@ -7269,6 +7459,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         setMyScheduleError('');
                         const qs = new URLSearchParams({ start_date: startDate, end_date: endDate });
                         qs.set('include_technical_issues', '1');
+                        qs.set('include_offline_activities', '1');
                         const response = await fetch(`${API_BASE_URL}/api/work_schedules/my?${qs.toString()}`, {
                             credentials: 'include',
                             headers: withAccessTokenHeader()
@@ -7307,6 +7498,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     try {
                         const qs = new URLSearchParams({ start_date: liveStart, end_date: liveEnd });
                         qs.set('include_technical_issues', '1');
+                        qs.set('include_offline_activities', '1');
                         const response = await fetch(`${API_BASE_URL}/api/work_schedules/my?${qs.toString()}`, {
                             credentials: 'include',
                             headers: withAccessTokenHeader()
@@ -7356,7 +7548,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         scheduleStatusPeriods: operatorSnapshot.scheduleStatusPeriods || [],
                         scheduleStatusDays: operatorSnapshot.scheduleStatusDays || {},
                         aggregatedScheduleFlagsDays: operatorSnapshot.aggregatedScheduleFlagsDays || {},
-                        technicalIssueTimelineDays: operatorSnapshot.technicalIssueTimelineDays || op.technicalIssueTimelineDays || {}
+                        technicalIssueTimelineDays: operatorSnapshot.technicalIssueTimelineDays || op.technicalIssueTimelineDays || {},
+                        offlineActivityTimelineDays: operatorSnapshot.offlineActivityTimelineDays || op.offlineActivityTimelineDays || {}
                     });
                 }));
             };
@@ -7632,6 +7825,64 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             };
 
+            const extractPlannerTimelineMinuteFromPointer = (event) => {
+                const targetNode = event?.currentTarget;
+                if (!targetNode || typeof targetNode.getBoundingClientRect !== 'function') return null;
+                const rect = targetNode.getBoundingClientRect();
+                if (!rect || !Number.isFinite(rect.width) || rect.width <= 0) return null;
+                const relative = Math.max(0, Math.min(1, (Number(event?.clientX || 0) - rect.left) / rect.width));
+                const rawMinutes = relative * (24 * 60);
+                const snapped = Math.round(rawMinutes / 5) * 5;
+                return Math.max(0, Math.min((24 * 60) - 5, snapped));
+            };
+
+            const handleOfflineTimelineContextMenu = (e, opId, date) => {
+                e.preventDefault();
+                e.stopPropagation();
+                if (viewMode !== 'day') return;
+                if (plannerStatusSpecialDayViewEnabled) {
+                    emitAppToast('Для выделения офлайн-активности отключите режим статусов.', 'info');
+                    return;
+                }
+                const minute = extractPlannerTimelineMinuteFromPointer(e);
+                const operatorId = Number(opId);
+                const dayKey = String(date || '').trim();
+                if (!Number.isFinite(minute) || !Number.isFinite(operatorId) || !dayKey) return;
+
+                const draftOpId = Number(plannerOfflineDraftSelection?.opId);
+                const draftDate = String(plannerOfflineDraftSelection?.date || '').trim();
+                const draftStart = Number(plannerOfflineDraftSelection?.startMin);
+                const isSameCell = Number.isFinite(draftOpId)
+                    && Number.isFinite(draftStart)
+                    && draftOpId === operatorId
+                    && draftDate === dayKey;
+
+                if (!isSameCell) {
+                    setPlannerOfflineDraftSelection({
+                        opId: operatorId,
+                        date: dayKey,
+                        startMin: minute
+                    });
+                    emitAppToast(`Начало офлайн-активности: ${minutesToTime(minute)}. Выберите конец правой кнопкой.`, 'info');
+                    return;
+                }
+
+                const startMin = Math.min(draftStart, minute);
+                const endMin = Math.max(draftStart, minute);
+                if (endMin <= startMin) {
+                    emitAppToast('Выберите отличающееся время для конца интервала.', 'error');
+                    return;
+                }
+
+                clearPlannerOfflineDraftSelection();
+                openPlannerOfflineActivityModal({
+                    operatorId,
+                    date: dayKey,
+                    startMin,
+                    endMin
+                });
+            };
+
             const handleDayClick = (e, opId, date) => {
                 const cellKey = makeSelectedCellKey(opId, date);
                 if (e.ctrlKey || e.metaKey) {
@@ -7693,6 +7944,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const clearSelectedDays = () => {
                 setSelectedDays({ cells: [] });
             };
+
+            useEffect(() => {
+                if (viewMode !== 'day') {
+                    clearPlannerOfflineDraftSelection();
+                }
+            }, [viewMode]);
+
+            useEffect(() => {
+                if (plannerOfflineActivityModalState?.open) {
+                    clearPlannerOfflineDraftSelection();
+                }
+            }, [plannerOfflineActivityModalState?.open]);
 
             const cloneOperatorsForBreakSimulation = (sourceOperators = []) => {
                 return (sourceOperators || []).map(op => ({
@@ -8534,6 +8797,116 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             };
 
+            const openPlannerOfflineActivityModal = ({ operatorId, date, startMin, endMin }) => {
+                const normalizedOperatorId = Number(operatorId);
+                const dayKey = String(date || '').trim();
+                const startMinutesRaw = Number(startMin);
+                const endMinutesRaw = Number(endMin);
+                if (!Number.isFinite(normalizedOperatorId) || !dayKey) return;
+                if (!Number.isFinite(startMinutesRaw) || !Number.isFinite(endMinutesRaw)) return;
+                let normalizedStart = Math.max(0, Math.min((24 * 60) - 5, Math.round(startMinutesRaw / 5) * 5));
+                let normalizedEnd = Math.max(0, Math.min((24 * 60) - 5, Math.round(endMinutesRaw / 5) * 5));
+                if (normalizedEnd < normalizedStart) {
+                    const tmp = normalizedStart;
+                    normalizedStart = normalizedEnd;
+                    normalizedEnd = tmp;
+                }
+                if (normalizedEnd <= normalizedStart) {
+                    normalizedEnd = Math.min((24 * 60) - 5, normalizedStart + 5);
+                }
+                setPlannerOfflineActivityModalError('');
+                setPlannerOfflineActivityModalState({
+                    open: true,
+                    operatorId: normalizedOperatorId,
+                    date: dayKey,
+                    startTime: minutesToTime(normalizedStart),
+                    endTime: minutesToTime(normalizedEnd),
+                    comment: ''
+                });
+            };
+
+            const closePlannerOfflineActivityModal = () => {
+                setPlannerOfflineActivityModalError('');
+                setPlannerOfflineActivityModalState({
+                    open: false,
+                    operatorId: null,
+                    date: null,
+                    startTime: '09:00',
+                    endTime: '10:00',
+                    comment: ''
+                });
+            };
+
+            const updatePlannerOfflineActivityDraftField = (field, value) => {
+                setPlannerOfflineActivityModalState(prev => ({
+                    ...(prev || {}),
+                    [field]: value
+                }));
+            };
+
+            const clearPlannerOfflineDraftSelection = () => {
+                setPlannerOfflineDraftSelection({
+                    opId: null,
+                    date: '',
+                    startMin: null
+                });
+            };
+
+            const submitPlannerOfflineActivityModal = async () => {
+                const operatorId = Number(plannerOfflineActivityModalState?.operatorId);
+                const dayKey = String(plannerOfflineActivityModalState?.date || '').trim();
+                const startTime = String(plannerOfflineActivityModalState?.startTime || '').trim();
+                const endTime = String(plannerOfflineActivityModalState?.endTime || '').trim();
+                const comment = String(plannerOfflineActivityModalState?.comment || '').trim();
+                if (!Number.isFinite(operatorId) || !dayKey) {
+                    setPlannerOfflineActivityModalError('Не удалось определить оператора или дату.');
+                    return;
+                }
+                if (!startTime || !endTime) {
+                    setPlannerOfflineActivityModalError('Укажите время начала и окончания.');
+                    return;
+                }
+                const startMinutes = timeToMinutes(startTime);
+                const endMinutes = timeToMinutes(endTime);
+                if (!Number.isFinite(startMinutes) || !Number.isFinite(endMinutes) || endMinutes <= startMinutes) {
+                    setPlannerOfflineActivityModalError('Время окончания должно быть позже времени начала.');
+                    return;
+                }
+
+                setPlannerOfflineActivityActionLoading(true);
+                setPlannerOfflineActivityModalError('');
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/offline_activities`, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: withAccessTokenHeader({
+                            'Content-Type': 'application/json'
+                        }),
+                        body: JSON.stringify({
+                            operator_id: operatorId,
+                            date: dayKey,
+                            start_time: startTime,
+                            end_time: endTime,
+                            comment: comment || null
+                        })
+                    });
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(payload?.error || `HTTP ${response.status}`);
+                    }
+
+                    await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
+                    emitAppToast('Офлайн-активность сохранена', 'success');
+                    closePlannerOfflineActivityModal();
+                } catch (error) {
+                    console.error('Error saving planner offline activity:', error);
+                    setPlannerOfflineActivityModalError(String(error?.message || error || 'Не удалось сохранить офлайн-активность.'));
+                    emitAppToast(`Ошибка сохранения офлайн-активности: ${error?.message || error}`, 'error');
+                } finally {
+                    setPlannerOfflineActivityActionLoading(false);
+                }
+            };
+
             const openPlannerTrainingModalForCurrentDay = (mode = 'add', preset = null) => {
                 const operatorId = Number(modalState?.opId);
                 const dayKey = String(modalState?.date || '').trim();
@@ -9273,6 +9646,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const technicalIssues = Array.isArray(myScheduleData?.technicalIssueTimelineDays?.[dateStr])
                         ? myScheduleData.technicalIssueTimelineDays[dateStr]
                         : [];
+                    const offlineActivities = Array.isArray(myScheduleData?.offlineActivityTimelineDays?.[dateStr])
+                        ? myScheduleData.offlineActivityTimelineDays[dateStr]
+                        : [];
                     const normalizedShifts = shifts.map(seg => {
                         const sMin = timeToMinutes(seg.start);
                         let eMin = timeToMinutes(seg.end);
@@ -9288,7 +9664,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         isDayOff: daysOffSet.has(dateStr),
                         shifts: normalizedShifts,
                         scheduleStatus,
-                        technicalIssues
+                        technicalIssues,
+                        offlineActivities
                     };
                 });
             }, [myScheduleData, visibleRange]);
@@ -9337,7 +9714,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return {
                     ...myScheduleData,
                     shifts: myScheduleData.shifts || {},
-                    technicalIssueTimelineDays: myScheduleData.technicalIssueTimelineDays || {}
+                    technicalIssueTimelineDays: myScheduleData.technicalIssueTimelineDays || {},
+                    offlineActivityTimelineDays: myScheduleData.offlineActivityTimelineDays || {}
                 };
             }, [myScheduleData]);
             const myLiveTimelineOperator = useMemo(() => {
@@ -9414,6 +9792,28 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             reason: reasonText,
                             comment: commentText,
                             title: `${reasonText} • ${minutesToTime(startMin)} — ${minutesToTime(endMin)}${commentText ? `\n${commentText}` : ''}`
+                        };
+                    })
+                    .filter(Boolean)
+                    .sort((a, b) => (a.startMin - b.startMin) || (a.endMin - b.endMin));
+            }, [myCurrentDayCard]);
+            const myCurrentDayOfflineActivities = useMemo(() => {
+                const list = Array.isArray(myCurrentDayCard?.offlineActivities) ? myCurrentDayCard.offlineActivities : [];
+                return list
+                    .map((seg, idx) => {
+                        const startRaw = Number(seg?.startMin ?? seg?.start_min ?? seg?.start ?? 0);
+                        const endRaw = Number(seg?.endMin ?? seg?.end_min ?? seg?.end ?? 0);
+                        if (!Number.isFinite(startRaw) || !Number.isFinite(endRaw)) return null;
+                        const startMin = Math.max(0, Math.min(1440, Math.round(startRaw)));
+                        const endMin = Math.max(0, Math.min(1440, Math.round(endRaw)));
+                        if (endMin <= startMin) return null;
+                        const commentText = String(seg?.comment || '').trim();
+                        return {
+                            id: seg?.id ?? `my-offline-${idx}`,
+                            startMin,
+                            endMin,
+                            comment: commentText,
+                            title: `Офлайн-активность • ${minutesToTime(startMin)} — ${minutesToTime(endMin)}${commentText ? `\n${commentText}` : ''}`
                         };
                     })
                     .filter(Boolean)
@@ -11117,6 +11517,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 {myCurrentDayTechnicalIssues.length > 0 && (
                                                                     <span className="px-2 py-0.5 rounded bg-violet-100 text-violet-800 font-semibold">{myCurrentDayTechnicalIssues.length} техсбой</span>
                                                                 )}
+                                                                {myCurrentDayOfflineActivities.length > 0 && (
+                                                                    <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 font-semibold">{myCurrentDayOfflineActivities.length} офлайн</span>
+                                                                )}
                                                             </div>
                                                         </div>
                                                         <div className="p-4">
@@ -11132,6 +11535,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 </span>
                                                                 <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-violet-200 bg-violet-50 text-violet-700">
                                                                     <span className="w-2 h-2 rounded-sm bg-violet-500 border border-violet-700/70"></span> Тех. сбой
+                                                                </span>
+                                                                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-emerald-200 bg-emerald-50 text-emerald-700">
+                                                                    <span className="w-2 h-2 rounded-sm bg-emerald-500 border border-emerald-700/70"></span> Офлайн
                                                                 </span>
                                                             </div>
                                                             <div className="overflow-x-auto">
@@ -11168,6 +11574,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                             <div
                                                                                 key={`my-tech-issue-${seg.id ?? idx}`}
                                                                                 className="absolute bottom-0 h-1.5 rounded-sm z-40 bg-violet-500/85 border border-violet-700/80"
+                                                                                style={{
+                                                                                    left: `${computeLeftPercent(seg.startMin)}%`,
+                                                                                    width: `${((seg.endMin - seg.startMin) / minutesInDay) * 100}%`
+                                                                                }}
+                                                                                title={seg.title}
+                                                                            />
+                                                                        ))}
+                                                                        {myCurrentDayOfflineActivities.map((seg, idx) => (
+                                                                            <div
+                                                                                key={`my-offline-activity-${seg.id ?? idx}`}
+                                                                                className="absolute bottom-2 h-1.5 rounded-sm z-40 bg-emerald-500/85 border border-emerald-700/80"
                                                                                 style={{
                                                                                     left: `${computeLeftPercent(seg.startMin)}%`,
                                                                                     width: `${((seg.endMin - seg.startMin) / minutesInDay) * 100}%`
@@ -11281,6 +11698,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 const dayWorkMin = (dayCard.shifts || []).reduce((acc, seg) => acc + (seg.durationMin || 0), 0);
                                                 const dayBreakMin = (dayCard.shifts || []).reduce((acc, seg) => acc + (seg.breaks || []).reduce((s, b) => s + Math.max(0, (Number(b?.end) || 0) - (Number(b?.start) || 0)), 0), 0);
                                                 const dayBreakCount = (dayCard.shifts || []).reduce((acc, seg) => acc + (Array.isArray(seg.breaks) ? seg.breaks.length : 0), 0);
+                                                const dayOfflineActivities = Array.isArray(dayCard.offlineActivities) ? dayCard.offlineActivities : [];
+                                                const dayOfflineMin = dayOfflineActivities.reduce((acc, seg) => {
+                                                    const startRaw = Number(seg?.startMin ?? seg?.start_min ?? seg?.start ?? 0);
+                                                    const endRaw = Number(seg?.endMin ?? seg?.end_min ?? seg?.end ?? 0);
+                                                    if (!Number.isFinite(startRaw) || !Number.isFinite(endRaw)) return acc;
+                                                    if (endRaw <= startRaw) return acc;
+                                                    return acc + (endRaw - startRaw);
+                                                }, 0);
                                                 const dayNetMin = Math.max(0, dayWorkMin - dayBreakMin);
                                                 const weekdayLabel = formatWeekdayRu(dateObj, 'long');
                                                 const isExpanded = Boolean(expandedMyDayCards?.[dayCard.date]);
@@ -11340,6 +11765,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         {!dayCard.isDayOff && hasShifts && dayWorkMin > 0 && (
                                                                             <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 text-[11px] font-medium tabular-nums">
                                                                                 {(dayWorkMin / 60).toFixed(1)} ч
+                                                                            </span>
+                                                                        )}
+                                                                        {dayOfflineActivities.length > 0 && (
+                                                                            <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-[11px] font-medium tabular-nums">
+                                                                                Офлайн {(dayOfflineMin / 60).toFixed(1)} ч
                                                                             </span>
                                                                         )}
                                                                     </div>
@@ -11436,6 +11866,37 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                             </div>
                                                                         );
                                                                     })}
+                                                                    {dayOfflineActivities.length > 0 && (
+                                                                        <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 p-3">
+                                                                            <div className="text-[11px] font-medium text-emerald-700 mb-1.5 uppercase tracking-wide flex items-center gap-2">
+                                                                                <FaIcon className="fas fa-user-clock text-emerald-500"></FaIcon>
+                                                                                Офлайн-активность
+                                                                            </div>
+                                                                            <div className="space-y-1.5">
+                                                                                {dayOfflineActivities.map((seg, idx) => {
+                                                                                    const startRaw = Number(seg?.startMin ?? seg?.start_min ?? seg?.start ?? 0);
+                                                                                    const endRaw = Number(seg?.endMin ?? seg?.end_min ?? seg?.end ?? 0);
+                                                                                    if (!Number.isFinite(startRaw) || !Number.isFinite(endRaw) || endRaw <= startRaw) return null;
+                                                                                    const commentText = String(seg?.comment || '').trim();
+                                                                                    return (
+                                                                                        <div key={`${dayCard.date}-offline-${seg?.id ?? idx}`} className="rounded-md border border-emerald-200 bg-white px-2 py-1.5">
+                                                                                            <div className="text-xs font-semibold text-emerald-900 tabular-nums">
+                                                                                                {minutesToTime(startRaw)} — {minutesToTime(endRaw)}
+                                                                                            </div>
+                                                                                            <div className="text-[11px] text-emerald-700 tabular-nums">
+                                                                                                {formatMinutesOnly(endRaw - startRaw)}
+                                                                                            </div>
+                                                                                            {commentText && (
+                                                                                                <div className="mt-0.5 text-[11px] text-slate-600">
+                                                                                                    {commentText}
+                                                                                                </div>
+                                                                                            )}
+                                                                                        </div>
+                                                                                    );
+                                                                                })}
+                                                                            </div>
+                                                                        </div>
+                                                                    )}
                                                                     {dayCard.shifts.length > 0 && (
                                                                         <div className="pt-1">
                                                                             <div className="grid grid-cols-3 gap-2">
@@ -12971,6 +13432,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     <div className="mb-2 p-2 bg-blue-50 border border-blue-200 rounded text-xs text-blue-700">
                         <FaIcon className="fas fa-info-circle mr-1"></FaIcon>
                         <strong>Совет:</strong> Удерживайте Ctrl (или Cmd на Mac) и кликайте по дням для множественного выбора
+                        <span className="ml-2">
+                            • Офлайн-активность: правый клик по таймлайну ставит начало, второй правый клик ставит конец.
+                        </span>
                     </div>
                     {(plannerStatusAnomalyFileName || plannerStatusAnomalyError) && (
                         <div className={`mb-2 p-2 rounded text-xs border ${plannerStatusAnomalyError ? 'bg-rose-50 border-rose-200 text-rose-700' : 'bg-rose-50 border-rose-200 text-rose-800'}`}>
@@ -13094,6 +13558,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     };
                                                 })
                                                 .filter(Boolean);
+                                            const offlineActivityBarsForCell = (Array.isArray(op?.offlineActivityTimelineDays?.[d]) ? op.offlineActivityTimelineDays[d] : [])
+                                                .map((seg, idx) => {
+                                                    const startRaw = Number(seg?.startMin ?? seg?.start_min ?? seg?.start ?? 0);
+                                                    const endRaw = Number(seg?.endMin ?? seg?.end_min ?? seg?.end ?? 0);
+                                                    if (!Number.isFinite(startRaw) || !Number.isFinite(endRaw)) return null;
+                                                    const startMin = Math.max(0, Math.min(1440, Math.round(startRaw)));
+                                                    const endMin = Math.max(0, Math.min(1440, Math.round(endRaw)));
+                                                    if (endMin <= startMin) return null;
+                                                    const commentText = String(seg?.comment || '').trim();
+                                                    return {
+                                                        id: seg?.id ?? `offline-${idx}`,
+                                                        startMin,
+                                                        endMin,
+                                                        comment: commentText,
+                                                        title: `Офлайн-активность • ${minutesToTime(startMin)} — ${minutesToTime(endMin)}${commentText ? `\n${commentText}` : ''}`
+                                                    };
+                                                })
+                                                .filter(Boolean);
                                             const breakPartsForCell = parts
                                                 .flatMap(p => getBreakPartsForPart(op, p, d))
                                                 .map(b => ({ start: Number(b?.start || 0), end: Number(b?.end || 0) }))
@@ -13143,6 +13625,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 defectNoPhoneSec > 60
                                             );
                                             const hasOvertimeMarker = (viewMode === 'day' || viewMode === 'week' || viewMode === 'month') && overtimeOutsideShiftMin > 10;
+                                            const hasOfflineMarker = (viewMode === 'day' || viewMode === 'week' || viewMode === 'month') && offlineActivityBarsForCell.length > 0;
+                                            const pendingOfflineStartMinForCell = (
+                                                Number(plannerOfflineDraftSelection?.opId) === Number(op?.id)
+                                                && String(plannerOfflineDraftSelection?.date || '') === String(d || '')
+                                                && Number.isFinite(Number(plannerOfflineDraftSelection?.startMin))
+                                            ) ? Number(plannerOfflineDraftSelection?.startMin) : null;
                                             const latePendingSuffix = aggregatedFlagsForCell?.pendingLate && defectLateMin > 0 ? ' (не подтверждено)' : '';
                                             const earlyPendingSuffix = aggregatedFlagsForCell?.pendingEarlyLeave && defectEarlyLeaveMin > 0 ? ' (не подтверждено)' : '';
                                             const trainingPendingSuffix = aggregatedFlagsForCell?.pendingTraining && defectTrainingMin > 0 ? ' (не подтверждено)' : '';
@@ -13155,7 +13643,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             const overtimeIssues = hasOvertimeMarker
                                                 ? [`Вне смены: ${Math.round(overtimeOutsideShiftMin)} мин`]
                                                 : [];
+                                            const offlineIssues = hasOfflineMarker
+                                                ? [`Офлайн-активность: ${offlineActivityBarsForCell.length}`]
+                                                : [];
                                             const markerTooltipText = [
+                                                offlineIssues.length > 0 ? `Офлайн: ${offlineIssues.join(', ')}` : '',
                                                 defectIssues.length > 0 ? `Проблемы: ${defectIssues.join(', ')}` : '',
                                                 overtimeIssues.length > 0 ? `Переработка: ${overtimeIssues.join(', ')}` : ''
                                             ].filter(Boolean).join('\n');
@@ -13244,8 +13736,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 style={viewMode === 'day' ? { flex: 1 } : { minWidth: cellMinWidth, flex: '0 0 auto' }}
                                                 onClick={(e) => handleDayClick(e, op.id, d)}
                                             >
-                                                {(hasDefectMarker || hasOvertimeMarker) && (
+                                                {(hasDefectMarker || hasOvertimeMarker || hasOfflineMarker) && (
                                                     <span className="absolute top-1 right-1 z-50 flex items-center gap-1" title={markerTooltipText || 'Есть недочеты/переработка'}>
+                                                        {hasOfflineMarker && (
+                                                            <span
+                                                                className="w-2.5 h-2.5 rounded-full bg-emerald-400 border border-white shadow-sm"
+                                                                title={`Офлайн-активность: ${offlineActivityBarsForCell.length}`}
+                                                            />
+                                                        )}
                                                         {hasOvertimeMarker && (
                                                             <span
                                                                 className="w-2.5 h-2.5 rounded-full bg-emerald-600 border border-white shadow-sm"
@@ -13259,7 +13757,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     </span>
                                                 )}
                                                 {viewMode === 'day' ? (
-                                                <div className={`relative ${plannerStatusSpecialDayViewEnabled ? 'h-[88px]' : 'h-12'}`}>
+                                                <div
+                                                    className={`relative ${plannerStatusSpecialDayViewEnabled ? 'h-[88px]' : 'h-12'}`}
+                                                    onContextMenu={(e) => handleOfflineTimelineContextMenu(e, op.id, d)}
+                                                    title={pendingOfflineStartMinForCell != null
+                                                        ? `Офлайн: начало ${minutesToTime(pendingOfflineStartMinForCell)}. Выберите конец правой кнопкой.`
+                                                        : 'Правая кнопка: отметить офлайн-активность (начало/конец).'}
+                                                >
+                                                    {pendingOfflineStartMinForCell != null && (
+                                                        <div
+                                                            className="absolute top-0 bottom-0 z-50 border-l-2 border-emerald-600/90 pointer-events-none"
+                                                            style={{ left: `${computeLeftPercent(pendingOfflineStartMinForCell)}%` }}
+                                                        />
+                                                    )}
                                                     {cellScheduleStatus ? (
                                                         <div className="flex items-center justify-center h-full px-1">
                                                             <div className={`text-sm font-semibold truncate ${cellScheduleStatusTone?.text || 'text-slate-700'}`} title={cellScheduleStatus.label || 'Статус'}>
@@ -13288,6 +13798,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         <div className="absolute inset-0 flex pointer-events-none">
                                                                             {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0 border-slate-100" />))}
                                                                         </div>
+                                                                        {offlineActivityBarsForCell.map((seg, segIdx) => (
+                                                                            <div
+                                                                                key={`special-offline-activity-${seg.id ?? segIdx}`}
+                                                                                className="absolute bottom-2 h-1.5 z-30 rounded-sm bg-emerald-500/85 border border-emerald-700/80"
+                                                                                style={{
+                                                                                    left: `${computeLeftPercent(seg.startMin)}%`,
+                                                                                    width: `${((seg.endMin - seg.startMin) / minutesInDay) * 100}%`
+                                                                                }}
+                                                                                title={seg.title}
+                                                                            />
+                                                                        ))}
                                                                         {technicalIssueBarsForCell.map((seg, segIdx) => (
                                                                             <div
                                                                                 key={`special-tech-issue-${seg.id ?? segIdx}`}
@@ -13430,6 +13951,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         <div className="absolute inset-0 flex">
                                                         {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0" />))}
                                                         </div>
+                                                        {offlineActivityBarsForCell.map((seg, segIdx) => (
+                                                            <div
+                                                                key={`offline-activity-${seg.id ?? segIdx}`}
+                                                                className="absolute bottom-2 h-1.5 rounded-sm z-40 bg-emerald-500/85 border border-emerald-700/80"
+                                                                style={{
+                                                                    left: `${computeLeftPercent(seg.startMin)}%`,
+                                                                    width: `${((seg.endMin - seg.startMin) / minutesInDay) * 100}%`
+                                                                }}
+                                                                title={seg.title}
+                                                            />
+                                                        ))}
                                                         {technicalIssueBarsForCell.map((seg, segIdx) => (
                                                             <div
                                                                 key={`tech-issue-${seg.id ?? segIdx}`}
@@ -14514,6 +15046,102 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     </SimpleModal>
                 )}
 
+                {plannerOfflineActivityModalState.open && (
+                    <SimpleModal
+                        open={plannerOfflineActivityModalState.open}
+                        onClose={closePlannerOfflineActivityModal}
+                        panelClassName="w-[560px] max-w-[calc(100vw-1rem)]"
+                    >
+                        <div className="mb-4 pb-3 border-b border-slate-200">
+                            <div className="flex items-center justify-between gap-3">
+                                <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                                    <FaIcon className="fas fa-user-clock text-emerald-600"></FaIcon>
+                                    Отметить офлайн-активность
+                                </h3>
+                                <button
+                                    type="button"
+                                    onClick={closePlannerOfflineActivityModal}
+                                    className="w-8 h-8 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 flex items-center justify-center"
+                                >
+                                    <FaIcon className="fas fa-times"></FaIcon>
+                                </button>
+                            </div>
+                            <div className="mt-1 text-xs text-slate-500">
+                                Дата: {plannerOfflineActivityModalState.date || '—'}
+                            </div>
+                        </div>
+
+                        <div className="space-y-3">
+                            <div>
+                                <label className="block text-xs font-medium text-slate-600 mb-1">Дата</label>
+                                <input
+                                    type="date"
+                                    value={plannerOfflineActivityModalState.date || ''}
+                                    onChange={(e) => updatePlannerOfflineActivityDraftField('date', e.target.value)}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                                />
+                            </div>
+                            <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label className="block text-xs font-medium text-slate-600 mb-1">Начало</label>
+                                    <input
+                                        type="time"
+                                        value={plannerOfflineActivityModalState.startTime || ''}
+                                        onChange={(e) => updatePlannerOfflineActivityDraftField('startTime', e.target.value)}
+                                        className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                                        step={300}
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-medium text-slate-600 mb-1">Конец</label>
+                                    <input
+                                        type="time"
+                                        value={plannerOfflineActivityModalState.endTime || ''}
+                                        onChange={(e) => updatePlannerOfflineActivityDraftField('endTime', e.target.value)}
+                                        className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                                        step={300}
+                                    />
+                                </div>
+                            </div>
+                            <div>
+                                <label className="block text-xs font-medium text-slate-600 mb-1">Комментарий</label>
+                                <textarea
+                                    rows={3}
+                                    value={plannerOfflineActivityModalState.comment || ''}
+                                    onChange={(e) => updatePlannerOfflineActivityDraftField('comment', e.target.value)}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 resize-y"
+                                    placeholder="Комментарий (необязательно)"
+                                />
+                            </div>
+                            {plannerOfflineActivityModalError && (
+                                <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                                    {plannerOfflineActivityModalError}
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="mt-5 pt-4 border-t border-slate-200 flex items-center justify-end gap-2">
+                            <button
+                                type="button"
+                                onClick={closePlannerOfflineActivityModal}
+                                disabled={plannerOfflineActivityActionLoading}
+                                className="px-4 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed"
+                            >
+                                Отмена
+                            </button>
+                            <button
+                                type="button"
+                                onClick={submitPlannerOfflineActivityModal}
+                                disabled={plannerOfflineActivityActionLoading}
+                                className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
+                            >
+                                <FaIcon className={`fas ${plannerOfflineActivityActionLoading ? 'fa-spinner fa-spin' : 'fa-save'}`}></FaIcon>
+                                {plannerOfflineActivityActionLoading ? 'Сохраняем...' : 'Сохранить'}
+                            </button>
+                        </div>
+                    </SimpleModal>
+                )}
+
                 {plannerFineModalState.open && (
                     <SimpleModal
                         open={plannerFineModalState.open}
@@ -14699,6 +15327,23 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         .map(b => ({ start: Math.max(0, Math.min(1440, Number(b?.start || 0))), end: Math.max(0, Math.min(1440, Number(b?.end || 0))) }))
                         .filter(b => b.end > b.start);
                     const previewStatusBars = importedStatusTimelineByOperatorDateKey.get(`${plannerStatusNormalizeOperatorName(modalPreviewOp?.name)}|${modalPreviewDate}`) || [];
+                    const previewOfflineBars = (Array.isArray(modalPreviewOp?.offlineActivityTimelineDays?.[modalPreviewDate]) ? modalPreviewOp.offlineActivityTimelineDays[modalPreviewDate] : [])
+                        .map((seg, idx) => {
+                            const startRaw = Number(seg?.startMin ?? seg?.start_min ?? seg?.start ?? 0);
+                            const endRaw = Number(seg?.endMin ?? seg?.end_min ?? seg?.end ?? 0);
+                            if (!Number.isFinite(startRaw) || !Number.isFinite(endRaw)) return null;
+                            const startMin = Math.max(0, Math.min(1440, Math.round(startRaw)));
+                            const endMin = Math.max(0, Math.min(1440, Math.round(endRaw)));
+                            if (endMin <= startMin) return null;
+                            const commentText = String(seg?.comment || '').trim();
+                            return {
+                                id: seg?.id ?? `preview-offline-${idx}`,
+                                startMin,
+                                endMin,
+                                title: `Офлайн-активность • ${minutesToTime(startMin)} — ${minutesToTime(endMin)}${commentText ? `\n${commentText}` : ''}`
+                            };
+                        })
+                        .filter(Boolean);
                     const previewMetrics = (previewParts.length > 0 && previewStatusBars.length > 0)
                         ? plannerComputeShiftStatusMatchMetrics({
                             shiftParts: previewParts,
@@ -14896,6 +15541,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 width: `${((b.end - b.start) / minutesInDay) * 100}%`
                                                             }}
                                                             title={getBreakTimelineTitle(b)}
+                                                        />
+                                                    ))}
+                                                    {previewOfflineBars.map((seg, segIdx) => (
+                                                        <div
+                                                            key={`modal-sheet-offline-bar-${seg.id ?? segIdx}`}
+                                                            className="absolute bottom-0 h-1.5 rounded-sm z-40 bg-emerald-500/85 border border-emerald-700/80"
+                                                            style={{
+                                                                left: `${computeLeftPercent(seg.startMin)}%`,
+                                                                width: `${((seg.endMin - seg.startMin) / minutesInDay) * 100}%`
+                                                            }}
+                                                            title={seg.title}
                                                         />
                                                     ))}
                                                     {previewLateBars.map((late, lateIdx) => (
@@ -21793,7 +22449,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             return "bg-green-700 text-white";
             };
 
-            const WorkHoursCalendar = ({ hoursData, selectedMonth, user, trainings = [], technicalIssuesByDay = null }) => {
+            const WorkHoursCalendar = ({ hoursData, selectedMonth, user, trainings = [], technicalIssuesByDay = null, offlineActivitiesByDay = null }) => {
                 const [selectedDay, setSelectedDay] = useState(null);
                 const [requestMessage, setRequestMessage] = useState('');
                 const [isSending, setIsSending] = useState(false);
@@ -21826,6 +22482,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 };
 
                 const computeTechnicalIssueDuration = (item) => {
+                    if (!item) return 0;
+                    const byMinutes = Number(item.duration_minutes ?? item.durationMinutes ?? null);
+                    if (Number.isFinite(byMinutes)) return Math.max(0, byMinutes) / 60;
+                    const byHours = Number(item.duration_hours ?? item.durationHours ?? null);
+                    if (Number.isFinite(byHours)) return Math.max(0, byHours);
+                    const s = parseHMToMinutes(item.start_time ?? item.startTime);
+                    const e = parseHMToMinutes(item.end_time ?? item.endTime);
+                    if (s == null || e == null) return 0;
+                    let diff = e - s;
+                    if (diff < 0) diff += 24 * 60;
+                    return diff / 60;
+                };
+
+                const computeOfflineActivityDuration = (item) => {
                     if (!item) return 0;
                     const byMinutes = Number(item.duration_minutes ?? item.durationMinutes ?? null);
                     if (Number.isFinite(byMinutes)) return Math.max(0, byMinutes) / 60;
@@ -21897,6 +22567,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return {};
                 }, [hoursData, technicalIssuesByDay]);
 
+                const normalizedOfflineActivitiesByDay = React.useMemo(() => {
+                    if (offlineActivitiesByDay && typeof offlineActivitiesByDay === 'object' && !Array.isArray(offlineActivitiesByDay)) {
+                        return offlineActivitiesByDay;
+                    }
+                    if (hoursData?.offline_activities_by_day && typeof hoursData.offline_activities_by_day === 'object' && !Array.isArray(hoursData.offline_activities_by_day)) {
+                        return hoursData.offline_activities_by_day;
+                    }
+                    return {};
+                }, [hoursData, offlineActivitiesByDay]);
+
                 const cells = [];
                 for (let i = 0; i < firstWeekday; i++) cells.push(null);
                 for (let day = 1; day <= endDate.getDate(); day++) {
@@ -21940,6 +22620,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const hasTraining = trainings.some(t => t.date === dateStr);
                     const technicalIssuesForDay = Array.isArray(normalizedTechnicalIssuesByDay[dayKey]) ? normalizedTechnicalIssuesByDay[dayKey] : [];
                     const hasTechnicalIssues = technicalIssuesForDay.length > 0;
+                    const offlineActivitiesForDay = Array.isArray(normalizedOfflineActivitiesByDay[dayKey]) ? normalizedOfflineActivitiesByDay[dayKey] : [];
+                    const hasOfflineActivities = offlineActivitiesForDay.length > 0;
 
                     const hasFines = Array.isArray(dayData?.fines) && dayData.fines.length > 0;
                     cells.push({
@@ -21952,7 +22634,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         hasTraining,
                         hasFines,
                         hasTechnicalIssues,
+                        hasOfflineActivities,
                         technicalIssues: technicalIssuesForDay,
+                        offlineActivities: offlineActivitiesForDay,
                     });
                 }
 
@@ -22079,6 +22763,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             {cell.hasTraining && <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 shadow" />}
                             {/* 🟣 Маркер техсбоя */}
                             {cell.hasTechnicalIssues && <span className="absolute top-1 right-7 w-2 h-2 rounded-full bg-violet-500 shadow" />}
+                            {/* 🟢 Маркер офлайн-активности */}
+                            {cell.hasOfflineActivities && <span className="absolute top-1 right-10 w-2 h-2 rounded-full bg-emerald-500 shadow" />}
                             {/* 🔴 Маркер штрафов */}
                             {cell.hasFines && <span className="absolute top-1 right-4 w-2 h-2 rounded-full bg-red-400 shadow" />}
 
@@ -22118,6 +22804,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         </span>
                         <span className="inline-flex items-center gap-1">
                             <span className="inline-block w-2 h-2 rounded-full bg-violet-500" /> Тех. сбой
+                        </span>
+                        <span className="inline-flex items-center gap-1">
+                            <span className="inline-block w-2 h-2 rounded-full bg-emerald-500" /> Офлайн активность
                         </span>
                         {/* 🔴 Маркер штрафа */}
                         <span className="inline-flex items-center gap-1">
@@ -22400,6 +23089,49 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </p>
                                                 <p className="text-sm text-gray-800">
                                                 <span className="font-semibold">Причина:</span> {item.reason || '—'}
+                                                </p>
+                                                {item.comment && <p className="text-sm text-gray-600 italic">"{item.comment}"</p>}
+                                                <p className="text-xs text-gray-500 mt-1">
+                                                Добавил: {item.created_by_name || '—'} {item.created_at ? `(${item.created_at})` : ''}
+                                                </p>
+                                            </div>
+                                            <div className="ml-3 flex-shrink-0 text-right">
+                                                <div className="text-sm font-medium text-gray-800">{Number(duration || 0).toFixed(2)} ч</div>
+                                            </div>
+                                            </div>
+                                        </div>
+                                        );
+                                    })}
+                                    </div>
+                                </div>
+                                );
+                            })()}
+
+                            {(() => {
+                                const offlineActivitiesOnDay = Array.isArray(selectedDay?.offlineActivities) ? selectedDay.offlineActivities : [];
+                                if (offlineActivitiesOnDay.length === 0) return null;
+                                const totalOfflineHours = offlineActivitiesOnDay.reduce((acc, item) => acc + computeOfflineActivityDuration(item), 0);
+
+                                return (
+                                <div className="mb-4">
+                                    <div className="flex items-center justify-between mb-2">
+                                    <h4 className="text-md font-semibold text-gray-800">Офлайн активность</h4>
+                                    <div className="text-sm text-gray-600">
+                                        Сумма: <span className="font-medium">{Number(totalOfflineHours || 0).toFixed(2)} ч</span>
+                                    </div>
+                                    </div>
+
+                                    <div className="space-y-2 max-h-56 overflow-y-auto pr-2">
+                                    {offlineActivitiesOnDay.map((item, idx) => {
+                                        const duration = computeOfflineActivityDuration(item);
+                                        const start = item.start_time || item.startTime || '—';
+                                        const end = item.end_time || item.endTime || '—';
+                                        return (
+                                        <div key={`offline-day-${item.id || idx}`} className="p-3 bg-emerald-50 border-l-4 border-emerald-400 rounded-md">
+                                            <div className="flex items-start justify-between">
+                                            <div className="flex-1 min-w-0">
+                                                <p className="text-sm text-gray-800">
+                                                <span className="font-semibold">Время:</span> {start} — {end}
                                                 </p>
                                                 {item.comment && <p className="text-sm text-gray-600 italic">"{item.comment}"</p>}
                                                 <p className="text-xs text-gray-500 mt-1">
@@ -28090,9 +28822,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             const regularBase = Number(op.aggregates?.regular_hours ?? 0);
                                             const norm = Number(op.norm_hours ?? 0);
                                             const fines = Number(op.fines ?? 0);
-                                            const callsPerHour = Number(op.aggregates?.calls_per_hour ?? 0);
+                                            const storedCallsPerHour = Number(op.aggregates?.calls_per_hour ?? 0);
+                                            const totalCalls = Number(op.aggregates?.total_calls ?? 0);
                                             const opTrainingField = Number(op.training_hours ?? 0); // если бек присылает предрасчитанные training_hours
                                             const opTechnicalField = Number(op.technical_issue_hours ?? 0);
+                                            const opOfflineField = Number(op.offline_activity_hours ?? 0);
 
                                             // --- вспомогательные функции ---
                                             const safeNum = (v, def = 0) => {
@@ -28177,8 +28911,35 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 ? safeNum(opTechnicalField)
                                                 : safeNum(technicalHoursFromMap);
 
-                                            // --- итоговые отработанные часы (с учётом зачтённых тренингов и техсбоев) ---
-                                            const regular = safeNum(regularBase) + trainingHours + technicalIssueHours;
+                                            const offlineByDayMap = (op && typeof op.offline_activities_by_day === 'object' && !Array.isArray(op.offline_activities_by_day))
+                                                ? op.offline_activities_by_day
+                                                : {};
+                                            const offlineHoursFromMap = Object.values(offlineByDayMap || {}).reduce((sum, arr) => {
+                                                if (!Array.isArray(arr)) return sum;
+                                                const daySum = arr.reduce((dayAcc, item) => {
+                                                const byMinutes = Number(item?.duration_minutes ?? item?.durationMinutes ?? null);
+                                                if (Number.isFinite(byMinutes)) return dayAcc + (Math.max(0, byMinutes) / 60);
+                                                const byHours = Number(item?.duration_hours ?? item?.durationHours ?? null);
+                                                if (Number.isFinite(byHours)) return dayAcc + Math.max(0, byHours);
+                                                const start = parseHMToMinutes(item?.start_time ?? item?.startTime);
+                                                const end = parseHMToMinutes(item?.end_time ?? item?.endTime);
+                                                if (start == null || end == null) return dayAcc;
+                                                let diff = end - start;
+                                                if (diff < 0) diff += 24 * 60;
+                                                return dayAcc + (diff / 60);
+                                                }, 0);
+                                                return sum + daySum;
+                                            }, 0);
+                                            const offlineActivityHours = safeNum(opOfflineField) > 0
+                                                ? safeNum(opOfflineField)
+                                                : safeNum(offlineHoursFromMap);
+
+                                            // --- итоговые отработанные часы (с учётом зачтённых тренингов, техсбоев и офлайн-активности) ---
+                                            const regular = safeNum(regularBase) + trainingHours + technicalIssueHours + offlineActivityHours;
+                                            const effectiveCallHours = Math.max(0, safeNum(regularBase) - safeNum(offlineActivityHours));
+                                            const callsPerHour = effectiveCallHours > 0
+                                                ? (safeNum(totalCalls) / effectiveCallHours)
+                                                : safeNum(storedCallsPerHour);
 
                                             // --- отображаем ---
                                             return (
@@ -28234,6 +28995,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     </p>
                                                 </div>
 
+                                                <div className="p-5 workhours-card bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
+                                                    <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
+                                                    <FaIcon className="fas fa-user-clock text-gray-400"></FaIcon> Офлайн активность
+                                                    </p>
+                                                    <p className="text-xl font-bold text-emerald-700">
+                                                    {safeNum(offlineActivityHours).toFixed(2)} <span className="text-sm font-medium text-gray-500">час</span>
+                                                    </p>
+                                                </div>
+
                                                 {/* Звонки в час */}
                                                 <div className="p-5 workhours-card bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
                                                     <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
@@ -28263,6 +29033,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     user={user}
                                                     trainings={operatorTrainings}
                                                     technicalIssuesByDay={technicalByDayMap}
+                                                    offlineActivitiesByDay={offlineByDayMap}
                                                 />
                                                 </div>
                                             </div>

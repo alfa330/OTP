@@ -7714,6 +7714,32 @@ def build_technical_issues_map(issues_list):
         imap.setdefault(op, {}).setdefault(day, []).append(item)
     return imap
 
+def build_offline_activities_map(activities_list):
+    """
+    Преобразует список офлайн-активностей в структуру { operator_id: { dayNum: [activity...] } }.
+    Ожидается, что у записи есть поле 'operator_id' и 'date' в формате 'YYYY-MM-DD'.
+    """
+    amap = {}
+    if not activities_list:
+        return amap
+    for item in activities_list:
+        op = item.get('operator_id')
+        if op is None:
+            continue
+        dt = item.get('date') or item.get('activity_date') or item.get('day')
+        day = None
+        if isinstance(dt, str) and len(dt) >= 10:
+            try:
+                day = int(dt[8:10])
+            except Exception:
+                day = None
+        elif isinstance(dt, int):
+            day = dt
+        if day is None:
+            continue
+        amap.setdefault(op, {}).setdefault(day, []).append(item)
+    return amap
+
 @app.route('/api/report/monthly_hours', methods=['GET'])
 @require_api_key
 def get_monthly_report_hours():
@@ -7816,19 +7842,52 @@ def get_monthly_report_hours():
 
         technical_issues_map = build_technical_issues_map(technical_items)
 
+        try:
+            y, m = map(int, month.split('-'))
+            month_last_day = calendar.monthrange(y, m)[1]
+            date_from = f"{month}-01"
+            date_to = f"{month}-{str(month_last_day).zfill(2)}"
+            offline_result = db.get_operator_offline_activities(
+                requester_id=requester_id,
+                requester_role=role,
+                date_from=date_from,
+                date_to=date_to,
+                limit=5000,
+                offset=0
+            )
+            offline_items_raw = offline_result.get('items', []) if isinstance(offline_result, dict) else []
+        except Exception:
+            logging.exception("Ошибка получения offline activities из db")
+            offline_items_raw = []
+
+        if visible_operator_ids:
+            offline_items = []
+            for item in offline_items_raw:
+                try:
+                    if int(item.get("operator_id")) in visible_operator_ids:
+                        offline_items.append(item)
+                except Exception:
+                    continue
+        else:
+            offline_items = offline_items_raw
+
+        offline_activities_map = build_offline_activities_map(offline_items)
+
         if generate_all:
             filename, content = db.generate_excel_report_all_operators_from_view(
                 operators,
                 trainings_map,
                 technical_issues_map,
-                month
+                month,
+                offline_activities_map=offline_activities_map
             )
         else:
             filename, content = db.generate_excel_report_from_view(
                 operators,
                 trainings_map,
                 technical_issues_map,
-                month
+                month,
+                offline_activities_map=offline_activities_map
             )
             
         if not filename or not content:
@@ -8195,6 +8254,104 @@ def list_technical_issues():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error listing technical issues: {e}", exc_info=True)
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
+@app.route('/api/offline_activities', methods=['POST'])
+@require_api_key
+def create_offline_activity():
+    try:
+        requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+        requester_id = int(requester_id)
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "User not found"}), 404
+
+        requester_role = _normalize_management_role(requester[3])
+        if requester_role not in ('admin', 'sv'):
+            return jsonify({"error": "Forbidden"}), 403
+
+        payload = request.get_json(silent=True) or {}
+        activity_date = payload.get('date') or payload.get('activity_date')
+        start_time = payload.get('start_time') or payload.get('start')
+        end_time = payload.get('end_time') or payload.get('end')
+        comment = payload.get('comment')
+
+        operator_id = payload.get('operator_id')
+        if operator_id is None:
+            operator_ids = _normalize_int_id_list(payload.get('operator_ids'))
+            if operator_ids:
+                operator_id = operator_ids[0]
+
+        result = db.create_operator_offline_activity(
+            requester_id=requester_id,
+            requester_role=requester_role,
+            activity_date=activity_date,
+            start_time=start_time,
+            end_time=end_time,
+            comment=comment,
+            operator_id=operator_id
+        )
+
+        return jsonify({
+            "status": "success",
+            "message": "Offline activity saved",
+            "result": result
+        }), 201
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error creating offline activity: {e}", exc_info=True)
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
+@app.route('/api/offline_activities', methods=['GET'])
+@require_api_key
+def list_offline_activities():
+    try:
+        requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+        requester_id = int(requester_id)
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "User not found"}), 404
+
+        requester_role = _normalize_management_role(requester[3])
+        if requester_role not in ('admin', 'sv'):
+            return jsonify({"error": "Forbidden"}), 403
+
+        activity_date = (request.args.get('date') or '').strip() or None
+        date_from = (request.args.get('date_from') or '').strip() or None
+        date_to = (request.args.get('date_to') or '').strip() or None
+        operator_id = (request.args.get('operator_id') or '').strip() or None
+        limit = request.args.get('limit', 500)
+        offset = request.args.get('offset', 0)
+
+        result = db.get_operator_offline_activities(
+            requester_id=requester_id,
+            requester_role=requester_role,
+            activity_date=activity_date,
+            date_from=date_from,
+            date_to=date_to,
+            operator_id=operator_id,
+            limit=limit,
+            offset=offset
+        )
+
+        return jsonify({
+            "status": "success",
+            "total": int(result.get('total') or 0),
+            "items": result.get('items') or []
+        }), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error listing offline activities: {e}", exc_info=True)
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 
@@ -9148,12 +9305,14 @@ def get_my_work_schedules():
         end_date = request.args.get('end_date')
         include_imported_statuses = _ws_query_bool('include_imported_statuses', default=False)
         include_technical_issues = _ws_query_bool('include_technical_issues', default=True)
+        include_offline_activities = _ws_query_bool('include_offline_activities', default=True)
         operator_schedule = db.get_operator_with_shifts(
             requester_id,
             start_date,
             end_date,
             include_imported_statuses=include_imported_statuses,
-            include_technical_issues=include_technical_issues
+            include_technical_issues=include_technical_issues,
+            include_offline_activities=include_offline_activities
         )
         if not operator_schedule:
             return jsonify({"error": "Operator not found"}), 404
@@ -9188,13 +9347,15 @@ def get_direction_work_schedules():
         end_date = request.args.get('end_date')
         include_imported_statuses = _ws_query_bool('include_imported_statuses', default=False)
         include_technical_issues = _ws_query_bool('include_technical_issues', default=True)
+        include_offline_activities = _ws_query_bool('include_offline_activities', default=True)
 
         operators = db.get_operators_with_shifts(
             start_date=start_date,
             end_date=end_date,
             direction_name=direction_name,
             include_imported_statuses=include_imported_statuses,
-            include_technical_issues=include_technical_issues
+            include_technical_issues=include_technical_issues,
+            include_offline_activities=include_offline_activities
         )
         return jsonify({"operators": operators, "direction": direction_name}), 200
 
@@ -9409,6 +9570,7 @@ def get_operators_with_schedules():
       - view_mode (optional: day/week/month; fallback for default range)
       - include_imported_statuses (optional: 1/true/yes/on)
       - include_technical_issues (optional: 1/true/yes/on, default: true)
+      - include_offline_activities (optional: 1/true/yes/on, default: true)
     """
     try:
         user = request.headers.get('X-User-Id')
@@ -9468,11 +9630,13 @@ def get_operators_with_schedules():
         
         include_imported_statuses = _ws_query_bool('include_imported_statuses', default=False)
         include_technical_issues = _ws_query_bool('include_technical_issues', default=True)
+        include_offline_activities = _ws_query_bool('include_offline_activities', default=True)
         operators = db.get_operators_with_shifts(
             start_date,
             end_date,
             include_imported_statuses=include_imported_statuses,
-            include_technical_issues=include_technical_issues
+            include_technical_issues=include_technical_issues,
+            include_offline_activities=include_offline_activities
         )
         
         return jsonify({
