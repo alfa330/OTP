@@ -415,6 +415,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const [offlineActivitiesMap, setOfflineActivitiesMap] = useState({}); // { operatorId: { dayNum: [offlineActivities...] } }
         const [trainingModalState, setTrainingModalState] = useState({ open: false, operatorId: null, date: null, training: null });
         const [isTrainingActionLoading, setIsTrainingActionLoading] = useState(false);
+        const [isTechnicalIssueActionLoading, setIsTechnicalIssueActionLoading] = useState(false);
         const [selectedSvId, setSelectedSvId] = useState(user?.role === 'sv' ? user.id : '');
         const [reportScope, setReportScope] = useState('by_sv'); // 'by_sv' or 'all' (admin only)
         const [isLoading, setIsLoading] = useState(false);
@@ -1754,6 +1755,28 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
         }
 
+        async function handleTechnicalIssueDeleteFromModal(issueId) {
+            if (!user || !issueId) return;
+            const confirmed = window.confirm('Удалить техсбой?');
+            if (!confirmed) return;
+            setIsTechnicalIssueActionLoading(true);
+            try {
+            await axios.delete(`${API_BASE_URL}/api/technical_issues/${issueId}`, {
+                headers: {
+                'X-API-Key': user.apiKey,
+                'X-User-Id': user.id
+                }
+            });
+            fallbackToast('Техсбой удален', 'success');
+            await fetchDailyHoursAndTrainings();
+            } catch (err) {
+            console.error('handleTechnicalIssueDeleteFromModal error', err);
+            fallbackToast('Ошибка при удалении техсбоя', 'error');
+            } finally {
+            setIsTechnicalIssueActionLoading(false);
+            }
+        }
+
         async function downloadMonthlyReport() {
             if (!user) {
             fallbackToast('Пользователь не авторизован', 'error');
@@ -2548,7 +2571,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <span>{item.start_time || '—'} — {item.end_time || '—'}</span>
                                     <span className="text-xs text-gray-600">· {dur.toFixed(2)} ч</span>
                                 </div>
-                                <div className="text-xs text-gray-500">by {item.created_by_name || '—'}</div>
+                                <div className="flex items-center gap-2">
+                                    <div className="text-xs text-gray-500">by {item.created_by_name || '—'}</div>
+                                    <button
+                                        type="button"
+                                        onClick={() => handleTechnicalIssueDeleteFromModal(item.id)}
+                                        disabled={isTechnicalIssueActionLoading}
+                                        className="px-2 py-1 text-xs rounded-md border border-red-200 text-red-600 bg-white hover:bg-red-50 disabled:opacity-60 disabled:cursor-not-allowed"
+                                        aria-label="Удалить техсбой"
+                                        title="Удалить техсбой"
+                                    >
+                                        <FaIcon className={`fas ${isTechnicalIssueActionLoading ? 'fa-spinner fa-spin' : 'fa-trash'}`} aria-hidden="true" />
+                                    </button>
+                                </div>
                                 </div>
                                 <div className="text-sm text-gray-700">{item.reason || '—'}</div>
                                 {item.comment && <div className="text-xs text-gray-600">{item.comment}</div>}
