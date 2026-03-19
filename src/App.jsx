@@ -8291,13 +8291,33 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             };
 
-            const openPlannerTrainingModalForCurrentDay = (mode = 'add') => {
+            const openPlannerTrainingModalForCurrentDay = (mode = 'add', preset = null) => {
                 const operatorId = Number(modalState?.opId);
                 const dayKey = String(modalState?.date || '').trim();
                 if (!Number.isFinite(operatorId) || !dayKey || isBulkSelectionModal) return;
                 const trainingMinutes = Math.max(0, Math.round(Number(modalAggregatedFlags?.trainingMinutes || 0)));
-                const startSeed = '09:00';
-                const endSeed = minutesToTime(Math.min(timeToMinutes(startSeed) + (trainingMinutes > 0 ? trainingMinutes : 60), (24 * 60) - 1));
+                let startSeed = '09:00';
+                let endSeed = minutesToTime(Math.min(timeToMinutes(startSeed) + (trainingMinutes > 0 ? trainingMinutes : 60), (24 * 60) - 1));
+
+                const presetStartMin = Number(preset?.startMin);
+                const presetEndMin = Number(preset?.endMin);
+                const hasPresetMinutes = Number.isFinite(presetStartMin) && Number.isFinite(presetEndMin) && presetEndMin > presetStartMin;
+                if (hasPresetMinutes) {
+                    startSeed = minutesToTime(Math.max(0, Math.min((24 * 60) - 1, presetStartMin)));
+                    endSeed = minutesToTime(Math.max(0, Math.min((24 * 60) - 1, presetEndMin)));
+                } else {
+                    const presetStartTime = String(preset?.startTime || '').trim();
+                    const presetEndTime = String(preset?.endTime || '').trim();
+                    if (presetStartTime) startSeed = presetStartTime;
+                    if (presetEndTime) endSeed = presetEndTime;
+                }
+
+                const startSeedMinutes = timeToMinutes(startSeed);
+                const endSeedMinutes = timeToMinutes(endSeed);
+                if (!Number.isFinite(endSeedMinutes) || endSeedMinutes <= startSeedMinutes) {
+                    endSeed = minutesToTime(Math.min(startSeedMinutes + 60, (24 * 60) - 1));
+                }
+
                 setPlannerTrainingModalError('');
                 setPlannerTrainingModalState({
                     open: true,
@@ -8306,9 +8326,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     mode: String(mode || 'add'),
                     startTime: startSeed,
                     endTime: endSeed,
-                    reason: '',
-                    comment: '',
-                    countInHours: true
+                    reason: String(preset?.reason || '').trim(),
+                    comment: String(preset?.comment || '').trim(),
+                    countInHours: typeof preset?.countInHours === 'boolean' ? preset.countInHours : true
                 });
             };
 
@@ -8909,6 +8929,49 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const op = operators.find(o => o.id === modalState.opId);
                 return getPlannerAggregatedFlagsForDate(op, modalState.date);
             }, [isBulkSelectionModal, modalState?.opId, modalState?.date, operators]);
+            const modalImportedStatusTimeline = useMemo(() => {
+                if (isBulkSelectionModal) return [];
+                if (!modalState?.opId || !modalState?.date) return [];
+                const op = operators.find(o => o.id === modalState.opId);
+                const operatorNameKey = plannerStatusNormalizeOperatorName(op?.name);
+                if (!operatorNameKey) return [];
+                return importedStatusTimelineByOperatorDateKey.get(`${operatorNameKey}|${modalState.date}`) || [];
+            }, [isBulkSelectionModal, modalState?.opId, modalState?.date, operators, importedStatusTimelineByOperatorDateKey]);
+            const modalTrainingStatusSegments = useMemo(() => {
+                const raw = (Array.isArray(modalImportedStatusTimeline) ? modalImportedStatusTimeline : [])
+                    .map((seg) => {
+                        const statusKey = plannerStatusNormalizeKey(seg?.stateName || seg?.stateKey || seg?.rawStateName || seg?.rawStateKey || '');
+                        if (statusKey !== 'тренинг' && statusKey !== 'training') return null;
+                        const startMin = Number(seg?.startMin ?? seg?.start ?? 0);
+                        const endMin = Number(seg?.endMin ?? seg?.end ?? 0);
+                        if (!Number.isFinite(startMin) || !Number.isFinite(endMin) || endMin <= startMin) return null;
+                        return {
+                            startMin: Math.max(0, Math.min(1440, startMin)),
+                            endMin: Math.max(0, Math.min(1440, endMin))
+                        };
+                    })
+                    .filter(Boolean)
+                    .sort((a, b) => (a.startMin - b.startMin) || (a.endMin - b.endMin));
+
+                if (raw.length === 0) return [];
+
+                const merged = [];
+                raw.forEach(seg => {
+                    const last = merged[merged.length - 1];
+                    if (last && seg.startMin <= (last.endMin + 0.01)) {
+                        last.endMin = Math.max(last.endMin, seg.endMin);
+                        return;
+                    }
+                    merged.push({ ...seg });
+                });
+
+                return merged.map((seg, idx) => ({
+                    id: `training-seg-${idx}-${Math.round(seg.startMin)}-${Math.round(seg.endMin)}`,
+                    startMin: seg.startMin,
+                    endMin: seg.endMin,
+                    durationMin: Math.max(1, Math.round(seg.endMin - seg.startMin))
+                }));
+            }, [modalImportedStatusTimeline]);
             const plannerTrainingReasonOptions = useMemo(() => ([
                 "Обратная связь",
                 "Собрание",
@@ -13540,7 +13603,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 type="button"
                                                 onClick={() => {
                                                     if (item.key === 'training') {
-                                                        openPlannerTrainingModalForCurrentDay('confirm_training_flag');
+                                                        const firstTrainingSeg = Array.isArray(modalTrainingStatusSegments) ? modalTrainingStatusSegments[0] : null;
+                                                        if (firstTrainingSeg) {
+                                                            openPlannerTrainingModalForCurrentDay('confirm_training_flag', {
+                                                                startMin: firstTrainingSeg.startMin,
+                                                                endMin: firstTrainingSeg.endMin
+                                                            });
+                                                        } else {
+                                                            openPlannerTrainingModalForCurrentDay('confirm_training_flag');
+                                                        }
                                                         return;
                                                     }
                                                     resolvePlannerAutoFlag(item.key, 'confirm');
@@ -13561,6 +13632,44 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 Отклонить
                                             </button>
                                         </div>
+
+                                        {item.key === 'training' && (
+                                            <div className="w-full mt-1 pt-2 border-t border-slate-100">
+                                                {modalTrainingStatusSegments.length > 0 ? (
+                                                    <div className="space-y-1.5">
+                                                        {modalTrainingStatusSegments.map((seg, segIndex) => {
+                                                            const startDisplay = minutesToTime(seg.startMin);
+                                                            const endDisplay = minutesToTime(Math.min(seg.endMin, (24 * 60) - 1));
+                                                            return (
+                                                                <div key={seg.id || `training-segment-${segIndex}`} className="flex flex-wrap items-center gap-2 rounded-md border border-teal-100 bg-teal-50/40 px-2 py-1.5">
+                                                                    <span className="text-xs font-semibold text-teal-800 tabular-nums">
+                                                                        {startDisplay} — {endDisplay}
+                                                                    </span>
+                                                                    <span className="text-[11px] text-teal-700">
+                                                                        {formatMinutesOnly(seg.durationMin)}
+                                                                    </span>
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => openPlannerTrainingModalForCurrentDay('confirm_training_flag', {
+                                                                            startMin: seg.startMin,
+                                                                            endMin: seg.endMin
+                                                                        })}
+                                                                        disabled={plannerTrainingActionLoading || anyBusy}
+                                                                        className="ml-auto px-2 py-1 rounded-md border border-teal-200 bg-white hover:bg-teal-50 text-teal-700 text-[11px] font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
+                                                                    >
+                                                                        Подтвердить интервал
+                                                                    </button>
+                                                                </div>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                ) : (
+                                                    <div className="text-[11px] text-slate-500">
+                                                        Интервалы тренинга не найдены в статусах за этот день.
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
                                     </div>
                                 );
                             })}

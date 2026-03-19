@@ -6293,6 +6293,9 @@ class Database:
         raise ValueError("Unsupported auto flag type")
 
     def _schedule_auto_build_fine_payload(self, flag_type, minutes_value):
+        flag_key = str(flag_type or '').strip().lower()
+        if flag_key == 'training':
+            raise ValueError("Training must be stored in trainings table, not in daily_fines")
         meta = self._schedule_auto_flag_meta(flag_type)
         minutes_int = max(0, int(minutes_value or 0))
         rate_per_minute = float(SCHEDULE_AUTO_FINE_RATE_PER_MINUTE or 0.0)
@@ -6348,7 +6351,11 @@ class Database:
             status_norm = self._schedule_auto_flag_status_for_minutes(status_value, minutes_int)
             fine_id_norm = int(fine_id_value) if fine_id_value is not None else None
 
-            should_keep_fine = (minutes_int > 0 and status_norm == SCHEDULE_AUTO_FLAG_CONFIRMED)
+            flag_key = str(flag_type or '').strip().lower()
+            # Штрафы из авто-флагов создаем только для нарушений дисциплины.
+            # Тренинг подтверждается/отклоняется, но не должен попадать в daily_fines.
+            supports_fine = flag_key in ('late', 'early', 'early_leave')
+            should_keep_fine = supports_fine and (minutes_int > 0 and status_norm == SCHEDULE_AUTO_FLAG_CONFIRMED)
             if should_keep_fine:
                 payload = self._schedule_auto_build_fine_payload(flag_type, minutes_int)
                 if fine_id_norm is None:
@@ -7042,6 +7049,8 @@ class Database:
         reason_norm = str(reason or '').strip()
         if not reason_norm:
             raise ValueError("reason is required")
+        if reason_norm.lower() in ('тренинг', 'training'):
+            raise ValueError("Training must be saved in trainings table")
 
         comment_norm = str(comment or '').strip() or None
 
