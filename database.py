@@ -5593,6 +5593,67 @@ class Database:
                 'items': items
             }
 
+    def delete_operator_technical_issue(self, requester_id, requester_role, issue_id):
+        role_norm = self._normalize_technical_issue_role(requester_role)
+        if role_norm not in ('admin', 'sv'):
+            raise ValueError("Only admin and sv can delete technical issues")
+
+        requester_id_int = int(requester_id)
+        try:
+            issue_id_int = int(issue_id)
+        except (TypeError, ValueError):
+            raise ValueError("Invalid technical issue id")
+        if issue_id_int <= 0:
+            raise ValueError("Invalid technical issue id")
+
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    ti.id,
+                    ti.batch_id::text,
+                    ti.operator_id,
+                    op.supervisor_id,
+                    ti.issue_date,
+                    ti.start_time,
+                    ti.end_time,
+                    ti.reason
+                FROM operator_technical_issues ti
+                JOIN users op ON op.id = ti.operator_id
+                WHERE ti.id = %s
+                """,
+                (issue_id_int,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError("Technical issue not found")
+
+            supervisor_id = int(row[3]) if row[3] is not None else None
+            if role_norm == 'sv' and supervisor_id != requester_id_int:
+                raise PermissionError("Forbidden")
+
+            cursor.execute(
+                """
+                DELETE FROM operator_technical_issues
+                WHERE id = %s
+                RETURNING id
+                """,
+                (issue_id_int,)
+            )
+            deleted_row = cursor.fetchone()
+            if not deleted_row:
+                raise ValueError("Technical issue not found")
+
+            return {
+                'id': int(row[0]),
+                'batch_id': row[1],
+                'operator_id': int(row[2]),
+                'date': row[4].strftime('%Y-%m-%d') if row[4] else None,
+                'start_time': row[5].strftime('%H:%M') if row[5] else None,
+                'end_time': row[6].strftime('%H:%M') if row[6] else None,
+                'reason': row[7]
+            }
+
     def create_operator_offline_activity(
         self,
         requester_id,

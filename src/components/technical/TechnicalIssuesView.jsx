@@ -73,6 +73,7 @@ const TechnicalIssuesView = ({
     const canCreate = role === 'admin' || role === 'sv';
     const canView = role === 'admin' || role === 'sv';
     const canExport = role === 'admin';
+    const canDelete = role === 'admin' || role === 'sv';
 
     const notify = useCallback(
         (message, type = 'info') => {
@@ -137,6 +138,7 @@ const TechnicalIssuesView = ({
     const [loading, setLoading] = useState(false);
     const [submitting, setSubmitting] = useState(false);
     const [exporting, setExporting] = useState(false);
+    const [deletingIssueId, setDeletingIssueId] = useState(null);
 
     const [createDate, setCreateDate] = useState(() => toIsoDate(new Date()));
     const [createStartTime, setCreateStartTime] = useState('00:00');
@@ -329,6 +331,33 @@ const TechnicalIssuesView = ({
             notify(message, 'error');
         } finally {
             setExporting(false);
+        }
+    };
+
+    const handleDeleteIssue = async (issue) => {
+        if (!canDelete) return;
+        const issueId = Number(issue?.id);
+        if (!Number.isFinite(issueId) || issueId <= 0) return;
+
+        const operatorName = String(issue?.operator_name || '').trim();
+        const issueDate = String(issue?.date || '').trim();
+        const confirmMessage = operatorName
+            ? `Удалить техсбой оператора "${operatorName}"${issueDate ? ` (${issueDate})` : ''}?`
+            : `Удалить техсбой${issueDate ? ` (${issueDate})` : ''}?`;
+        if (typeof window !== 'undefined' && !window.confirm(confirmMessage)) return;
+
+        setDeletingIssueId(issueId);
+        try {
+            await axios.delete(`${apiBaseUrl}/api/technical_issues/${issueId}`, {
+                headers: buildHeaders()
+            });
+            notify('Техсбой удален', 'success');
+            await fetchRows();
+        } catch (error) {
+            const message = error?.response?.data?.error || 'Не удалось удалить техсбой';
+            notify(message, 'error');
+        } finally {
+            setDeletingIssueId(null);
         }
     };
 
@@ -580,6 +609,9 @@ const TechnicalIssuesView = ({
                                     <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Направления</th>
                                     <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Добавил</th>
                                     <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Фиксация</th>
+                                    {canDelete && (
+                                        <th className="px-4 py-3 text-right text-xs font-semibold text-gray-600 uppercase">Действия</th>
+                                    )}
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-gray-100 bg-white">
@@ -608,6 +640,25 @@ const TechnicalIssuesView = ({
                                         <td className="px-4 py-3 text-sm text-gray-700 whitespace-nowrap">
                                             {item.created_at || '—'}
                                         </td>
+                                        {canDelete && (
+                                            <td className="px-4 py-3 text-sm text-right whitespace-nowrap">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => handleDeleteIssue(item)}
+                                                    disabled={deletingIssueId === item.id}
+                                                    className={`inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-xs font-medium ${
+                                                        deletingIssueId === item.id
+                                                            ? 'cursor-not-allowed border-red-100 bg-red-50 text-red-300'
+                                                            : 'border-red-200 bg-white text-red-600 hover:bg-red-50'
+                                                    }`}
+                                                    title="Удалить техсбой"
+                                                    aria-label="Удалить техсбой"
+                                                >
+                                                    <FaIcon className={`fas ${deletingIssueId === item.id ? 'fa-spinner fa-spin' : 'fa-trash'}`} />
+                                                    {deletingIssueId === item.id ? 'Удаление...' : 'Удалить'}
+                                                </button>
+                                            </td>
+                                        )}
                                     </tr>
                                 ))}
                             </tbody>
@@ -620,5 +671,4 @@ const TechnicalIssuesView = ({
 };
 
 export default TechnicalIssuesView;
-
 

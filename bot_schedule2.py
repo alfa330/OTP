@@ -8257,6 +8257,46 @@ def list_technical_issues():
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 
+@app.route('/api/technical_issues/<int:issue_id>', methods=['DELETE'])
+@require_api_key
+def delete_technical_issue(issue_id):
+    try:
+        requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+        requester_id = int(requester_id)
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "User not found"}), 404
+
+        requester_role = _normalize_management_role(requester[3])
+        if requester_role not in ('admin', 'sv'):
+            return jsonify({"error": "Forbidden"}), 403
+
+        result = db.delete_operator_technical_issue(
+            requester_id=requester_id,
+            requester_role=requester_role,
+            issue_id=issue_id
+        )
+
+        return jsonify({
+            "status": "success",
+            "message": "Technical issue deleted",
+            "result": result
+        }), 200
+    except PermissionError:
+        return jsonify({"error": "Forbidden"}), 403
+    except ValueError as e:
+        error_text = str(e)
+        if error_text == "Technical issue not found":
+            return jsonify({"error": error_text}), 404
+        return jsonify({"error": error_text}), 400
+    except Exception as e:
+        logging.error(f"Error deleting technical issue {issue_id}: {e}", exc_info=True)
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
 @app.route('/api/offline_activities', methods=['POST'])
 @require_api_key
 def create_offline_activity():
