@@ -22509,6 +22509,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return diff / 60;
                 };
 
+                const computeTrainingDuration = (item) => {
+                    if (!item) return 0;
+                    const byMinutes = Number(item.duration_minutes ?? item.durationMinutes ?? null);
+                    if (Number.isFinite(byMinutes)) return Math.max(0, byMinutes) / 60;
+                    const byHours = Number(item.duration_hours ?? item.durationHours ?? item.hours ?? item.duration ?? item.count ?? null);
+                    if (Number.isFinite(byHours) && byHours > 0) return Math.max(0, byHours);
+                    const s = parseHMToMinutes(item.start_time ?? item.startTime);
+                    const e = parseHMToMinutes(item.end_time ?? item.endTime);
+                    if (s == null || e == null) return 0;
+                    let diff = e - s;
+                    if (diff < 0) diff += 24 * 60;
+                    return diff / 60;
+                };
+
                 // --- Нормализуем входные daily данные в удобную мапу вида { "1": {...}, "2": {...} } ---
                 const dailyMap = React.useMemo(() => {
                     if (!hoursData) return {};
@@ -22614,22 +22628,35 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     new Date(year, monthIndex, day) <
                     new Date(today.getFullYear(), today.getMonth(), today.getDate());
 
-                    const isPastDayWithZero = isPastDay && hours === 0;
-
-                    // проверяем тренинги
-                    const hasTraining = trainings.some(t => t.date === dateStr);
+                    const trainingsForDay = Array.isArray(trainings) ? trainings.filter(t => t?.date === dateStr) : [];
+                    // training hours that should be counted in work hours
+                    const trainingHoursForDay = trainingsForDay.reduce((acc, t) => {
+                        if (!t || !t.count_in_hours) return acc;
+                        return acc + computeTrainingDuration(t);
+                    }, 0);
+                    const hasTraining = trainingsForDay.length > 0;
                     const technicalIssuesForDay = Array.isArray(normalizedTechnicalIssuesByDay[dayKey]) ? normalizedTechnicalIssuesByDay[dayKey] : [];
                     const hasTechnicalIssues = technicalIssuesForDay.length > 0;
+                    const technicalHoursForDay = technicalIssuesForDay.reduce((acc, item) => acc + computeTechnicalIssueDuration(item), 0);
                     const offlineActivitiesForDay = Array.isArray(normalizedOfflineActivitiesByDay[dayKey]) ? normalizedOfflineActivitiesByDay[dayKey] : [];
                     const hasOfflineActivities = offlineActivitiesForDay.length > 0;
+                    const offlineHoursForDay = offlineActivitiesForDay.reduce((acc, item) => acc + computeOfflineActivityDuration(item), 0);
+                    const combinedHours = Number(hours || 0)
+                        + Number(trainingHoursForDay || 0)
+                        + Number(technicalHoursForDay || 0)
+                        + Number(offlineHoursForDay || 0);
 
                     const hasFines = Array.isArray(dayData?.fines) && dayData.fines.length > 0;
                     cells.push({
                         day,
                         dateStr,
-                        hours,
+                        hours: combinedHours,
+                        baseHours: Number(hours || 0),
+                        trainingHours: Number(trainingHoursForDay || 0),
+                        technicalHours: Number(technicalHoursForDay || 0),
+                        offlineHours: Number(offlineHoursForDay || 0),
                         dayData,
-                        isPastDayWithZero,
+                        isPastDayWithZero: isPastDay && combinedHours === 0,
                         isToday,
                         hasTraining,
                         hasFines,
@@ -22855,6 +22882,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <p className="text-sm text-gray-700">
                                     <span className="font-semibold">Выполненные часы:</span> {selectedDay.hours ?? "—"}
                                     </p>
+                                    {(Number(selectedDay.trainingHours || 0) > 0 || Number(selectedDay.technicalHours || 0) > 0 || Number(selectedDay.offlineHours || 0) > 0) && (
+                                    <p className="text-xs text-gray-600">
+                                        База: {Number(selectedDay.baseHours || 0).toFixed(2)} ч
+                                        {' + '}Тренинг: {Number(selectedDay.trainingHours || 0).toFixed(2)} ч
+                                        {' + '}Тех. сбой: {Number(selectedDay.technicalHours || 0).toFixed(2)} ч
+                                        {' + '}Оффлайн: {Number(selectedDay.offlineHours || 0).toFixed(2)} ч
+                                    </p>
+                                    )}
                                 </div>
 
                                 {/* Крупный бейдж с общими часами (если нужно) */}
