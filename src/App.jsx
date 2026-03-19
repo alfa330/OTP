@@ -416,6 +416,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const [trainingModalState, setTrainingModalState] = useState({ open: false, operatorId: null, date: null, training: null });
         const [isTrainingActionLoading, setIsTrainingActionLoading] = useState(false);
         const [isTechnicalIssueActionLoading, setIsTechnicalIssueActionLoading] = useState(false);
+        const [isOfflineActivityActionLoading, setIsOfflineActivityActionLoading] = useState(false);
         const [selectedSvId, setSelectedSvId] = useState(user?.role === 'sv' ? user.id : '');
         const [reportScope, setReportScope] = useState('by_sv'); // 'by_sv' or 'all' (admin only)
         const [isLoading, setIsLoading] = useState(false);
@@ -1777,6 +1778,28 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
         }
 
+        async function handleOfflineActivityDeleteFromModal(activityId) {
+            if (!user || !activityId) return;
+            const confirmed = window.confirm('Удалить офлайн-активность?');
+            if (!confirmed) return;
+            setIsOfflineActivityActionLoading(true);
+            try {
+            await axios.delete(`${API_BASE_URL}/api/offline_activities/${activityId}`, {
+                headers: {
+                'X-API-Key': user.apiKey,
+                'X-User-Id': user.id
+                }
+            });
+            fallbackToast('Офлайн-активность удалена', 'success');
+            await fetchDailyHoursAndTrainings();
+            } catch (err) {
+            console.error('handleOfflineActivityDeleteFromModal error', err);
+            fallbackToast('Ошибка при удалении офлайн-активности', 'error');
+            } finally {
+            setIsOfflineActivityActionLoading(false);
+            }
+        }
+
         async function downloadMonthlyReport() {
             if (!user) {
             fallbackToast('Пользователь не авторизован', 'error');
@@ -2615,7 +2638,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <span>{item.start_time || '—'} — {item.end_time || '—'}</span>
                                     <span className="text-xs text-gray-600">· {dur.toFixed(2)} ч</span>
                                 </div>
-                                <div className="text-xs text-gray-500">by {item.created_by_name || '—'}</div>
+                                <div className="flex items-center gap-2">
+                                    <div className="text-xs text-gray-500">by {item.created_by_name || '—'}</div>
+                                    <button
+                                        type="button"
+                                        onClick={() => handleOfflineActivityDeleteFromModal(item.id)}
+                                        disabled={isOfflineActivityActionLoading}
+                                        className="px-2 py-1 text-xs rounded-md border border-red-200 text-red-600 bg-white hover:bg-red-50 disabled:opacity-60 disabled:cursor-not-allowed"
+                                        aria-label="Удалить офлайн-активность"
+                                        title="Удалить офлайн-активность"
+                                    >
+                                        <FaIcon className={`fas ${isOfflineActivityActionLoading ? 'fa-spinner fa-spin' : 'fa-trash'}`} aria-hidden="true" />
+                                    </button>
+                                </div>
                                 </div>
                                 {item.comment && <div className="text-sm text-gray-700">{item.comment}</div>}
                             </div>
@@ -6130,7 +6165,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [plannerOfflineDraftSelection, setPlannerOfflineDraftSelection] = useState({
                 opId: null,
                 date: '',
-                startMin: null
+                startMin: null,
+                endMin: null,
+                dragging: false
             });
             const [plannerFineModalState, setPlannerFineModalState] = useState({
                 open: false,
@@ -7871,14 +7908,49 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return Math.max(0, Math.min((24 * 60) - 5, snapped));
             };
 
-            const handleOfflineTimelineContextMenu = (e, opId, date) => {
+            const finalizeOfflineDraftSelectionForCell = ({ operatorId, dayKey, endMinute, keepAnchorOnZero = false }) => {
+                const draftOpId = Number(plannerOfflineDraftSelection?.opId);
+                const draftDate = String(plannerOfflineDraftSelection?.date || '').trim();
+                const draftStart = Number(plannerOfflineDraftSelection?.startMin);
+                if (!Number.isFinite(draftOpId) || !Number.isFinite(draftStart) || !draftDate) return false;
+                if (draftOpId !== Number(operatorId) || draftDate !== String(dayKey || '').trim()) return false;
+
+                const resolvedEnd = Number.isFinite(Number(endMinute))
+                    ? Number(endMinute)
+                    : Number(plannerOfflineDraftSelection?.endMin);
+                if (!Number.isFinite(resolvedEnd)) return false;
+
+                const startMin = Math.min(draftStart, resolvedEnd);
+                const endMin = Math.max(draftStart, resolvedEnd);
+                if (endMin > startMin) {
+                    clearPlannerOfflineDraftSelection();
+                    openPlannerOfflineActivityModal({
+                        operatorId: Number(operatorId),
+                        date: String(dayKey || '').trim(),
+                        startMin,
+                        endMin
+                    });
+                    return true;
+                }
+
+                if (keepAnchorOnZero) {
+                    setPlannerOfflineDraftSelection({
+                        opId: Number(operatorId),
+                        date: String(dayKey || '').trim(),
+                        startMin: draftStart,
+                        endMin: null,
+                        dragging: false
+                    });
+                    emitAppToast(`Начало офлайн-активности: ${minutesToTime(draftStart)}. Протяните правой кнопкой или выберите конец вторым ПКМ.`, 'info');
+                }
+                return false;
+            };
+
+            const handleOfflineTimelineRightMouseDown = (e, opId, date) => {
+                if (e.button !== 2) return;
                 e.preventDefault();
                 e.stopPropagation();
                 if (viewMode !== 'day') return;
-                if (plannerStatusSpecialDayViewEnabled) {
-                    emitAppToast('Для выделения офлайн-активности отключите режим статусов.', 'info');
-                    return;
-                }
                 const minute = extractPlannerTimelineMinuteFromPointer(e);
                 const operatorId = Number(opId);
                 const dayKey = String(date || '').trim();
@@ -7887,35 +7959,79 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const draftOpId = Number(plannerOfflineDraftSelection?.opId);
                 const draftDate = String(plannerOfflineDraftSelection?.date || '').trim();
                 const draftStart = Number(plannerOfflineDraftSelection?.startMin);
+                const draftDragging = Boolean(plannerOfflineDraftSelection?.dragging);
                 const isSameCell = Number.isFinite(draftOpId)
                     && Number.isFinite(draftStart)
                     && draftOpId === operatorId
                     && draftDate === dayKey;
 
-                if (!isSameCell) {
-                    setPlannerOfflineDraftSelection({
-                        opId: operatorId,
-                        date: dayKey,
-                        startMin: minute
+                if (isSameCell && !draftDragging && minute !== draftStart) {
+                    finalizeOfflineDraftSelectionForCell({
+                        operatorId,
+                        dayKey,
+                        endMinute: minute,
+                        keepAnchorOnZero: false
                     });
-                    emitAppToast(`Начало офлайн-активности: ${minutesToTime(minute)}. Выберите конец правой кнопкой.`, 'info');
                     return;
                 }
 
-                const startMin = Math.min(draftStart, minute);
-                const endMin = Math.max(draftStart, minute);
-                if (endMin <= startMin) {
-                    emitAppToast('Выберите отличающееся время для конца интервала.', 'error');
-                    return;
-                }
-
-                clearPlannerOfflineDraftSelection();
-                openPlannerOfflineActivityModal({
-                    operatorId,
+                setPlannerOfflineDraftSelection({
+                    opId: operatorId,
                     date: dayKey,
-                    startMin,
-                    endMin
+                    startMin: minute,
+                    endMin: minute,
+                    dragging: true
                 });
+            };
+
+            const handleOfflineTimelineRightMouseMove = (e, opId, date) => {
+                if ((e.buttons & 2) !== 2) return;
+                if (viewMode !== 'day') return;
+                const operatorId = Number(opId);
+                const dayKey = String(date || '').trim();
+                const draftOpId = Number(plannerOfflineDraftSelection?.opId);
+                const draftDate = String(plannerOfflineDraftSelection?.date || '').trim();
+                if (!Number.isFinite(draftOpId) || !draftDate) return;
+                if (!Boolean(plannerOfflineDraftSelection?.dragging)) return;
+                if (draftOpId !== operatorId || draftDate !== dayKey) return;
+                const minute = extractPlannerTimelineMinuteFromPointer(e);
+                if (!Number.isFinite(minute)) return;
+                e.preventDefault();
+                e.stopPropagation();
+                setPlannerOfflineDraftSelection(prev => {
+                    if (!prev || !prev.dragging) return prev;
+                    if (Number(prev.opId) !== operatorId || String(prev.date || '') !== dayKey) return prev;
+                    if (Number(prev.endMin) === minute) return prev;
+                    return {
+                        ...prev,
+                        endMin: minute
+                    };
+                });
+            };
+
+            const handleOfflineTimelineRightMouseUp = (e, opId, date) => {
+                if (e.button !== 2) return;
+                if (viewMode !== 'day') return;
+                const operatorId = Number(opId);
+                const dayKey = String(date || '').trim();
+                const draftOpId = Number(plannerOfflineDraftSelection?.opId);
+                const draftDate = String(plannerOfflineDraftSelection?.date || '').trim();
+                if (!Boolean(plannerOfflineDraftSelection?.dragging)) return;
+                if (draftOpId !== operatorId || draftDate !== dayKey) return;
+                e.preventDefault();
+                e.stopPropagation();
+                const minute = extractPlannerTimelineMinuteFromPointer(e);
+                finalizeOfflineDraftSelectionForCell({
+                    operatorId,
+                    dayKey,
+                    endMinute: minute,
+                    keepAnchorOnZero: true
+                });
+            };
+
+            const handleOfflineTimelineContextMenu = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
             };
 
             const handleDayClick = (e, opId, date) => {
@@ -8883,7 +8999,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setPlannerOfflineDraftSelection({
                     opId: null,
                     date: '',
-                    startMin: null
+                    startMin: null,
+                    endMin: null,
+                    dragging: false
                 });
             };
 
@@ -13468,7 +13586,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         <FaIcon className="fas fa-info-circle mr-1"></FaIcon>
                         <strong>Совет:</strong> Удерживайте Ctrl (или Cmd на Mac) и кликайте по дням для множественного выбора
                         <span className="ml-2">
-                            • Офлайн-активность: правый клик по таймлайну ставит начало, второй правый клик ставит конец.
+                            • Офлайн-активность: зажмите правую кнопку и протяните по таймлайну (в обычном и в статусном режиме), затем отпустите.
                         </span>
                     </div>
                     {(plannerStatusAnomalyFileName || plannerStatusAnomalyError) && (
@@ -13661,11 +13779,33 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             );
                                             const hasOvertimeMarker = (viewMode === 'day' || viewMode === 'week' || viewMode === 'month') && overtimeOutsideShiftMin > 10;
                                             const hasOfflineMarker = (viewMode === 'day' || viewMode === 'week' || viewMode === 'month') && offlineActivityBarsForCell.length > 0;
-                                            const pendingOfflineStartMinForCell = (
+                                            const pendingOfflineDraftForCell = (
                                                 Number(plannerOfflineDraftSelection?.opId) === Number(op?.id)
                                                 && String(plannerOfflineDraftSelection?.date || '') === String(d || '')
                                                 && Number.isFinite(Number(plannerOfflineDraftSelection?.startMin))
-                                            ) ? Number(plannerOfflineDraftSelection?.startMin) : null;
+                                            ) ? plannerOfflineDraftSelection : null;
+                                            const pendingOfflineStartMinForCell = pendingOfflineDraftForCell
+                                                ? Number(pendingOfflineDraftForCell.startMin)
+                                                : null;
+                                            const pendingOfflineEndMinForCell = (pendingOfflineDraftForCell && Number.isFinite(Number(pendingOfflineDraftForCell?.endMin)))
+                                                ? Number(pendingOfflineDraftForCell.endMin)
+                                                : null;
+                                            const pendingOfflineIsDraggingForCell = Boolean(pendingOfflineDraftForCell?.dragging);
+                                            const pendingOfflineRangeStartMinForCell = (
+                                                pendingOfflineStartMinForCell != null
+                                                && pendingOfflineEndMinForCell != null
+                                                && pendingOfflineStartMinForCell !== pendingOfflineEndMinForCell
+                                            ) ? Math.min(pendingOfflineStartMinForCell, pendingOfflineEndMinForCell) : null;
+                                            const pendingOfflineRangeEndMinForCell = (
+                                                pendingOfflineStartMinForCell != null
+                                                && pendingOfflineEndMinForCell != null
+                                                && pendingOfflineStartMinForCell !== pendingOfflineEndMinForCell
+                                            ) ? Math.max(pendingOfflineStartMinForCell, pendingOfflineEndMinForCell) : null;
+                                            const hasPendingOfflineRangeForCell = (
+                                                pendingOfflineRangeStartMinForCell != null
+                                                && pendingOfflineRangeEndMinForCell != null
+                                                && pendingOfflineRangeEndMinForCell > pendingOfflineRangeStartMinForCell
+                                            );
                                             const latePendingSuffix = aggregatedFlagsForCell?.pendingLate && defectLateMin > 0 ? ' (не подтверждено)' : '';
                                             const earlyPendingSuffix = aggregatedFlagsForCell?.pendingEarlyLeave && defectEarlyLeaveMin > 0 ? ' (не подтверждено)' : '';
                                             const trainingPendingSuffix = aggregatedFlagsForCell?.pendingTraining && defectTrainingMin > 0 ? ' (не подтверждено)' : '';
@@ -13795,16 +13935,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <div
                                                     className={`relative ${plannerStatusSpecialDayViewEnabled ? 'h-[88px]' : 'h-12'}`}
                                                     onContextMenu={(e) => handleOfflineTimelineContextMenu(e, op.id, d)}
-                                                    title={pendingOfflineStartMinForCell != null
-                                                        ? `Офлайн: начало ${minutesToTime(pendingOfflineStartMinForCell)}. Выберите конец правой кнопкой.`
-                                                        : 'Правая кнопка: отметить офлайн-активность (начало/конец).'}
+                                                    onMouseDown={plannerStatusSpecialDayViewEnabled ? undefined : (e) => handleOfflineTimelineRightMouseDown(e, op.id, d)}
+                                                    onMouseMove={plannerStatusSpecialDayViewEnabled ? undefined : (e) => handleOfflineTimelineRightMouseMove(e, op.id, d)}
+                                                    onMouseUp={plannerStatusSpecialDayViewEnabled ? undefined : (e) => handleOfflineTimelineRightMouseUp(e, op.id, d)}
+                                                    title={hasPendingOfflineRangeForCell
+                                                        ? `Офлайн: ${minutesToTime(pendingOfflineRangeStartMinForCell)} — ${minutesToTime(pendingOfflineRangeEndMinForCell)}. Отпустите ПКМ, чтобы подтвердить.`
+                                                        : pendingOfflineStartMinForCell != null
+                                                            ? `Офлайн: начало ${minutesToTime(pendingOfflineStartMinForCell)}. Протяните правой кнопкой или выберите конец вторым ПКМ.`
+                                                            : 'ПКМ + протягивание по таймлайну: отметить офлайн-активность.'}
                                                 >
-                                                    {pendingOfflineStartMinForCell != null && (
-                                                        <div
-                                                            className="absolute top-0 bottom-0 z-50 border-l-2 border-emerald-600/90 pointer-events-none"
-                                                            style={{ left: `${computeLeftPercent(pendingOfflineStartMinForCell)}%` }}
-                                                        />
-                                                    )}
                                                     {cellScheduleStatus ? (
                                                         <div className="flex items-center justify-center h-full px-1">
                                                             <div className={`text-sm font-semibold truncate ${cellScheduleStatusTone?.text || 'text-slate-700'}`} title={cellScheduleStatus.label || 'Статус'}>
@@ -13829,10 +13968,33 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             <div className="flex items-center gap-1 h-[34px]">
                                                                 <div className="w-6 shrink-0 text-[9px] uppercase text-slate-500 font-semibold text-right">гр</div>
                                                                 <div className="flex-1 overflow-x-auto overflow-y-hidden" onClick={(e) => e.stopPropagation()}>
-                                                                    <div className="relative h-[34px] border border-slate-200 bg-white" style={specialStatusTimelineTrackStyle}>
+                                                                    <div
+                                                                        className="relative h-[34px] border border-slate-200 bg-white"
+                                                                        style={specialStatusTimelineTrackStyle}
+                                                                        onContextMenu={(e) => handleOfflineTimelineContextMenu(e, op.id, d)}
+                                                                        onMouseDown={(e) => handleOfflineTimelineRightMouseDown(e, op.id, d)}
+                                                                        onMouseMove={(e) => handleOfflineTimelineRightMouseMove(e, op.id, d)}
+                                                                        onMouseUp={(e) => handleOfflineTimelineRightMouseUp(e, op.id, d)}
+                                                                    >
                                                                         <div className="absolute inset-0 flex pointer-events-none">
                                                                             {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0 border-slate-100" />))}
                                                                         </div>
+                                                                        {hasPendingOfflineRangeForCell && (
+                                                                            <div
+                                                                                className={`absolute top-0 bottom-0 z-50 pointer-events-none border-x-2 border-emerald-600/90 ${pendingOfflineIsDraggingForCell ? 'bg-emerald-400/35' : 'bg-emerald-300/30'}`}
+                                                                                style={{
+                                                                                    left: `${computeLeftPercent(pendingOfflineRangeStartMinForCell)}%`,
+                                                                                    width: `${((pendingOfflineRangeEndMinForCell - pendingOfflineRangeStartMinForCell) / minutesInDay) * 100}%`
+                                                                                }}
+                                                                                title={`Черновик офлайн: ${minutesToTime(pendingOfflineRangeStartMinForCell)} — ${minutesToTime(pendingOfflineRangeEndMinForCell)}`}
+                                                                            />
+                                                                        )}
+                                                                        {pendingOfflineStartMinForCell != null && !hasPendingOfflineRangeForCell && (
+                                                                            <div
+                                                                                className="absolute top-0 bottom-0 z-50 border-l-2 border-emerald-600/90 pointer-events-none"
+                                                                                style={{ left: `${computeLeftPercent(pendingOfflineStartMinForCell)}%` }}
+                                                                            />
+                                                                        )}
                                                                         {offlineActivityBarsForCell.map((seg, segIdx) => (
                                                                             <div
                                                                                 key={`special-offline-activity-${seg.id ?? segIdx}`}
@@ -13929,10 +14091,33 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             <div className="flex items-center gap-1 h-[34px]">
                                                                 <div className="w-6 shrink-0 text-[9px] uppercase text-slate-500 font-semibold text-right">ст</div>
                                                                 <div className="flex-1 overflow-x-auto overflow-y-hidden" onClick={(e) => e.stopPropagation()}>
-                                                                    <div className="relative h-[34px] border border-slate-200 bg-white" style={specialStatusTimelineTrackStyle}>
+                                                                    <div
+                                                                        className="relative h-[34px] border border-slate-200 bg-white"
+                                                                        style={specialStatusTimelineTrackStyle}
+                                                                        onContextMenu={(e) => handleOfflineTimelineContextMenu(e, op.id, d)}
+                                                                        onMouseDown={(e) => handleOfflineTimelineRightMouseDown(e, op.id, d)}
+                                                                        onMouseMove={(e) => handleOfflineTimelineRightMouseMove(e, op.id, d)}
+                                                                        onMouseUp={(e) => handleOfflineTimelineRightMouseUp(e, op.id, d)}
+                                                                    >
                                                                         <div className="absolute inset-0 flex pointer-events-none">
                                                                             {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0 border-slate-100" />))}
                                                                         </div>
+                                                                        {hasPendingOfflineRangeForCell && (
+                                                                            <div
+                                                                                className={`absolute top-0 bottom-0 z-50 pointer-events-none border-x-2 border-emerald-600/90 ${pendingOfflineIsDraggingForCell ? 'bg-emerald-400/30' : 'bg-emerald-300/25'}`}
+                                                                                style={{
+                                                                                    left: `${computeLeftPercent(pendingOfflineRangeStartMinForCell)}%`,
+                                                                                    width: `${((pendingOfflineRangeEndMinForCell - pendingOfflineRangeStartMinForCell) / minutesInDay) * 100}%`
+                                                                                }}
+                                                                                title={`Черновик офлайн: ${minutesToTime(pendingOfflineRangeStartMinForCell)} — ${minutesToTime(pendingOfflineRangeEndMinForCell)}`}
+                                                                            />
+                                                                        )}
+                                                                        {pendingOfflineStartMinForCell != null && !hasPendingOfflineRangeForCell && (
+                                                                            <div
+                                                                                className="absolute top-0 bottom-0 z-50 border-l-2 border-emerald-600/90 pointer-events-none"
+                                                                                style={{ left: `${computeLeftPercent(pendingOfflineStartMinForCell)}%` }}
+                                                                            />
+                                                                        )}
                                                                         {importedStatusBarsForCell.map((seg, segIdx) => {
                                                                             const tone = getPlannerImportedStatusTone(seg.stateName || seg.stateKey);
                                                                             return (
@@ -13986,6 +14171,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         <div className="absolute inset-0 flex">
                                                         {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0" />))}
                                                         </div>
+                                                        {hasPendingOfflineRangeForCell && (
+                                                            <div
+                                                                className={`absolute top-0 bottom-0 z-50 pointer-events-none border-x-2 border-emerald-600/90 ${pendingOfflineIsDraggingForCell ? 'bg-emerald-400/35' : 'bg-emerald-300/30'}`}
+                                                                style={{
+                                                                    left: `${computeLeftPercent(pendingOfflineRangeStartMinForCell)}%`,
+                                                                    width: `${((pendingOfflineRangeEndMinForCell - pendingOfflineRangeStartMinForCell) / minutesInDay) * 100}%`
+                                                                }}
+                                                                title={`Черновик офлайн: ${minutesToTime(pendingOfflineRangeStartMinForCell)} — ${minutesToTime(pendingOfflineRangeEndMinForCell)}`}
+                                                            />
+                                                        )}
+                                                        {pendingOfflineStartMinForCell != null && !hasPendingOfflineRangeForCell && (
+                                                            <div
+                                                                className="absolute top-0 bottom-0 z-50 border-l-2 border-emerald-600/90 pointer-events-none"
+                                                                style={{ left: `${computeLeftPercent(pendingOfflineStartMinForCell)}%` }}
+                                                            />
+                                                        )}
                                                         {offlineActivityBarsForCell.map((seg, segIdx) => (
                                                             <div
                                                                 key={`offline-activity-${seg.id ?? segIdx}`}
