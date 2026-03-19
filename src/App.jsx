@@ -5040,6 +5040,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const sDate = seg.start instanceof Date ? seg.start : new Date(seg.start);
             const eDate = seg.end instanceof Date ? seg.end : new Date(seg.end);
             if (Number.isNaN(sDate.getTime()) || Number.isNaN(eDate.getTime())) return null;
+            const startDayKey = plannerStatusDayKey(sDate);
+            const endDayKey = plannerStatusDayKey(eDate);
+            const targetDayKey = String(dateKey || '').trim();
+            if (!startDayKey || !endDayKey || !targetDayKey) return null;
+            if (targetDayKey < startDayKey || targetDayKey > endDayKey) return null;
             let startMin = (plannerStatusDayKey(sDate) === dateKey)
                 ? (sDate.getHours() * 60 + sDate.getMinutes() + (sDate.getSeconds() / 60))
                 : 0;
@@ -6919,7 +6924,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 [plannerStatusAnomalyAnalysis, plannerStatusServerAnalysis]
             );
             const importedStatusTimelineByOperatorDateKey = useMemo(() => {
-                const map = new Map();
+                const sourceTimelineByDayOperator = new Map();
                 const days = Array.isArray(plannerStatusEffectiveAnalysis?.days) ? plannerStatusEffectiveAnalysis.days : [];
                 days.forEach(day => {
                     const dateKey = String(day?.dateKey || '');
@@ -6927,21 +6932,72 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     (Array.isArray(day?.operators) ? day.operators : []).forEach(opItem => {
                         const nameKey = plannerStatusNormalizeOperatorName(opItem?.operatorName);
                         if (!nameKey) return;
-                        const timeline = (Array.isArray(opItem?.timeline) ? opItem.timeline : [])
-                            .map(seg => {
-                                const mins = plannerStatusImportedSegmentToDayMinutes(seg, dateKey);
-                                if (!mins) return null;
-                                return {
-                                    ...seg,
-                                    startMin: mins.start,
-                                    endMin: mins.end
-                                };
-                            })
-                            .filter(Boolean)
-                            .sort((a, b) => (a.startMin - b.startMin) || (a.endMin - b.endMin));
-                        map.set(`${nameKey}|${dateKey}`, timeline);
+                        sourceTimelineByDayOperator.set(
+                            `${nameKey}|${dateKey}`,
+                            Array.isArray(opItem?.timeline) ? opItem.timeline : []
+                        );
                     });
                 });
+
+                const targetKeys = new Set();
+                sourceTimelineByDayOperator.forEach((_, sourceKey) => {
+                    const splitIndex = sourceKey.lastIndexOf('|');
+                    if (splitIndex <= 0) return;
+                    const nameKey = sourceKey.slice(0, splitIndex);
+                    const sourceDayKey = sourceKey.slice(splitIndex + 1);
+                    const sourceDayObj = parseDateStr(sourceDayKey);
+                    if (!sourceDayObj || Number.isNaN(sourceDayObj.getTime())) return;
+                    targetKeys.add(`${nameKey}|${todayDateStr(addDays(sourceDayObj, -1))}`);
+                    targetKeys.add(`${nameKey}|${sourceDayKey}`);
+                    targetKeys.add(`${nameKey}|${todayDateStr(addDays(sourceDayObj, 1))}`);
+                });
+
+                const map = new Map();
+                targetKeys.forEach(targetKey => {
+                    const splitIndex = targetKey.lastIndexOf('|');
+                    if (splitIndex <= 0) return;
+                    const nameKey = targetKey.slice(0, splitIndex);
+                    const targetDayKey = targetKey.slice(splitIndex + 1);
+                    const targetDayObj = parseDateStr(targetDayKey);
+                    if (!targetDayObj || Number.isNaN(targetDayObj.getTime())) return;
+
+                    const candidateDayKeys = [
+                        todayDateStr(addDays(targetDayObj, -1)),
+                        targetDayKey,
+                        todayDateStr(addDays(targetDayObj, 1))
+                    ];
+
+                    const seenSegments = new Set();
+                    const mergedTimeline = [];
+                    candidateDayKeys.forEach(dayKey => {
+                        const sourceTimeline = sourceTimelineByDayOperator.get(`${nameKey}|${dayKey}`) || [];
+                        (Array.isArray(sourceTimeline) ? sourceTimeline : []).forEach(seg => {
+                            const mins = plannerStatusImportedSegmentToDayMinutes(seg, targetDayKey);
+                            if (!mins) return;
+                            const segKey = [
+                                String(seg?.start || ''),
+                                String(seg?.end || ''),
+                                String(seg?.stateKey || seg?.statusKey || ''),
+                                String(seg?.rawStateKey || seg?.raw_state_key || ''),
+                                String(seg?.stateNote || seg?.state_note || ''),
+                                String(mins.start),
+                                String(mins.end)
+                            ].join('|');
+                            if (seenSegments.has(segKey)) return;
+                            seenSegments.add(segKey);
+                            mergedTimeline.push({
+                                ...seg,
+                                startMin: mins.start,
+                                endMin: mins.end
+                            });
+                        });
+                    });
+
+                    if (mergedTimeline.length === 0) return;
+                    mergedTimeline.sort((a, b) => (a.startMin - b.startMin) || (a.endMin - b.endMin));
+                    map.set(targetKey, mergedTimeline);
+                });
+
                 return map;
             }, [plannerStatusEffectiveAnalysis]);
 
