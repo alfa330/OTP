@@ -2093,7 +2093,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                             const callsTotal = Number(aggr.total_calls || 0);
                             const effTotal = Number(aggr.total_efficiency_hours || 0);
-                            const effectiveCallHours = Math.max(0, regular - totalOfflineActivityHours);
+                            const effectiveCallHours = Math.max(0, regular);
 
                             // compute total fines for the operator across days
                             let finesTotal = 0;
@@ -28822,7 +28822,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             const regularBase = Number(op.aggregates?.regular_hours ?? 0);
                                             const norm = Number(op.norm_hours ?? 0);
                                             const fines = Number(op.fines ?? 0);
-                                            const storedCallsPerHour = Number(op.aggregates?.calls_per_hour ?? 0);
                                             const totalCalls = Number(op.aggregates?.total_calls ?? 0);
                                             const opTrainingField = Number(op.training_hours ?? 0); // если бек присылает предрасчитанные training_hours
                                             const opTechnicalField = Number(op.technical_issue_hours ?? 0);
@@ -28936,10 +28935,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                             // --- итоговые отработанные часы (с учётом зачтённых тренингов, техсбоев и офлайн-активности) ---
                                             const regular = safeNum(regularBase) + trainingHours + technicalIssueHours + offlineActivityHours;
-                                            const effectiveCallHours = Math.max(0, safeNum(regularBase) - safeNum(offlineActivityHours));
+                                            const effectiveCallHours = Math.max(0, safeNum(regularBase));
                                             const callsPerHour = effectiveCallHours > 0
                                                 ? (safeNum(totalCalls) / effectiveCallHours)
-                                                : safeNum(storedCallsPerHour);
+                                                : 0;
 
                                             // --- отображаем ---
                                             return (
