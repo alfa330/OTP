@@ -13576,17 +13576,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 const busyConfirm = plannerAutoFlagActionLoading === `${item.key}:confirm`;
                                 const busyReject = plannerAutoFlagActionLoading === `${item.key}:reject`;
                                 const anyBusy = Boolean(plannerAutoFlagActionLoading);
+                                const isPenaltyDecisionFlag = item.key === 'late' || item.key === 'early_leave';
                                 const statusLabel = status === 'confirmed'
-                                    ? 'Подтверждено'
+                                    ? (isPenaltyDecisionFlag ? 'Штраф' : 'Подтверждено')
                                     : status === 'rejected'
-                                        ? 'Отклонено'
+                                        ? (isPenaltyDecisionFlag ? 'Согласовано' : 'Отклонено')
                                         : hasMinutes
-                                            ? 'Не подтверждено'
+                                            ? (isPenaltyDecisionFlag ? 'Ожидает решения' : 'Не подтверждено')
                                             : 'Нет данных';
                                 const statusClass = status === 'confirmed'
-                                    ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                                    ? (isPenaltyDecisionFlag ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700')
                                     : status === 'rejected'
-                                        ? 'border-slate-300 bg-slate-100 text-slate-600'
+                                        ? (isPenaltyDecisionFlag ? 'border-sky-200 bg-sky-50 text-sky-700' : 'border-slate-300 bg-slate-100 text-slate-600')
                                         : hasMinutes
                                             ? 'border-amber-200 bg-amber-50 text-amber-700'
                                             : 'border-slate-200 bg-white text-slate-500';
@@ -13599,38 +13600,65 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             {statusLabel}
                                         </span>
                                         <div className="ml-auto flex items-center gap-2">
-                                            <button
-                                                type="button"
-                                                onClick={() => {
-                                                    if (item.key === 'training') {
-                                                        const firstTrainingSeg = Array.isArray(modalTrainingStatusSegments) ? modalTrainingStatusSegments[0] : null;
-                                                        if (firstTrainingSeg) {
-                                                            openPlannerTrainingModalForCurrentDay('confirm_training_flag', {
-                                                                startMin: firstTrainingSeg.startMin,
-                                                                endMin: firstTrainingSeg.endMin
-                                                            });
-                                                        } else {
-                                                            openPlannerTrainingModalForCurrentDay('confirm_training_flag');
-                                                        }
-                                                        return;
-                                                    }
-                                                    resolvePlannerAutoFlag(item.key, 'confirm');
-                                                }}
-                                                disabled={!hasMinutes || anyBusy}
-                                                className="px-2.5 py-1 rounded-md border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
-                                            >
-                                                <FaIcon className={`fas ${busyConfirm ? 'fa-spinner fa-spin' : 'fa-check'}`}></FaIcon>
-                                                Подтвердить
-                                            </button>
-                                            <button
-                                                type="button"
-                                                onClick={() => resolvePlannerAutoFlag(item.key, 'reject')}
-                                                disabled={!hasMinutes || anyBusy}
-                                                className="px-2.5 py-1 rounded-md border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
-                                            >
-                                                <FaIcon className={`fas ${busyReject ? 'fa-spinner fa-spin' : 'fa-times'}`}></FaIcon>
-                                                Отклонить
-                                            </button>
+                                            {isPenaltyDecisionFlag ? (
+                                                <>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => resolvePlannerAutoFlag(item.key, 'reject')}
+                                                        disabled={!hasMinutes || anyBusy}
+                                                        className="px-2.5 py-1 rounded-md border border-sky-200 bg-sky-50 hover:bg-sky-100 text-sky-700 text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
+                                                        title="Согласовано: событие подтверждено без штрафа"
+                                                    >
+                                                        <FaIcon className={`fas ${busyReject ? 'fa-spinner fa-spin' : 'fa-handshake'}`}></FaIcon>
+                                                        Согласовано
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => resolvePlannerAutoFlag(item.key, 'confirm')}
+                                                        disabled={!hasMinutes || anyBusy}
+                                                        className="px-2.5 py-1 rounded-md border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
+                                                        title="Штраф: событие будет засчитано в штраф"
+                                                    >
+                                                        <FaIcon className={`fas ${busyConfirm ? 'fa-spinner fa-spin' : 'fa-gavel'}`}></FaIcon>
+                                                        Штраф
+                                                    </button>
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => {
+                                                            if (item.key === 'training') {
+                                                                const firstTrainingSeg = Array.isArray(modalTrainingStatusSegments) ? modalTrainingStatusSegments[0] : null;
+                                                                if (firstTrainingSeg) {
+                                                                    openPlannerTrainingModalForCurrentDay('confirm_training_flag', {
+                                                                        startMin: firstTrainingSeg.startMin,
+                                                                        endMin: firstTrainingSeg.endMin
+                                                                    });
+                                                                } else {
+                                                                    openPlannerTrainingModalForCurrentDay('confirm_training_flag');
+                                                                }
+                                                                return;
+                                                            }
+                                                            resolvePlannerAutoFlag(item.key, 'confirm');
+                                                        }}
+                                                        disabled={!hasMinutes || anyBusy}
+                                                        className="px-2.5 py-1 rounded-md border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
+                                                    >
+                                                        <FaIcon className={`fas ${busyConfirm ? 'fa-spinner fa-spin' : 'fa-check'}`}></FaIcon>
+                                                        Подтвердить
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => resolvePlannerAutoFlag(item.key, 'reject')}
+                                                        disabled={!hasMinutes || anyBusy}
+                                                        className="px-2.5 py-1 rounded-md border border-slate-300 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
+                                                    >
+                                                        <FaIcon className={`fas ${busyReject ? 'fa-spinner fa-spin' : 'fa-times'}`}></FaIcon>
+                                                        Отклонить
+                                                    </button>
+                                                </>
+                                            )}
                                         </div>
 
                                         {item.key === 'training' && (
