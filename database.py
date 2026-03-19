@@ -17,7 +17,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import gc
 from psycopg2.pool import ThreadedConnectionPool  # Added for connection pooling
-from psycopg2.extras import execute_values
+from psycopg2.extras import execute_values, Json
 import calendar
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Border, Side, Alignment
@@ -247,6 +247,29 @@ SCHEDULE_AUTO_TALK_STATUS_KEYS = {'занят', 'занята'}
 SCHEDULE_AUTO_BREAK_STATUS_KEYS = {'перерыв', 'авто'}
 SCHEDULE_AUTO_TRAINING_STATUS_KEY = 'тренинг'
 SCHEDULE_AUTO_FINE_RATE_PER_MINUTE = float(os.getenv('SCHEDULE_AUTO_FINE_RATE_PER_MINUTE', '50'))
+
+TECHNICAL_ISSUE_REASONS: List[str] = [
+    'Не работает интернет',
+    'Замена мыши',
+    'Не работает микрофон',
+    'Не работает Oktell',
+    'Проблема с маршрутизацией Oktell (не идут исходящие звонки), переключение в ручной режим',
+    'Замена клавиатуры',
+    'Не заходит в корпоративный чат',
+    'Не включается компьютер',
+    'Переполнена память',
+    'Кнопка "Войти в колл-центр" в Oktell не реагирует на действия',
+    'Виснет компьютер',
+    'Не работают программы на ПК (ошибка "Меню \"Пуск\" не работает")',
+    'Проблема с подключением к сайту Oktell',
+    'Не может войти в учетную запись ПК',
+    'Не поступают звонки',
+    'Не может войти в учетную запись Oktell',
+    'Массовая проблема с Октелл',
+    'Массовая проблема с интернетом',
+    'Массовая проблема с телефонией'
+]
+TECHNICAL_ISSUE_REASONS_SET = set(TECHNICAL_ISSUE_REASONS)
 
 def get_pool():
     global POOL
@@ -769,6 +792,29 @@ class Database:
                     comment TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS operator_technical_issues (
+                    id SERIAL PRIMARY KEY,
+                    batch_id UUID NOT NULL,
+                    operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    issue_date DATE NOT NULL,
+                    start_time TIME NOT NULL DEFAULT TIME '00:00:00',
+                    end_time TIME NOT NULL DEFAULT TIME '23:59:59',
+                    reason VARCHAR(255) NOT NULL,
+                    comment TEXT,
+                    direction_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cursor.execute("""
+                ALTER TABLE operator_technical_issues
+                ADD COLUMN IF NOT EXISTS start_time TIME NOT NULL DEFAULT TIME '00:00:00';
+            """)
+            cursor.execute("""
+                ALTER TABLE operator_technical_issues
+                ADD COLUMN IF NOT EXISTS end_time TIME NOT NULL DEFAULT TIME '23:59:59';
             """)
 
             cursor.execute("""
@@ -1345,6 +1391,18 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_work_hours_calls_per_hour ON work_hours(calls_per_hour);
                 CREATE INDEX IF NOT EXISTS idx_trainings_operator_id ON trainings(operator_id);
                 CREATE INDEX IF NOT EXISTS idx_trainings_training_date ON trainings(training_date);
+                CREATE INDEX IF NOT EXISTS idx_operator_technical_issues_issue_date
+                ON operator_technical_issues(issue_date);
+                CREATE INDEX IF NOT EXISTS idx_operator_technical_issues_issue_date_time
+                ON operator_technical_issues(issue_date, start_time, end_time);
+                CREATE INDEX IF NOT EXISTS idx_operator_technical_issues_operator_id
+                ON operator_technical_issues(operator_id);
+                CREATE INDEX IF NOT EXISTS idx_operator_technical_issues_reason
+                ON operator_technical_issues(reason);
+                CREATE INDEX IF NOT EXISTS idx_operator_technical_issues_created_by
+                ON operator_technical_issues(created_by);
+                CREATE INDEX IF NOT EXISTS idx_operator_technical_issues_created_at
+                ON operator_technical_issues(created_at);
                 CREATE INDEX IF NOT EXISTS idx_work_shifts_operator_date ON work_shifts(operator_id, shift_date);
                 CREATE INDEX IF NOT EXISTS idx_work_shifts_date ON work_shifts(shift_date);
                 CREATE INDEX IF NOT EXISTS idx_days_off_operator_date ON days_off(operator_id, day_off_date);
@@ -1733,6 +1791,76 @@ class Database:
                     WHERE id = %s
                 """, (float(total_amount), first_reason, agg_comment, daily_id))
 
+    def _load_technical_issues_by_operator_day_tx(self, cursor, operator_ids, start_date, end_date):
+        """
+        Возвращает:
+        - map: {operator_id: {day_num_str: [issues...]}}
+        - totals: {operator_id: total_hours}
+        """
+        op_ids = sorted({int(v) for v in (operator_ids or []) if v is not None})
+        result = {op_id: {} for op_id in op_ids}
+        totals = {op_id: 0.0 for op_id in op_ids}
+        if not op_ids:
+            return result, totals
+
+        cursor.execute(
+            """
+            SELECT
+                ti.id,
+                ti.operator_id,
+                ti.issue_date,
+                ti.start_time,
+                ti.end_time,
+                ti.reason,
+                ti.comment,
+                cb.name,
+                ti.created_at
+            FROM operator_technical_issues ti
+            LEFT JOIN users cb ON cb.id = ti.created_by
+            WHERE ti.operator_id = ANY(%s)
+              AND ti.issue_date >= %s
+              AND ti.issue_date <= %s
+            ORDER BY ti.operator_id, ti.issue_date, ti.start_time, ti.end_time, ti.id
+            """,
+            (op_ids, start_date, end_date),
+        )
+        for issue_id, op_id, issue_date, start_time, end_time, reason, comment, created_by_name, created_at in cursor.fetchall() or []:
+            try:
+                op_id_int = int(op_id)
+            except Exception:
+                continue
+            if op_id_int not in result or issue_date is None:
+                continue
+
+            start_text = start_time.strftime('%H:%M') if start_time else None
+            end_text = end_time.strftime('%H:%M') if end_time else None
+            duration_minutes = 0
+            try:
+                if start_time and end_time:
+                    start_min, end_min = self._schedule_interval_minutes(start_time, end_time)
+                    duration_minutes = max(0, int(end_min - start_min))
+            except Exception:
+                duration_minutes = 0
+            duration_hours = round(float(duration_minutes) / 60.0, 2)
+
+            day_key = str(int(issue_date.day))
+            result.setdefault(op_id_int, {}).setdefault(day_key, []).append({
+                "id": int(issue_id),
+                "date": issue_date.strftime('%Y-%m-%d'),
+                "start_time": start_text,
+                "end_time": end_text,
+                "time_range": f"{start_text} - {end_text}" if start_text and end_text else None,
+                "reason": reason,
+                "comment": comment,
+                "created_by_name": created_by_name,
+                "created_at": created_at.strftime('%Y-%m-%d %H:%M:%S') if created_at else None,
+                "duration_minutes": int(duration_minutes),
+                "duration_hours": float(duration_hours),
+            })
+            totals[op_id_int] = round(float(totals.get(op_id_int, 0.0)) + float(duration_hours), 2)
+
+        return result, totals
+
     def get_daily_hours_for_operator_month(self, operator_id: int, month: str):
         """
         Возвращает daily_hours для одного оператора за месяц YYYY-MM,
@@ -1821,6 +1949,13 @@ class Database:
                 if entry is not None:
                     entry.setdefault('fines', []).append(fine_obj)
 
+            technical_map_by_operator, technical_totals_by_operator = self._load_technical_issues_by_operator_day_tx(
+                cursor=cursor,
+                operator_ids=[operator_id],
+                start_date=start,
+                end_date=end
+            )
+
             # 2) Получаем имя/ставку + данные work_hours одним LEFT JOIN запросом (включая fines)
             cursor.execute(
                 """
@@ -1845,6 +1980,9 @@ class Database:
             )
             row = cursor.fetchone()
 
+        technical_issues_by_day = technical_map_by_operator.get(int(operator_id), {}) if isinstance(technical_map_by_operator, dict) else {}
+        technical_issue_hours = float(technical_totals_by_operator.get(int(operator_id), 0.0)) if isinstance(technical_totals_by_operator, dict) else 0.0
+
         # default values if user / work_hours not found
         if row:
             name, rate, direction_name, norm_hours, regular_hours, total_break_time, total_talk_time, \
@@ -1866,6 +2004,8 @@ class Database:
             "norm_hours": float(norm_hours),
             "fines": float(fines),
             "daily": daily_map,
+            "technical_issues_by_day": technical_issues_by_day,
+            "technical_issue_hours": round(float(technical_issue_hours), 2),
             "aggregates": {
                 "regular_hours": float(regular_hours),
                 "total_break_time": float(total_break_time),
@@ -1971,6 +2111,13 @@ class Database:
                 if op_id in daily_map and day_num in daily_map[op_id]:
                     daily_map[op_id][day_num].setdefault('fines', []).append(fine_obj)
 
+            technical_map_by_operator, technical_totals_by_operator = self._load_technical_issues_by_operator_day_tx(
+                cursor=cursor,
+                operator_ids=op_ids,
+                start_date=start,
+                end_date=end
+            )
+
             # Сбор финального списка операторов
             operators = []
             for row in operator_rows:
@@ -1987,6 +2134,8 @@ class Database:
                     "status": status,
                     "norm_hours": float(norm_hours) if norm_hours is not None else 0.0,
                     "daily": daily_map.get(op_id, {}),
+                    "technical_issues_by_day": technical_map_by_operator.get(op_id, {}) if isinstance(technical_map_by_operator, dict) else {},
+                    "technical_issue_hours": round(float(technical_totals_by_operator.get(op_id, 0.0)), 2) if isinstance(technical_totals_by_operator, dict) else 0.0,
                     "aggregates": {
                         "regular_hours": float(regular_hours),
                         "total_break_time": float(total_break_time),
@@ -2088,6 +2237,13 @@ class Database:
                 if op_id in daily_map and day_num in daily_map[op_id]:
                     daily_map[op_id][day_num].setdefault('fines', []).append(fine_obj)
 
+            technical_map_by_operator, technical_totals_by_operator = self._load_technical_issues_by_operator_day_tx(
+                cursor=cursor,
+                operator_ids=op_ids,
+                start_date=start,
+                end_date=end
+            )
+
             operators = []
             for row in operator_rows:
                 (op_id, op_name, rate, status, sup_id, direction_name, norm_hours,
@@ -2103,6 +2259,8 @@ class Database:
                     "status": status,
                     "norm_hours": float(norm_hours) if norm_hours is not None else 0.0,
                     "daily": daily_map.get(op_id, {}),
+                    "technical_issues_by_day": technical_map_by_operator.get(op_id, {}) if isinstance(technical_map_by_operator, dict) else {},
+                    "technical_issue_hours": round(float(technical_totals_by_operator.get(op_id, 0.0)), 2) if isinstance(technical_totals_by_operator, dict) else 0.0,
                     "aggregates": {
                         "regular_hours": float(regular_hours),
                         "total_break_time": float(total_break_time),
@@ -2842,7 +3000,23 @@ class Database:
             tr_row = cursor.fetchone()
             training_hours = float(tr_row[0] or 0.0)
 
-            # 3) Количество оценённых звонков и средняя оценка (как раньше)
+            # 3) Рассчитываем техсбои за месяц (учитываются в часах выполнения нормы)
+            cursor.execute("""
+                SELECT COALESCE(SUM(
+                    CASE
+                    WHEN ti.end_time <= ti.start_time
+                        THEN EXTRACT(EPOCH FROM (ti.end_time + INTERVAL '24 hours' - ti.start_time))
+                    ELSE EXTRACT(EPOCH FROM (ti.end_time - ti.start_time))
+                    END
+                ) / 3600.0, 0) AS technical_issue_hours_seconds
+                FROM operator_technical_issues ti
+                WHERE ti.operator_id = %s
+                AND TO_CHAR(ti.issue_date, 'YYYY-MM') = %s
+            """, (operator_id, current_month))
+            tech_row = cursor.fetchone()
+            technical_issue_hours = float(tech_row[0] or 0.0)
+
+            # 4) Количество оценённых звонков и средняя оценка (как раньше)
             cursor.execute("""
                 SELECT 
                     (SELECT COUNT(*) FROM calls WHERE operator_id = %s AND month = %s AND is_draft = FALSE) AS call_count,
@@ -2852,16 +3026,17 @@ class Database:
             call_count = int(calls_row[0] or 0)
             avg_score = float(calls_row[1]) if calls_row[1] is not None else 0.0
 
-            # 4) calls_per_hour: используем total_calls (из work_hours) делённые на regular_hours
+            # 5) calls_per_hour: используем total_calls (из work_hours) делённые на regular_hours
             #    Если регулярных часов нет — 0.0
             if regular_hours and regular_hours > 0:
                 calls_per_hour = float(total_calls) / float(regular_hours)
             else:
                 calls_per_hour = 0.0
 
-            # 5) percent_complete: считаем с учётом зачётных тренингов (если вы хотите старое поведение — вернуть regular_hours/norm_hours)
+            # 6) percent_complete: считаем с учётом зачётных тренингов и техсбоев
+            accounted_hours = regular_hours + training_hours + technical_issue_hours
             if norm_hours and norm_hours > 0:
-                percent_complete = ((regular_hours + training_hours) / norm_hours) * 100.0
+                percent_complete = (accounted_hours / norm_hours) * 100.0
             else:
                 percent_complete = 0.0
 
@@ -2870,6 +3045,8 @@ class Database:
                 'month': current_month,
                 'regular_hours': round(float(regular_hours), 2),
                 'training_hours': round(float(training_hours), 2),
+                'technical_issue_hours': round(float(technical_issue_hours), 2),
+                'accounted_hours': round(float(accounted_hours), 2),
                 'fines': round(float(fines), 2),
                 'norm_hours': float(norm_hours),
                 'percent_complete': round(percent_complete, 2),
@@ -3028,7 +3205,21 @@ class Database:
                     WHERE t.operator_id = u.id
                     AND t.count_in_hours = TRUE
                     AND (%s IS NULL OR TO_CHAR(t.training_date, 'YYYY-MM') = %s)
-                ), 0) AS training_hours
+                ), 0) AS training_hours,
+
+                -- technical issue hours считаем отдельно и учитываем в часах выполнения
+                COALESCE((
+                    SELECT SUM(
+                        CASE
+                            WHEN ti.end_time <= ti.start_time
+                                THEN EXTRACT(EPOCH FROM (ti.end_time + INTERVAL '24 hours' - ti.start_time))
+                            ELSE EXTRACT(EPOCH FROM (ti.end_time - ti.start_time))
+                        END
+                    ) / 3600.0
+                    FROM operator_technical_issues ti
+                    WHERE ti.operator_id = u.id
+                    AND (%s IS NULL OR TO_CHAR(ti.issue_date, 'YYYY-MM') = %s)
+                ), 0) AS technical_issue_hours
 
             FROM users u
             LEFT JOIN work_hours wh
@@ -3037,7 +3228,7 @@ class Database:
             WHERE u.role = 'operator'
         """
 
-        params = [month, month, month, month]
+        params = [month, month, month, month, month, month]
 
         if operator_id:
             query += " AND u.id = %s"
@@ -3051,6 +3242,9 @@ class Database:
             for row in rows:
                 regular_hours = float(row[3])
                 total_calls = int(row[6])
+                training_hours = round(float(row[7]), 2)
+                technical_issue_hours = round(float(row[8]), 2)
+                accounted_hours = round(regular_hours + training_hours + technical_issue_hours, 2)
 
                 calls_per_hour = (
                     round(total_calls / regular_hours, 2)
@@ -3062,7 +3256,9 @@ class Database:
                     "operator_name": row[1],
                     "direction": row[2],
                     "regular_hours": regular_hours,
-                    "training_hours": round(float(row[7]), 2),
+                    "training_hours": training_hours,
+                    "technical_issue_hours": technical_issue_hours,
+                    "accounted_hours": accounted_hours,
                     "fines": float(row[4]),
                     "norm_hours": float(row[5]),
                     "calls_per_hour": calls_per_hour
@@ -4718,6 +4914,525 @@ class Database:
                     "count_in_hours": bool(row[9])
                 } for row in cursor.fetchall()
             ]
+
+    def _normalize_technical_issue_role(self, role_value):
+        role_norm = str(role_value or '').strip().lower()
+        if role_norm == 'supervisor':
+            return 'sv'
+        return role_norm
+
+    def _coerce_int_list(self, values):
+        if values is None:
+            return []
+        if isinstance(values, (list, tuple, set)):
+            raw_values = list(values)
+        else:
+            raw_values = [values]
+
+        normalized = []
+        seen = set()
+        for item in raw_values:
+            if item is None:
+                continue
+            if isinstance(item, str) and not item.strip():
+                continue
+            try:
+                ivalue = int(item)
+            except (TypeError, ValueError):
+                continue
+            if ivalue <= 0 or ivalue in seen:
+                continue
+            seen.add(ivalue)
+            normalized.append(ivalue)
+        return normalized
+
+    def _parse_technical_issue_date(self, value, field_name='date'):
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        if not value:
+            raise ValueError(f"Field '{field_name}' is required (YYYY-MM-DD)")
+        try:
+            return datetime.strptime(str(value), '%Y-%m-%d').date()
+        except (TypeError, ValueError):
+            raise ValueError(f"Invalid '{field_name}' format. Use YYYY-MM-DD")
+
+    def _parse_technical_issue_time(self, value, field_name='start_time', default_value=None):
+        raw_value = value
+        if raw_value is None or (isinstance(raw_value, str) and not raw_value.strip()):
+            if default_value is None:
+                raise ValueError(f"Field '{field_name}' is required (HH:MM)")
+            raw_value = default_value
+
+        if isinstance(raw_value, dt_time):
+            return raw_value.replace(second=0, microsecond=0)
+
+        raw_text = str(raw_value).strip()
+        for fmt in ('%H:%M', '%H:%M:%S'):
+            try:
+                parsed = datetime.strptime(raw_text, fmt).time()
+                return parsed.replace(second=0, microsecond=0)
+            except (TypeError, ValueError):
+                continue
+        raise ValueError(f"Invalid '{field_name}' format. Use HH:MM")
+
+    def _technical_issue_time_to_hhmm(self, time_value):
+        if isinstance(time_value, dt_time):
+            return time_value.strftime('%H:%M')
+        if isinstance(time_value, str):
+            try:
+                parsed = self._parse_technical_issue_time(time_value, field_name='time')
+                return parsed.strftime('%H:%M')
+            except ValueError:
+                return str(time_value)
+        return str(time_value or '')
+
+    def _split_absolute_minutes_intervals_by_day(self, intervals, anchor_date_obj):
+        """
+        Splits absolute-minute intervals (relative to anchor_date midnight) into day chunks.
+        Returns list of dicts: {'date': date, 'start_min': int, 'end_min': int, 'start_time': 'HH:MM', 'end_time': 'HH:MM'}.
+        """
+        anchor_date_obj = self._parse_technical_issue_date(anchor_date_obj, field_name='date')
+        merged_intervals = self._merge_break_intervals(intervals or [])
+        result = []
+        for interval in merged_intervals:
+            seg_start = int(interval.get('start', 0))
+            seg_end = int(interval.get('end', 0))
+            if seg_end <= seg_start:
+                continue
+
+            cursor_min = seg_start
+            while cursor_min < seg_end:
+                day_offset = int(cursor_min // 1440)
+                day_floor = int(day_offset) * 1440
+                day_ceil = day_floor + 1440
+                chunk_end = min(seg_end, day_ceil)
+                if chunk_end <= cursor_min:
+                    break
+
+                local_start = int(cursor_min - day_floor)
+                local_end = int(chunk_end - day_floor)
+                if local_end > local_start:
+                    issue_day = anchor_date_obj + timedelta(days=day_offset)
+                    result.append({
+                        'date': issue_day,
+                        'start_min': local_start,
+                        'end_min': local_end,
+                        'start_time': _minutes_to_time(local_start),
+                        'end_time': _minutes_to_time(local_end)
+                    })
+                cursor_min = chunk_end
+        return result
+
+    def _find_shift_overlap_intervals_for_technical_issue_tx(
+        self,
+        cursor,
+        operator_ids,
+        issue_date_obj,
+        start_time_obj,
+        end_time_obj
+    ):
+        operator_ids_norm = self._coerce_int_list(operator_ids)
+        if not operator_ids_norm:
+            return {}
+
+        issue_date_obj = self._parse_technical_issue_date(issue_date_obj, field_name='date')
+        issue_start_min, issue_end_min = self._schedule_interval_minutes(start_time_obj, end_time_obj)
+        issue_start_abs = int(issue_start_min)
+        issue_end_abs = int(issue_end_min)
+        if issue_end_abs <= issue_start_abs:
+            return {}
+
+        shifts_source_start = issue_date_obj - timedelta(days=1)
+        shifts_source_end = issue_date_obj + timedelta(days=1)
+        cursor.execute(
+            """
+            SELECT operator_id, shift_date, start_time, end_time
+            FROM work_shifts
+            WHERE operator_id = ANY(%s)
+              AND shift_date >= %s
+              AND shift_date <= %s
+            ORDER BY operator_id, shift_date, start_time, end_time
+            """,
+            (operator_ids_norm, shifts_source_start, shifts_source_end)
+        )
+        rows = cursor.fetchall() or []
+
+        overlaps_by_operator = {}
+        for operator_id, shift_date_value, shift_start_value, shift_end_value in rows:
+            if shift_date_value is None:
+                continue
+            day_offset = int((shift_date_value - issue_date_obj).days)
+            shift_start_min, shift_end_min = self._schedule_interval_minutes(shift_start_value, shift_end_value)
+            shift_start_abs = day_offset * 1440 + int(shift_start_min)
+            shift_end_abs = day_offset * 1440 + int(shift_end_min)
+
+            overlap_start = max(issue_start_abs, shift_start_abs)
+            overlap_end = min(issue_end_abs, shift_end_abs)
+            if overlap_end <= overlap_start:
+                continue
+            overlaps_by_operator.setdefault(int(operator_id), []).append({
+                'start': int(overlap_start),
+                'end': int(overlap_end)
+            })
+
+        for op_id in list(overlaps_by_operator.keys()):
+            overlaps_by_operator[op_id] = self._merge_break_intervals(overlaps_by_operator.get(op_id) or [])
+            if not overlaps_by_operator[op_id]:
+                overlaps_by_operator.pop(op_id, None)
+
+        return overlaps_by_operator
+
+    def _normalize_direction_ids_json_payload(self, payload):
+        if payload is None:
+            return []
+        parsed = payload
+        if isinstance(payload, str):
+            payload = payload.strip()
+            if not payload:
+                return []
+            try:
+                parsed = json.loads(payload)
+            except Exception:
+                return []
+        if not isinstance(parsed, list):
+            return []
+        result = []
+        seen = set()
+        for item in parsed:
+            try:
+                direction_id = int(item)
+            except (TypeError, ValueError):
+                continue
+            if direction_id <= 0 or direction_id in seen:
+                continue
+            seen.add(direction_id)
+            result.append(direction_id)
+        return result
+
+    def _get_direction_name_map_tx(self, cursor, direction_ids):
+        normalized_ids = self._coerce_int_list(direction_ids)
+        if not normalized_ids:
+            return {}
+        cursor.execute("""
+            SELECT id, name
+            FROM directions
+            WHERE id = ANY(%s)
+        """, (normalized_ids,))
+        return {int(row[0]): row[1] for row in cursor.fetchall()}
+
+    def _resolve_technical_issue_operator_ids_tx(self, cursor, requester_id, requester_role, operator_ids=None, direction_ids=None):
+        role_norm = self._normalize_technical_issue_role(requester_role)
+        if role_norm not in ('admin', 'sv'):
+            raise ValueError("Only admin and sv can register technical issues")
+
+        operator_ids_norm = self._coerce_int_list(operator_ids)
+        direction_ids_norm = self._coerce_int_list(direction_ids)
+        target_operator_ids = set()
+
+        if operator_ids_norm:
+            cursor.execute("""
+                SELECT id, supervisor_id
+                FROM users
+                WHERE role = 'operator' AND id = ANY(%s)
+            """, (operator_ids_norm,))
+            rows = cursor.fetchall()
+            found_ids = {int(row[0]) for row in rows}
+            missing_ids = [op_id for op_id in operator_ids_norm if op_id not in found_ids]
+            if missing_ids:
+                raise ValueError(f"Operators not found: {', '.join(map(str, missing_ids))}")
+
+            if role_norm == 'sv':
+                forbidden_ids = [int(op_id) for op_id, supervisor_id in rows if int(supervisor_id or 0) != int(requester_id)]
+                if forbidden_ids:
+                    raise ValueError(f"Forbidden operators for sv: {', '.join(map(str, forbidden_ids))}")
+            target_operator_ids.update(found_ids)
+
+        if direction_ids_norm:
+            cursor.execute("""
+                SELECT id
+                FROM directions
+                WHERE id = ANY(%s) AND is_active = TRUE
+            """, (direction_ids_norm,))
+            valid_direction_ids = {int(row[0]) for row in cursor.fetchall()}
+            missing_directions = [dir_id for dir_id in direction_ids_norm if dir_id not in valid_direction_ids]
+            if missing_directions:
+                raise ValueError(f"Directions not found or inactive: {', '.join(map(str, missing_directions))}")
+
+            if role_norm == 'sv':
+                cursor.execute("""
+                    SELECT id
+                    FROM users
+                    WHERE role = 'operator'
+                      AND direction_id = ANY(%s)
+                      AND supervisor_id = %s
+                      AND COALESCE(status, 'working') <> 'fired'
+                """, (direction_ids_norm, int(requester_id)))
+            else:
+                cursor.execute("""
+                    SELECT id
+                    FROM users
+                    WHERE role = 'operator'
+                      AND direction_id = ANY(%s)
+                      AND COALESCE(status, 'working') <> 'fired'
+                """, (direction_ids_norm,))
+            target_operator_ids.update(int(row[0]) for row in cursor.fetchall())
+
+        if not target_operator_ids:
+            raise ValueError("Select at least one operator or direction with active operators")
+
+        return sorted(target_operator_ids), direction_ids_norm
+
+    def get_technical_issue_reasons(self):
+        return list(TECHNICAL_ISSUE_REASONS)
+
+    def create_operator_technical_issues(
+        self,
+        requester_id,
+        requester_role,
+        issue_date,
+        reason,
+        start_time=None,
+        end_time=None,
+        comment=None,
+        operator_ids=None,
+        direction_ids=None
+    ):
+        role_norm = self._normalize_technical_issue_role(requester_role)
+        if role_norm not in ('admin', 'sv'):
+            raise ValueError("Only admin and sv can create technical issues")
+
+        reason_text = str(reason or '').strip()
+        if reason_text not in TECHNICAL_ISSUE_REASONS_SET:
+            raise ValueError("Invalid technical issue reason")
+
+        issue_date_obj = self._parse_technical_issue_date(issue_date, field_name='date')
+        start_time_obj = self._parse_technical_issue_time(start_time, field_name='start_time', default_value='00:00')
+        end_time_obj = self._parse_technical_issue_time(end_time, field_name='end_time', default_value='23:59')
+        if start_time_obj == end_time_obj:
+            raise ValueError("start_time and end_time cannot be equal")
+        comment_text = str(comment or '').strip() or None
+        requester_id_int = int(requester_id)
+
+        with self._get_cursor() as cursor:
+            target_operator_ids, selected_direction_ids = self._resolve_technical_issue_operator_ids_tx(
+                cursor=cursor,
+                requester_id=requester_id_int,
+                requester_role=role_norm,
+                operator_ids=operator_ids,
+                direction_ids=direction_ids
+            )
+
+            overlaps_by_operator = self._find_shift_overlap_intervals_for_technical_issue_tx(
+                cursor=cursor,
+                operator_ids=target_operator_ids,
+                issue_date_obj=issue_date_obj,
+                start_time_obj=start_time_obj,
+                end_time_obj=end_time_obj
+            )
+            eligible_operator_ids = sorted(overlaps_by_operator.keys())
+            if not eligible_operator_ids:
+                raise ValueError("No selected operators have shifts in the specified time range")
+
+            batch_id = str(uuid.uuid4())
+            issue_values = []
+
+            for operator_id in eligible_operator_ids:
+                day_chunks = self._split_absolute_minutes_intervals_by_day(
+                    overlaps_by_operator.get(operator_id) or [],
+                    issue_date_obj
+                )
+                for chunk in day_chunks:
+                    issue_values.append((
+                        batch_id,
+                        int(operator_id),
+                        chunk['date'],
+                        chunk['start_time'],
+                        chunk['end_time'],
+                        reason_text,
+                        comment_text,
+                        Json(selected_direction_ids),
+                        requester_id_int
+                    ))
+
+            if not issue_values:
+                raise ValueError("No overlapping shift intervals were found")
+
+            execute_values(
+                cursor,
+                """
+                    INSERT INTO operator_technical_issues (
+                        batch_id,
+                        operator_id,
+                        issue_date,
+                        start_time,
+                        end_time,
+                        reason,
+                        comment,
+                        direction_ids,
+                        created_by
+                    )
+                    VALUES %s
+                """,
+                issue_values
+            )
+
+            direction_name_map = self._get_direction_name_map_tx(cursor, selected_direction_ids)
+            skipped_operator_ids = [op_id for op_id in target_operator_ids if op_id not in set(eligible_operator_ids)]
+            return {
+                'batch_id': batch_id,
+                'created_count': len(issue_values),
+                'created_operator_count': len(eligible_operator_ids),
+                'operator_ids': eligible_operator_ids,
+                'requested_operator_ids': target_operator_ids,
+                'requested_operator_count': len(target_operator_ids),
+                'skipped_operator_ids': skipped_operator_ids,
+                'skipped_operator_count': len(skipped_operator_ids),
+                'selected_direction_ids': selected_direction_ids,
+                'selected_direction_names': [direction_name_map.get(dir_id) for dir_id in selected_direction_ids if direction_name_map.get(dir_id)],
+                'date': issue_date_obj.strftime('%Y-%m-%d'),
+                'start_time': start_time_obj.strftime('%H:%M'),
+                'end_time': end_time_obj.strftime('%H:%M'),
+                'reason': reason_text
+            }
+
+    def get_operator_technical_issues(
+        self,
+        requester_id,
+        requester_role,
+        issue_date=None,
+        date_from=None,
+        date_to=None,
+        operator_id=None,
+        reason=None,
+        limit=500,
+        offset=0
+    ):
+        role_norm = self._normalize_technical_issue_role(requester_role)
+        if role_norm not in ('admin', 'sv'):
+            raise ValueError("Only admin and sv can view technical issues")
+
+        limit_int = max(1, min(int(limit or 500), 5000))
+        offset_int = max(0, int(offset or 0))
+        requester_id_int = int(requester_id)
+
+        where_parts = []
+        params = []
+        if role_norm == 'sv':
+            where_parts.append("op.supervisor_id = %s")
+            params.append(requester_id_int)
+
+        if issue_date:
+            issue_date_obj = self._parse_technical_issue_date(issue_date, field_name='date')
+            where_parts.append("ti.issue_date = %s")
+            params.append(issue_date_obj)
+        else:
+            if date_from:
+                from_obj = self._parse_technical_issue_date(date_from, field_name='date_from')
+                where_parts.append("ti.issue_date >= %s")
+                params.append(from_obj)
+            if date_to:
+                to_obj = self._parse_technical_issue_date(date_to, field_name='date_to')
+                where_parts.append("ti.issue_date <= %s")
+                params.append(to_obj)
+
+        operator_id_int = None
+        if operator_id is not None and str(operator_id).strip() != '':
+            try:
+                operator_id_int = int(operator_id)
+            except (TypeError, ValueError):
+                raise ValueError("Invalid operator_id")
+            where_parts.append("ti.operator_id = %s")
+            params.append(operator_id_int)
+
+        reason_text = str(reason or '').strip()
+        if reason_text:
+            if reason_text not in TECHNICAL_ISSUE_REASONS_SET:
+                raise ValueError("Invalid reason filter")
+            where_parts.append("ti.reason = %s")
+            params.append(reason_text)
+
+        where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+        base_sql = """
+            FROM operator_technical_issues ti
+            JOIN users op ON op.id = ti.operator_id
+            LEFT JOIN users sv ON sv.id = op.supervisor_id
+            LEFT JOIN users cb ON cb.id = ti.created_by
+            LEFT JOIN directions d ON d.id = op.direction_id
+        """
+
+        with self._get_cursor() as cursor:
+            cursor.execute(f"SELECT COUNT(*) {base_sql} {where_sql}", params)
+            total = int(cursor.fetchone()[0] or 0)
+
+            cursor.execute(
+                f"""
+                    SELECT
+                        ti.id,
+                        ti.batch_id::text,
+                        ti.operator_id,
+                        op.name,
+                        op.supervisor_id,
+                        sv.name,
+                        op.direction_id,
+                        d.name,
+                        ti.issue_date,
+                        ti.start_time,
+                        ti.end_time,
+                        ti.reason,
+                        ti.comment,
+                        ti.created_by,
+                        cb.name,
+                        ti.created_at,
+                        ti.direction_ids
+                    {base_sql}
+                    {where_sql}
+                    ORDER BY ti.issue_date DESC, ti.start_time DESC, ti.created_at DESC, ti.id DESC
+                    LIMIT %s OFFSET %s
+                """,
+                params + [limit_int, offset_int]
+            )
+            rows = cursor.fetchall()
+
+            all_selected_direction_ids = set()
+            prepared_rows = []
+            for row in rows:
+                selected_direction_ids = self._normalize_direction_ids_json_payload(row[16])
+                all_selected_direction_ids.update(selected_direction_ids)
+                prepared_rows.append((row, selected_direction_ids))
+
+            direction_name_map = self._get_direction_name_map_tx(cursor, list(all_selected_direction_ids))
+            items = []
+            for row, selected_direction_ids in prepared_rows:
+                start_time_text = row[9].strftime('%H:%M') if row[9] else None
+                end_time_text = row[10].strftime('%H:%M') if row[10] else None
+                items.append({
+                    'id': int(row[0]),
+                    'batch_id': row[1],
+                    'operator_id': int(row[2]),
+                    'operator_name': row[3],
+                    'supervisor_id': int(row[4]) if row[4] is not None else None,
+                    'supervisor_name': row[5],
+                    'direction_id': int(row[6]) if row[6] is not None else None,
+                    'direction_name': row[7],
+                    'date': row[8].strftime('%Y-%m-%d') if row[8] else None,
+                    'start_time': start_time_text,
+                    'end_time': end_time_text,
+                    'time_range': f"{start_time_text} - {end_time_text}" if start_time_text and end_time_text else None,
+                    'reason': row[11],
+                    'comment': row[12],
+                    'created_by_id': int(row[13]) if row[13] is not None else None,
+                    'created_by_name': row[14],
+                    'created_at': row[15].strftime('%Y-%m-%d %H:%M:%S') if row[15] else None,
+                    'selected_direction_ids': selected_direction_ids,
+                    'selected_direction_names': [direction_name_map.get(dir_id) for dir_id in selected_direction_ids if direction_name_map.get(dir_id)]
+                })
+
+            return {
+                'total': total,
+                'items': items
+            }
     
     def get_user_history(self, user_id):
         with self._get_cursor() as cursor:
@@ -5005,12 +5720,13 @@ class Database:
     def generate_excel_report_from_view(self,
         operators: List[Dict[str, Any]],
         trainings_map: Dict[int, Dict[int, List[Dict[str, Any]]]],
+        technical_issues_map: Dict[int, Dict[int, List[Dict[str, Any]]]],
         month: str,  # 'YYYY-MM'
         filename: str = None,
         include_supervisor: bool = False
     ) -> Tuple[str, bytes]:
         """
-        Генерирует xlsx с листами: Отработанные часы, Перерыв, Звонки, Эффективность, Тренинги.
+        Генерирует xlsx с листами: Отработанные часы, Перерыв, Звонки, Эффективность, Штрафы, Тренинги, Тех. сбои.
 
         Правила форматирования (по заданию пользователя):
         - Округлять все числа до 1 знака после запятой, КРОМЕ полей "Ставка" (rate) и "Норма часов" (norm_hours) — они оставляются как есть.
@@ -5021,6 +5737,8 @@ class Database:
         - Добавить границы ко всем ячейкам таблиц.
         """
 
+        trainings_map = trainings_map or {}
+        technical_issues_map = technical_issues_map or {}
         operators = operators["operators"]
 
         # If requested, ensure each operator has `supervisor_name` populated.
@@ -5133,6 +5851,23 @@ class Database:
                     return round(float(t['duration_hours']), 2)
                 s = parse_time_to_minutes(t.get('start_time'))
                 e = parse_time_to_minutes(t.get('end_time'))
+                if s is None or e is None:
+                    return 0.0
+                diff = e - s
+                if diff < 0:
+                    diff += 24 * 60
+                return round(diff / 60.0, 2)
+            except Exception:
+                return 0.0
+
+        def compute_technical_issue_duration_hours(item: Dict[str, Any]) -> float:
+            try:
+                if item.get('duration_minutes') is not None:
+                    return round(float(item['duration_minutes']) / 60.0, 2)
+                if item.get('duration_hours') is not None:
+                    return round(float(item['duration_hours']), 2)
+                s = parse_time_to_minutes(item.get('start_time'))
+                e = parse_time_to_minutes(item.get('end_time'))
                 if s is None or e is None:
                     return 0.0
                 diff = e - s
@@ -5276,7 +6011,7 @@ class Database:
             headers = ["Оператор"]
             if include_supervisor:
                 headers.append("Супервайзер")
-            headers += ["Ставка", "Норма часов (ч)"] + [f"{d:02d}.{mon:02d}" for d in days] + ["Итого часов", "С выч. тренинга", "Вып нормы (%)", "Выработка"]
+            headers += ["Ставка", "Норма часов (ч)"] + [f"{d:02d}.{mon:02d}" for d in days] + ["Итого часов", "База часов", "Тех. сбои (ч)", "Вып нормы (%)", "Выработка"]
             _make_header(ws, headers)
             row = 2
             for op in operators:
@@ -5294,6 +6029,7 @@ class Database:
 
                 total_work = 0.0
                 total_counted_trainings = 0.0
+                total_technical_issues = 0.0
 
                 day_start = norm_col + 1
                 for c_idx, day in enumerate(days, start=day_start):
@@ -5310,25 +6046,32 @@ class Database:
                         if t.get('count_in_hours'):
                             counted_for_day += dur
 
-                    # Сохраняем в суммарные показатели отдельно, итоговая ячейка по дню — work + trainings
+                    technical_for_day = 0.0
+                    technical_items_for_day = technical_issues_map.get(op.get('operator_id'), {}).get(day, []) if technical_issues_map else []
+                    for item in technical_items_for_day:
+                        technical_for_day += compute_technical_issue_duration_hours(item)
+
+                    # Сохраняем в суммарные показатели отдельно, итоговая ячейка по дню — work + trainings + technical
                     total_work += work_val
                     total_counted_trainings += counted_for_day
-                    combined = work_val + counted_for_day
+                    total_technical_issues += technical_for_day
+                    combined = work_val + counted_for_day + technical_for_day
                     cell_val = fmt_day_value('work_time', combined)
                     fill = FILL_POS if (isinstance(cell_val, (int, float)) and cell_val > 0) else None
                     set_cell(ws, row, c_idx, cell_val, fill=fill)
 
-                itogo_chasov = total_work + total_counted_trainings
+                itogo_chasov = total_work + total_counted_trainings + total_technical_issues
                 base_total_col = day_start + len(days)
                 set_cell(ws, row, base_total_col, fmt_total_value('work_time', itogo_chasov))
                 set_cell(ws, row, base_total_col + 1, fmt_total_value('work_time', total_work))
+                set_cell(ws, row, base_total_col + 2, fmt_total_value('work_time', total_technical_issues))
                 if norm and norm != 0:
                     percent = round((itogo_chasov / norm) * 100, 2)
                     percent_display = f"{percent}%"
                 else:
                     percent_display = None
-                set_cell(ws, row, base_total_col + 2, percent_display)
-                set_cell(ws, row, base_total_col + 3, fmt_total_value('work_time', round(norm - itogo_chasov, 2) if norm is not None else None))
+                set_cell(ws, row, base_total_col + 3, percent_display)
+                set_cell(ws, row, base_total_col + 4, fmt_total_value('work_time', round(norm - itogo_chasov, 2) if norm is not None else None))
 
                 row += 1
 
@@ -5526,6 +6269,50 @@ class Database:
             col = ws_t.cell(1, i).column_letter
             ws_t.column_dimensions[col].width = 14
 
+        ws_tech = wb.create_sheet(title='Тех. сбои'[:31])
+        tech_headers = ["Оператор"]
+        if include_supervisor:
+            tech_headers.append("Супервайзер")
+        tech_headers += [f"{d:02d}.{mon:02d}" for d in days] + ["Всего (ч)"]
+        _make_header(ws_tech, tech_headers)
+
+        row_tech = 2
+        for op in operators:
+            name = op.get('name') or f"op_{op.get('operator_id')}"
+            op_id = op.get('operator_id')
+            op_issues = technical_issues_map.get(op_id) or {}
+
+            total_issue_hours = 0.0
+            for day in days:
+                arr = op_issues.get(day, []) if isinstance(op_issues, dict) else []
+                for item in arr:
+                    total_issue_hours += compute_technical_issue_duration_hours(item)
+
+            set_cell(ws_tech, row_tech, 1, name, align_center=False)
+            if include_supervisor:
+                sup_name = op.get('supervisor_name') or ""
+                set_cell(ws_tech, row_tech, 2, sup_name, align_center=False)
+
+            day_start = 2 + (1 if include_supervisor else 0)
+            for c_idx, day in enumerate(days, start=day_start):
+                arr = op_issues.get(day, []) if isinstance(op_issues, dict) else []
+                day_sum = 0.0
+                for item in arr:
+                    day_sum += compute_technical_issue_duration_hours(item)
+                if day_sum == 0:
+                    set_cell(ws_tech, row_tech, c_idx, "")
+                else:
+                    set_cell(ws_tech, row_tech, c_idx, fmt_num(day_sum), fill=FILL_POS)
+
+            total_col = len(tech_headers)
+            set_cell(ws_tech, row_tech, total_col, fmt_num(total_issue_hours))
+            row_tech += 1
+
+        ws_tech.column_dimensions['A'].width = 24
+        for i in range(2, 3 + len(days)):
+            col = ws_tech.cell(1, i).column_letter
+            ws_tech.column_dimensions[col].width = 14
+
         out = BytesIO()
         wb.save(out)
         out.seek(0)
@@ -5537,6 +6324,7 @@ class Database:
     def generate_excel_report_all_operators_from_view(self,
         operators: List[Dict[str, Any]],
         trainings_map: Dict[int, Dict[int, List[Dict[str, Any]]]],
+        technical_issues_map: Dict[int, Dict[int, List[Dict[str, Any]]]],
         month: str,  # 'YYYY-MM'
         filename: str = None
         ) -> Tuple[str, bytes]:
@@ -5566,7 +6354,14 @@ class Database:
             op['supervisor_name'] = sup_map.get(int(sid)) if sid else None
 
         # Вызов генератора — один проход, файл формируется сразу с колонкой "Супервайзер"
-        return self.generate_excel_report_from_view({"operators": ops}, trainings_map, month, filename=filename, include_supervisor=True)
+        return self.generate_excel_report_from_view(
+            {"operators": ops},
+            trainings_map,
+            technical_issues_map,
+            month,
+            filename=filename,
+            include_supervisor=True
+        )
 
     def _normalize_break_durations_list(self, value):
         if value is None:
@@ -7686,6 +8481,98 @@ class Database:
                 continue
             target['importedStatusTimelineDays'] = timeline_map.get(int(op_id), {})
 
+    def _load_technical_issue_segments_for_operators(self, cursor, operator_ids, start_date_obj=None, end_date_obj=None):
+        op_ids = [int(v) for v in (operator_ids or []) if v is not None]
+        result = {op_id: {} for op_id in op_ids}
+        if not op_ids:
+            return result
+
+        query = """
+            SELECT
+                id,
+                operator_id,
+                batch_id,
+                issue_date,
+                start_time,
+                end_time,
+                reason,
+                comment
+            FROM operator_technical_issues
+            WHERE operator_id = ANY(%s)
+        """
+        params = [op_ids]
+        if start_date_obj:
+            query += " AND issue_date >= %s"
+            params.append(start_date_obj - timedelta(days=1))
+        if end_date_obj:
+            query += " AND issue_date <= %s"
+            params.append(end_date_obj + timedelta(days=1))
+
+        query += " ORDER BY operator_id, issue_date, start_time, end_time, id"
+        cursor.execute(query, params)
+        rows = cursor.fetchall() or []
+
+        for row in rows:
+            issue_id, operator_id, batch_id, issue_date_value, start_time_value, end_time_value, reason, comment = row
+            op_id = int(operator_id)
+            if op_id not in result or issue_date_value is None:
+                continue
+
+            start_min, end_min = self._schedule_interval_minutes(start_time_value, end_time_value)
+            day_chunks = self._split_absolute_minutes_intervals_by_day(
+                [{'start': int(start_min), 'end': int(end_min)}],
+                issue_date_value
+            )
+            for chunk in day_chunks:
+                chunk_date = chunk.get('date')
+                if not chunk_date:
+                    continue
+                if start_date_obj and chunk_date < start_date_obj:
+                    continue
+                if end_date_obj and chunk_date > end_date_obj:
+                    continue
+
+                day_key = chunk_date.strftime('%Y-%m-%d')
+                start_min_local = int(chunk.get('start_min') or 0)
+                end_min_local = int(chunk.get('end_min') or 0)
+                if end_min_local <= start_min_local:
+                    continue
+
+                result[op_id].setdefault(day_key, []).append({
+                    'id': int(issue_id),
+                    'batch_id': str(batch_id) if batch_id is not None else None,
+                    'date': day_key,
+                    'start': chunk.get('start_time') or _minutes_to_time(start_min_local),
+                    'end': chunk.get('end_time') or _minutes_to_time(end_min_local),
+                    'startMin': start_min_local,
+                    'endMin': end_min_local,
+                    'reason': str(reason or ''),
+                    'comment': str(comment or '')
+                })
+
+        for op_id, days_map in result.items():
+            for day_key, items in list(days_map.items()):
+                items_sorted = sorted(
+                    (items or []),
+                    key=lambda seg: (int(seg.get('startMin', 0)), int(seg.get('endMin', 0)), int(seg.get('id', 0)))
+                )
+                days_map[day_key] = items_sorted
+
+        return result
+
+    def _attach_technical_issue_segments_to_operators(self, cursor, operators_map, operator_ids, start_date_obj=None, end_date_obj=None):
+        timeline_map = self._load_technical_issue_segments_for_operators(
+            cursor=cursor,
+            operator_ids=operator_ids,
+            start_date_obj=start_date_obj,
+            end_date_obj=end_date_obj
+        )
+        for op_id in (operator_ids or []):
+            target = operators_map.get(op_id)
+            if target is None:
+                continue
+            target['technicalIssueTimelineDays'] = timeline_map.get(int(op_id), {})
+
     def _sync_user_statuses_from_schedule_periods_tx(self, cursor, operator_ids=None, as_of_date=None):
         """
         Синхронизировать users.status по активным периодным статусам на дату.
@@ -7777,7 +8664,14 @@ class Database:
                 as_of_date=as_of_date
             )
 
-    def get_operators_with_shifts(self, start_date=None, end_date=None, direction_name=None, include_imported_statuses=False):
+    def get_operators_with_shifts(
+        self,
+        start_date=None,
+        end_date=None,
+        direction_name=None,
+        include_imported_statuses=False,
+        include_technical_issues=False
+    ):
         """
         Получить всех операторов со сменами и выходными днями за период.
         Если direction_name задан — только операторы этого направления.
@@ -7828,7 +8722,8 @@ class Database:
                     'scheduleStatusPeriods': [],
                     'scheduleStatusDays': {},
                     'aggregatedScheduleFlagsDays': {},
-                    'importedStatusTimelineDays': {}
+                    'importedStatusTimelineDays': {},
+                    'technicalIssueTimelineDays': {}
                 }
 
             shifts_query = """
@@ -7927,10 +8822,25 @@ class Database:
                     start_date_obj=start_date_obj,
                     end_date_obj=end_date_obj
                 )
+            if include_technical_issues:
+                self._attach_technical_issue_segments_to_operators(
+                    cursor=cursor,
+                    operators_map=result_map,
+                    operator_ids=operator_ids,
+                    start_date_obj=start_date_obj,
+                    end_date_obj=end_date_obj
+                )
 
             return [result_map[row[0]] for row in operators]
 
-    def get_operator_with_shifts(self, operator_id, start_date=None, end_date=None, include_imported_statuses=False):
+    def get_operator_with_shifts(
+        self,
+        operator_id,
+        start_date=None,
+        end_date=None,
+        include_imported_statuses=False,
+        include_technical_issues=False
+    ):
         """
         Получить одного оператора с его сменами/перерывами/выходными за период.
         Возвращает структуру, совместимую с get_operators_with_shifts()[i].
@@ -7968,7 +8878,8 @@ class Database:
                 'scheduleStatusPeriods': [],
                 'scheduleStatusDays': {},
                 'aggregatedScheduleFlagsDays': {},
-                'importedStatusTimelineDays': {}
+                'importedStatusTimelineDays': {},
+                'technicalIssueTimelineDays': {}
             }
 
             shifts_query = """
@@ -8053,6 +8964,14 @@ class Database:
             )
             if include_imported_statuses:
                 self._attach_imported_status_segments_to_operators(
+                    cursor=cursor,
+                    operators_map={operator_id: result},
+                    operator_ids=[operator_id],
+                    start_date_obj=start_date_obj,
+                    end_date_obj=end_date_obj
+                )
+            if include_technical_issues:
+                self._attach_technical_issue_segments_to_operators(
                     cursor=cursor,
                     operators_map={operator_id: result},
                     operator_ids=[operator_id],

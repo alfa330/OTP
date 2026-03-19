@@ -7,6 +7,7 @@ import ToastContainer from './components/common/ToastContainer';
 import SalaryCalculationResult from './components/salary/SalaryCalculationResult';
 import TasksView from './components/tasks/TasksView';
 import SurveysView from './components/surveys/SurveysView';
+import TechnicalIssuesView from './components/technical/TechnicalIssuesView';
 import FaIcon from './components/common/FaIcon';
 import AuthEntranceSplash from './components/common/AuthEntranceSplash';
 
@@ -355,6 +356,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         { key: "calls", label: "Звонки", unit: "" },
         { key: "efficiency", label: "Эффективность", unit: "ч" },
         { key: "trainings", label: "Тренинги", unit: "" }, // новый таб
+        { key: "technical_issues", label: "Тех причины", unit: "ч" },
         { key: "fines", label: "Штрафы", unit: "₸" }
         ];
 
@@ -378,6 +380,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         return Number((diff / 60).toFixed(2));
         }
 
+        function computeTechnicalIssueDurationHours(item) {
+        if (item?.duration_minutes != null) return Number((Number(item.duration_minutes || 0) / 60).toFixed(2));
+        if (item?.duration_hours != null) return Number(Number(item.duration_hours || 0).toFixed(2));
+        const s = parseTimeToMinutes(item?.start_time);
+        const e = parseTimeToMinutes(item?.end_time);
+        if (s == null || e == null) return 0;
+        let diff = e - s;
+        if (diff < 0) diff += 24 * 60;
+        return Number((diff / 60).toFixed(2));
+        }
+
         const HoursAccountingView = ({ user, svList, onUploaded, showToast }) => {
         const [month, setMonth] = useState(() => {
             const d = new Date();
@@ -386,6 +399,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         const [operators, setOperators] = useState([]);
         const [trainingsMap, setTrainingsMap] = useState({}); // { operatorId: { dayNum: [trainings...] } }
+        const [technicalIssuesMap, setTechnicalIssuesMap] = useState({}); // { operatorId: { dayNum: [technicalIssues...] } }
         const [trainingModalState, setTrainingModalState] = useState({ open: false, operatorId: null, date: null, training: null });
         const [isTrainingActionLoading, setIsTrainingActionLoading] = useState(false);
         const [selectedSvId, setSelectedSvId] = useState(user?.role === 'sv' ? user.id : '');
@@ -460,7 +474,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
         }
 
-        // ---- fetch daily hours + trainings ----
+        // ---- fetch daily hours + trainings + technical issues ----
         async function fetchDailyHoursAndTrainings() {
             if (!user || !selectedSvId) return;
             setIsLoading(true);
@@ -485,12 +499,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             const url = `${API_BASE_URL}/api/sv/daily_hours?${hoursParams.toString()}`;
             const trainingsUrl = `${API_BASE_URL}/api/trainings?${trainingsParams.toString()}`;
+            const technicalParams = new URLSearchParams();
+            technicalParams.append('date_from', `${month}-01`);
+            technicalParams.append('date_to', `${month}-${String(daysInMonth).padStart(2, '0')}`);
+            technicalParams.append('limit', '5000');
+            const technicalIssuesUrl = `${API_BASE_URL}/api/technical_issues?${technicalParams.toString()}`;
 
-            const [hoursResp, trainingsResp] = await Promise.all([
+            const [hoursResp, trainingsResp, technicalIssuesResp] = await Promise.all([
                 axios.get(url, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } }),
-                axios.get(trainingsUrl, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } })
+                axios.get(trainingsUrl, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } }),
+                axios.get(technicalIssuesUrl, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } })
             ]);
 
+            const loadedOperators = (hoursResp.data && hoursResp.data.status === 'success' && Array.isArray(hoursResp.data.operators))
+                ? hoursResp.data.operators
+                : [];
             if (hoursResp.data && hoursResp.data.status === 'success' && Array.isArray(hoursResp.data.operators)) {
                 setOperators(hoursResp.data.operators);
             } else {
@@ -514,11 +537,47 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
             setTrainingsMap(tmap);
 
+            const visibleOperatorIds = new Set(
+                (loadedOperators || [])
+                    .map(op => Number(op?.operator_id))
+                    .filter(id => Number.isFinite(id) && id > 0)
+            );
+            const technicalItems = Array.isArray(technicalIssuesResp?.data?.items)
+                ? technicalIssuesResp.data.items
+                : [];
+            const techMap = {};
+            for (const item of technicalItems) {
+                const op = Number(item?.operator_id);
+                if (!Number.isFinite(op) || op <= 0) continue;
+                if (visibleOperatorIds.size > 0 && !visibleOperatorIds.has(op)) continue;
+
+                let dayNum;
+                try {
+                dayNum = new Date(`${item.date || ''}T00:00:00`).getDate();
+                } catch (e) {
+                dayNum = parseInt(String(item.date || '').slice(-2), 10);
+                }
+                if (!Number.isFinite(dayNum) || dayNum <= 0) continue;
+
+                if (!techMap[op]) techMap[op] = {};
+                if (!techMap[op][dayNum]) techMap[op][dayNum] = [];
+                techMap[op][dayNum].push(item);
+            }
+            Object.keys(techMap).forEach(opId => {
+                Object.keys(techMap[opId]).forEach(dayKey => {
+                techMap[opId][dayKey] = (techMap[opId][dayKey] || []).sort((a, b) =>
+                    String(a?.start_time || '').localeCompare(String(b?.start_time || ''))
+                );
+                });
+            });
+            setTechnicalIssuesMap(techMap);
+
             } catch (err) {
             console.error('fetchDailyHoursAndTrainings error', err);
             fallbackToast('Ошибка загрузки данных', 'error');
             setOperators([]);
             setTrainingsMap({});
+            setTechnicalIssuesMap({});
             } finally {
             setIsLoading(false);
             }
@@ -1011,6 +1070,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             return Math.max(1, max);
         }, [trainingsMap]);
 
+        const maxTechnicalIssuesHours = useMemo(() => {
+            let max = 0;
+            for (const opId of Object.keys(technicalIssuesMap)) {
+            for (const dayKey of Object.keys(technicalIssuesMap[opId] || {})) {
+                const sum = (technicalIssuesMap[opId][dayKey] || []).reduce((acc, item) => acc + computeTechnicalIssueDurationHours(item), 0);
+                if (sum > max) max = sum;
+            }
+            }
+            return Math.max(1, max);
+        }, [technicalIssuesMap]);
+
         // Direction options derived from loaded operators (for filtering)
         const directionOptions = useMemo(() => {
             const s = new Set();
@@ -1235,14 +1305,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         // ====== FOOTER AGGREGATES ======
         const footerTotals = useMemo(() => {
-            let sumDisplayedTotal = 0; // regular + counted training
-            let sumRegular = 0; // без тренинга
+            let sumDisplayedTotal = 0; // regular + counted training + technical issues
+            let sumRegular = 0; // база без тренинга/техсбоев
             let sumProd = 0; // displayedTotal - norm
             let sumNorm = 0;
             let sumEff = 0; // sum of efficiency hours
             let occValues = [];
             let trainingsTotal = 0;
             let trainingsCounted = 0;
+            let technicalIssuesTotal = 0;
             let sumFines = 0;
 
             for (const op of filteredOperators) {
@@ -1263,7 +1334,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             }
 
-            const displayedTotal = regular + totalHoursCounted;
+            const technicalByDay = technicalIssuesMap[op.operator_id] || {};
+            let technicalHoursTotal = 0;
+            for (const dKey of Object.keys(technicalByDay)) {
+                const arr = technicalByDay[dKey] || [];
+                for (const item of arr) {
+                technicalHoursTotal += computeTechnicalIssueDurationHours(item) || 0;
+                }
+            }
+
+            const displayedTotal = regular + totalHoursCounted + technicalHoursTotal;
             const prodDiff = displayedTotal - norm;
 
             sumDisplayedTotal += displayedTotal;
@@ -1273,6 +1353,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             sumEff += effTotal;
             trainingsTotal += totalHoursAll;
             trainingsCounted += totalHoursCounted;
+            technicalIssuesTotal += technicalHoursTotal;
 
             // compute fines per operator (support both array of fines and legacy fine_amount)
             if (op.daily) {
@@ -1302,9 +1383,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             sumFines,
             avgOcc,
             trainingsTotal,
-            trainingsCounted
+            trainingsCounted,
+            technicalIssuesTotal
             };
-        }, [filteredOperators, trainingsMap]);
+        }, [filteredOperators, trainingsMap, technicalIssuesMap]);
 
         // render cell with trainings marker and trainings-tab rendering
         function renderCellByMetricWithStyleAndMarker(op, day, metricKey) {
@@ -1322,6 +1404,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             })();
 
             const trainings = (trainingsMap[op.operator_id] && trainingsMap[op.operator_id][day]) || [];
+            const technicalIssues = (technicalIssuesMap[op.operator_id] && technicalIssuesMap[op.operator_id][day]) || [];
             const fines = (op.daily && op.daily[dayKey] && Array.isArray(op.daily[dayKey].fines)) ? op.daily[dayKey].fines : [];
 
             const fineIcons = (fines && fines.length > 0) ? (
@@ -1341,6 +1424,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 <div className="relative w-full h-8 rounded-md flex items-center justify-center bg-gray-400 text-white">
                     <span>—</span>
                     {trainings.length > 0 && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
+                    {technicalIssues.length > 0 && <div className="absolute top-1 right-4 w-2 h-2 rounded-full bg-violet-500 ring-1 ring-violet-700" title={`Тех причины: ${technicalIssues.length}`}></div>}
                     {fines.length > 0 && <div className="absolute top-4 right-1 w-2 h-2 rounded-full bg-red-400 ring-1 ring-red-500" title={`Штрафы: ${fines.length}`}></div>}
                 </div>
                 );
@@ -1350,6 +1434,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 <div className="relative w-full h-8 rounded-md flex items-center justify-center bg-gray-200 text-gray-600">
                     <span>—</span>
                     {trainings.length > 0 && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
+                    {technicalIssues.length > 0 && <div className="absolute top-1 right-4 w-2 h-2 rounded-full bg-violet-500 ring-1 ring-violet-700" title={`Тех причины: ${technicalIssues.length}`}></div>}
                     {fines.length > 0 && <div className="absolute top-4 right-1 w-2 h-2 rounded-full bg-red-400 ring-1 ring-red-500" title={`Штрафы: ${fines.length}`}></div>}
                 </div>
                 );
@@ -1359,6 +1444,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 <div className="relative w-full h-8 rounded-md flex items-center justify-center bg-gray-100 text-gray-600">
                     <span>—</span>
                     {trainings.length > 0 && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
+                    {technicalIssues.length > 0 && <div className="absolute top-1 right-4 w-2 h-2 rounded-full bg-violet-500 ring-1 ring-violet-700" title={`Тех причины: ${technicalIssues.length}`}></div>}
                     {fines.length > 0 && <div className="absolute top-4 right-1 w-2 h-2 rounded-full bg-red-400 ring-1 ring-red-500" title={`Штрафы: ${fines.length}`}></div>}
                 </div>
                 );
@@ -1374,6 +1460,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 <div className={`relative w-full h-8 rounded-md flex items-center justify-center ${textClass}`} style={{ backgroundColor: bg }}>
                 <span className="text-xs font-medium truncate" style={{maxWidth: '110px', display: 'inline-block'}} title={display}>{display}</span>
                 {trainings.length > 0 && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
+                {technicalIssues.length > 0 && <div className="absolute top-1 right-4 w-2 h-2 rounded-full bg-violet-500 ring-1 ring-violet-700" title={`Тех причины: ${technicalIssues.length}`}></div>}
                 {fines.length > 0 && <div className="absolute top-4 right-1 w-2 h-2 rounded-full bg-red-400 ring-1 ring-red-500" title={`Штрафы: ${fines.length}`}></div>}
                 </div>
             );
@@ -1410,6 +1497,29 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
 
             return <div className="relative flex items-center justify-center gap-1">{parts}</div>;
+            }
+
+            if (selectedTab === 'technical_issues') {
+            if (!technicalIssues || technicalIssues.length === 0) return <div className="text-sm text-gray-400">—</div>;
+
+            const totalTechHours = technicalIssues.reduce((acc, item) => acc + computeTechnicalIssueDurationHours(item), 0);
+            const ratio = Math.min(1, totalTechHours / maxTechnicalIssuesHours);
+            const alpha = 0.18 + 0.77 * ratio;
+            const title = technicalIssues
+                .map(item => `${item.start_time || '—'} — ${item.end_time || '—'} • ${item.reason || 'Тех. причина'}`)
+                .join('\n');
+
+            return (
+                <div className="relative flex items-center justify-center">
+                <div
+                    className="inline-flex items-center justify-center px-2 py-1 rounded-md text-sm font-medium"
+                    style={{ backgroundColor: `rgba(139,92,246,${alpha})` }}
+                    title={title}
+                >
+                    <span className={ratio > 0.5 ? 'text-white' : 'text-gray-900'}>{totalTechHours.toFixed(2)}</span>
+                </div>
+                </div>
+            );
             }
 
             if (selectedTab === 'fines') {
@@ -1454,6 +1564,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         function getTrainingsFor(opId, day) {
             return (trainingsMap[opId] && trainingsMap[opId][day]) ? trainingsMap[opId][day] : [];
+        }
+
+        function getTechnicalIssuesFor(opId, day) {
+            return (technicalIssuesMap[opId] && technicalIssuesMap[opId][day]) ? technicalIssuesMap[opId][day] : [];
         }
 
         function getAllTrainingsForDay(day) {
@@ -1781,7 +1895,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     {selectedTab === 'work_time' && (
                     <>
                         <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Итого часов</div>
-                        <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">С выч. тренинга</div>
+                        <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">База часов</div>
                         <div className="w-32 p-2 text-center border-l bg-gray-50 text-sm font-medium">Вып. нормы (%)</div>
                         <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Выработка</div>
                     </>
@@ -1802,6 +1916,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         <div className="w-32 p-2 text-center border-l bg-gray-50 text-sm font-medium">Засчитано (ч)</div>
                         <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Не засчитано (ч)</div>
                         */}
+                    </>
+                    )}
+                    {selectedTab === 'technical_issues' && (
+                    <>
+                        <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Тех. сбои (ч)</div>
                     </>
                     )}
                     {selectedTab === 'fines' && (
@@ -1831,6 +1950,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             let totalHoursAll = 0;
                             let totalHoursCounted = 0;
                             let totalHoursNotCounted = 0;
+                            let totalTechnicalIssuesHours = 0;
 
                             const byDay = trainingsMap[op.operator_id] || {};
                             for (const dKey of Object.keys(byDay)) {
@@ -1842,8 +1962,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 else totalHoursNotCounted += h;
                             }
                             }
+                            const technicalByDay = technicalIssuesMap[op.operator_id] || {};
+                            for (const dKey of Object.keys(technicalByDay)) {
+                            const arr = technicalByDay[dKey] || [];
+                            for (const item of arr) {
+                                totalTechnicalIssuesHours += computeTechnicalIssueDurationHours(item) || 0;
+                            }
+                            }
 
-                            const displayedTotal = regular + totalHoursCounted;
+                            const displayedTotal = regular + totalHoursCounted + totalTechnicalIssuesHours;
                             const prodDiff = displayedTotal - norm;
 
                             const callsTotal = Number(aggr.total_calls || 0);
@@ -1947,6 +2074,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <div className="w-36 p-2 text-sm text-center border-l">{totalHoursAll.toFixed(2)}</div>
                                 </>
                                 )}
+                                {selectedTab === 'technical_issues' && (
+                                <>
+                                    <div className="w-36 p-2 text-sm text-center border-l">{totalTechnicalIssuesHours.toFixed(2)}</div>
+                                </>
+                                )}
                                 {selectedTab === 'fines' && (
                                 <div className="w-44 p-2 text-sm text-center border-l">
                                     {finesTotal ? (
@@ -1978,7 +2110,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         <>
                             <div className="w-36 p-2 text-sm text-center border-l">{footerTotals.sumDisplayedTotal.toFixed(2)}</div>
                             <div className="w-36 p-2 text-sm text-center border-l">{footerTotals.sumRegular.toFixed(2)}</div>
-                            <div className="w-32 p-2 text-sm text-center border-l">{footerTotals.sumNorm > 0 ? `${((footerTotals.sumRegular / footerTotals.sumNorm) * 100).toFixed(1)}%` : '—'}</div>
+                            <div className="w-32 p-2 text-sm text-center border-l">{footerTotals.sumNorm > 0 ? `${((footerTotals.sumDisplayedTotal / footerTotals.sumNorm) * 100).toFixed(1)}%` : '—'}</div>
                             <div className="w-36 p-2 text-sm text-center border-l">{footerTotals.sumProd.toFixed(2)}</div>
                         </>
                         )}
@@ -2001,6 +2133,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             <div className="w-32 p-2 text-sm text-center border-l">{footerTotals.trainingsCounted.toFixed(2)}</div>
                             <div className="w-36 p-2 text-sm text-center border-l">{(footerTotals.trainingsTotal - footerTotals.trainingsCounted).toFixed(2)}</div>
                             */}
+                        </>
+                        )}
+                        {selectedTab === 'technical_issues' && (
+                        <>
+                            <div className="w-36 p-2 text-sm text-center border-l">{footerTotals.technicalIssuesTotal.toFixed(2)}</div>
                         </>
                         )}
                         {selectedTab === 'fines' && (
@@ -2260,6 +2397,38 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         )}
                         </div>
                     )}
+
+                    <div className="mt-6">
+                    <div className="flex items-center justify-between mb-3">
+                        <h4 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
+                        <FaIcon className="fas fa-tools" aria-hidden="true" /> Технические причины
+                        </h4>
+                    </div>
+
+                    {getTechnicalIssuesFor(selectedCell.operator.operator_id, selectedCell.day).length === 0 ? (
+                        <div className="rounded-md border border-dashed p-4 text-sm text-gray-500">Технических причин нет.</div>
+                    ) : (
+                        <div className="space-y-2">
+                        {getTechnicalIssuesFor(selectedCell.operator.operator_id, selectedCell.day).map((item, idx) => {
+                            const dur = computeTechnicalIssueDurationHours(item);
+                            return (
+                            <div key={`${item.id || 'tech'}-${idx}`} className="p-3 rounded-lg border border-violet-200 bg-violet-50/60 flex flex-col gap-2">
+                                <div className="flex items-center justify-between gap-2">
+                                <div className="text-sm font-medium flex items-center gap-3">
+                                    <FaIcon className="fas fa-clock" aria-hidden="true" />
+                                    <span>{item.start_time || '—'} — {item.end_time || '—'}</span>
+                                    <span className="text-xs text-gray-600">· {dur.toFixed(2)} ч</span>
+                                </div>
+                                <div className="text-xs text-gray-500">by {item.created_by_name || '—'}</div>
+                                </div>
+                                <div className="text-sm text-gray-700">{item.reason || '—'}</div>
+                                {item.comment && <div className="text-xs text-gray-600">{item.comment}</div>}
+                            </div>
+                            );
+                        })}
+                        </div>
+                    )}
+                    </div>
 
                     <div className="mt-6">
                     {/* Header */}
@@ -5640,6 +5809,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             dayKey,
                             (Array.isArray(list) ? list : []).map(seg => ({ ...(seg || {}) }))
                         ])
+                    ) : {},
+                    technicalIssueTimelineDays: next.technicalIssueTimelineDays ? Object.fromEntries(
+                        Object.entries(next.technicalIssueTimelineDays).map(([dayKey, list]) => [
+                            dayKey,
+                            (Array.isArray(list) ? list : []).map(seg => ({ ...(seg || {}) }))
+                        ])
                     ) : {}
                 };
             }
@@ -5653,7 +5828,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     scheduleStatusPeriods: [],
                     scheduleStatusDays: {},
                     aggregatedScheduleFlagsDays: {},
-                    importedStatusTimelineDays: {}
+                    importedStatusTimelineDays: {},
+                    technicalIssueTimelineDays: {}
                 };
             }
 
@@ -5669,7 +5845,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         scheduleStatusPeriods: existing.scheduleStatusPeriods ?? base.scheduleStatusPeriods,
                         scheduleStatusDays: existing.scheduleStatusDays ?? base.scheduleStatusDays,
                         aggregatedScheduleFlagsDays: existing.aggregatedScheduleFlagsDays ?? base.aggregatedScheduleFlagsDays,
-                        importedStatusTimelineDays: existing.importedStatusTimelineDays ?? base.importedStatusTimelineDays
+                        importedStatusTimelineDays: existing.importedStatusTimelineDays ?? base.importedStatusTimelineDays,
+                        technicalIssueTimelineDays: existing.technicalIssueTimelineDays ?? base.technicalIssueTimelineDays
                     });
                 });
 
@@ -6193,6 +6370,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             ...(op?.importedStatusTimelineDays || {}),
                             ...(serverOp?.importedStatusTimelineDays || {})
                         };
+                        const mergedTechnicalIssueTimelineDays = {
+                            ...(op?.technicalIssueTimelineDays || {}),
+                            ...(serverOp?.technicalIssueTimelineDays || {})
+                        };
                         const periodMap = new Map();
                         (Array.isArray(op?.scheduleStatusPeriods) ? op.scheduleStatusPeriods : []).forEach((period, idx) => {
                             periodMap.set(plannerStatusPeriodMergeKey(period, idx), period);
@@ -6212,7 +6393,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             scheduleStatusPeriods: mergedPeriods,
                             scheduleStatusDays: mergedStatusDays,
                             aggregatedScheduleFlagsDays: mergedAggregatedScheduleFlagsDays,
-                            importedStatusTimelineDays: mergedImportedStatusTimelineDays
+                            importedStatusTimelineDays: mergedImportedStatusTimelineDays,
+                            technicalIssueTimelineDays: mergedTechnicalIssueTimelineDays
                         });
                     });
                     const seen = new Set(merged.map(op => plannerOperatorIdKey(op?.id)));
@@ -6257,6 +6439,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         end_date: todayDateStr(requestEnd)
                     });
                     qs.set('include_imported_statuses', '0');
+                    qs.set('include_technical_issues', '1');
                     const response = await fetch(`${API_BASE_URL}/api/work_schedules/operators?${qs.toString()}`, {
                         credentials: 'include',
                         headers: withAccessTokenHeader(),
@@ -6302,7 +6485,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const qs = new URLSearchParams({
                         start_date: start,
                         end_date: end,
-                        include_imported_statuses: '1'
+                        include_imported_statuses: '1',
+                        include_technical_issues: '1'
                     });
                     const response = await fetch(`${API_BASE_URL}/api/work_schedules/operators?${qs.toString()}`, {
                         credentials: 'include',
@@ -7084,6 +7268,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         setMyScheduleLoading(true);
                         setMyScheduleError('');
                         const qs = new URLSearchParams({ start_date: startDate, end_date: endDate });
+                        qs.set('include_technical_issues', '1');
                         const response = await fetch(`${API_BASE_URL}/api/work_schedules/my?${qs.toString()}`, {
                             credentials: 'include',
                             headers: withAccessTokenHeader()
@@ -7121,6 +7306,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const loadMyLiveSchedules = async () => {
                     try {
                         const qs = new URLSearchParams({ start_date: liveStart, end_date: liveEnd });
+                        qs.set('include_technical_issues', '1');
                         const response = await fetch(`${API_BASE_URL}/api/work_schedules/my?${qs.toString()}`, {
                             credentials: 'include',
                             headers: withAccessTokenHeader()
@@ -7169,7 +7355,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         daysOff: operatorSnapshot.daysOff || [],
                         scheduleStatusPeriods: operatorSnapshot.scheduleStatusPeriods || [],
                         scheduleStatusDays: operatorSnapshot.scheduleStatusDays || {},
-                        aggregatedScheduleFlagsDays: operatorSnapshot.aggregatedScheduleFlagsDays || {}
+                        aggregatedScheduleFlagsDays: operatorSnapshot.aggregatedScheduleFlagsDays || {},
+                        technicalIssueTimelineDays: operatorSnapshot.technicalIssueTimelineDays || op.technicalIssueTimelineDays || {}
                     });
                 }));
             };
@@ -9083,6 +9270,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return (visibleRange || []).map(dateStr => {
                     const scheduleStatus = getPlannerScheduleStatusForDate(myScheduleData, dateStr);
                     const shifts = Array.isArray(myScheduleData?.shifts?.[dateStr]) ? myScheduleData.shifts[dateStr] : [];
+                    const technicalIssues = Array.isArray(myScheduleData?.technicalIssueTimelineDays?.[dateStr])
+                        ? myScheduleData.technicalIssueTimelineDays[dateStr]
+                        : [];
                     const normalizedShifts = shifts.map(seg => {
                         const sMin = timeToMinutes(seg.start);
                         let eMin = timeToMinutes(seg.end);
@@ -9097,7 +9287,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         date: dateStr,
                         isDayOff: daysOffSet.has(dateStr),
                         shifts: normalizedShifts,
-                        scheduleStatus
+                        scheduleStatus,
+                        technicalIssues
                     };
                 });
             }, [myScheduleData, visibleRange]);
@@ -9145,7 +9336,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (!myScheduleData) return null;
                 return {
                     ...myScheduleData,
-                    shifts: myScheduleData.shifts || {}
+                    shifts: myScheduleData.shifts || {},
+                    technicalIssueTimelineDays: myScheduleData.technicalIssueTimelineDays || {}
                 };
             }, [myScheduleData]);
             const myLiveTimelineOperator = useMemo(() => {
@@ -9202,6 +9394,30 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         };
                     });
                 }).sort((a, b) => (a.start - b.start) || (a.end - b.end));
+            }, [myCurrentDayCard]);
+            const myCurrentDayTechnicalIssues = useMemo(() => {
+                const list = Array.isArray(myCurrentDayCard?.technicalIssues) ? myCurrentDayCard.technicalIssues : [];
+                return list
+                    .map((seg, idx) => {
+                        const startRaw = Number(seg?.startMin ?? seg?.start_min ?? seg?.start ?? 0);
+                        const endRaw = Number(seg?.endMin ?? seg?.end_min ?? seg?.end ?? 0);
+                        if (!Number.isFinite(startRaw) || !Number.isFinite(endRaw)) return null;
+                        const startMin = Math.max(0, Math.min(1440, Math.round(startRaw)));
+                        const endMin = Math.max(0, Math.min(1440, Math.round(endRaw)));
+                        if (endMin <= startMin) return null;
+                        const reasonText = String(seg?.reason || 'Тех. сбой').trim() || 'Тех. сбой';
+                        const commentText = String(seg?.comment || '').trim();
+                        return {
+                            id: seg?.id ?? `my-tech-${idx}`,
+                            startMin,
+                            endMin,
+                            reason: reasonText,
+                            comment: commentText,
+                            title: `${reasonText} • ${minutesToTime(startMin)} — ${minutesToTime(endMin)}${commentText ? `\n${commentText}` : ''}`
+                        };
+                    })
+                    .filter(Boolean)
+                    .sort((a, b) => (a.startMin - b.startMin) || (a.endMin - b.endMin));
             }, [myCurrentDayCard]);
             const formatDateRuShort = (value) => {
                 let d = null;
@@ -10898,6 +11114,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             <div className="flex items-center gap-2 text-xs">
                                                                 {myCurrentDayCard.isDayOff && <span className="px-2 py-0.5 rounded-full bg-sky-100 text-sky-700 font-semibold">Выходной</span>}
                                                                 <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-700">{myTimelineParts.length} фрагм.</span>
+                                                                {myCurrentDayTechnicalIssues.length > 0 && (
+                                                                    <span className="px-2 py-0.5 rounded bg-violet-100 text-violet-800 font-semibold">{myCurrentDayTechnicalIssues.length} техсбой</span>
+                                                                )}
                                                             </div>
                                                         </div>
                                                         <div className="p-4">
@@ -10910,6 +11129,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 </span>
                                                                 <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-amber-200 bg-amber-50 text-amber-700">
                                                                     <span className="w-2 h-2 rounded-sm bg-amber-300 border border-amber-500/70"></span> Перерыв
+                                                                </span>
+                                                                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-violet-200 bg-violet-50 text-violet-700">
+                                                                    <span className="w-2 h-2 rounded-sm bg-violet-500 border border-violet-700/70"></span> Тех. сбой
                                                                 </span>
                                                             </div>
                                                             <div className="overflow-x-auto">
@@ -10942,6 +11164,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         <div className="absolute inset-0 flex">
                                                                             {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0 border-slate-200/80" />))}
                                                                         </div>
+                                                                        {myCurrentDayTechnicalIssues.map((seg, idx) => (
+                                                                            <div
+                                                                                key={`my-tech-issue-${seg.id ?? idx}`}
+                                                                                className="absolute bottom-0 h-1.5 rounded-sm z-40 bg-violet-500/85 border border-violet-700/80"
+                                                                                style={{
+                                                                                    left: `${computeLeftPercent(seg.startMin)}%`,
+                                                                                    width: `${((seg.endMin - seg.startMin) / minutesInDay) * 100}%`
+                                                                                }}
+                                                                                title={seg.title}
+                                                                            />
+                                                                        ))}
                                                                         {myCurrentDayScheduleStatus && myTimelineParts.length === 0 && (
                                                                             <div className={`absolute inset-0 flex items-center justify-center text-sm font-semibold ${myCurrentDayScheduleStatusTone?.text || 'text-slate-700'}`}>
                                                                                 {myCurrentDayScheduleStatus.label || 'Статус'}
@@ -12841,6 +13074,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             const parts = getShiftPartsForDate(op, d);
                                             const aggregatedFlagsForCell = getPlannerAggregatedFlagsForDate(op, d);
                                             const importedStatusBarsForCell = importedStatusTimelineByOperatorDateKey.get(`${plannerStatusNormalizeOperatorName(op?.name)}|${d}`) || [];
+                                            const technicalIssueBarsForCell = (Array.isArray(op?.technicalIssueTimelineDays?.[d]) ? op.technicalIssueTimelineDays[d] : [])
+                                                .map((seg, idx) => {
+                                                    const startRaw = Number(seg?.startMin ?? seg?.start_min ?? seg?.start ?? 0);
+                                                    const endRaw = Number(seg?.endMin ?? seg?.end_min ?? seg?.end ?? 0);
+                                                    if (!Number.isFinite(startRaw) || !Number.isFinite(endRaw)) return null;
+                                                    const startMin = Math.max(0, Math.min(1440, Math.round(startRaw)));
+                                                    const endMin = Math.max(0, Math.min(1440, Math.round(endRaw)));
+                                                    if (endMin <= startMin) return null;
+                                                    const reasonText = String(seg?.reason || 'Тех. сбой').trim() || 'Тех. сбой';
+                                                    const commentText = String(seg?.comment || '').trim();
+                                                    return {
+                                                        id: seg?.id ?? `tech-${idx}`,
+                                                        startMin,
+                                                        endMin,
+                                                        reason: reasonText,
+                                                        comment: commentText,
+                                                        title: `${reasonText} • ${minutesToTime(startMin)} — ${minutesToTime(endMin)}${commentText ? `\n${commentText}` : ''}`
+                                                    };
+                                                })
+                                                .filter(Boolean);
                                             const breakPartsForCell = parts
                                                 .flatMap(p => getBreakPartsForPart(op, p, d))
                                                 .map(b => ({ start: Number(b?.start || 0), end: Number(b?.end || 0) }))
@@ -13035,6 +13288,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         <div className="absolute inset-0 flex pointer-events-none">
                                                                             {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0 border-slate-100" />))}
                                                                         </div>
+                                                                        {technicalIssueBarsForCell.map((seg, segIdx) => (
+                                                                            <div
+                                                                                key={`special-tech-issue-${seg.id ?? segIdx}`}
+                                                                                className="absolute bottom-0 h-1.5 z-30 rounded-sm bg-violet-500/85 border border-violet-700/80"
+                                                                                style={{
+                                                                                    left: `${computeLeftPercent(seg.startMin)}%`,
+                                                                                    width: `${((seg.endMin - seg.startMin) / minutesInDay) * 100}%`
+                                                                                }}
+                                                                                title={seg.title}
+                                                                            />
+                                                                        ))}
                                                                         {parts.map((p, idx) => (
                                                                             <React.Fragment key={`special-part-${idx}`}>
                                                                                 <div
@@ -13166,6 +13430,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         <div className="absolute inset-0 flex">
                                                         {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0" />))}
                                                         </div>
+                                                        {technicalIssueBarsForCell.map((seg, segIdx) => (
+                                                            <div
+                                                                key={`tech-issue-${seg.id ?? segIdx}`}
+                                                                className="absolute bottom-0 h-1.5 rounded-sm z-40 bg-violet-500/85 border border-violet-700/80"
+                                                                style={{
+                                                                    left: `${computeLeftPercent(seg.startMin)}%`,
+                                                                    width: `${((seg.endMin - seg.startMin) / minutesInDay) * 100}%`
+                                                                }}
+                                                                title={seg.title}
+                                                            />
+                                                        ))}
                                                         {parts.map((p, idx) => (
                                                         <div key={idx}
                                                             className="absolute top-1/4 h-1/2 rounded text-xs overflow-hidden flex items-center justify-between"
@@ -21518,7 +21793,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             return "bg-green-700 text-white";
             };
 
-            const WorkHoursCalendar = ({ hoursData, selectedMonth, user, trainings = [] }) => {
+            const WorkHoursCalendar = ({ hoursData, selectedMonth, user, trainings = [], technicalIssuesByDay = null }) => {
                 const [selectedDay, setSelectedDay] = useState(null);
                 const [requestMessage, setRequestMessage] = useState('');
                 const [isSending, setIsSending] = useState(false);
@@ -21539,6 +21814,30 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                 const firstWeekday = (startDate.getDay() + 6) % 7; // 0 (Пн) - 6 (Вс)
                 const daysOfWeek = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
+
+                const parseHMToMinutes = (hm) => {
+                    if (!hm || typeof hm !== 'string') return null;
+                    const parts = hm.split(':');
+                    if (parts.length < 2) return null;
+                    const hh = parseInt(parts[0], 10);
+                    const mm = parseInt(parts[1], 10);
+                    if (Number.isNaN(hh) || Number.isNaN(mm)) return null;
+                    return hh * 60 + mm;
+                };
+
+                const computeTechnicalIssueDuration = (item) => {
+                    if (!item) return 0;
+                    const byMinutes = Number(item.duration_minutes ?? item.durationMinutes ?? null);
+                    if (Number.isFinite(byMinutes)) return Math.max(0, byMinutes) / 60;
+                    const byHours = Number(item.duration_hours ?? item.durationHours ?? null);
+                    if (Number.isFinite(byHours)) return Math.max(0, byHours);
+                    const s = parseHMToMinutes(item.start_time ?? item.startTime);
+                    const e = parseHMToMinutes(item.end_time ?? item.endTime);
+                    if (s == null || e == null) return 0;
+                    let diff = e - s;
+                    if (diff < 0) diff += 24 * 60;
+                    return diff / 60;
+                };
 
                 // --- Нормализуем входные daily данные в удобную мапу вида { "1": {...}, "2": {...} } ---
                 const dailyMap = React.useMemo(() => {
@@ -21588,6 +21887,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return {};
                 }, [hoursData]);
 
+                const normalizedTechnicalIssuesByDay = React.useMemo(() => {
+                    if (technicalIssuesByDay && typeof technicalIssuesByDay === 'object' && !Array.isArray(technicalIssuesByDay)) {
+                        return technicalIssuesByDay;
+                    }
+                    if (hoursData?.technical_issues_by_day && typeof hoursData.technical_issues_by_day === 'object' && !Array.isArray(hoursData.technical_issues_by_day)) {
+                        return hoursData.technical_issues_by_day;
+                    }
+                    return {};
+                }, [hoursData, technicalIssuesByDay]);
+
                 const cells = [];
                 for (let i = 0; i < firstWeekday; i++) cells.push(null);
                 for (let day = 1; day <= endDate.getDate(); day++) {
@@ -21629,9 +21938,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                     // проверяем тренинги
                     const hasTraining = trainings.some(t => t.date === dateStr);
+                    const technicalIssuesForDay = Array.isArray(normalizedTechnicalIssuesByDay[dayKey]) ? normalizedTechnicalIssuesByDay[dayKey] : [];
+                    const hasTechnicalIssues = technicalIssuesForDay.length > 0;
 
                     const hasFines = Array.isArray(dayData?.fines) && dayData.fines.length > 0;
-                    cells.push({ day, dateStr, hours, dayData, isPastDayWithZero, isToday, hasTraining, hasFines });
+                    cells.push({
+                        day,
+                        dateStr,
+                        hours,
+                        dayData,
+                        isPastDayWithZero,
+                        isToday,
+                        hasTraining,
+                        hasFines,
+                        hasTechnicalIssues,
+                        technicalIssues: technicalIssuesForDay,
+                    });
                 }
 
                 const handleDayClick = (cell) => {
@@ -21755,6 +22077,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                             {/* 🔶 Маркер тренинга */}
                             {cell.hasTraining && <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 shadow" />}
+                            {/* 🟣 Маркер техсбоя */}
+                            {cell.hasTechnicalIssues && <span className="absolute top-1 right-7 w-2 h-2 rounded-full bg-violet-500 shadow" />}
                             {/* 🔴 Маркер штрафов */}
                             {cell.hasFines && <span className="absolute top-1 right-4 w-2 h-2 rounded-full bg-red-400 shadow" />}
 
@@ -21791,6 +22115,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         {/* 🔶 Маркер тренинга */}
                         <span className="inline-flex items-center gap-1">
                             <span className="inline-block w-2 h-2 rounded-full bg-yellow-400" /> Тренинг
+                        </span>
+                        <span className="inline-flex items-center gap-1">
+                            <span className="inline-block w-2 h-2 rounded-full bg-violet-500" /> Тех. сбой
                         </span>
                         {/* 🔴 Маркер штрафа */}
                         <span className="inline-flex items-center gap-1">
@@ -22035,6 +22362,52 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     </div>
                                                 )}
                                                 </div>
+                                            </div>
+                                            </div>
+                                        </div>
+                                        );
+                                    })}
+                                    </div>
+                                </div>
+                                );
+                            })()}
+
+                            {(() => {
+                                const technicalIssuesOnDay = Array.isArray(selectedDay?.technicalIssues) ? selectedDay.technicalIssues : [];
+                                if (technicalIssuesOnDay.length === 0) return null;
+                                const totalTechnicalHours = technicalIssuesOnDay.reduce((acc, item) => acc + computeTechnicalIssueDuration(item), 0);
+
+                                return (
+                                <div className="mb-4">
+                                    <div className="flex items-center justify-between mb-2">
+                                    <h4 className="text-md font-semibold text-gray-800">Технические причины</h4>
+                                    <div className="text-sm text-gray-600">
+                                        Сумма: <span className="font-medium">{Number(totalTechnicalHours || 0).toFixed(2)} ч</span>
+                                    </div>
+                                    </div>
+
+                                    <div className="space-y-2 max-h-56 overflow-y-auto pr-2">
+                                    {technicalIssuesOnDay.map((item, idx) => {
+                                        const duration = computeTechnicalIssueDuration(item);
+                                        const start = item.start_time || item.startTime || '—';
+                                        const end = item.end_time || item.endTime || '—';
+                                        return (
+                                        <div key={`tech-day-${item.id || idx}`} className="p-3 bg-violet-50 border-l-4 border-violet-400 rounded-md">
+                                            <div className="flex items-start justify-between">
+                                            <div className="flex-1 min-w-0">
+                                                <p className="text-sm text-gray-800">
+                                                <span className="font-semibold">Время:</span> {start} — {end}
+                                                </p>
+                                                <p className="text-sm text-gray-800">
+                                                <span className="font-semibold">Причина:</span> {item.reason || '—'}
+                                                </p>
+                                                {item.comment && <p className="text-sm text-gray-600 italic">"{item.comment}"</p>}
+                                                <p className="text-xs text-gray-500 mt-1">
+                                                Добавил: {item.created_by_name || '—'} {item.created_at ? `(${item.created_at})` : ''}
+                                                </p>
+                                            </div>
+                                            <div className="ml-3 flex-shrink-0 text-right">
+                                                <div className="text-sm font-medium text-gray-800">{Number(duration || 0).toFixed(2)} ч</div>
                                             </div>
                                             </div>
                                         </div>
@@ -25178,6 +25551,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </button>
                                         </li>
                                         <li>
+                                            <button onClick={() => { setView('technical_issues'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'technical_issues' ? 'bg-blue-700' : ''}`}>
+                                                <FaIcon className="fas fa-tools"></FaIcon> <span className="sidebar-text">Тех причины</span>
+                                            </button>
+                                        </li>
+                                        <li>
                                             <button onClick={() => { setView('tasks'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'tasks' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-tasks"></FaIcon> <span className="sidebar-text">Задачи</span>
                                             </button>
@@ -25238,6 +25616,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         <li>
                                             <button onClick={() => { setView('trainings'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'trainings' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-book"></FaIcon> <span className="sidebar-text">Учет тренингов</span>
+                                            </button>
+                                        </li>
+                                        <li>
+                                            <button onClick={() => { setView('technical_issues'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'technical_issues' ? 'bg-blue-700' : ''}`}>
+                                                <FaIcon className="fas fa-tools"></FaIcon> <span className="sidebar-text">Тех причины</span>
                                             </button>
                                         </li>
                                         <li>
@@ -26807,6 +27190,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 )}
                                 {( view === "contests" && (<ContestsApp user={user} operators={users} directions={directions} />))}
                                 {( view === "trainings" && (<TrainingsView user={user} operators={users} showToast={showToast} apiBaseUrl={API_BASE_URL} />))}
+                                {( view === "technical_issues" && (<TechnicalIssuesView user={user} operators={users} directions={directions} showToast={showToast} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} />))}
                                 {( view === "tasks" && (<TasksView user={user} showToast={showToast} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} />))}
                                 {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
                                 {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
@@ -27481,6 +27865,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 )} 
                                 {( view === "trainings" && (<TrainingsView user={user} operators={users} showToast={showToast} apiBaseUrl={API_BASE_URL} />))}
                                 {( view === "contests" && (<ContestsApp user={user} operators={users} directions={directions} />))}
+                                {( view === "technical_issues" && (<TechnicalIssuesView user={user} operators={users} directions={directions} showToast={showToast} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} />))}
                                 {( view === "tasks" && (<TasksView user={user} showToast={showToast} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} />))}
                                 {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
                                 {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
@@ -27551,7 +27936,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                           const avgScore = evalCount > 0 ? evalsFiltered.reduce((sum, ev) => sum + Number(ev.score || 0), 0) / evalCount : 0;
                                           
                                           const hoursOp = hoursData?.operators?.find(o => Number(o.operator_id) === Number(user.id)) || hoursData?.operators?.[0];
-                                          const totalHours = Number(hoursOp?.aggregates?.regular_hours ?? hoursOp?.aggregates?.regular ?? 0);
+                                          const totalHoursBase = Number(hoursOp?.aggregates?.regular_hours ?? hoursOp?.aggregates?.regular ?? 0);
+                                          const totalHoursTraining = Number(hoursOp?.training_hours ?? 0);
+                                          const totalHoursTechnical = Number(hoursOp?.technical_issue_hours ?? 0);
+                                          const totalHours = totalHoursBase + totalHoursTraining + totalHoursTechnical;
                                           const normHours = Number(hoursOp?.norm_hours ?? 0);
                                           const hasHoursData = hoursData?.operators?.length > 0;
                                           
@@ -27704,6 +28092,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             const fines = Number(op.fines ?? 0);
                                             const callsPerHour = Number(op.aggregates?.calls_per_hour ?? 0);
                                             const opTrainingField = Number(op.training_hours ?? 0); // если бек присылает предрасчитанные training_hours
+                                            const opTechnicalField = Number(op.technical_issue_hours ?? 0);
 
                                             // --- вспомогательные функции ---
                                             const safeNum = (v, def = 0) => {
@@ -27765,8 +28154,31 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                             const trainingHours = safeNum(opTrainingField) + safeNum(trainingHoursFromList);
 
-                                            // --- итоговые отработанные часы (с учётом зачтённых часов тренинга) ---
-                                            const regular = safeNum(regularBase) + trainingHours;
+                                            const technicalByDayMap = (op && typeof op.technical_issues_by_day === 'object' && !Array.isArray(op.technical_issues_by_day))
+                                                ? op.technical_issues_by_day
+                                                : {};
+                                            const technicalHoursFromMap = Object.values(technicalByDayMap || {}).reduce((sum, arr) => {
+                                                if (!Array.isArray(arr)) return sum;
+                                                const daySum = arr.reduce((dayAcc, item) => {
+                                                const byMinutes = Number(item?.duration_minutes ?? item?.durationMinutes ?? null);
+                                                if (Number.isFinite(byMinutes)) return dayAcc + (Math.max(0, byMinutes) / 60);
+                                                const byHours = Number(item?.duration_hours ?? item?.durationHours ?? null);
+                                                if (Number.isFinite(byHours)) return dayAcc + Math.max(0, byHours);
+                                                const start = parseHMToMinutes(item?.start_time ?? item?.startTime);
+                                                const end = parseHMToMinutes(item?.end_time ?? item?.endTime);
+                                                if (start == null || end == null) return dayAcc;
+                                                let diff = end - start;
+                                                if (diff < 0) diff += 24 * 60;
+                                                return dayAcc + (diff / 60);
+                                                }, 0);
+                                                return sum + daySum;
+                                            }, 0);
+                                            const technicalIssueHours = safeNum(opTechnicalField) > 0
+                                                ? safeNum(opTechnicalField)
+                                                : safeNum(technicalHoursFromMap);
+
+                                            // --- итоговые отработанные часы (с учётом зачтённых тренингов и техсбоев) ---
+                                            const regular = safeNum(regularBase) + trainingHours + technicalIssueHours;
 
                                             // --- отображаем ---
                                             return (
@@ -27813,6 +28225,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     </p>
                                                 </div>
 
+                                                <div className="p-5 workhours-card bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
+                                                    <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
+                                                    <FaIcon className="fas fa-tools text-gray-400"></FaIcon> Тех. сбои
+                                                    </p>
+                                                    <p className="text-xl font-bold text-violet-700">
+                                                    {safeNum(technicalIssueHours).toFixed(2)} <span className="text-sm font-medium text-gray-500">час</span>
+                                                    </p>
+                                                </div>
+
                                                 {/* Звонки в час */}
                                                 <div className="p-5 workhours-card bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
                                                     <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
@@ -27841,6 +28262,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     selectedMonth={selectedMonth}
                                                     user={user}
                                                     trainings={operatorTrainings}
+                                                    technicalIssuesByDay={technicalByDayMap}
                                                 />
                                                 </div>
                                             </div>
