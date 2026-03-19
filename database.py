@@ -5875,6 +5875,67 @@ class Database:
                 'total': total,
                 'items': items
             }
+
+    def delete_operator_offline_activity(self, requester_id, requester_role, activity_id):
+        role_norm = self._normalize_technical_issue_role(requester_role)
+        if role_norm not in ('admin', 'sv'):
+            raise ValueError("Only admin and sv can delete offline activities")
+
+        requester_id_int = int(requester_id)
+        try:
+            activity_id_int = int(activity_id)
+        except (TypeError, ValueError):
+            raise ValueError("Invalid offline activity id")
+        if activity_id_int <= 0:
+            raise ValueError("Invalid offline activity id")
+
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    oa.id,
+                    oa.batch_id::text,
+                    oa.operator_id,
+                    op.supervisor_id,
+                    oa.activity_date,
+                    oa.start_time,
+                    oa.end_time,
+                    oa.comment
+                FROM operator_offline_activities oa
+                JOIN users op ON op.id = oa.operator_id
+                WHERE oa.id = %s
+                """,
+                (activity_id_int,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError("Offline activity not found")
+
+            supervisor_id = int(row[3]) if row[3] is not None else None
+            if role_norm == 'sv' and supervisor_id != requester_id_int:
+                raise PermissionError("Forbidden")
+
+            cursor.execute(
+                """
+                DELETE FROM operator_offline_activities
+                WHERE id = %s
+                RETURNING id
+                """,
+                (activity_id_int,)
+            )
+            deleted_row = cursor.fetchone()
+            if not deleted_row:
+                raise ValueError("Offline activity not found")
+
+            return {
+                'id': int(row[0]),
+                'batch_id': row[1],
+                'operator_id': int(row[2]),
+                'date': row[4].strftime('%Y-%m-%d') if row[4] else None,
+                'start_time': row[5].strftime('%H:%M') if row[5] else None,
+                'end_time': row[6].strftime('%H:%M') if row[6] else None,
+                'comment': row[7]
+            }
     
     def get_user_history(self, user_id):
         with self._get_cursor() as cursor:
