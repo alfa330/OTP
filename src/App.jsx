@@ -1208,13 +1208,100 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             return 'fas fa-exclamation-circle';
         }
 
+        const hasNonZeroMetric = (value) => {
+            const num = Number(value);
+            return Number.isFinite(num) && Math.abs(num) > 0;
+        };
+
+        const hasAnyHoursIndicators = (op) => {
+            if (!op || typeof op !== 'object') return false;
+
+            const aggregates = (op.aggregates && typeof op.aggregates === 'object') ? op.aggregates : {};
+            const aggregateKeys = [
+            'regular_hours',
+            'total_break_time',
+            'total_talk_time',
+            'total_calls',
+            'total_efficiency_hours',
+            'calls_per_hour',
+            'fines'
+            ];
+            for (const key of aggregateKeys) {
+            if (hasNonZeroMetric(aggregates[key])) return true;
+            }
+
+            if (
+            hasNonZeroMetric(op.fines) ||
+            hasNonZeroMetric(op.training_hours) ||
+            hasNonZeroMetric(op.technical_issue_hours) ||
+            hasNonZeroMetric(op.offline_activity_hours)
+            ) {
+            return true;
+            }
+
+            const daily = (op.daily && typeof op.daily === 'object' && !Array.isArray(op.daily)) ? op.daily : {};
+            for (const dayData of Object.values(daily)) {
+            if (!dayData || typeof dayData !== 'object') continue;
+
+            if (
+                hasNonZeroMetric(dayData.work_time) ||
+                hasNonZeroMetric(dayData.break_time) ||
+                hasNonZeroMetric(dayData.talk_time) ||
+                hasNonZeroMetric(dayData.calls) ||
+                hasNonZeroMetric(dayData.efficiency) ||
+                hasNonZeroMetric(dayData.fine_amount)
+            ) {
+                return true;
+            }
+
+            if (String(dayData.fine_reason || '').trim() || String(dayData.fine_comment || '').trim()) {
+                return true;
+            }
+
+            const dayFines = Array.isArray(dayData.fines) ? dayData.fines : [];
+            for (const fine of dayFines) {
+                if (!fine || typeof fine !== 'object') continue;
+                if (
+                hasNonZeroMetric(fine.amount ?? fine.fine_amount) ||
+                String(fine.reason || fine.fine_reason || '').trim() ||
+                String(fine.comment || fine.fine_comment || '').trim()
+                ) {
+                return true;
+                }
+            }
+            }
+
+            const operatorId = Number(op.operator_id);
+            if (Number.isFinite(operatorId) && operatorId > 0) {
+            const trainingsByDay = trainingsMap[operatorId] || {};
+            if (Object.values(trainingsByDay).some(arr => Array.isArray(arr) && arr.length > 0)) return true;
+
+            const technicalByDay = technicalIssuesMap[operatorId] || {};
+            if (Object.values(technicalByDay).some(arr => Array.isArray(arr) && arr.length > 0)) return true;
+
+            const offlineByDay = offlineActivitiesMap[operatorId] || {};
+            if (Object.values(offlineByDay).some(arr => Array.isArray(arr) && arr.length > 0)) return true;
+            }
+
+            return false;
+        };
+
         // FILTERED OPERATORS + COUNTERS (NEW)
         const { filteredOperators, activeCount, firedCount } = useMemo(() => {
             const activeList = [];
             const firedList = [];
             for (const op of operators) {
-            if (op.status === 'fired') firedList.push(op);
-            else activeList.push(op);
+            const status = String(op?.status || '').trim().toLowerCase();
+            const isFiredLike = status === 'fired' || status === 'dismissal';
+            if (isFiredLike) {
+                if (hasAnyHoursIndicators(op)) {
+                activeList.push(op);
+                continue;
+                }
+                firedList.push(op);
+                continue;
+            }
+            activeList.push(op);
             }
 
             // start from active or fired list
@@ -1234,7 +1321,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             activeCount: activeList.length,
             firedCount: firedList.length
             };
-        }, [operators, operatorsViewTab, selectedDirections]);
+        }, [operators, operatorsViewTab, selectedDirections, trainingsMap, technicalIssuesMap, offlineActivitiesMap]);
 
         // Group operators by direction (key fallbacks: direction, direction_name, direction_id)
         const groupedByDirection = useMemo(() => {
