@@ -7923,7 +7923,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const startMin = Math.min(draftStart, resolvedEnd);
                 const endMin = Math.max(draftStart, resolvedEnd);
                 if (endMin > startMin) {
-                    clearPlannerOfflineDraftSelection();
                     openPlannerOfflineActivityModal({
                         operatorId: Number(operatorId),
                         date: String(dayKey || '').trim(),
@@ -8103,7 +8102,44 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, [viewMode]);
 
             useEffect(() => {
-                if (plannerOfflineActivityModalState?.open) {
+                if (!plannerOfflineActivityModalState?.open) return;
+                const operatorId = Number(plannerOfflineActivityModalState?.operatorId);
+                const dayKey = String(plannerOfflineActivityModalState?.date || '').trim();
+                const startMinutes = timeToMinutes(String(plannerOfflineActivityModalState?.startTime || '').trim());
+                const endMinutes = timeToMinutes(String(plannerOfflineActivityModalState?.endTime || '').trim());
+                if (!Number.isFinite(operatorId) || !dayKey || !Number.isFinite(startMinutes)) {
+                    return;
+                }
+
+                if (Number.isFinite(endMinutes) && endMinutes > startMinutes) {
+                    setPlannerOfflineDraftSelection({
+                        opId: operatorId,
+                        date: dayKey,
+                        startMin: startMinutes,
+                        endMin: endMinutes,
+                        dragging: false
+                    });
+                    return;
+                }
+
+                setPlannerOfflineDraftSelection({
+                    opId: operatorId,
+                    date: dayKey,
+                    startMin: startMinutes,
+                    endMin: null,
+                    dragging: false
+                });
+            }, [
+                plannerOfflineActivityModalState?.open,
+                plannerOfflineActivityModalState?.operatorId,
+                plannerOfflineActivityModalState?.date,
+                plannerOfflineActivityModalState?.startTime,
+                plannerOfflineActivityModalState?.endTime
+            ]);
+
+            useEffect(() => {
+                if (plannerOfflineActivityModalState?.open) return;
+                if (Number.isFinite(Number(plannerOfflineDraftSelection?.startMin))) {
                     clearPlannerOfflineDraftSelection();
                 }
             }, [plannerOfflineActivityModalState?.open]);
