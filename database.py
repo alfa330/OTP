@@ -6274,21 +6274,87 @@ class Database:
                     except Exception:
                         op['supervisor_name'] = None
 
-        # Фильтруем уволенных операторов — оставляем только тех, у кого запись об
-        # увольнении (field_changed='status', new_value='fired') попадает в выбранный месяц.
+        def _num_has_value(value: Any) -> bool:
+            try:
+                return abs(float(value)) > 0
+            except Exception:
+                return False
+
+        def _has_any_hours_indicators(op: Dict[str, Any]) -> bool:
+            if not isinstance(op, dict):
+                return False
+
+            aggregates = op.get('aggregates') if isinstance(op.get('aggregates'), dict) else {}
+            for key in (
+                'regular_hours',
+                'total_break_time',
+                'total_talk_time',
+                'total_calls',
+                'total_efficiency_hours',
+                'calls_per_hour',
+                'fines'
+            ):
+                if _num_has_value(aggregates.get(key)):
+                    return True
+
+            if (
+                _num_has_value(op.get('fines')) or
+                _num_has_value(op.get('training_hours')) or
+                _num_has_value(op.get('technical_issue_hours')) or
+                _num_has_value(op.get('offline_activity_hours'))
+            ):
+                return True
+
+            daily = op.get('daily') if isinstance(op.get('daily'), dict) else {}
+            for day_payload in daily.values():
+                if not isinstance(day_payload, dict):
+                    continue
+                for key in ('work_time', 'break_time', 'talk_time', 'calls', 'efficiency', 'fine_amount'):
+                    if _num_has_value(day_payload.get(key)):
+                        return True
+                if str(day_payload.get('fine_reason') or '').strip():
+                    return True
+                if str(day_payload.get('fine_comment') or '').strip():
+                    return True
+                if isinstance(day_payload.get('fines'), list) and len(day_payload.get('fines')) > 0:
+                    return True
+
+            op_id_int = None
+            try:
+                op_id_int = int(op.get('operator_id'))
+            except Exception:
+                op_id_int = None
+
+            if op_id_int is not None:
+                for source_map in (trainings_map, technical_issues_map, offline_activities_map):
+                    if not isinstance(source_map, dict):
+                        continue
+                    by_day = source_map.get(op_id_int)
+                    if by_day is None:
+                        by_day = source_map.get(str(op_id_int))
+                    if not isinstance(by_day, dict):
+                        continue
+                    if any(isinstance(items, list) and len(items) > 0 for items in by_day.values()):
+                        return True
+
+            return False
+
+        # Фильтруем уволенных операторов:
+        # - оставляем, если увольнение попадает в выбранный месяц
+        # - либо если у оператора есть любые показатели за период отчета.
         try:
-            # month уже распаршен ниже, но нам нужны year/mon для границ месяца — вычислим их сейчас
             year, mon = map(int, month.split('-'))
             month_start = date(year, mon, 1)
-            days_in_month = calendar.monthrange(year, mon)[1]
-            month_end = date(year, mon, days_in_month)
-            next_month_start = month_end + timedelta(days=1)
+            fired_candidates = set()
+            for op in operators:
+                status_norm = str(op.get('status') or '').strip().lower()
+                if status_norm in ('fired', 'dismissal'):
+                    try:
+                        fired_candidates.add(int(op.get('operator_id')))
+                    except Exception:
+                        continue
 
-            # собираем кандидатов со статусом 'fired'
-            fired_candidates = [op.get('operator_id') for op in operators if (op.get('status') or '').lower() == 'fired']
             if fired_candidates:
-                # Берём все записи об увольнении для кандидатов и затем проверяем дату увольнения
-                # — включаем оператора в отчёт для месяца, если дата увольнения >= начала выбранного месяца.
                 with self._get_cursor() as cursor:
                     cursor.execute(
                         """
@@ -6296,9 +6362,9 @@ class Database:
                         FROM user_history
                         WHERE user_id = ANY(%s)
                           AND field_changed = 'status'
-                          AND lower(new_value) = 'fired'
+                          AND lower(new_value) IN ('fired', 'dismissal')
                         """,
-                        (fired_candidates,)
+                        (list(fired_candidates),)
                     )
                     rows = cursor.fetchall()
                 allowed_fired_ids = set()
@@ -6308,7 +6374,6 @@ class Database:
                         changed_at = r[1]
                         if changed_at is None:
                             continue
-                        # приведение к date
                         ch_date = changed_at.date() if hasattr(changed_at, 'date') else changed_at
                         if ch_date >= month_start:
                             allowed_fired_ids.add(uid)
@@ -6317,11 +6382,27 @@ class Database:
             else:
                 allowed_fired_ids = set()
 
-            # окончательный фильтр: включаем всех не-уволенных и только отфильтрованных уволенных
-            operators = [op for op in operators if (op.get('status') or '').lower() != 'fired' or op.get('operator_id') in allowed_fired_ids]
+            filtered_operators = []
+            for op in operators:
+                status_norm = str(op.get('status') or '').strip().lower()
+                if status_norm not in ('fired', 'dismissal'):
+                    filtered_operators.append(op)
+                    continue
+
+                op_id_int = None
+                try:
+                    op_id_int = int(op.get('operator_id'))
+                except Exception:
+                    op_id_int = None
+
+                keep_by_dismissal_month = bool(op_id_int in allowed_fired_ids) if op_id_int is not None else False
+                keep_by_metrics = _has_any_hours_indicators(op)
+                if keep_by_dismissal_month or keep_by_metrics:
+                    filtered_operators.append(op)
+
+            operators = filtered_operators
         except Exception:
-            # в случае ошибки фильтрации — не ломаем генерацию отчёта, оставляем исходный список
-            logging.exception("Error filtering fired operators by dismissal date; proceeding without filter")
+            logging.exception("Error filtering fired operators for report; proceeding without filter")
 
         FILL_POS = PatternFill(fill_type='solid', start_color='b3b3b3')  # чуть темнее серый
         THIN = Side(style='thin')
