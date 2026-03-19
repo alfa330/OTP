@@ -3168,9 +3168,8 @@ class Database:
             call_count = int(calls_row[0] or 0)
             avg_score = float(calls_row[1]) if calls_row[1] is not None else 0.0
 
-            # 5) calls_per_hour: total_calls / (regular_hours - offline_activity_hours)
-            #    Оффлайн активность не должна влиять на КВЗ.
-            effective_call_hours = max(0.0, float(regular_hours) - float(offline_activity_hours))
+            # 5) calls_per_hour: total_calls / regular_hours (время в работе из статусов).
+            effective_call_hours = max(0.0, float(regular_hours))
             if effective_call_hours > 0:
                 calls_per_hour = float(total_calls) / float(effective_call_hours)
             else:
@@ -3404,7 +3403,7 @@ class Database:
                 offline_activity_hours = round(float(row[9]), 2)
                 accounted_hours = round(regular_hours + training_hours + technical_issue_hours + offline_activity_hours, 2)
 
-                effective_call_hours = max(0.0, float(regular_hours) - float(offline_activity_hours))
+                effective_call_hours = max(0.0, float(regular_hours))
                 calls_per_hour = (
                     round(total_calls / effective_call_hours, 2)
                     if effective_call_hours > 0 else 0.0
@@ -6496,14 +6495,8 @@ class Database:
                 daily = op.get('daily', {})
                 for dnum in daily.values():
                     work_hours += float(dnum.get('work_time') or 0.0)
-                offline_hours = 0.0
-                op_offline = offline_activities_map.get(op.get('operator_id')) or {}
-                if isinstance(op_offline, dict):
-                    for day_items in op_offline.values():
-                        for item in (day_items or []):
-                            offline_hours += compute_offline_activity_duration_hours(item)
                 calls = totals.get('calls', 0)
-                effective_hours = max(0.0, float(work_hours) - float(offline_hours))
+                effective_hours = max(0.0, float(work_hours))
                 if effective_hours > 0:
                     return round(calls / effective_hours, 1)
                 return None
@@ -7797,7 +7790,7 @@ class Database:
         """, (operator_id, start, end))
         total_offline_hours = float(cursor.fetchone()[0] or 0.0)
 
-        effective_hours_for_calls = max(0.0, float(total_work_time or 0.0) - float(total_offline_hours or 0.0))
+        effective_hours_for_calls = max(0.0, float(total_work_time or 0.0))
 
         if effective_hours_for_calls > 0:
             calls_per_hour = float(total_calls) / float(effective_hours_for_calls)
