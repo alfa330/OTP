@@ -3,6 +3,7 @@ import os
 import threading
 import asyncio
 import requests
+import calendar
 import csv
 import hashlib
 import base64
@@ -28,7 +29,7 @@ import xlsxwriter
 import json
 import html
 from concurrent.futures import ThreadPoolExecutor
-from database import db
+from database import db, TECHNICAL_ISSUE_REASONS
 import uuid
 from passlib.hash import pbkdf2_sha256
 from werkzeug.utils import secure_filename
@@ -641,6 +642,39 @@ def _ensure_call_access_for_requester(call_operator_id, requester, requester_id)
 
 def _is_supervisor_role(role: str) -> bool:
     return role in ('sv', 'supervisor')
+
+
+def _normalize_management_role(role):
+    role_norm = str(role or '').strip().lower()
+    if role_norm == 'supervisor':
+        return 'sv'
+    return role_norm
+
+
+def _normalize_int_id_list(values):
+    if values is None:
+        return []
+    if isinstance(values, (list, tuple, set)):
+        raw_values = list(values)
+    else:
+        raw_values = [values]
+
+    result = []
+    seen = set()
+    for item in raw_values:
+        if item is None:
+            continue
+        if isinstance(item, str) and not item.strip():
+            continue
+        try:
+            ivalue = int(item)
+        except (TypeError, ValueError):
+            continue
+        if ivalue <= 0 or ivalue in seen:
+            continue
+        seen.add(ivalue)
+        result.append(ivalue)
+    return result
 
 
 def _normalize_calibration_score_value(value):
@@ -7654,6 +7688,32 @@ def build_trainings_map(trainings_list):
         tmap.setdefault(op, {}).setdefault(day, []).append(t)
     return tmap
 
+def build_technical_issues_map(issues_list):
+    """
+    Преобразует список техсбоев в структуру { operator_id: { dayNum: [issue...] } }.
+    Ожидается, что у записи есть поле 'operator_id' и 'date' в формате 'YYYY-MM-DD'.
+    """
+    imap = {}
+    if not issues_list:
+        return imap
+    for item in issues_list:
+        op = item.get('operator_id')
+        if op is None:
+            continue
+        dt = item.get('date') or item.get('issue_date') or item.get('day')
+        day = None
+        if isinstance(dt, str) and len(dt) >= 10:
+            try:
+                day = int(dt[8:10])
+            except Exception:
+                day = None
+        elif isinstance(dt, int):
+            day = dt
+        if day is None:
+            continue
+        imap.setdefault(op, {}).setdefault(day, []).append(item)
+    return imap
+
 @app.route('/api/report/monthly_hours', methods=['GET'])
 @require_api_key
 def get_monthly_report_hours():
@@ -7714,10 +7774,62 @@ def get_monthly_report_hours():
 
         trainings_map = build_trainings_map(trainings_list)
 
-        if generate_all:
-            filename, content = db.generate_excel_report_all_operators_from_view(operators, trainings_map, month)
+        try:
+            y, m = map(int, month.split('-'))
+            month_last_day = calendar.monthrange(y, m)[1]
+            date_from = f"{month}-01"
+            date_to = f"{month}-{str(month_last_day).zfill(2)}"
+            technical_result = db.get_operator_technical_issues(
+                requester_id=requester_id,
+                requester_role=role,
+                date_from=date_from,
+                date_to=date_to,
+                limit=5000,
+                offset=0
+            )
+            technical_items_raw = technical_result.get('items', []) if isinstance(technical_result, dict) else []
+        except Exception:
+            logging.exception("Ошибка получения technical issues из db")
+            technical_items_raw = []
+
+        visible_operator_ids = set()
+        try:
+            operators_list_for_scope = operators.get("operators", []) if isinstance(operators, dict) else []
+            visible_operator_ids = {
+                int(op.get("operator_id"))
+                for op in operators_list_for_scope
+                if op and op.get("operator_id") is not None
+            }
+        except Exception:
+            visible_operator_ids = set()
+
+        if visible_operator_ids:
+            technical_items = []
+            for item in technical_items_raw:
+                try:
+                    if int(item.get("operator_id")) in visible_operator_ids:
+                        technical_items.append(item)
+                except Exception:
+                    continue
         else:
-            filename, content = db.generate_excel_report_from_view(operators, trainings_map, month)
+            technical_items = technical_items_raw
+
+        technical_issues_map = build_technical_issues_map(technical_items)
+
+        if generate_all:
+            filename, content = db.generate_excel_report_all_operators_from_view(
+                operators,
+                trainings_map,
+                technical_issues_map,
+                month
+            )
+        else:
+            filename, content = db.generate_excel_report_from_view(
+                operators,
+                trainings_map,
+                technical_issues_map,
+                month
+            )
             
         if not filename or not content:
             logging.error("Генерация отчёта вернула пустой результат")
@@ -7949,6 +8061,236 @@ def delete_training(training_id):
         return jsonify({"status": "success", "message": "Training deleted"}), 200
     except Exception as e:
         logging.error(f"Error deleting training {training_id}: {e}", exc_info=True)
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
+@app.route('/api/technical_issues/reasons', methods=['GET'])
+@require_api_key
+def technical_issue_reasons():
+    try:
+        requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+        requester_id = int(requester_id)
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "User not found"}), 404
+
+        requester_role = _normalize_management_role(requester[3])
+        if requester_role not in ('admin', 'sv'):
+            return jsonify({"error": "Forbidden"}), 403
+
+        return jsonify({
+            "status": "success",
+            "reasons": list(TECHNICAL_ISSUE_REASONS)
+        }), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error fetching technical issue reasons: {e}", exc_info=True)
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
+@app.route('/api/technical_issues', methods=['POST'])
+@require_api_key
+def create_technical_issue():
+    try:
+        requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+        requester_id = int(requester_id)
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "User not found"}), 404
+
+        requester_role = _normalize_management_role(requester[3])
+        if requester_role not in ('admin', 'sv'):
+            return jsonify({"error": "Forbidden"}), 403
+
+        payload = request.get_json(silent=True) or {}
+        issue_date = payload.get('date') or payload.get('issue_date')
+        start_time = payload.get('start_time') or payload.get('start')
+        end_time = payload.get('end_time') or payload.get('end')
+        reason = payload.get('reason')
+        comment = payload.get('comment')
+
+        operator_ids = _normalize_int_id_list(payload.get('operator_ids'))
+        operator_ids.extend(_normalize_int_id_list(payload.get('operator_id')))
+        operator_ids = _normalize_int_id_list(operator_ids)
+
+        direction_ids = _normalize_int_id_list(payload.get('direction_ids'))
+        direction_ids.extend(_normalize_int_id_list(payload.get('direction_id')))
+        direction_ids = _normalize_int_id_list(direction_ids)
+
+        result = db.create_operator_technical_issues(
+            requester_id=requester_id,
+            requester_role=requester_role,
+            issue_date=issue_date,
+            start_time=start_time,
+            end_time=end_time,
+            reason=reason,
+            comment=comment,
+            operator_ids=operator_ids,
+            direction_ids=direction_ids
+        )
+
+        return jsonify({
+            "status": "success",
+            "message": "Technical issue saved",
+            "result": result
+        }), 201
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error creating technical issue: {e}", exc_info=True)
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
+@app.route('/api/technical_issues', methods=['GET'])
+@require_api_key
+def list_technical_issues():
+    try:
+        requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+        requester_id = int(requester_id)
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "User not found"}), 404
+
+        requester_role = _normalize_management_role(requester[3])
+        if requester_role not in ('admin', 'sv'):
+            return jsonify({"error": "Forbidden"}), 403
+
+        issue_date = (request.args.get('date') or '').strip() or None
+        date_from = (request.args.get('date_from') or '').strip() or None
+        date_to = (request.args.get('date_to') or '').strip() or None
+        operator_id = (request.args.get('operator_id') or '').strip() or None
+        reason = (request.args.get('reason') or '').strip() or None
+        limit = request.args.get('limit', 500)
+        offset = request.args.get('offset', 0)
+
+        result = db.get_operator_technical_issues(
+            requester_id=requester_id,
+            requester_role=requester_role,
+            issue_date=issue_date,
+            date_from=date_from,
+            date_to=date_to,
+            operator_id=operator_id,
+            reason=reason,
+            limit=limit,
+            offset=offset
+        )
+
+        return jsonify({
+            "status": "success",
+            "total": int(result.get('total') or 0),
+            "items": result.get('items') or [],
+            "reasons": list(TECHNICAL_ISSUE_REASONS)
+        }), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error listing technical issues: {e}", exc_info=True)
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
+@app.route('/api/technical_issues/export_excel', methods=['GET'])
+@require_api_key
+def export_technical_issues_excel():
+    try:
+        requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+        requester_id = int(requester_id)
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "User not found"}), 404
+
+        requester_role = _normalize_management_role(requester[3])
+        if requester_role != 'admin':
+            return jsonify({"error": "Only admin can export technical issues"}), 403
+
+        issue_date = (request.args.get('date') or '').strip() or None
+        date_from = (request.args.get('date_from') or '').strip() or None
+        date_to = (request.args.get('date_to') or '').strip() or None
+        operator_id = (request.args.get('operator_id') or '').strip() or None
+        reason = (request.args.get('reason') or '').strip() or None
+
+        result = db.get_operator_technical_issues(
+            requester_id=requester_id,
+            requester_role=requester_role,
+            issue_date=issue_date,
+            date_from=date_from,
+            date_to=date_to,
+            operator_id=operator_id,
+            reason=reason,
+            limit=5000,
+            offset=0
+        )
+        rows = result.get('items') or []
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = 'Тех причины'
+
+        headers = [
+            'Дата проблемы',
+            'Время начала',
+            'Время окончания',
+            'Оператор',
+            'Направление оператора',
+            'Техническая причина',
+            'Комментарий',
+            'Выбранные направления',
+            'Добавил',
+            'Дата фиксации'
+        ]
+        for col_idx, title in enumerate(headers, start=1):
+            cell = ws.cell(row=1, column=col_idx, value=title)
+            cell.font = cell.font.copy(bold=True)
+
+        for row_idx, item in enumerate(rows, start=2):
+            selected_directions = ', '.join(item.get('selected_direction_names') or [])
+            ws.cell(row=row_idx, column=1, value=item.get('date') or '')
+            ws.cell(row=row_idx, column=2, value=item.get('start_time') or '')
+            ws.cell(row=row_idx, column=3, value=item.get('end_time') or '')
+            ws.cell(row=row_idx, column=4, value=item.get('operator_name') or '')
+            ws.cell(row=row_idx, column=5, value=item.get('direction_name') or '')
+            ws.cell(row=row_idx, column=6, value=item.get('reason') or '')
+            ws.cell(row=row_idx, column=7, value=item.get('comment') or '')
+            ws.cell(row=row_idx, column=8, value=selected_directions)
+            ws.cell(row=row_idx, column=9, value=item.get('created_by_name') or '')
+            ws.cell(row=row_idx, column=10, value=item.get('created_at') or '')
+
+        for column_cells in ws.columns:
+            max_len = 0
+            for cell in column_cells:
+                try:
+                    max_len = max(max_len, len(str(cell.value or '')))
+                except Exception:
+                    continue
+            ws.column_dimensions[column_cells[0].column_letter].width = min(max(max_len + 2, 12), 60)
+
+        filename = f"technical_issues_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        output = BytesIO()
+        wb.save(output)
+        output.seek(0)
+
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name=filename,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error exporting technical issues: {e}", exc_info=True)
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 
@@ -8805,11 +9147,13 @@ def get_my_work_schedules():
         start_date = request.args.get('start_date')
         end_date = request.args.get('end_date')
         include_imported_statuses = _ws_query_bool('include_imported_statuses', default=False)
+        include_technical_issues = _ws_query_bool('include_technical_issues', default=True)
         operator_schedule = db.get_operator_with_shifts(
             requester_id,
             start_date,
             end_date,
-            include_imported_statuses=include_imported_statuses
+            include_imported_statuses=include_imported_statuses,
+            include_technical_issues=include_technical_issues
         )
         if not operator_schedule:
             return jsonify({"error": "Operator not found"}), 404
@@ -8843,12 +9187,14 @@ def get_direction_work_schedules():
         start_date = request.args.get('start_date')
         end_date = request.args.get('end_date')
         include_imported_statuses = _ws_query_bool('include_imported_statuses', default=False)
+        include_technical_issues = _ws_query_bool('include_technical_issues', default=True)
 
         operators = db.get_operators_with_shifts(
             start_date=start_date,
             end_date=end_date,
             direction_name=direction_name,
-            include_imported_statuses=include_imported_statuses
+            include_imported_statuses=include_imported_statuses,
+            include_technical_issues=include_technical_issues
         )
         return jsonify({"operators": operators, "direction": direction_name}), 200
 
@@ -9062,6 +9408,7 @@ def get_operators_with_schedules():
       - anchor_date (optional, format: YYYY-MM-DD; fallback for default range)
       - view_mode (optional: day/week/month; fallback for default range)
       - include_imported_statuses (optional: 1/true/yes/on)
+      - include_technical_issues (optional: 1/true/yes/on, default: true)
     """
     try:
         user = request.headers.get('X-User-Id')
@@ -9120,10 +9467,12 @@ def get_operators_with_schedules():
                 return jsonify({"error": "end_date must be >= start_date"}), 400
         
         include_imported_statuses = _ws_query_bool('include_imported_statuses', default=False)
+        include_technical_issues = _ws_query_bool('include_technical_issues', default=True)
         operators = db.get_operators_with_shifts(
             start_date,
             end_date,
-            include_imported_statuses=include_imported_statuses
+            include_imported_statuses=include_imported_statuses,
+            include_technical_issues=include_technical_issues
         )
         
         return jsonify({
@@ -11100,15 +11449,19 @@ async def show_operator_hours(callback: types.CallbackQuery):
         if hours_data:
             hours = hours_data[0]
             regular_hours = round(hours.get('regular_hours', 0) or 0, 2)
+            training_hours = round(hours.get('training_hours', 0) or 0, 2)
+            technical_issue_hours = round(hours.get('technical_issue_hours', 0) or 0, 2)
+            accounted_hours = round(hours.get('accounted_hours', regular_hours + training_hours + technical_issue_hours) or 0, 2)
             norm_hours = hours.get('norm_hours', 0) or 0
             percent_complete = 0
             if norm_hours > 0:
-                percent_complete = round(regular_hours / norm_hours * 100, 1)
+                percent_complete = round(accounted_hours / norm_hours * 100, 1)
             message_text += (
                 f"👤 <b>{op_name}</b>\n"
-                f"   ⏱️ Часы работы: {regular_hours} из {norm_hours}\n"
+                f"   ⏱️ Часы работы: {accounted_hours} из {norm_hours}\n"
                 f"   📈 Процент выполнения: {percent_complete}%\n"
-                f"   📚 Часы тренинга: {round(hours.get('training_hours', 0), 2)}\n"
+                f"   📚 Часы тренинга: {training_hours}\n"
+                f"   🛠 Тех. сбои: {technical_issue_hours}\n"
                 f"   💸 Штрафы: {hours.get('fines', 0)}\n\n"
             )
         else:
@@ -12097,11 +12450,13 @@ async def show_operator_stats(message: types.Message):
     if user and user[3] == 'operator':
         stats = db.get_operator_stats(user[0])
         current_month = datetime.now().strftime('%B %Y')
+        accounted_hours = stats.get('accounted_hours', (stats.get('regular_hours', 0) or 0) + (stats.get('training_hours', 0) or 0) + (stats.get('technical_issue_hours', 0) or 0))
         
         message_text = (
             f"<b>Ваша статистика за {current_month}:</b>\n\n"
-            f"⏱ <b>Общие часы работы:</b> {stats['regular_hours']+stats['training_hours']} из {stats['norm_hours']} ({stats['percent_complete']}%)\n"
+            f"⏱ <b>Общие часы работы:</b> {accounted_hours} из {stats['norm_hours']} ({stats['percent_complete']}%)\n"
             f"📚 <b>Часы тренинга:</b> {stats['training_hours']}\n"
+            f"🛠 <b>Тех. сбои:</b> {stats.get('technical_issue_hours', 0)}\n"
             f"📞 <b>Количество звонков в час:</b> {stats['calls_per_hour']}\n"
             f"💸 <b>Штрафы:</b> {stats['fines']}\n\n"
             f"📞 <b>Прослушано звонков:</b> {stats['call_count']}\n"
