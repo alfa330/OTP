@@ -14616,39 +14616,39 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             >
                                                 {pendingFlagLabels.length > 0 && (
                                                     <span
-                                                        className="absolute top-1 left-1 z-50 flex items-center gap-1"
+                                                        className="absolute top-0.5 left-0.5 z-50 flex items-center gap-0.5"
                                                         title={`Ожидает подтверждения: ${pendingFlagLabels.join(', ')}`}
                                                     >
-                                                        <span className="px-1.5 py-0.5 rounded-md bg-amber-500 text-white text-[9px] font-bold uppercase tracking-wide shadow-md shadow-amber-500/40 animate-pulse">
+                                                        <span className="px-1 py-[1px] rounded-md bg-amber-500 text-white text-[8px] font-bold uppercase tracking-wide shadow-sm shadow-amber-500/35 animate-pulse leading-none">
                                                             Ожидает
                                                         </span>
-                                                        <span className="px-1 py-0.5 rounded bg-amber-100 text-amber-800 text-[9px] font-semibold border border-amber-300">
+                                                        <span className="px-0.5 py-[1px] rounded bg-amber-100 text-amber-800 text-[8px] font-semibold border border-amber-300 leading-none">
                                                             {pendingFlagLabels.length}
                                                         </span>
                                                     </span>
                                                 )}
                                                 {(hasDefectMarker || hasOvertimeMarker || hasOfflineMarker) && (
-                                                    <span className="absolute top-1 right-1 z-50 flex items-center gap-1.5" title={markerTooltipText || 'Есть недочеты/переработка'}>
+                                                    <span className="absolute top-0.5 right-0.5 z-50 flex items-center gap-1" title={markerTooltipText || 'Есть недочеты/переработка'}>
                                                         {hasOfflineMarker && (
                                                             <span
-                                                                className="w-3.5 h-3.5 rounded-full bg-emerald-400 border-2 border-white ring-1 ring-emerald-500/60 shadow-md shadow-emerald-400/50"
+                                                                className="w-2.5 h-2.5 rounded-full bg-emerald-400 border border-white ring-1 ring-emerald-500/60 shadow-sm shadow-emerald-400/45"
                                                                 title={`Офлайн-активность: ${offlineActivityBarsForCell.length}`}
                                                             />
                                                         )}
                                                         {hasOvertimeMarker && (
                                                             <span
-                                                                className="w-3.5 h-3.5 rounded-full bg-emerald-600 border-2 border-white ring-1 ring-emerald-700/60 shadow-md shadow-emerald-600/50"
+                                                                className="w-2.5 h-2.5 rounded-full bg-emerald-600 border border-white ring-1 ring-emerald-700/60 shadow-sm shadow-emerald-600/45"
                                                             />
                                                         )}
                                                         {hasDefectMarker && (
                                                             <span className="relative inline-flex items-center justify-center">
                                                                 {hasPendingDefectMarker && (
-                                                                    <span className="absolute inline-flex h-4 w-4 rounded-full bg-amber-400 opacity-75 animate-ping"></span>
+                                                                    <span className="absolute inline-flex h-3.5 w-3.5 rounded-full bg-amber-400 opacity-70 animate-ping"></span>
                                                                 )}
                                                                 <span
-                                                                    className={`relative w-3.5 h-3.5 rounded-full border-2 border-white ring-1 shadow-md ${hasPendingDefectMarker
-                                                                        ? 'bg-amber-500 ring-amber-700/70 shadow-amber-500/60'
-                                                                        : 'bg-rose-600 ring-rose-700/70 shadow-rose-600/60'}`}
+                                                                    className={`relative w-2.5 h-2.5 rounded-full border border-white ring-1 shadow-sm ${hasPendingDefectMarker
+                                                                        ? 'bg-amber-500 ring-amber-700/70 shadow-amber-500/55'
+                                                                        : 'bg-rose-600 ring-rose-700/70 shadow-rose-600/55'}`}
                                                                 />
                                                             </span>
                                                         )}
