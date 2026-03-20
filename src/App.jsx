@@ -10,6 +10,7 @@ import SurveysView from './components/surveys/SurveysView';
 import TechnicalIssuesView from './components/technical/TechnicalIssuesView';
 import FaIcon from './components/common/FaIcon';
 import AuthEntranceSplash from './components/common/AuthEntranceSplash';
+import OrazAitSplash from './components/common/OrazAitSplash';
 
 const CHUNK_RELOAD_STORAGE_KEY = 'otp_chunk_reload_attempted';
 
@@ -63,6 +64,9 @@ const CALL_EVALUATION_EMBED_STATE_KEY = 'call_evaluation_embed_state';
 const ACCESS_TOKEN_STORAGE_KEY = 'otp_access_token';
 const REFRESH_TOKEN_STORAGE_KEY = 'otp_refresh_token';
 const ADMIN_SESSIONS_PAGE_SIZE = 100;
+const ORAZA_AIT_SPLASH_BASE_DATE = Object.freeze({ year: 2026, month: 2, day: 20 });
+const ORAZA_AIT_SPLASH_SHIFT_DAYS = 11;
+const ORAZA_AIT_SPLASH_LAST_SHOWN_KEY = 'otp_oraza_ait_splash_last_shown';
 const emitAppToast = (message, type = 'info') => {
     const text = String(message ?? '');
     try {
@@ -118,6 +122,37 @@ const withAccessTokenHeader = (headers = {}) => {
         nextHeaders['X-Refresh-Token'] = refreshToken;
     }
     return nextHeaders;
+};
+
+const buildDateKey = (date) => {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+};
+
+const getOrazAitSplashDateForYear = (year) => {
+    const date = new Date(
+        year,
+        ORAZA_AIT_SPLASH_BASE_DATE.month,
+        ORAZA_AIT_SPLASH_BASE_DATE.day
+    );
+    const yearOffset = year - ORAZA_AIT_SPLASH_BASE_DATE.year;
+    date.setDate(date.getDate() - (yearOffset * ORAZA_AIT_SPLASH_SHIFT_DAYS));
+    return date;
+};
+
+const isOrazAitSplashDay = (date = new Date()) => {
+    if (date.getFullYear() < ORAZA_AIT_SPLASH_BASE_DATE.year) {
+        return false;
+    }
+
+    const splashDate = getOrazAitSplashDateForYear(date.getFullYear());
+    return (
+        date.getFullYear() === splashDate.getFullYear() &&
+        date.getMonth() === splashDate.getMonth() &&
+        date.getDate() === splashDate.getDate()
+    );
 };
 
 const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'auto' }) => (
@@ -20510,6 +20545,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [user, setUser] = useState(null);
             const [isAuthInitializing, setIsAuthInitializing] = useState(true);
             const [showAuthEntranceSplash, setShowAuthEntranceSplash] = useState(false);
+            const [showOrazAitSplash, setShowOrazAitSplash] = useState(false);
             const [login, setLogin] = useState('');
             const [password, setPassword] = useState('');
             const [toasts, setToasts] = useState([]);
@@ -22592,6 +22628,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             useEffect(() => {
                 if (isAuthInitializing || !user) {
                     setShowAuthEntranceSplash(false);
+                    setShowOrazAitSplash(false);
                     return;
                 }
 
@@ -22600,10 +22637,27 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     now.getMonth() === 2 &&
                     now.getDate() >= 7 &&
                     now.getDate() <= 9;
+                let shouldShowOrazAitSplash = isOrazAitSplashDay(now);
+                if (shouldShowOrazAitSplash && typeof window !== 'undefined') {
+                    const todayKey = buildDateKey(now);
+                    const lastShownDate = window.localStorage.getItem(ORAZA_AIT_SPLASH_LAST_SHOWN_KEY);
+                    shouldShowOrazAitSplash = lastShownDate !== todayKey;
+                }
 
                 setShowAuthEntranceSplash(isMarchEntranceWindow);
+                setShowOrazAitSplash(shouldShowOrazAitSplash);
             }, [isAuthInitializing, user?.id]);
-            
+
+            const closeOrazAitSplash = useCallback(() => {
+                if (typeof window !== 'undefined') {
+                    window.localStorage.setItem(
+                        ORAZA_AIT_SPLASH_LAST_SHOWN_KEY,
+                        buildDateKey(new Date())
+                    );
+                }
+                setShowOrazAitSplash(false);
+            }, []);
+             
             // Persist and restore view (after user is loaded to ensure role-based access)
             useEffect(() => {
                 if (!user) return;
@@ -25356,6 +25410,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setSensitiveQrExpiresAt('');
                     setSensitiveQrError('');
                     setShowAuthEntranceSplash(false);
+                    setShowOrazAitSplash(false);
                     setBirthdaysToday([]);
                     setBirthdaysDate('');
                     setBirthdaysLoading(false);
@@ -30878,6 +30933,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         </div>
                     )}
 
+                    <OrazAitSplash
+                        open={showOrazAitSplash}
+                        onClose={closeOrazAitSplash}
+                    />
                     <AuthEntranceSplash
                         open={showAuthEntranceSplash}
                         onClose={() => setShowAuthEntranceSplash(false)}
