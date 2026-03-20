@@ -23169,6 +23169,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         {/* Ячейки */}
                         {cells.map((cell, idx) =>
                         cell ? (
+                            (() => {
+                            const roundedCellHours = Number(cell.hours || 0);
+                            const cellHoursDisplay = Number.isFinite(roundedCellHours) ? roundedCellHours.toFixed(2) : "0.00";
+                            const [cellHoursInt, cellHoursFrac] = cellHoursDisplay.split(".");
+                            return (
                             <div
                             key={cell.dateStr}
                             onClick={() => handleDayClick(cell)}
@@ -23177,15 +23182,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 cell.hours,
                                 cell.isPastDayWithZero
                             )} ${cell.isToday ? "ring-2 ring-blue-600" : ""} hover:scale-110 hover:ring-2 hover:ring-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer`}
-                            aria-label={`${cell.day} ${monthLabel}: ${cell.hours} часов`}
+                            aria-label={`${cell.day} ${monthLabel}: ${cellHoursDisplay} часов`}
                             >
                             {/* Часы */}
                             {cell.hours > 0 ? (
                                 <div className="flex items-center">
-                                <span className="text-sm">{String(cell.hours).split(".")[0]}</span>
-                                {String(cell.hours).includes(".") && (
-                                    <span className="text-[10px]">.{String(cell.hours).split(".")[1]}</span>
-                                )}
+                                <span className="text-sm">{cellHoursInt}</span>
+                                <span className="text-[10px]">.{cellHoursFrac}</span>
                                 </div>
                             ) : (
                                 ""
@@ -23206,6 +23209,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 <span className="absolute left-1/2 top-full -translate-x-1/2 w-2 h-2 bg-gray-900 rotate-45" />
                             </div>
                             </div>
+                            );
+                            })()
                         ) : (
                             <div key={`e-${idx}`} className="w-10 h-10" />
                         )
