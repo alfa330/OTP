@@ -745,6 +745,10 @@ class Database:
             """)
             cursor.execute("""
                 ALTER TABLE daily_hours
+                ADD COLUMN IF NOT EXISTS technical_reason_minutes INTEGER NOT NULL DEFAULT 0;
+            """)
+            cursor.execute("""
+                ALTER TABLE daily_hours
                 ADD COLUMN IF NOT EXISTS late_status VARCHAR(16);
             """)
             cursor.execute("""
@@ -757,6 +761,10 @@ class Database:
             """)
             cursor.execute("""
                 ALTER TABLE daily_hours
+                ADD COLUMN IF NOT EXISTS technical_reason_status VARCHAR(16);
+            """)
+            cursor.execute("""
+                ALTER TABLE daily_hours
                 ADD COLUMN IF NOT EXISTS late_fine_id INTEGER;
             """)
             cursor.execute("""
@@ -766,6 +774,10 @@ class Database:
             cursor.execute("""
                 ALTER TABLE daily_hours
                 ADD COLUMN IF NOT EXISTS training_fine_id INTEGER;
+            """)
+            cursor.execute("""
+                ALTER TABLE daily_hours
+                ADD COLUMN IF NOT EXISTS technical_reason_fine_id INTEGER;
             """)
             cursor.execute("""
                 ALTER TABLE daily_hours
@@ -7782,12 +7794,17 @@ class Database:
                 'reason': 'Тренинг',
                 'label': 'Тренинг'
             }
+        if key in ('technical_reason', 'tech_reason', 'tech', 'technical'):
+            return {
+                'reason': 'Тех.причина',
+                'label': 'Тех.причина'
+            }
         raise ValueError("Unsupported auto flag type")
 
     def _schedule_auto_build_fine_payload(self, flag_type, minutes_value):
         flag_key = str(flag_type or '').strip().lower()
-        if flag_key == 'training':
-            raise ValueError("Training must be stored in trainings table, not in daily_fines")
+        if flag_key in ('training', 'technical_reason', 'tech_reason', 'tech', 'technical'):
+            raise ValueError("This auto flag must not be stored in daily_fines")
         meta = self._schedule_auto_flag_meta(flag_type)
         minutes_int = max(0, int(minutes_value or 0))
         rate_per_minute = float(SCHEDULE_AUTO_FINE_RATE_PER_MINUTE or 0.0)
@@ -7817,12 +7834,15 @@ class Database:
                 COALESCE(late_minutes, 0),
                 COALESCE(early_leave_minutes, 0),
                 COALESCE(training_minutes, 0),
+                COALESCE(technical_reason_minutes, 0),
                 late_status,
                 early_leave_status,
                 training_status,
+                technical_reason_status,
                 late_fine_id,
                 early_leave_fine_id,
-                training_fine_id
+                training_fine_id,
+                technical_reason_fine_id
             FROM daily_hours
             WHERE operator_id = ANY(%s)
               AND day >= %s
@@ -7918,12 +7938,15 @@ class Database:
                 late_minutes,
                 early_leave_minutes,
                 training_minutes,
+                technical_reason_minutes,
                 late_status,
                 early_status,
                 training_status,
+                technical_reason_status,
                 late_fine_id,
                 early_fine_id,
-                training_fine_id
+                training_fine_id,
+                technical_reason_fine_id
             ) = row
 
             late_status_norm, late_fine_id_norm = sync_one_flag(
@@ -7953,32 +7976,47 @@ class Database:
                 status_value=training_status,
                 fine_id_value=training_fine_id
             )
+            technical_reason_status_norm, technical_reason_fine_id_norm = sync_one_flag(
+                daily_id=daily_id,
+                operator_id=operator_id,
+                day_value=day_value,
+                flag_type='technical_reason',
+                minutes_value=technical_reason_minutes,
+                status_value=technical_reason_status,
+                fine_id_value=technical_reason_fine_id
+            )
 
             if (
                 self._schedule_auto_normalize_flag_status(late_status) != late_status_norm
                 or self._schedule_auto_normalize_flag_status(early_status) != early_status_norm
                 or self._schedule_auto_normalize_flag_status(training_status) != training_status_norm
+                or self._schedule_auto_normalize_flag_status(technical_reason_status) != technical_reason_status_norm
                 or (int(late_fine_id) if late_fine_id is not None else None) != late_fine_id_norm
                 or (int(early_fine_id) if early_fine_id is not None else None) != early_fine_id_norm
                 or (int(training_fine_id) if training_fine_id is not None else None) != training_fine_id_norm
+                or (int(technical_reason_fine_id) if technical_reason_fine_id is not None else None) != technical_reason_fine_id_norm
             ):
                 cursor.execute("""
                     UPDATE daily_hours
                     SET late_status = %s,
                         early_leave_status = %s,
                         training_status = %s,
+                        technical_reason_status = %s,
                         late_fine_id = %s,
                         early_leave_fine_id = %s,
                         training_fine_id = %s,
+                        technical_reason_fine_id = %s,
                         created_at = CURRENT_TIMESTAMP
                     WHERE id = %s
                 """, (
                     late_status_norm,
                     early_status_norm,
                     training_status_norm,
+                    technical_reason_status_norm,
                     late_fine_id_norm,
                     early_fine_id_norm,
                     training_fine_id_norm,
+                    technical_reason_fine_id_norm,
                     daily_id
                 ))
 
@@ -8193,9 +8231,11 @@ class Database:
                 late_status,
                 early_leave_status,
                 training_status,
+                technical_reason_status,
                 late_fine_id,
                 early_leave_fine_id,
-                training_fine_id
+                training_fine_id,
+                technical_reason_fine_id
             FROM daily_hours
             WHERE operator_id = ANY(%s)
               AND day >= %s
@@ -8211,14 +8251,22 @@ class Database:
                 'late_status': self._schedule_auto_normalize_flag_status(row[3]),
                 'early_leave_status': self._schedule_auto_normalize_flag_status(row[4]),
                 'training_status': self._schedule_auto_normalize_flag_status(row[5]),
-                'late_fine_id': int(row[6]) if row[6] is not None else None,
-                'early_leave_fine_id': int(row[7]) if row[7] is not None else None,
-                'training_fine_id': int(row[8]) if row[8] is not None else None
+                'technical_reason_status': self._schedule_auto_normalize_flag_status(row[6]),
+                'late_fine_id': int(row[7]) if row[7] is not None else None,
+                'early_leave_fine_id': int(row[8]) if row[8] is not None else None,
+                'training_fine_id': int(row[9]) if row[9] is not None else None,
+                'technical_reason_fine_id': int(row[10]) if row[10] is not None else None
             }
 
         target_days = set(shifts_segments_by_day.keys())
         for key, item in existing_by_day.items():
-            if item.get('auto_aggregated') or item.get('late_status') or item.get('early_leave_status') or item.get('training_status'):
+            if (
+                item.get('auto_aggregated')
+                or item.get('late_status')
+                or item.get('early_leave_status')
+                or item.get('training_status')
+                or item.get('technical_reason_status')
+            ):
                 target_days.add(key)
 
         if not target_days:
@@ -8253,6 +8301,10 @@ class Database:
                 day_statuses,
                 lambda seg: str(seg.get('status_key') or '') == SCHEDULE_AUTO_TRAINING_STATUS_KEY
             )
+            day_technical_reason_status = pick_status_intervals(
+                day_statuses,
+                lambda seg: self._schedule_auto_is_tech_reason_status_key(seg.get('status_key'))
+            )
             day_late_excused_status = pick_status_intervals(
                 day_statuses,
                 lambda seg: self._schedule_auto_is_late_excused_status_key(seg.get('status_key'))
@@ -8267,6 +8319,7 @@ class Database:
             # запланированных break-интервалов графика.
             break_minutes = self._schedule_auto_overlap_minutes(day_shift_intervals, day_break_status)
             training_minutes_in_shift = self._schedule_auto_overlap_minutes(day_shift_intervals, day_training_status)
+            technical_reason_minutes_in_shift = self._schedule_auto_overlap_minutes(day_shift_intervals, day_technical_reason_status)
 
             late_minutes_total = 0.0
             early_leave_minutes_total = 0.0
@@ -8334,15 +8387,18 @@ class Database:
             early_leave_minutes_int = max(0, int(round(early_leave_minutes_total)))
             overtime_minutes_int = max(0, int(round(overtime_minutes_total)))
             training_minutes_int = max(0, int(round(training_minutes_in_shift)))
+            technical_reason_minutes_int = max(0, int(round(technical_reason_minutes_in_shift)))
 
             existing = existing_by_day.get((op_id, day_value)) or {}
             prev_late_status = self._schedule_auto_normalize_flag_status(existing.get('late_status'))
             prev_early_status = self._schedule_auto_normalize_flag_status(existing.get('early_leave_status'))
             prev_training_status = self._schedule_auto_normalize_flag_status(existing.get('training_status'))
+            prev_technical_reason_status = self._schedule_auto_normalize_flag_status(existing.get('technical_reason_status'))
 
             late_status = self._schedule_auto_flag_status_for_minutes(prev_late_status, late_minutes_int)
             early_status = self._schedule_auto_flag_status_for_minutes(prev_early_status, early_leave_minutes_int)
             training_status = self._schedule_auto_flag_status_for_minutes(prev_training_status, training_minutes_int)
+            technical_reason_status = self._schedule_auto_flag_status_for_minutes(prev_technical_reason_status, technical_reason_minutes_int)
 
             upsert_rows.append((
                 int(op_id),
@@ -8357,12 +8413,15 @@ class Database:
                 int(early_leave_minutes_int),
                 int(overtime_minutes_int),
                 int(training_minutes_int),
+                int(technical_reason_minutes_int),
                 late_status,
                 early_status,
                 training_status,
+                technical_reason_status,
                 existing.get('late_fine_id'),
                 existing.get('early_leave_fine_id'),
-                existing.get('training_fine_id')
+                existing.get('training_fine_id'),
+                existing.get('technical_reason_fine_id')
             ))
             affected_months.add((int(op_id), day_value.strftime('%Y-%m')))
 
@@ -8372,9 +8431,9 @@ class Database:
                 """
                 INSERT INTO daily_hours (
                     operator_id, day, work_time, break_time, talk_time, calls, efficiency,
-                    training_time, late_minutes, early_leave_minutes, overtime_minutes, training_minutes,
-                    late_status, early_leave_status, training_status,
-                    late_fine_id, early_leave_fine_id, training_fine_id,
+                    training_time, late_minutes, early_leave_minutes, overtime_minutes, training_minutes, technical_reason_minutes,
+                    late_status, early_leave_status, training_status, technical_reason_status,
+                    late_fine_id, early_leave_fine_id, training_fine_id, technical_reason_fine_id,
                     auto_aggregated, auto_aggregated_at
                 )
                 VALUES %s
@@ -8390,12 +8449,15 @@ class Database:
                     early_leave_minutes = EXCLUDED.early_leave_minutes,
                     overtime_minutes = EXCLUDED.overtime_minutes,
                     training_minutes = EXCLUDED.training_minutes,
+                    technical_reason_minutes = EXCLUDED.technical_reason_minutes,
                     late_status = EXCLUDED.late_status,
                     early_leave_status = EXCLUDED.early_leave_status,
                     training_status = EXCLUDED.training_status,
+                    technical_reason_status = EXCLUDED.technical_reason_status,
                     late_fine_id = EXCLUDED.late_fine_id,
                     early_leave_fine_id = EXCLUDED.early_leave_fine_id,
                     training_fine_id = EXCLUDED.training_fine_id,
+                    technical_reason_fine_id = EXCLUDED.technical_reason_fine_id,
                     auto_aggregated = TRUE,
                     auto_aggregated_at = CURRENT_TIMESTAMP,
                     created_at = CURRENT_TIMESTAMP
@@ -8403,9 +8465,9 @@ class Database:
                 upsert_rows,
                 template="""(
                     %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s,
-                    %s, %s, %s,
-                    %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s, %s, %s, %s,
                     TRUE, CURRENT_TIMESTAMP
                 )""",
                 page_size=2000
@@ -8444,7 +8506,9 @@ class Database:
             return ('early_leave_minutes', 'early_leave_status', 'early_leave_fine_id')
         if flag_key == 'training':
             return ('training_minutes', 'training_status', 'training_fine_id')
-        raise ValueError("Unsupported flag_type. Allowed: late, early_leave, training")
+        if flag_key in ('technical_reason', 'tech_reason', 'tech', 'technical'):
+            return ('technical_reason_minutes', 'technical_reason_status', 'technical_reason_fine_id')
+        raise ValueError("Unsupported flag_type. Allowed: late, early_leave, training, technical_reason")
 
     def resolve_auto_schedule_flag(self, operator_id, day, flag_type, action):
         operator_id_int = int(operator_id)
@@ -8475,9 +8539,11 @@ class Database:
                     COALESCE(late_minutes, 0),
                     COALESCE(early_leave_minutes, 0),
                     COALESCE(training_minutes, 0),
+                    COALESCE(technical_reason_minutes, 0),
                     late_status,
                     early_leave_status,
-                    training_status
+                    training_status,
+                    technical_reason_status
                 FROM daily_hours
                 WHERE operator_id = %s
                   AND day = %s
@@ -8492,24 +8558,29 @@ class Database:
                 late_minutes,
                 early_leave_minutes,
                 training_minutes,
+                technical_reason_minutes,
                 late_status,
                 early_status,
-                training_status
+                training_status,
+                technical_reason_status
             ) = row
 
             late_minutes_int = max(0, int(late_minutes or 0))
             early_minutes_int = max(0, int(early_leave_minutes or 0))
             training_minutes_int = max(0, int(training_minutes or 0))
+            technical_reason_minutes_int = max(0, int(technical_reason_minutes or 0))
 
             status_map = {
                 'late_status': self._schedule_auto_flag_status_for_minutes(late_status, late_minutes_int),
                 'early_leave_status': self._schedule_auto_flag_status_for_minutes(early_status, early_minutes_int),
-                'training_status': self._schedule_auto_flag_status_for_minutes(training_status, training_minutes_int)
+                'training_status': self._schedule_auto_flag_status_for_minutes(training_status, training_minutes_int),
+                'technical_reason_status': self._schedule_auto_flag_status_for_minutes(technical_reason_status, technical_reason_minutes_int)
             }
             minutes_by_status_col = {
                 'late_status': late_minutes_int,
                 'early_leave_status': early_minutes_int,
-                'training_status': training_minutes_int
+                'training_status': training_minutes_int,
+                'technical_reason_status': technical_reason_minutes_int
             }
 
             current_minutes = minutes_by_status_col.get(status_col, 0)
@@ -8526,12 +8597,14 @@ class Database:
                 SET late_status = %s,
                     early_leave_status = %s,
                     training_status = %s,
+                    technical_reason_status = %s,
                     created_at = CURRENT_TIMESTAMP
                 WHERE id = %s
             """, (
                 status_map['late_status'],
                 status_map['early_leave_status'],
                 status_map['training_status'],
+                status_map['technical_reason_status'],
                 daily_id
             ))
 
@@ -8555,7 +8628,8 @@ class Database:
             resolved_minutes = int(day_flags.get({
                 'late_status': 'lateMinutes',
                 'early_leave_status': 'earlyLeaveMinutes',
-                'training_status': 'trainingMinutes'
+                'training_status': 'trainingMinutes',
+                'technical_reason_status': 'technicalReasonMinutes'
             }.get(status_col, ''), 0))
 
             return {
@@ -8565,7 +8639,8 @@ class Database:
                 'status': day_flags.get({
                     'late_status': 'lateStatus',
                     'early_leave_status': 'earlyLeaveStatus',
-                    'training_status': 'trainingStatus'
+                    'training_status': 'trainingStatus',
+                    'technical_reason_status': 'technicalReasonStatus'
                 }.get(status_col, ''), None),
                 'minutes': resolved_minutes,
                 'day_flags': day_flags,
@@ -9016,12 +9091,15 @@ class Database:
                 COALESCE(early_leave_minutes, 0),
                 COALESCE(overtime_minutes, 0),
                 COALESCE(training_minutes, 0),
+                COALESCE(technical_reason_minutes, 0),
                 late_status,
                 early_leave_status,
                 training_status,
+                technical_reason_status,
                 late_fine_id,
                 early_leave_fine_id,
-                training_fine_id
+                training_fine_id,
+                technical_reason_fine_id
             FROM daily_hours
             WHERE operator_id = ANY(%s)
               AND (
@@ -9029,9 +9107,11 @@ class Database:
                  OR COALESCE(early_leave_minutes, 0) > 0
                  OR COALESCE(overtime_minutes, 0) > 0
                  OR COALESCE(training_minutes, 0) > 0
+                 OR COALESCE(technical_reason_minutes, 0) > 0
                  OR late_status IS NOT NULL
                  OR early_leave_status IS NOT NULL
                  OR training_status IS NOT NULL
+                 OR technical_reason_status IS NOT NULL
               )
         """
         params = [op_ids]
@@ -9058,12 +9138,15 @@ class Database:
                 early_leave_minutes,
                 overtime_minutes,
                 training_minutes,
+                technical_reason_minutes,
                 late_status,
                 early_status,
                 training_status,
+                technical_reason_status,
                 late_fine_id,
                 early_fine_id,
-                training_fine_id
+                training_fine_id,
+                technical_reason_fine_id
             ) = row
             op_id = int(operator_id)
             day_key = day_value.strftime('%Y-%m-%d') if hasattr(day_value, 'strftime') else str(day_value or '')
@@ -9074,18 +9157,22 @@ class Database:
             early_leave_minutes_int = max(0, int(early_leave_minutes or 0))
             overtime_minutes_int = max(0, int(overtime_minutes or 0))
             training_minutes_int = max(0, int(training_minutes or 0))
+            technical_reason_minutes_int = max(0, int(technical_reason_minutes or 0))
 
             late_status_norm = self._schedule_auto_flag_status_for_minutes(late_status, late_minutes_int)
             early_status_norm = self._schedule_auto_flag_status_for_minutes(early_status, early_leave_minutes_int)
             training_status_norm = self._schedule_auto_flag_status_for_minutes(training_status, training_minutes_int)
+            technical_reason_status_norm = self._schedule_auto_flag_status_for_minutes(technical_reason_status, technical_reason_minutes_int)
 
             has_late = late_minutes_int > 0 and late_status_norm != SCHEDULE_AUTO_FLAG_REJECTED
             has_early_leave = early_leave_minutes_int > 0 and early_status_norm != SCHEDULE_AUTO_FLAG_REJECTED
             has_training = training_minutes_int > 0 and training_status_norm != SCHEDULE_AUTO_FLAG_REJECTED
+            has_technical_reason = technical_reason_minutes_int > 0 and technical_reason_status_norm != SCHEDULE_AUTO_FLAG_REJECTED
             has_pending = (
                 (late_status_norm == SCHEDULE_AUTO_FLAG_PENDING and late_minutes_int > 0)
                 or (early_status_norm == SCHEDULE_AUTO_FLAG_PENDING and early_leave_minutes_int > 0)
                 or (training_status_norm == SCHEDULE_AUTO_FLAG_PENDING and training_minutes_int > 0)
+                or (technical_reason_status_norm == SCHEDULE_AUTO_FLAG_PENDING and technical_reason_minutes_int > 0)
             )
 
             result.setdefault(op_id, {})[day_key] = {
@@ -9093,16 +9180,20 @@ class Database:
                 'earlyLeaveMinutes': early_leave_minutes_int,
                 'overtimeMinutes': overtime_minutes_int,
                 'trainingMinutes': training_minutes_int,
+                'technicalReasonMinutes': technical_reason_minutes_int,
                 'lateStatus': late_status_norm,
                 'earlyLeaveStatus': early_status_norm,
                 'trainingStatus': training_status_norm,
+                'technicalReasonStatus': technical_reason_status_norm,
                 'lateFineId': int(late_fine_id) if late_fine_id is not None else None,
                 'earlyLeaveFineId': int(early_fine_id) if early_fine_id is not None else None,
                 'trainingFineId': int(training_fine_id) if training_fine_id is not None else None,
+                'technicalReasonFineId': int(technical_reason_fine_id) if technical_reason_fine_id is not None else None,
                 'hasLate': bool(has_late),
                 'hasEarlyLeave': bool(has_early_leave),
                 'hasTraining': bool(has_training),
-                'hasDefect': bool(has_late or has_early_leave or has_training),
+                'hasTechnicalReason': bool(has_technical_reason),
+                'hasDefect': bool(has_late or has_early_leave or has_training or has_technical_reason),
                 'hasOvertime': bool(overtime_minutes_int > 0),
                 'hasPending': bool(has_pending)
             }
