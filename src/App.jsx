@@ -6312,6 +6312,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 operatorId: null,
                 date: null,
                 mode: 'add',
+                intervals: [],
                 startTime: '09:00',
                 endTime: '10:00',
                 reason: '',
@@ -6320,6 +6321,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             });
             const [plannerTrainingActionLoading, setPlannerTrainingActionLoading] = useState(false);
             const [plannerTrainingModalError, setPlannerTrainingModalError] = useState('');
+            const [plannerTechStatusModalState, setPlannerTechStatusModalState] = useState({
+                open: false,
+                operatorId: null,
+                date: null,
+                mode: 'confirm_tech_flag',
+                intervals: [],
+                startTime: '09:00',
+                endTime: '10:00',
+                reason: '',
+                comment: ''
+            });
+            const [plannerTechStatusActionLoading, setPlannerTechStatusActionLoading] = useState(false);
+            const [plannerTechStatusModalError, setPlannerTechStatusModalError] = useState('');
+            const [plannerTechReasonOptions, setPlannerTechReasonOptions] = useState([]);
             const [plannerOfflineActivityModalState, setPlannerOfflineActivityModalState] = useState({
                 open: false,
                 operatorId: null,
@@ -6662,6 +6677,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const earlyLeaveMinutes = Math.max(0, Math.round(Number(raw?.earlyLeaveMinutes ?? raw?.early_leave_minutes ?? 0) || 0));
                 const overtimeMinutes = Math.max(0, Math.round(Number(raw?.overtimeMinutes ?? raw?.overtime_minutes ?? 0) || 0));
                 const trainingMinutes = Math.max(0, Math.round(Number(raw?.trainingMinutes ?? raw?.training_minutes ?? 0) || 0));
+                const technicalReasonMinutes = Math.max(0, Math.round(Number(raw?.technicalReasonMinutes ?? raw?.technical_reason_minutes ?? 0) || 0));
 
                 const lateStatus = (lateMinutes > 0)
                     ? (normalizePlannerAutoFlagStatus(raw?.lateStatus ?? raw?.late_status) || 'pending')
@@ -6672,29 +6688,38 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const trainingStatus = (trainingMinutes > 0)
                     ? (normalizePlannerAutoFlagStatus(raw?.trainingStatus ?? raw?.training_status) || 'pending')
                     : null;
+                const technicalReasonStatus = (technicalReasonMinutes > 0)
+                    ? (normalizePlannerAutoFlagStatus(raw?.technicalReasonStatus ?? raw?.technical_reason_status) || 'pending')
+                    : null;
 
                 const lateActive = lateMinutes > 0 && lateStatus !== 'rejected';
                 const earlyLeaveActive = earlyLeaveMinutes > 0 && earlyLeaveStatus !== 'rejected';
                 const trainingActive = trainingMinutes > 0 && trainingStatus !== 'rejected';
+                const technicalReasonActive = technicalReasonMinutes > 0 && technicalReasonStatus !== 'rejected';
                 const pendingLate = lateMinutes > 0 && lateStatus === 'pending';
                 const pendingEarlyLeave = earlyLeaveMinutes > 0 && earlyLeaveStatus === 'pending';
                 const pendingTraining = trainingMinutes > 0 && trainingStatus === 'pending';
+                const pendingTechnicalReason = technicalReasonMinutes > 0 && technicalReasonStatus === 'pending';
 
                 return {
                     lateMinutes,
                     earlyLeaveMinutes,
                     overtimeMinutes,
                     trainingMinutes,
+                    technicalReasonMinutes,
                     lateStatus,
                     earlyLeaveStatus,
                     trainingStatus,
+                    technicalReasonStatus,
                     lateActive,
                     earlyLeaveActive,
                     trainingActive,
+                    technicalReasonActive,
                     pendingLate,
                     pendingEarlyLeave,
                     pendingTraining,
-                    hasPending: pendingLate || pendingEarlyLeave || pendingTraining
+                    pendingTechnicalReason,
+                    hasPending: pendingLate || pendingEarlyLeave || pendingTraining || pendingTechnicalReason
                 };
             };
             const paginatePlannerDates = useCallback((direction = 1) => {
@@ -9264,6 +9289,82 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             };
 
+            const normalizePlannerModalIntervals = (segments) => (
+                (Array.isArray(segments) ? segments : [])
+                    .map((seg) => ({
+                        startMin: Number(seg?.startMin ?? seg?.start),
+                        endMin: Number(seg?.endMin ?? seg?.end)
+                    }))
+                    .filter(seg => Number.isFinite(seg.startMin) && Number.isFinite(seg.endMin) && seg.endMin > seg.startMin)
+                    .sort((a, b) => (a.startMin - b.startMin) || (a.endMin - b.endMin))
+            );
+
+            const plannerIntervalToApiTimes = (segment) => {
+                const startRaw = Number(segment?.startMin);
+                const endRaw = Number(segment?.endMin);
+                if (!Number.isFinite(startRaw) || !Number.isFinite(endRaw) || endRaw <= startRaw) return null;
+                const startMin = Math.max(0, Math.min((24 * 60) - 1, Math.round(startRaw)));
+                let endMin = Math.round(endRaw);
+                if (endMin >= (24 * 60)) endMin = (24 * 60) - 1;
+                endMin = Math.max(1, Math.min((24 * 60) - 1, endMin));
+                if (endMin <= startMin) endMin = Math.min((24 * 60) - 1, startMin + 1);
+                if (endMin <= startMin) return null;
+                return {
+                    startTime: minutesToTime(startMin),
+                    endTime: minutesToTime(endMin)
+                };
+            };
+
+            const plannerFallbackTechReasonOptions = useMemo(() => ([
+                'Не работает интернет',
+                'Замена мыши',
+                'Не работает микрофон',
+                'Не работает Oktell',
+                'Проблема с маршрутизацией Oktell (не идут исходящие звонки), переключение в ручной режим',
+                'Замена клавиатуры',
+                'Не заходит в корпоративный чат',
+                'Не включается компьютер',
+                'Переполнена память',
+                'Кнопка "Войти в колл-центр" в Oktell не реагирует на действия',
+                'Виснет компьютер',
+                'Не работают программы на ПК (ошибка "Меню "Пуск" не работает")',
+                'Проблема с подключением к сайту Oktell',
+                'Не может войти в учетную запись ПК',
+                'Не поступают звонки',
+                'Не может войти в учетную запись Oktell',
+                'Массовая проблема с Октелл',
+                'Массовая проблема с интернетом',
+                'Массовая проблема с телефонией'
+            ]), []);
+
+            const loadPlannerTechReasonOptions = useCallback(async () => {
+                if (Array.isArray(plannerTechReasonOptions) && plannerTechReasonOptions.length > 0) {
+                    return plannerTechReasonOptions;
+                }
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/technical_issues/reasons`, {
+                        method: 'GET',
+                        credentials: 'include',
+                        headers: withAccessTokenHeader({})
+                    });
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(payload?.error || `HTTP ${response.status}`);
+                    }
+                    const rawReasons = Array.isArray(payload?.reasons) ? payload.reasons : [];
+                    const normalized = rawReasons
+                        .map(item => String(item || '').trim())
+                        .filter(Boolean);
+                    const unique = Array.from(new Set(normalized));
+                    const next = unique.length > 0 ? unique : plannerFallbackTechReasonOptions;
+                    setPlannerTechReasonOptions(next);
+                    return next;
+                } catch (error) {
+                    setPlannerTechReasonOptions(plannerFallbackTechReasonOptions);
+                    return plannerFallbackTechReasonOptions;
+                }
+            }, [API_BASE_URL, plannerFallbackTechReasonOptions, plannerTechReasonOptions, withAccessTokenHeader]);
+
             const openPlannerTrainingModalForCurrentDay = (mode = 'add', preset = null) => {
                 const operatorId = Number(modalState?.opId);
                 const dayKey = String(modalState?.date || '').trim();
@@ -9271,6 +9372,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const trainingMinutes = Math.max(0, Math.round(Number(modalAggregatedFlags?.trainingMinutes || 0)));
                 let startSeed = '09:00';
                 let endSeed = minutesToTime(Math.min(timeToMinutes(startSeed) + (trainingMinutes > 0 ? trainingMinutes : 60), (24 * 60) - 1));
+                const presetIntervals = normalizePlannerModalIntervals(preset?.intervals);
 
                 const presetStartMin = Number(preset?.startMin);
                 const presetEndMin = Number(preset?.endMin);
@@ -9278,6 +9380,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (hasPresetMinutes) {
                     startSeed = minutesToTime(Math.max(0, Math.min((24 * 60) - 1, presetStartMin)));
                     endSeed = minutesToTime(Math.max(0, Math.min((24 * 60) - 1, presetEndMin)));
+                } else if (presetIntervals.length > 0) {
+                    const firstSeg = presetIntervals[0];
+                    startSeed = minutesToTime(Math.max(0, Math.min((24 * 60) - 1, firstSeg.startMin)));
+                    endSeed = minutesToTime(Math.max(0, Math.min((24 * 60) - 1, firstSeg.endMin)));
                 } else {
                     const presetStartTime = String(preset?.startTime || '').trim();
                     const presetEndTime = String(preset?.endTime || '').trim();
@@ -9297,6 +9403,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     operatorId,
                     date: dayKey,
                     mode: String(mode || 'add'),
+                    intervals: presetIntervals,
                     startTime: startSeed,
                     endTime: endSeed,
                     reason: String(preset?.reason || '').trim(),
@@ -9312,6 +9419,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     operatorId: null,
                     date: null,
                     mode: 'add',
+                    intervals: [],
                     startTime: '09:00',
                     endTime: '10:00',
                     reason: '',
@@ -9335,51 +9443,74 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const reason = String(plannerTrainingModalState?.reason || '').trim();
                 const comment = String(plannerTrainingModalState?.comment || '').trim();
                 const mode = String(plannerTrainingModalState?.mode || 'add').trim();
+                const isBulkConfirm = mode === 'confirm_training_flag_all';
+                const isFlagConfirmMode = mode === 'confirm_training_flag' || mode === 'confirm_training_flag_all';
 
                 if (!Number.isFinite(operatorId) || !dayKey) {
                     setPlannerTrainingModalError('Не удалось определить оператора или дату.');
-                    return;
-                }
-                if (!startTime || !endTime) {
-                    setPlannerTrainingModalError('Укажите время начала и окончания.');
                     return;
                 }
                 if (!reason) {
                     setPlannerTrainingModalError('Выберите причину тренинга.');
                     return;
                 }
-                const startMinutes = timeToMinutes(startTime);
-                const endMinutes = timeToMinutes(endTime);
-                if (!Number.isFinite(startMinutes) || !Number.isFinite(endMinutes) || endMinutes <= startMinutes) {
-                    setPlannerTrainingModalError('Время окончания должно быть позже времени начала.');
+
+                let intervalsToSave = [];
+                if (isBulkConfirm) {
+                    intervalsToSave = normalizePlannerModalIntervals(plannerTrainingModalState?.intervals);
+                    if (intervalsToSave.length === 0) {
+                        setPlannerTrainingModalError('Интервалы тренинга не найдены для подтверждения.');
+                        return;
+                    }
+                } else {
+                    if (!startTime || !endTime) {
+                        setPlannerTrainingModalError('Укажите время начала и окончания.');
+                        return;
+                    }
+                    const startMinutes = timeToMinutes(startTime);
+                    const endMinutes = timeToMinutes(endTime);
+                    if (!Number.isFinite(startMinutes) || !Number.isFinite(endMinutes) || endMinutes <= startMinutes) {
+                        setPlannerTrainingModalError('Время окончания должно быть позже времени начала.');
+                        return;
+                    }
+                    intervalsToSave = [{ startMin: startMinutes, endMin: endMinutes }];
+                }
+
+                const payloadIntervals = intervalsToSave
+                    .map(plannerIntervalToApiTimes)
+                    .filter(Boolean);
+                if (payloadIntervals.length === 0) {
+                    setPlannerTrainingModalError('Не удалось подготовить интервалы для сохранения.');
                     return;
                 }
 
                 setPlannerTrainingActionLoading(true);
                 setPlannerTrainingModalError('');
                 try {
-                    const response = await fetch(`${API_BASE_URL}/api/trainings`, {
-                        method: 'POST',
-                        credentials: 'include',
-                        headers: withAccessTokenHeader({
-                            'Content-Type': 'application/json'
-                        }),
-                        body: JSON.stringify({
-                            operator_id: operatorId,
-                            date: dayKey,
-                            start_time: startTime,
-                            end_time: endTime,
-                            reason,
-                            comment: comment || null,
-                            count_in_hours: !!plannerTrainingModalState?.countInHours
-                        })
-                    });
-                    const payload = await response.json().catch(() => ({}));
-                    if (!response.ok) {
-                        throw new Error(payload?.error || `HTTP ${response.status}`);
+                    for (const interval of payloadIntervals) {
+                        const response = await fetch(`${API_BASE_URL}/api/trainings`, {
+                            method: 'POST',
+                            credentials: 'include',
+                            headers: withAccessTokenHeader({
+                                'Content-Type': 'application/json'
+                            }),
+                            body: JSON.stringify({
+                                operator_id: operatorId,
+                                date: dayKey,
+                                start_time: interval.startTime,
+                                end_time: interval.endTime,
+                                reason,
+                                comment: comment || null,
+                                count_in_hours: !!plannerTrainingModalState?.countInHours
+                            })
+                        });
+                        const payload = await response.json().catch(() => ({}));
+                        if (!response.ok) {
+                            throw new Error(payload?.error || `HTTP ${response.status}`);
+                        }
                     }
 
-                    if (mode === 'confirm_training_flag') {
+                    if (isFlagConfirmMode) {
                         const resolveResponse = await fetch(`${API_BASE_URL}/api/work_schedules/auto_flags/resolve`, {
                             method: 'POST',
                             credentials: 'include',
@@ -9400,7 +9531,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     }
 
                     await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
-                    emitAppToast(mode === 'confirm_training_flag' ? 'Тренинг добавлен и подтвержден' : 'Тренинг добавлен', 'success');
+                    if (isFlagConfirmMode) {
+                        emitAppToast(payloadIntervals.length > 1 ? 'Интервалы тренинга подтверждены' : 'Тренинг добавлен и подтвержден', 'success');
+                    } else {
+                        emitAppToast(payloadIntervals.length > 1 ? 'Интервалы тренинга сохранены' : 'Тренинг добавлен', 'success');
+                    }
                     closePlannerTrainingModal();
                 } catch (error) {
                     console.error('Error saving planner training:', error);
@@ -9408,6 +9543,183 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     emitAppToast(`Ошибка сохранения тренинга: ${error?.message || error}`, 'error');
                 } finally {
                     setPlannerTrainingActionLoading(false);
+                }
+            };
+
+            const openPlannerTechStatusModalForCurrentDay = (mode = 'confirm_tech_flag', preset = null) => {
+                const operatorId = Number(modalState?.opId);
+                const dayKey = String(modalState?.date || '').trim();
+                if (!Number.isFinite(operatorId) || !dayKey || isBulkSelectionModal) return;
+
+                loadPlannerTechReasonOptions();
+
+                let startSeed = '09:00';
+                let endSeed = minutesToTime(Math.min(timeToMinutes(startSeed) + 60, (24 * 60) - 1));
+                const presetIntervals = normalizePlannerModalIntervals(preset?.intervals);
+
+                const presetStartMin = Number(preset?.startMin);
+                const presetEndMin = Number(preset?.endMin);
+                const hasPresetMinutes = Number.isFinite(presetStartMin) && Number.isFinite(presetEndMin) && presetEndMin > presetStartMin;
+                if (hasPresetMinutes) {
+                    startSeed = minutesToTime(Math.max(0, Math.min((24 * 60) - 1, presetStartMin)));
+                    endSeed = minutesToTime(Math.max(0, Math.min((24 * 60) - 1, presetEndMin)));
+                } else if (presetIntervals.length > 0) {
+                    const firstSeg = presetIntervals[0];
+                    startSeed = minutesToTime(Math.max(0, Math.min((24 * 60) - 1, firstSeg.startMin)));
+                    endSeed = minutesToTime(Math.max(0, Math.min((24 * 60) - 1, firstSeg.endMin)));
+                } else {
+                    const presetStartTime = String(preset?.startTime || '').trim();
+                    const presetEndTime = String(preset?.endTime || '').trim();
+                    if (presetStartTime) startSeed = presetStartTime;
+                    if (presetEndTime) endSeed = presetEndTime;
+                }
+
+                const startSeedMinutes = timeToMinutes(startSeed);
+                const endSeedMinutes = timeToMinutes(endSeed);
+                if (!Number.isFinite(endSeedMinutes) || endSeedMinutes <= startSeedMinutes) {
+                    endSeed = minutesToTime(Math.min(startSeedMinutes + 60, (24 * 60) - 1));
+                }
+
+                setPlannerTechStatusModalError('');
+                setPlannerTechStatusModalState({
+                    open: true,
+                    operatorId,
+                    date: dayKey,
+                    mode: String(mode || 'confirm_tech_flag'),
+                    intervals: presetIntervals,
+                    startTime: startSeed,
+                    endTime: endSeed,
+                    reason: String(preset?.reason || '').trim(),
+                    comment: String(preset?.comment || '').trim()
+                });
+            };
+
+            const closePlannerTechStatusModal = () => {
+                setPlannerTechStatusModalError('');
+                setPlannerTechStatusModalState({
+                    open: false,
+                    operatorId: null,
+                    date: null,
+                    mode: 'confirm_tech_flag',
+                    intervals: [],
+                    startTime: '09:00',
+                    endTime: '10:00',
+                    reason: '',
+                    comment: ''
+                });
+            };
+
+            const updatePlannerTechStatusDraftField = (field, value) => {
+                setPlannerTechStatusModalState(prev => ({
+                    ...(prev || {}),
+                    [field]: value
+                }));
+            };
+
+            const submitPlannerTechStatusModal = async () => {
+                const operatorId = Number(plannerTechStatusModalState?.operatorId);
+                const dayKey = String(plannerTechStatusModalState?.date || '').trim();
+                const startTime = String(plannerTechStatusModalState?.startTime || '').trim();
+                const endTime = String(plannerTechStatusModalState?.endTime || '').trim();
+                const reason = String(plannerTechStatusModalState?.reason || '').trim();
+                const comment = String(plannerTechStatusModalState?.comment || '').trim();
+                const mode = String(plannerTechStatusModalState?.mode || 'confirm_tech_flag').trim();
+                const isBulkConfirm = mode === 'confirm_tech_flag_all';
+                const isFlagConfirmMode = mode === 'confirm_tech_flag' || mode === 'confirm_tech_flag_all';
+
+                if (!Number.isFinite(operatorId) || !dayKey) {
+                    setPlannerTechStatusModalError('Не удалось определить оператора или дату.');
+                    return;
+                }
+                if (!reason) {
+                    setPlannerTechStatusModalError('Выберите причину тех.сбоя.');
+                    return;
+                }
+
+                let intervalsToSave = [];
+                if (isBulkConfirm) {
+                    intervalsToSave = normalizePlannerModalIntervals(plannerTechStatusModalState?.intervals);
+                    if (intervalsToSave.length === 0) {
+                        setPlannerTechStatusModalError('Интервалы тех.причины не найдены для подтверждения.');
+                        return;
+                    }
+                } else {
+                    if (!startTime || !endTime) {
+                        setPlannerTechStatusModalError('Укажите время начала и окончания.');
+                        return;
+                    }
+                    const startMinutes = timeToMinutes(startTime);
+                    const endMinutes = timeToMinutes(endTime);
+                    if (!Number.isFinite(startMinutes) || !Number.isFinite(endMinutes) || endMinutes <= startMinutes) {
+                        setPlannerTechStatusModalError('Время окончания должно быть позже времени начала.');
+                        return;
+                    }
+                    intervalsToSave = [{ startMin: startMinutes, endMin: endMinutes }];
+                }
+
+                const payloadIntervals = intervalsToSave
+                    .map(plannerIntervalToApiTimes)
+                    .filter(Boolean);
+                if (payloadIntervals.length === 0) {
+                    setPlannerTechStatusModalError('Не удалось подготовить интервалы для сохранения.');
+                    return;
+                }
+
+                setPlannerTechStatusActionLoading(true);
+                setPlannerTechStatusModalError('');
+                try {
+                    for (const interval of payloadIntervals) {
+                        const response = await fetch(`${API_BASE_URL}/api/technical_issues`, {
+                            method: 'POST',
+                            credentials: 'include',
+                            headers: withAccessTokenHeader({
+                                'Content-Type': 'application/json'
+                            }),
+                            body: JSON.stringify({
+                                date: dayKey,
+                                start_time: interval.startTime,
+                                end_time: interval.endTime,
+                                reason,
+                                comment: comment || null,
+                                operator_ids: [operatorId],
+                                direction_ids: []
+                            })
+                        });
+                        const payload = await response.json().catch(() => ({}));
+                        if (!response.ok) {
+                            throw new Error(payload?.error || `HTTP ${response.status}`);
+                        }
+                    }
+
+                    if (isFlagConfirmMode) {
+                        const resolveResponse = await fetch(`${API_BASE_URL}/api/work_schedules/auto_flags/resolve`, {
+                            method: 'POST',
+                            credentials: 'include',
+                            headers: withAccessTokenHeader({
+                                'Content-Type': 'application/json'
+                            }),
+                            body: JSON.stringify({
+                                operator_id: operatorId,
+                                day: dayKey,
+                                flag_type: 'technical_reason',
+                                action: 'confirm'
+                            })
+                        });
+                        const resolvePayload = await resolveResponse.json().catch(() => ({}));
+                        if (!resolveResponse.ok) {
+                            throw new Error(resolvePayload?.error || `HTTP ${resolveResponse.status}`);
+                        }
+                    }
+
+                    await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
+                    emitAppToast(payloadIntervals.length > 1 ? 'Интервалы тех.причины подтверждены' : 'Тех.причина подтверждена', 'success');
+                    closePlannerTechStatusModal();
+                } catch (error) {
+                    console.error('Error saving planner technical issue from status:', error);
+                    setPlannerTechStatusModalError(String(error?.message || error || 'Не удалось сохранить тех.причину.'));
+                    emitAppToast(`Ошибка сохранения тех.причины: ${error?.message || error}`, 'error');
+                } finally {
+                    setPlannerTechStatusActionLoading(false);
                 }
             };
 
@@ -9910,11 +10222,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (!operatorNameKey) return [];
                 return importedStatusTimelineByOperatorDateKey.get(`${operatorNameKey}|${modalState.date}`) || [];
             }, [isBulkSelectionModal, modalState?.opId, modalState?.date, operators, importedStatusTimelineByOperatorDateKey]);
-            const modalTrainingStatusSegments = useMemo(() => {
+            const buildModalStatusSegments = useCallback((matchFn, idPrefix = 'status') => {
                 const raw = (Array.isArray(modalImportedStatusTimeline) ? modalImportedStatusTimeline : [])
                     .map((seg) => {
                         const statusKey = plannerStatusNormalizeKey(seg?.stateName || seg?.stateKey || seg?.rawStateName || seg?.rawStateKey || '');
-                        if (statusKey !== 'тренинг' && statusKey !== 'training') return null;
+                        if (!matchFn(statusKey)) return null;
                         const startMin = Number(seg?.startMin ?? seg?.start ?? 0);
                         const endMin = Number(seg?.endMin ?? seg?.end ?? 0);
                         if (!Number.isFinite(startMin) || !Number.isFinite(endMin) || endMin <= startMin) return null;
@@ -9939,12 +10251,30 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 });
 
                 return merged.map((seg, idx) => ({
-                    id: `training-seg-${idx}-${Math.round(seg.startMin)}-${Math.round(seg.endMin)}`,
+                    id: `${idPrefix}-seg-${idx}-${Math.round(seg.startMin)}-${Math.round(seg.endMin)}`,
                     startMin: seg.startMin,
                     endMin: seg.endMin,
                     durationMin: Math.max(1, Math.round(seg.endMin - seg.startMin))
                 }));
             }, [modalImportedStatusTimeline]);
+            const modalTrainingStatusSegments = useMemo(
+                () => buildModalStatusSegments(
+                    (statusKey) => statusKey === 'тренинг' || statusKey === 'training',
+                    'training'
+                ),
+                [buildModalStatusSegments]
+            );
+            const modalTechReasonStatusSegments = useMemo(
+                () => buildModalStatusSegments(
+                    (statusKey) => plannerStatusIsTechReasonKey(statusKey),
+                    'tech-reason'
+                ),
+                [buildModalStatusSegments]
+            );
+            const modalTechReasonMinutesFromStatuses = useMemo(
+                () => (modalTechReasonStatusSegments || []).reduce((sum, seg) => sum + Math.max(0, Number(seg?.durationMin || 0)), 0),
+                [modalTechReasonStatusSegments]
+            );
             const plannerTrainingReasonOptions = useMemo(() => ([
                 "Обратная связь",
                 "Собрание",
@@ -14871,6 +15201,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     label: 'Тренинг (по статусам)',
                                     minutes: Number(modalAggregatedFlags?.trainingMinutes || 0),
                                     status: modalAggregatedFlags?.trainingStatus || null
+                                },
+                                {
+                                    key: 'technical_reason',
+                                    label: 'Тех.причина (по статусам)',
+                                    minutes: Number(modalAggregatedFlags?.technicalReasonMinutes ?? modalTechReasonMinutesFromStatuses ?? 0),
+                                    status: modalAggregatedFlags?.technicalReasonStatus || null
                                 }
                             ].map(item => {
                                 const minutes = Math.max(0, Math.round(item.minutes || 0));
@@ -14933,14 +15269,30 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         type="button"
                                                         onClick={() => {
                                                             if (item.key === 'training') {
-                                                                const firstTrainingSeg = Array.isArray(modalTrainingStatusSegments) ? modalTrainingStatusSegments[0] : null;
-                                                                if (firstTrainingSeg) {
-                                                                    openPlannerTrainingModalForCurrentDay('confirm_training_flag', {
-                                                                        startMin: firstTrainingSeg.startMin,
-                                                                        endMin: firstTrainingSeg.endMin
+                                                                const trainingIntervals = Array.isArray(modalTrainingStatusSegments) ? modalTrainingStatusSegments : [];
+                                                                if (trainingIntervals.length > 0) {
+                                                                    openPlannerTrainingModalForCurrentDay('confirm_training_flag_all', {
+                                                                        intervals: trainingIntervals.map(seg => ({
+                                                                            startMin: seg.startMin,
+                                                                            endMin: seg.endMin
+                                                                        }))
                                                                     });
                                                                 } else {
                                                                     openPlannerTrainingModalForCurrentDay('confirm_training_flag');
+                                                                }
+                                                                return;
+                                                            }
+                                                            if (item.key === 'technical_reason') {
+                                                                const techIntervals = Array.isArray(modalTechReasonStatusSegments) ? modalTechReasonStatusSegments : [];
+                                                                if (techIntervals.length > 0) {
+                                                                    openPlannerTechStatusModalForCurrentDay('confirm_tech_flag_all', {
+                                                                        intervals: techIntervals.map(seg => ({
+                                                                            startMin: seg.startMin,
+                                                                            endMin: seg.endMin
+                                                                        }))
+                                                                    });
+                                                                } else {
+                                                                    openPlannerTechStatusModalForCurrentDay('confirm_tech_flag');
                                                                 }
                                                                 return;
                                                             }
@@ -14969,9 +15321,34 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <div className="w-full mt-1 pt-2 border-t border-slate-100">
                                                 {modalTrainingStatusSegments.length > 0 ? (
                                                     <div className="space-y-1.5">
+                                                        <div className="flex justify-end">
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => openPlannerTrainingModalForCurrentDay('confirm_training_flag_all', {
+                                                                    intervals: modalTrainingStatusSegments.map(seg => ({
+                                                                        startMin: seg.startMin,
+                                                                        endMin: seg.endMin
+                                                                    }))
+                                                                })}
+                                                                disabled={plannerTrainingActionLoading || anyBusy}
+                                                                className="px-2.5 py-1 rounded-md border border-teal-300 bg-white hover:bg-teal-50 text-teal-700 text-[11px] font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
+                                                            >
+                                                                Подтвердить все интервалы
+                                                            </button>
+                                                        </div>
                                                         {modalTrainingStatusSegments.map((seg, segIndex) => {
                                                             const startDisplay = minutesToTime(seg.startMin);
                                                             const endDisplay = minutesToTime(Math.min(seg.endMin, (24 * 60) - 1));
+                                                            const intervalStatusLabel = status === 'confirmed'
+                                                                ? 'Подтвержден'
+                                                                : status === 'rejected'
+                                                                    ? 'Отклонен'
+                                                                    : 'Ожидает';
+                                                            const intervalStatusClass = status === 'confirmed'
+                                                                ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                                                                : status === 'rejected'
+                                                                    ? 'border-slate-300 bg-slate-100 text-slate-600'
+                                                                    : 'border-amber-200 bg-amber-50 text-amber-700';
                                                             return (
                                                                 <div key={seg.id || `training-segment-${segIndex}`} className="flex flex-wrap items-center gap-2 rounded-md border border-teal-100 bg-teal-50/40 px-2 py-1.5">
                                                                     <span className="text-xs font-semibold text-teal-800 tabular-nums">
@@ -14979,6 +15356,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     </span>
                                                                     <span className="text-[11px] text-teal-700">
                                                                         {formatMinutesOnly(seg.durationMin)}
+                                                                    </span>
+                                                                    <span className={`px-2 py-0.5 rounded-full border text-[10px] font-semibold ${intervalStatusClass}`}>
+                                                                        {intervalStatusLabel}
                                                                     </span>
                                                                     <button
                                                                         type="button"
@@ -14998,6 +15378,71 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 ) : (
                                                     <div className="text-[11px] text-slate-500">
                                                         Интервалы тренинга не найдены в статусах за этот день.
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
+                                        {item.key === 'technical_reason' && (
+                                            <div className="w-full mt-1 pt-2 border-t border-slate-100">
+                                                {modalTechReasonStatusSegments.length > 0 ? (
+                                                    <div className="space-y-1.5">
+                                                        <div className="flex justify-end">
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => openPlannerTechStatusModalForCurrentDay('confirm_tech_flag_all', {
+                                                                    intervals: modalTechReasonStatusSegments.map(seg => ({
+                                                                        startMin: seg.startMin,
+                                                                        endMin: seg.endMin
+                                                                    }))
+                                                                })}
+                                                                disabled={plannerTechStatusActionLoading || anyBusy}
+                                                                className="px-2.5 py-1 rounded-md border border-violet-300 bg-white hover:bg-violet-50 text-violet-700 text-[11px] font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
+                                                            >
+                                                                Подтвердить все интервалы
+                                                            </button>
+                                                        </div>
+                                                        {modalTechReasonStatusSegments.map((seg, segIndex) => {
+                                                            const startDisplay = minutesToTime(seg.startMin);
+                                                            const endDisplay = minutesToTime(Math.min(seg.endMin, (24 * 60) - 1));
+                                                            const intervalStatusLabel = status === 'confirmed'
+                                                                ? 'Подтвержден'
+                                                                : status === 'rejected'
+                                                                    ? 'Отклонен'
+                                                                    : 'Ожидает';
+                                                            const intervalStatusClass = status === 'confirmed'
+                                                                ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                                                                : status === 'rejected'
+                                                                    ? 'border-slate-300 bg-slate-100 text-slate-600'
+                                                                    : 'border-amber-200 bg-amber-50 text-amber-700';
+                                                            return (
+                                                                <div key={seg.id || `tech-reason-segment-${segIndex}`} className="flex flex-wrap items-center gap-2 rounded-md border border-violet-100 bg-violet-50/40 px-2 py-1.5">
+                                                                    <span className="text-xs font-semibold text-violet-800 tabular-nums">
+                                                                        {startDisplay} — {endDisplay}
+                                                                    </span>
+                                                                    <span className="text-[11px] text-violet-700">
+                                                                        {formatMinutesOnly(seg.durationMin)}
+                                                                    </span>
+                                                                    <span className={`px-2 py-0.5 rounded-full border text-[10px] font-semibold ${intervalStatusClass}`}>
+                                                                        {intervalStatusLabel}
+                                                                    </span>
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => openPlannerTechStatusModalForCurrentDay('confirm_tech_flag', {
+                                                                            startMin: seg.startMin,
+                                                                            endMin: seg.endMin
+                                                                        })}
+                                                                        disabled={plannerTechStatusActionLoading || anyBusy}
+                                                                        className="ml-auto px-2 py-1 rounded-md border border-violet-200 bg-white hover:bg-violet-50 text-violet-700 text-[11px] font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
+                                                                    >
+                                                                        Подтвердить интервал
+                                                                    </button>
+                                                                </div>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                ) : (
+                                                    <div className="text-[11px] text-slate-500">
+                                                        Интервалы тех.причины не найдены в статусах за этот день.
                                                     </div>
                                                 )}
                                             </div>
@@ -15383,7 +15828,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             <div className="flex items-center justify-between gap-3">
                                 <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
                                     <FaIcon className="fas fa-chalkboard-teacher text-blue-600"></FaIcon>
-                                    {String(plannerTrainingModalState.mode || '') === 'confirm_training_flag'
+                                    {(String(plannerTrainingModalState.mode || '') === 'confirm_training_flag'
+                                        || String(plannerTrainingModalState.mode || '') === 'confirm_training_flag_all')
                                         ? 'Подтвердить тренинг'
                                         : 'Добавить тренинг'}
                                 </h3>
@@ -15411,26 +15857,41 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 />
                             </div>
 
-                            <div className="grid grid-cols-2 gap-3">
-                                <div>
-                                    <label className="block text-xs font-medium text-slate-600 mb-1">Начало</label>
-                                    <input
-                                        type="time"
-                                        value={plannerTrainingModalState.startTime || ''}
-                                        onChange={(e) => updatePlannerTrainingDraftField('startTime', e.target.value)}
-                                        className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                    />
+                            {String(plannerTrainingModalState.mode || '') === 'confirm_training_flag_all' ? (
+                                <div className="rounded-lg border border-blue-100 bg-blue-50/60 px-3 py-2">
+                                    <div className="text-xs font-semibold text-blue-800 mb-1">
+                                        Интервалы для подтверждения: {Array.isArray(plannerTrainingModalState.intervals) ? plannerTrainingModalState.intervals.length : 0}
+                                    </div>
+                                    <div className="max-h-44 overflow-auto space-y-1 pr-1">
+                                        {(Array.isArray(plannerTrainingModalState.intervals) ? plannerTrainingModalState.intervals : []).map((seg, idx) => (
+                                            <div key={`planner-training-modal-interval-${idx}`} className="text-[11px] text-blue-900 tabular-nums">
+                                                {minutesToTime(Number(seg?.startMin || 0))} — {minutesToTime(Math.min(Number(seg?.endMin || 0), (24 * 60) - 1))}
+                                            </div>
+                                        ))}
+                                    </div>
                                 </div>
-                                <div>
-                                    <label className="block text-xs font-medium text-slate-600 mb-1">Конец</label>
-                                    <input
-                                        type="time"
-                                        value={plannerTrainingModalState.endTime || ''}
-                                        onChange={(e) => updatePlannerTrainingDraftField('endTime', e.target.value)}
-                                        className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                    />
+                            ) : (
+                                <div className="grid grid-cols-2 gap-3">
+                                    <div>
+                                        <label className="block text-xs font-medium text-slate-600 mb-1">Начало</label>
+                                        <input
+                                            type="time"
+                                            value={plannerTrainingModalState.startTime || ''}
+                                            onChange={(e) => updatePlannerTrainingDraftField('startTime', e.target.value)}
+                                            className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-medium text-slate-600 mb-1">Конец</label>
+                                        <input
+                                            type="time"
+                                            value={plannerTrainingModalState.endTime || ''}
+                                            onChange={(e) => updatePlannerTrainingDraftField('endTime', e.target.value)}
+                                            className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        />
+                                    </div>
                                 </div>
-                            </div>
+                            )}
 
                             <div>
                                 <label className="block text-xs font-medium text-slate-600 mb-1">Причина</label>
@@ -15480,7 +15941,141 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
                             >
                                 <FaIcon className={`fas ${plannerTrainingActionLoading ? 'fa-spinner fa-spin' : 'fa-save'}`}></FaIcon>
-                                {plannerTrainingActionLoading ? 'Сохраняем...' : 'Сохранить тренинг'}
+                                {plannerTrainingActionLoading
+                                    ? 'Сохраняем...'
+                                    : ((String(plannerTrainingModalState.mode || '') === 'confirm_training_flag'
+                                        || String(plannerTrainingModalState.mode || '') === 'confirm_training_flag_all')
+                                        ? 'Подтвердить'
+                                        : 'Сохранить тренинг')}
+                            </button>
+                        </div>
+                    </SimpleModal>
+                )}
+
+                {plannerTechStatusModalState.open && (
+                    <SimpleModal
+                        open={plannerTechStatusModalState.open}
+                        onClose={closePlannerTechStatusModal}
+                        panelClassName="w-[560px] max-w-[calc(100vw-1rem)]"
+                    >
+                        <div className="mb-4 pb-3 border-b border-slate-200">
+                            <div className="flex items-center justify-between gap-3">
+                                <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                                    <FaIcon className="fas fa-tools text-violet-600"></FaIcon>
+                                    {(String(plannerTechStatusModalState.mode || '') === 'confirm_tech_flag'
+                                        || String(plannerTechStatusModalState.mode || '') === 'confirm_tech_flag_all')
+                                        ? 'Подтвердить тех.причину'
+                                        : 'Добавить тех.причину'}
+                                </h3>
+                                <button
+                                    type="button"
+                                    onClick={closePlannerTechStatusModal}
+                                    className="w-8 h-8 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 flex items-center justify-center"
+                                >
+                                    <FaIcon className="fas fa-times"></FaIcon>
+                                </button>
+                            </div>
+                            <div className="mt-1 text-xs text-slate-500">
+                                Дата: {plannerTechStatusModalState.date || '—'}
+                            </div>
+                        </div>
+
+                        <div className="space-y-3">
+                            <div>
+                                <label className="block text-xs font-medium text-slate-600 mb-1">Дата</label>
+                                <input
+                                    type="date"
+                                    value={plannerTechStatusModalState.date || ''}
+                                    onChange={(e) => updatePlannerTechStatusDraftField('date', e.target.value)}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
+                                />
+                            </div>
+
+                            {String(plannerTechStatusModalState.mode || '') === 'confirm_tech_flag_all' ? (
+                                <div className="rounded-lg border border-violet-100 bg-violet-50/60 px-3 py-2">
+                                    <div className="text-xs font-semibold text-violet-800 mb-1">
+                                        Интервалы для подтверждения: {Array.isArray(plannerTechStatusModalState.intervals) ? plannerTechStatusModalState.intervals.length : 0}
+                                    </div>
+                                    <div className="max-h-44 overflow-auto space-y-1 pr-1">
+                                        {(Array.isArray(plannerTechStatusModalState.intervals) ? plannerTechStatusModalState.intervals : []).map((seg, idx) => (
+                                            <div key={`planner-tech-modal-interval-${idx}`} className="text-[11px] text-violet-900 tabular-nums">
+                                                {minutesToTime(Number(seg?.startMin || 0))} — {minutesToTime(Math.min(Number(seg?.endMin || 0), (24 * 60) - 1))}
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            ) : (
+                                <div className="grid grid-cols-2 gap-3">
+                                    <div>
+                                        <label className="block text-xs font-medium text-slate-600 mb-1">Начало</label>
+                                        <input
+                                            type="time"
+                                            value={plannerTechStatusModalState.startTime || ''}
+                                            onChange={(e) => updatePlannerTechStatusDraftField('startTime', e.target.value)}
+                                            className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-medium text-slate-600 mb-1">Конец</label>
+                                        <input
+                                            type="time"
+                                            value={plannerTechStatusModalState.endTime || ''}
+                                            onChange={(e) => updatePlannerTechStatusDraftField('endTime', e.target.value)}
+                                            className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
+                                        />
+                                    </div>
+                                </div>
+                            )}
+
+                            <div>
+                                <label className="block text-xs font-medium text-slate-600 mb-1">Причина</label>
+                                <select
+                                    value={plannerTechStatusModalState.reason || ''}
+                                    onChange={(e) => updatePlannerTechStatusDraftField('reason', e.target.value)}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
+                                >
+                                    <option value="">Выберите причину</option>
+                                    {(plannerTechReasonOptions.length > 0 ? plannerTechReasonOptions : plannerFallbackTechReasonOptions).map(reason => (
+                                        <option key={`planner-tech-reason-${reason}`} value={reason}>{reason}</option>
+                                    ))}
+                                </select>
+                            </div>
+
+                            <div>
+                                <label className="block text-xs font-medium text-slate-600 mb-1">Комментарий</label>
+                                <textarea
+                                    rows={3}
+                                    value={plannerTechStatusModalState.comment || ''}
+                                    onChange={(e) => updatePlannerTechStatusDraftField('comment', e.target.value)}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-violet-500 resize-y"
+                                    placeholder="Комментарий (необязательно)"
+                                />
+                            </div>
+
+                            {plannerTechStatusModalError && (
+                                <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                                    {plannerTechStatusModalError}
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="mt-5 pt-4 border-t border-slate-200 flex items-center justify-end gap-2">
+                            <button
+                                type="button"
+                                onClick={closePlannerTechStatusModal}
+                                disabled={plannerTechStatusActionLoading}
+                                className="px-4 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed"
+                            >
+                                Отмена
+                            </button>
+                            <button
+                                type="button"
+                                onClick={submitPlannerTechStatusModal}
+                                disabled={plannerTechStatusActionLoading}
+                                className="px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-700 text-white text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
+                            >
+                                <FaIcon className={`fas ${plannerTechStatusActionLoading ? 'fa-spinner fa-spin' : 'fa-save'}`}></FaIcon>
+                                {plannerTechStatusActionLoading ? 'Сохраняем...' : 'Подтвердить'}
                             </button>
                         </div>
                     </SimpleModal>
