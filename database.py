@@ -7751,18 +7751,82 @@ class Database:
                 result.append({'start': overlap_start, 'end': overlap_end})
         return self._merge_break_intervals(result)
 
-    def _schedule_auto_start_second_of_day(self, dt_value):
-        if not isinstance(dt_value, datetime):
-            return None
-        return int((dt_value.hour * 3600) + (dt_value.minute * 60) + dt_value.second)
+    def _schedule_auto_split_status_segment_by_day(self, status_date_value, start_at_value, end_at_value):
+        """
+        Разбивает статус-сегмент на дневные куски в секундах [0..86400].
+        Корректно обрабатывает переход через полночь и интервалы, где end_at
+        лежит в следующем календарном дне.
+        """
+        chunks = []
 
-    def _schedule_auto_end_second_of_day(self, dt_value):
-        if not isinstance(dt_value, datetime):
-            return None
-        second = (dt_value.hour * 3600) + (dt_value.minute * 60) + dt_value.second
-        if dt_value.microsecond > 0:
-            second += 1
-        return int(second)
+        if isinstance(start_at_value, datetime) and isinstance(end_at_value, datetime):
+            if end_at_value <= start_at_value:
+                return []
+
+            cursor = start_at_value
+            while cursor < end_at_value:
+                day_start = cursor.replace(hour=0, minute=0, second=0, microsecond=0)
+                day_end = day_start + timedelta(days=1)
+                seg_end = end_at_value if end_at_value <= day_end else day_end
+                if seg_end <= cursor:
+                    break
+
+                start_delta = (cursor - day_start).total_seconds()
+                end_delta = (seg_end - day_start).total_seconds()
+                start_sec = int(start_delta)
+                end_sec = int(end_delta)
+                if end_delta > float(end_sec):
+                    end_sec += 1
+                if end_sec <= start_sec and seg_end > cursor:
+                    end_sec = min(86400, start_sec + 1)
+
+                start_sec = max(0, min(86399, int(start_sec)))
+                end_sec = max(1, min(86400, int(end_sec)))
+                if end_sec > start_sec:
+                    chunks.append({
+                        'day': cursor.date(),
+                        'start': int(start_sec),
+                        'end': int(end_sec)
+                    })
+                cursor = seg_end
+
+            if chunks:
+                return chunks
+
+        # Fallback для старых/нестандартных данных: якоримся на status_date.
+        if not isinstance(status_date_value, date):
+            return []
+
+        if isinstance(start_at_value, datetime):
+            start_sec = int((start_at_value.hour * 3600) + (start_at_value.minute * 60) + start_at_value.second)
+        elif isinstance(start_at_value, dt_time):
+            start_sec = int((start_at_value.hour * 3600) + (start_at_value.minute * 60) + start_at_value.second)
+        else:
+            return []
+
+        if isinstance(end_at_value, datetime):
+            end_sec = int((end_at_value.hour * 3600) + (end_at_value.minute * 60) + end_at_value.second)
+            if end_at_value.microsecond > 0:
+                end_sec += 1
+        elif isinstance(end_at_value, dt_time):
+            end_sec = int((end_at_value.hour * 3600) + (end_at_value.minute * 60) + end_at_value.second)
+            if getattr(end_at_value, 'microsecond', 0) > 0:
+                end_sec += 1
+        else:
+            return []
+
+        start_sec = max(0, min(86399, start_sec))
+        end_sec = max(1, min(86400, end_sec))
+        if end_sec <= start_sec:
+            end_sec = min(86400, start_sec + 1)
+
+        if end_sec > start_sec:
+            chunks.append({
+                'day': status_date_value,
+                'start': int(start_sec),
+                'end': int(end_sec)
+            })
+        return chunks
 
     def _schedule_auto_compact_status_key(self, status_key_value):
         key = str(status_key_value or '').strip().lower()
@@ -8248,6 +8312,7 @@ class Database:
                     'end': local_end
                 })
 
+        status_start_for_query = calc_start_date_obj - timedelta(days=1)
         status_end_for_query = calc_end_date_obj + timedelta(days=1)
         cursor.execute("""
             SELECT
@@ -8263,28 +8328,35 @@ class Database:
               AND status_date >= %s
               AND status_date <= %s
             ORDER BY operator_id, status_date, start_at, end_at, id
-        """, (op_ids, calc_start_date_obj, status_end_for_query))
+        """, (op_ids, status_start_for_query, status_end_for_query))
         status_rows = cursor.fetchall() or []
         statuses_by_day = {}
         for op_id, status_date_value, start_at_value, end_at_value, status_key, is_work, is_break in status_rows:
-            start_sec = self._schedule_auto_start_second_of_day(start_at_value)
-            end_sec = self._schedule_auto_end_second_of_day(end_at_value)
-            if start_sec is None or end_sec is None:
+            day_chunks = self._schedule_auto_split_status_segment_by_day(
+                status_date_value=status_date_value,
+                start_at_value=start_at_value,
+                end_at_value=end_at_value
+            )
+            if not day_chunks:
                 continue
-            # Для очень коротких статус-сегментов (< 1 сек) учитываем минимум 1 секунду,
-            # иначе подтверждение "Тренинг/Тех.причина" может теряться как 0.
-            if end_sec <= start_sec and isinstance(start_at_value, datetime) and isinstance(end_at_value, datetime) and end_at_value > start_at_value:
-                end_sec = start_sec + 1
-            if end_sec <= start_sec:
-                continue
-            day_key = (int(op_id), status_date_value)
-            statuses_by_day.setdefault(day_key, []).append({
-                'start': int(start_sec),
-                'end': int(end_sec),
-                'status_key': str(status_key or '').strip().lower(),
-                'is_work': bool(is_work),
-                'is_break': bool(is_break)
-            })
+            for chunk in day_chunks:
+                chunk_day = chunk.get('day')
+                start_sec = int(chunk.get('start', 0))
+                end_sec = int(chunk.get('end', 0))
+                if not isinstance(chunk_day, date):
+                    continue
+                if chunk_day < calc_start_date_obj or chunk_day > status_end_for_query:
+                    continue
+                if end_sec <= start_sec:
+                    continue
+                day_key = (int(op_id), chunk_day)
+                statuses_by_day.setdefault(day_key, []).append({
+                    'start': int(start_sec),
+                    'end': int(end_sec),
+                    'status_key': str(status_key or '').strip().lower(),
+                    'is_work': bool(is_work),
+                    'is_break': bool(is_break)
+                })
 
         cursor.execute("""
             SELECT
