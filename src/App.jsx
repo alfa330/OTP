@@ -9154,7 +9154,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     }
 
                     await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
-                    emitAppToast(`Агрегация дня ${dayKey} выполнена`, 'success');
+                    const rangeStart = String(payload?.range?.start_date || '').trim();
+                    const rangeEnd = String(payload?.range?.end_date || '').trim();
+                    const expandedCrossDay = !!payload?.expanded_cross_day;
+                    if (rangeStart && rangeEnd) {
+                        emitAppToast(
+                            expandedCrossDay
+                                ? `Агрегация выполнена (${rangeStart} — ${rangeEnd}, с учетом переходов через 00:00)`
+                                : `Агрегация выполнена (${rangeStart} — ${rangeEnd})`,
+                            'success'
+                        );
+                    } else {
+                        emitAppToast(`Агрегация дня ${dayKey} выполнена`, 'success');
+                    }
                 } catch (error) {
                     console.error('Error aggregating planner day:', error);
                     emitAppToast(`Ошибка агрегации дня: ${error?.message || error}`, 'error');
