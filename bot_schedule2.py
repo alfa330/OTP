@@ -11695,6 +11695,7 @@ async def show_operator_hours(callback: types.CallbackQuery):
             regular_hours = round(hours.get('regular_hours', 0) or 0, 2)
             training_hours = round(hours.get('training_hours', 0) or 0, 2)
             technical_issue_hours = round(hours.get('technical_issue_hours', 0) or 0, 2)
+            offline_activity_hours = round(hours.get('offline_activity_hours', 0) or 0, 2)
             accounted_hours = round(hours.get('accounted_hours', regular_hours + training_hours + technical_issue_hours) or 0, 2)
             norm_hours = hours.get('norm_hours', 0) or 0
             percent_complete = 0
@@ -11706,6 +11707,7 @@ async def show_operator_hours(callback: types.CallbackQuery):
                 f"   📈 Процент выполнения: {percent_complete}%\n"
                 f"   📚 Часы тренинга: {training_hours}\n"
                 f"   🛠 Тех. сбои: {technical_issue_hours}\n"
+                f"   👤 Офлайн активность: {offline_activity_hours}\n"
                 f"   💸 Штрафы: {hours.get('fines', 0)}\n\n"
             )
         else:
@@ -12701,6 +12703,7 @@ async def show_operator_stats(message: types.Message):
             f"⏱ <b>Общие часы работы:</b> {accounted_hours} из {stats['norm_hours']} ({stats['percent_complete']}%)\n"
             f"📚 <b>Часы тренинга:</b> {stats['training_hours']}\n"
             f"🛠 <b>Тех. сбои:</b> {stats.get('technical_issue_hours', 0)}\n"
+            f"👤 <b>Офлайн активность:</b> {stats.get('offline_activity_hours', 0)}\n"
             f"📞 <b>Количество звонков в час:</b> {stats['calls_per_hour']}\n"
             f"💸 <b>Штрафы:</b> {stats['fines']}\n\n"
             f"📞 <b>Прослушано звонков:</b> {stats['call_count']}\n"

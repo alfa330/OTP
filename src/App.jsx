@@ -1455,7 +1455,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         // ====== FOOTER AGGREGATES ======
         const footerTotals = useMemo(() => {
-            let sumDisplayedTotal = 0; // regular + counted training + technical issues
+            let sumDisplayedTotal = 0; // regular + counted training + technical issues + offline activities
             let sumRegular = 0; // база без тренинга/техсбоев
             let sumProd = 0; // displayedTotal - norm
             let sumNorm = 0;
@@ -29065,7 +29065,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                           const totalHoursBase = Number(hoursOp?.aggregates?.regular_hours ?? hoursOp?.aggregates?.regular ?? 0);
                                           const totalHoursTraining = Number(hoursOp?.training_hours ?? 0);
                                           const totalHoursTechnical = Number(hoursOp?.technical_issue_hours ?? 0);
-                                          const totalHours = totalHoursBase + totalHoursTraining + totalHoursTechnical;
+                                          const totalHoursOffline = Number(hoursOp?.offline_activity_hours ?? 0);
+                                          const totalHours = totalHoursBase + totalHoursTraining + totalHoursTechnical + totalHoursOffline;
                                           const normHours = Number(hoursOp?.norm_hours ?? 0);
                                           const hasHoursData = hoursData?.operators?.length > 0;
                                           
@@ -29279,7 +29280,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             return sum + hours;
                                             }, 0);
 
-                                            const trainingHours = safeNum(opTrainingField) + safeNum(trainingHoursFromList);
+                                            // Avoid double counting: use backend value if present, otherwise compute from list.
+                                            const trainingHours = safeNum(opTrainingField) > 0
+                                                ? safeNum(opTrainingField)
+                                                : safeNum(trainingHoursFromList);
 
                                             const technicalByDayMap = (op && typeof op.technical_issues_by_day === 'object' && !Array.isArray(op.technical_issues_by_day))
                                                 ? op.technical_issues_by_day
@@ -29339,7 +29343,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <div className="workhours-main-grid grid grid-cols-1 md:grid-cols-3 gap-6">
                                                 {/* Левая часть с карточками */}
                                                 <div className="workhours-left col-span-1 md:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-6">
-                                                {/* Отработанные часы (включая зачтённые часы тренинга) */}
+                                                {/* Отработанные часы (база + зачтённые тренинги + техсбои + оффлайн) */}
                                                 <div className="p-5 workhours-card bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
                                                     <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
                                                     <FaIcon className="fas fa-briefcase text-gray-400"></FaIcon> Отработанные часы
