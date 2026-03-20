@@ -733,7 +733,15 @@ class Database:
             """)
             cursor.execute("""
                 ALTER TABLE daily_hours
+                ADD COLUMN IF NOT EXISTS late_seconds INTEGER NOT NULL DEFAULT 0;
+            """)
+            cursor.execute("""
+                ALTER TABLE daily_hours
                 ADD COLUMN IF NOT EXISTS early_leave_minutes INTEGER NOT NULL DEFAULT 0;
+            """)
+            cursor.execute("""
+                ALTER TABLE daily_hours
+                ADD COLUMN IF NOT EXISTS early_leave_seconds INTEGER NOT NULL DEFAULT 0;
             """)
             cursor.execute("""
                 ALTER TABLE daily_hours
@@ -741,11 +749,23 @@ class Database:
             """)
             cursor.execute("""
                 ALTER TABLE daily_hours
+                ADD COLUMN IF NOT EXISTS overtime_seconds INTEGER NOT NULL DEFAULT 0;
+            """)
+            cursor.execute("""
+                ALTER TABLE daily_hours
                 ADD COLUMN IF NOT EXISTS training_minutes INTEGER NOT NULL DEFAULT 0;
             """)
             cursor.execute("""
                 ALTER TABLE daily_hours
+                ADD COLUMN IF NOT EXISTS training_seconds INTEGER NOT NULL DEFAULT 0;
+            """)
+            cursor.execute("""
+                ALTER TABLE daily_hours
                 ADD COLUMN IF NOT EXISTS technical_reason_minutes INTEGER NOT NULL DEFAULT 0;
+            """)
+            cursor.execute("""
+                ALTER TABLE daily_hours
+                ADD COLUMN IF NOT EXISTS technical_reason_seconds INTEGER NOT NULL DEFAULT 0;
             """)
             cursor.execute("""
                 ALTER TABLE daily_hours
@@ -7654,6 +7674,12 @@ class Database:
                 total += (end - start)
         return float(total)
 
+    def _schedule_auto_seconds_to_display_minutes(self, seconds_value):
+        seconds_int = max(0, int(seconds_value or 0))
+        if seconds_int <= 0:
+            return 0
+        return int((seconds_int + 59) // 60)
+
     def _schedule_auto_subtract_intervals(self, source_intervals, blocked_intervals):
         source = self._merge_break_intervals(source_intervals or [])
         blocked = self._merge_break_intervals(blocked_intervals or [])
@@ -7725,13 +7751,18 @@ class Database:
                 result.append({'start': overlap_start, 'end': overlap_end})
         return self._merge_break_intervals(result)
 
-    def _schedule_auto_minute_of_day(self, dt_value):
+    def _schedule_auto_start_second_of_day(self, dt_value):
         if not isinstance(dt_value, datetime):
             return None
-        minute = (dt_value.hour * 60) + dt_value.minute
-        if dt_value.second >= 30:
-            minute += 1
-        return int(minute)
+        return int((dt_value.hour * 3600) + (dt_value.minute * 60) + dt_value.second)
+
+    def _schedule_auto_end_second_of_day(self, dt_value):
+        if not isinstance(dt_value, datetime):
+            return None
+        second = (dt_value.hour * 3600) + (dt_value.minute * 60) + dt_value.second
+        if dt_value.microsecond > 0:
+            second += 1
+        return int(second)
 
     def _schedule_auto_compact_status_key(self, status_key_value):
         key = str(status_key_value or '').strip().lower()
@@ -8182,21 +8213,23 @@ class Database:
         shifts_segments_by_day = {}
         for shift_id, op_id, shift_date_value, start_time_value, end_time_value in shifts_rows:
             start_min, end_min = self._schedule_interval_minutes(start_time_value, end_time_value)
+            start_sec = int(start_min) * 60
+            end_sec = int(end_min) * 60
             item = {
                 'id': int(shift_id),
-                'start': int(start_min),
-                'end': int(end_min)
+                'start': int(start_sec),
+                'end': int(end_sec)
             }
             start_key = (int(op_id), shift_date_value)
             shifts_by_start_day.setdefault(start_key, []).append(item)
 
-            shift_start_abs = int(start_min)
-            shift_end_abs = int(end_min)
-            first_day_offset = int(shift_start_abs // 1440)
-            last_day_offset = int((shift_end_abs - 1) // 1440)
+            shift_start_abs = int(start_sec)
+            shift_end_abs = int(end_sec)
+            first_day_offset = int(shift_start_abs // 86400)
+            last_day_offset = int((shift_end_abs - 1) // 86400)
             for day_offset in range(first_day_offset, last_day_offset + 1):
-                day_floor = int(day_offset) * 1440
-                day_ceil = day_floor + 1440
+                day_floor = int(day_offset) * 86400
+                day_ceil = day_floor + 86400
                 segment_abs_start = max(shift_start_abs, day_floor)
                 segment_abs_end = min(shift_end_abs, day_ceil)
                 if segment_abs_end <= segment_abs_start:
@@ -8234,16 +8267,20 @@ class Database:
         status_rows = cursor.fetchall() or []
         statuses_by_day = {}
         for op_id, status_date_value, start_at_value, end_at_value, status_key, is_work, is_break in status_rows:
-            start_min = self._schedule_auto_minute_of_day(start_at_value)
-            end_min = self._schedule_auto_minute_of_day(end_at_value)
-            if start_min is None or end_min is None:
+            start_sec = self._schedule_auto_start_second_of_day(start_at_value)
+            end_sec = self._schedule_auto_end_second_of_day(end_at_value)
+            if start_sec is None or end_sec is None:
                 continue
-            if end_min <= start_min:
+            # Для очень коротких статус-сегментов (< 1 сек) учитываем минимум 1 секунду,
+            # иначе подтверждение "Тренинг/Тех.причина" может теряться как 0.
+            if end_sec <= start_sec and isinstance(start_at_value, datetime) and isinstance(end_at_value, datetime) and end_at_value > start_at_value:
+                end_sec = start_sec + 1
+            if end_sec <= start_sec:
                 continue
             day_key = (int(op_id), status_date_value)
             statuses_by_day.setdefault(day_key, []).append({
-                'start': int(start_min),
-                'end': int(end_min),
+                'start': int(start_sec),
+                'end': int(end_sec),
                 'status_key': str(status_key or '').strip().lower(),
                 'is_work': bool(is_work),
                 'is_break': bool(is_break)
@@ -8339,16 +8376,16 @@ class Database:
             day_shift_intervals = self._merge_break_intervals(
                 shifts_segments_by_day.get((op_id, day_value)) or []
             )
-            work_minutes = self._schedule_auto_overlap_minutes(day_shift_intervals, day_work_status)
-            talk_minutes = self._schedule_auto_overlap_minutes(day_shift_intervals, day_talk_status)
+            work_seconds = self._schedule_auto_overlap_minutes(day_shift_intervals, day_work_status)
+            talk_seconds = self._schedule_auto_overlap_minutes(day_shift_intervals, day_talk_status)
             # Перерывы считаем по фактическим статусам в пределах смены, независимо от
             # запланированных break-интервалов графика.
-            break_minutes = self._schedule_auto_overlap_minutes(day_shift_intervals, day_break_status)
-            training_minutes_in_shift = self._schedule_auto_overlap_minutes(day_shift_intervals, day_training_status)
-            technical_reason_minutes_in_shift = self._schedule_auto_overlap_minutes(day_shift_intervals, day_technical_reason_status)
+            break_seconds = self._schedule_auto_overlap_minutes(day_shift_intervals, day_break_status)
+            training_seconds_in_shift = self._schedule_auto_overlap_minutes(day_shift_intervals, day_training_status)
+            technical_reason_seconds_in_shift = self._schedule_auto_overlap_minutes(day_shift_intervals, day_technical_reason_status)
 
-            late_minutes_total = 0.0
-            early_leave_minutes_total = 0.0
+            late_seconds_total = 0.0
+            early_leave_seconds_total = 0.0
             shifts_started_today = shifts_by_start_day.get((op_id, day_value)) or []
             if shifts_started_today:
                 next_day_statuses = statuses_by_day.get((op_id, day_value + timedelta(days=1))) or []
@@ -8362,16 +8399,16 @@ class Database:
                 )
                 shifted_next_day_work_status = [
                     {
-                        'start': int(seg.get('start', 0)) + 1440,
-                        'end': int(seg.get('end', 0)) + 1440
+                        'start': int(seg.get('start', 0)) + 86400,
+                        'end': int(seg.get('end', 0)) + 86400
                     }
                     for seg in (next_day_work_status or [])
                     if int(seg.get('end', 0)) > int(seg.get('start', 0))
                 ]
                 shifted_next_day_late_excused_status = [
                     {
-                        'start': int(seg.get('start', 0)) + 1440,
-                        'end': int(seg.get('end', 0)) + 1440
+                        'start': int(seg.get('start', 0)) + 86400,
+                        'end': int(seg.get('end', 0)) + 86400
                     }
                     for seg in (next_day_late_excused_status or [])
                     if int(seg.get('end', 0)) > int(seg.get('start', 0))
@@ -8404,24 +8441,30 @@ class Database:
                         shift_interval,
                         shift_excused_status
                     )
-                    late_minutes_total += max(0, first_work_start - int(late_excused_boundary))
-                    early_leave_minutes_total += max(0, int(early_excused_boundary) - last_work_end)
+                    late_seconds_total += max(0, first_work_start - int(late_excused_boundary))
+                    early_leave_seconds_total += max(0, int(early_excused_boundary) - last_work_end)
 
             day_shift_intervals = self._merge_break_intervals(day_shift_intervals)
             work_inside_shift_day = self._schedule_auto_overlap_minutes(day_work_status, day_shift_intervals)
-            overtime_minutes_total = max(0.0, self._schedule_auto_total_minutes(day_work_status) - work_inside_shift_day)
+            overtime_seconds_total = max(0.0, self._schedule_auto_total_minutes(day_work_status) - work_inside_shift_day)
 
-            work_time_hours = round(work_minutes / 60.0, 4)
-            break_time_hours = round(break_minutes / 60.0, 4)
-            talk_time_hours = round(talk_minutes / 60.0, 4)
-            efficiency_hours = round(talk_minutes / 60.0, 4)
-            training_time_hours = round(training_minutes_in_shift / 60.0, 4)
+            work_time_hours = round(work_seconds / 3600.0, 4)
+            break_time_hours = round(break_seconds / 3600.0, 4)
+            talk_time_hours = round(talk_seconds / 3600.0, 4)
+            efficiency_hours = round(talk_seconds / 3600.0, 4)
+            training_time_hours = round(training_seconds_in_shift / 3600.0, 4)
 
-            late_minutes_int = max(0, int(round(late_minutes_total)))
-            early_leave_minutes_int = max(0, int(round(early_leave_minutes_total)))
-            overtime_minutes_int = max(0, int(round(overtime_minutes_total)))
-            training_minutes_int = max(0, int(round(training_minutes_in_shift)))
-            technical_reason_minutes_int = max(0, int(round(technical_reason_minutes_in_shift)))
+            late_seconds_int = max(0, int(round(late_seconds_total)))
+            early_leave_seconds_int = max(0, int(round(early_leave_seconds_total)))
+            overtime_seconds_int = max(0, int(round(overtime_seconds_total)))
+            training_seconds_int = max(0, int(round(training_seconds_in_shift)))
+            technical_reason_seconds_int = max(0, int(round(technical_reason_seconds_in_shift)))
+
+            late_minutes_int = self._schedule_auto_seconds_to_display_minutes(late_seconds_int)
+            early_leave_minutes_int = self._schedule_auto_seconds_to_display_minutes(early_leave_seconds_int)
+            overtime_minutes_int = self._schedule_auto_seconds_to_display_minutes(overtime_seconds_int)
+            training_minutes_int = self._schedule_auto_seconds_to_display_minutes(training_seconds_int)
+            technical_reason_minutes_int = self._schedule_auto_seconds_to_display_minutes(technical_reason_seconds_int)
 
             existing = existing_by_day.get((op_id, day_value)) or {}
             prev_late_status = self._schedule_auto_normalize_flag_status(existing.get('late_status'))
@@ -8444,10 +8487,15 @@ class Database:
                 float(efficiency_hours),
                 float(training_time_hours),
                 int(late_minutes_int),
+                int(late_seconds_int),
                 int(early_leave_minutes_int),
+                int(early_leave_seconds_int),
                 int(overtime_minutes_int),
+                int(overtime_seconds_int),
                 int(training_minutes_int),
+                int(training_seconds_int),
                 int(technical_reason_minutes_int),
+                int(technical_reason_seconds_int),
                 late_status,
                 early_status,
                 training_status,
@@ -8465,7 +8513,12 @@ class Database:
                 """
                 INSERT INTO daily_hours (
                     operator_id, day, work_time, break_time, talk_time, calls, efficiency,
-                    training_time, late_minutes, early_leave_minutes, overtime_minutes, training_minutes, technical_reason_minutes,
+                    training_time,
+                    late_minutes, late_seconds,
+                    early_leave_minutes, early_leave_seconds,
+                    overtime_minutes, overtime_seconds,
+                    training_minutes, training_seconds,
+                    technical_reason_minutes, technical_reason_seconds,
                     late_status, early_leave_status, training_status, technical_reason_status,
                     late_fine_id, early_leave_fine_id, training_fine_id, technical_reason_fine_id,
                     auto_aggregated, auto_aggregated_at
@@ -8480,10 +8533,15 @@ class Database:
                     efficiency = EXCLUDED.efficiency,
                     training_time = EXCLUDED.training_time,
                     late_minutes = EXCLUDED.late_minutes,
+                    late_seconds = EXCLUDED.late_seconds,
                     early_leave_minutes = EXCLUDED.early_leave_minutes,
+                    early_leave_seconds = EXCLUDED.early_leave_seconds,
                     overtime_minutes = EXCLUDED.overtime_minutes,
+                    overtime_seconds = EXCLUDED.overtime_seconds,
                     training_minutes = EXCLUDED.training_minutes,
+                    training_seconds = EXCLUDED.training_seconds,
                     technical_reason_minutes = EXCLUDED.technical_reason_minutes,
+                    technical_reason_seconds = EXCLUDED.technical_reason_seconds,
                     late_status = EXCLUDED.late_status,
                     early_leave_status = EXCLUDED.early_leave_status,
                     training_status = EXCLUDED.training_status,
@@ -8499,7 +8557,12 @@ class Database:
                 upsert_rows,
                 template="""(
                     %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s,
+                    %s,
+                    %s, %s,
+                    %s, %s,
+                    %s, %s,
+                    %s, %s,
+                    %s, %s,
                     %s, %s, %s, %s,
                     %s, %s, %s, %s,
                     TRUE, CURRENT_TIMESTAMP
@@ -8571,9 +8634,13 @@ class Database:
                 SELECT
                     id,
                     COALESCE(late_minutes, 0),
+                    COALESCE(late_seconds, 0),
                     COALESCE(early_leave_minutes, 0),
+                    COALESCE(early_leave_seconds, 0),
                     COALESCE(training_minutes, 0),
+                    COALESCE(training_seconds, 0),
                     COALESCE(technical_reason_minutes, 0),
+                    COALESCE(technical_reason_seconds, 0),
                     late_status,
                     early_leave_status,
                     training_status,
@@ -8590,19 +8657,40 @@ class Database:
             (
                 daily_id,
                 late_minutes,
+                late_seconds,
                 early_leave_minutes,
+                early_leave_seconds,
                 training_minutes,
+                training_seconds,
                 technical_reason_minutes,
+                technical_reason_seconds,
                 late_status,
                 early_status,
                 training_status,
                 technical_reason_status
             ) = row
 
-            late_minutes_int = max(0, int(late_minutes or 0))
-            early_minutes_int = max(0, int(early_leave_minutes or 0))
-            training_minutes_int = max(0, int(training_minutes or 0))
-            technical_reason_minutes_int = max(0, int(technical_reason_minutes or 0))
+            late_seconds_int = max(0, int(late_seconds or 0))
+            early_seconds_int = max(0, int(early_leave_seconds or 0))
+            training_seconds_int = max(0, int(training_seconds or 0))
+            technical_reason_seconds_int = max(0, int(technical_reason_seconds or 0))
+
+            late_minutes_int = max(
+                max(0, int(late_minutes or 0)),
+                self._schedule_auto_seconds_to_display_minutes(late_seconds_int)
+            )
+            early_minutes_int = max(
+                max(0, int(early_leave_minutes or 0)),
+                self._schedule_auto_seconds_to_display_minutes(early_seconds_int)
+            )
+            training_minutes_int = max(
+                max(0, int(training_minutes or 0)),
+                self._schedule_auto_seconds_to_display_minutes(training_seconds_int)
+            )
+            technical_reason_minutes_int = max(
+                max(0, int(technical_reason_minutes or 0)),
+                self._schedule_auto_seconds_to_display_minutes(technical_reason_seconds_int)
+            )
 
             status_map = {
                 'late_status': self._schedule_auto_flag_status_for_minutes(late_status, late_minutes_int),
@@ -8610,18 +8698,18 @@ class Database:
                 'training_status': self._schedule_auto_flag_status_for_minutes(training_status, training_minutes_int),
                 'technical_reason_status': self._schedule_auto_flag_status_for_minutes(technical_reason_status, technical_reason_minutes_int)
             }
-            minutes_by_status_col = {
-                'late_status': late_minutes_int,
-                'early_leave_status': early_minutes_int,
-                'training_status': training_minutes_int,
-                'technical_reason_status': technical_reason_minutes_int
+            seconds_by_status_col = {
+                'late_status': late_seconds_int,
+                'early_leave_status': early_seconds_int,
+                'training_status': training_seconds_int,
+                'technical_reason_status': technical_reason_seconds_int
             }
 
-            current_minutes = minutes_by_status_col.get(status_col, 0)
-            if target_status == SCHEDULE_AUTO_FLAG_CONFIRMED and current_minutes <= 0:
+            current_seconds = seconds_by_status_col.get(status_col, 0)
+            if target_status == SCHEDULE_AUTO_FLAG_CONFIRMED and current_seconds <= 0:
                 raise ValueError("Нельзя подтвердить флаг без рассчитанного времени")
 
-            if current_minutes <= 0:
+            if current_seconds <= 0:
                 status_map[status_col] = None
             else:
                 status_map[status_col] = target_status
@@ -9122,10 +9210,15 @@ class Database:
                 operator_id,
                 day,
                 COALESCE(late_minutes, 0),
+                COALESCE(late_seconds, 0),
                 COALESCE(early_leave_minutes, 0),
+                COALESCE(early_leave_seconds, 0),
                 COALESCE(overtime_minutes, 0),
+                COALESCE(overtime_seconds, 0),
                 COALESCE(training_minutes, 0),
+                COALESCE(training_seconds, 0),
                 COALESCE(technical_reason_minutes, 0),
+                COALESCE(technical_reason_seconds, 0),
                 late_status,
                 early_leave_status,
                 training_status,
@@ -9138,10 +9231,15 @@ class Database:
             WHERE operator_id = ANY(%s)
               AND (
                     COALESCE(late_minutes, 0) > 0
+                 OR COALESCE(late_seconds, 0) > 0
                  OR COALESCE(early_leave_minutes, 0) > 0
+                 OR COALESCE(early_leave_seconds, 0) > 0
                  OR COALESCE(overtime_minutes, 0) > 0
+                 OR COALESCE(overtime_seconds, 0) > 0
                  OR COALESCE(training_minutes, 0) > 0
+                 OR COALESCE(training_seconds, 0) > 0
                  OR COALESCE(technical_reason_minutes, 0) > 0
+                 OR COALESCE(technical_reason_seconds, 0) > 0
                  OR late_status IS NOT NULL
                  OR early_leave_status IS NOT NULL
                  OR training_status IS NOT NULL
@@ -9169,10 +9267,15 @@ class Database:
                 operator_id,
                 day_value,
                 late_minutes,
+                late_seconds,
                 early_leave_minutes,
+                early_leave_seconds,
                 overtime_minutes,
+                overtime_seconds,
                 training_minutes,
+                training_seconds,
                 technical_reason_minutes,
+                technical_reason_seconds,
                 late_status,
                 early_status,
                 training_status,
@@ -9187,11 +9290,34 @@ class Database:
             if not day_key:
                 continue
 
-            late_minutes_int = max(0, int(late_minutes or 0))
-            early_leave_minutes_int = max(0, int(early_leave_minutes or 0))
-            overtime_minutes_int = max(0, int(overtime_minutes or 0))
-            training_minutes_int = max(0, int(training_minutes or 0))
-            technical_reason_minutes_int = max(0, int(technical_reason_minutes or 0))
+            late_seconds_int = max(0, int(late_seconds or 0))
+            early_leave_seconds_int = max(0, int(early_leave_seconds or 0))
+            overtime_seconds_int = max(0, int(overtime_seconds or 0))
+            training_seconds_int = max(0, int(training_seconds or 0))
+            technical_reason_seconds_int = max(0, int(technical_reason_seconds or 0))
+
+            # Для совместимости с историческими данными берем максимум из старых минут
+            # и минут, рассчитанных по секундам.
+            late_minutes_int = max(
+                max(0, int(late_minutes or 0)),
+                self._schedule_auto_seconds_to_display_minutes(late_seconds_int)
+            )
+            early_leave_minutes_int = max(
+                max(0, int(early_leave_minutes or 0)),
+                self._schedule_auto_seconds_to_display_minutes(early_leave_seconds_int)
+            )
+            overtime_minutes_int = max(
+                max(0, int(overtime_minutes or 0)),
+                self._schedule_auto_seconds_to_display_minutes(overtime_seconds_int)
+            )
+            training_minutes_int = max(
+                max(0, int(training_minutes or 0)),
+                self._schedule_auto_seconds_to_display_minutes(training_seconds_int)
+            )
+            technical_reason_minutes_int = max(
+                max(0, int(technical_reason_minutes or 0)),
+                self._schedule_auto_seconds_to_display_minutes(technical_reason_seconds_int)
+            )
 
             late_status_norm = self._schedule_auto_flag_status_for_minutes(late_status, late_minutes_int)
             early_status_norm = self._schedule_auto_flag_status_for_minutes(early_status, early_leave_minutes_int)
@@ -9211,10 +9337,15 @@ class Database:
 
             result.setdefault(op_id, {})[day_key] = {
                 'lateMinutes': late_minutes_int,
+                'lateSeconds': late_seconds_int,
                 'earlyLeaveMinutes': early_leave_minutes_int,
+                'earlyLeaveSeconds': early_leave_seconds_int,
                 'overtimeMinutes': overtime_minutes_int,
+                'overtimeSeconds': overtime_seconds_int,
                 'trainingMinutes': training_minutes_int,
+                'trainingSeconds': training_seconds_int,
                 'technicalReasonMinutes': technical_reason_minutes_int,
+                'technicalReasonSeconds': technical_reason_seconds_int,
                 'lateStatus': late_status_norm,
                 'earlyLeaveStatus': early_status_norm,
                 'trainingStatus': training_status_norm,
