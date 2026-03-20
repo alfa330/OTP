@@ -10232,8 +10232,23 @@ def aggregate_work_schedule_metrics():
         operator_id = data.get('operator_id')
         operator_ids_raw = data.get('operator_ids')
         day_value = data.get('date')
-        start_date = data.get('start_date') or day_value
-        end_date = data.get('end_date') or start_date
+        start_date_input = data.get('start_date')
+        end_date_input = data.get('end_date')
+        start_date = start_date_input or day_value
+        end_date = end_date_input or start_date
+
+        # Для запуска "агрегировать день" считаем расширенное окно:
+        # день-1..день+1, чтобы корректно обработать ночные смены и статусы,
+        # которые перетекают через 00:00.
+        expanded_cross_day = False
+        if day_value and not start_date_input and not end_date_input:
+            try:
+                day_obj = datetime.strptime(str(day_value), '%Y-%m-%d').date()
+            except Exception:
+                return jsonify({"error": "Invalid date format. Use YYYY-MM-DD"}), 400
+            start_date = (day_obj - timedelta(days=1)).strftime('%Y-%m-%d')
+            end_date = (day_obj + timedelta(days=1)).strftime('%Y-%m-%d')
+            expanded_cross_day = True
 
         operator_ids = []
         if isinstance(operator_ids_raw, list) and operator_ids_raw:
@@ -10262,6 +10277,7 @@ def aggregate_work_schedule_metrics():
                 "start_date": start_date,
                 "end_date": end_date
             },
+            "expanded_cross_day": bool(expanded_cross_day),
             "operator_ids": operator_ids
         }), 200
 
