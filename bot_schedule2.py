@@ -8680,6 +8680,7 @@ def _status_import_resolve_break_note_label(state_note_raw):
     note_key = _status_import_normalize_key(state_note_raw)
     if not note_key:
         return 'Перерыв'
+    compact_note_key = re.sub(r'[\s._-]+', '', note_key)
     if note_key == 'вышел':
         return 'Вышел'
     # "Авто" в рамках "Перерыв" трактуем как обычный перерыв.
@@ -8687,7 +8688,7 @@ def _status_import_resolve_break_note_label(state_note_raw):
         return 'Перерыв'
     if note_key == 'перезвон':
         return 'Перезвон'
-    if note_key in ('тех причина', 'техпричина'):
+    if compact_note_key == 'техпричина':
         return 'Тех причина'
     if note_key == 'тренинг':
         return 'Тренинг'

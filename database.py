@@ -7721,6 +7721,43 @@ class Database:
             minute += 1
         return int(minute)
 
+    def _schedule_auto_compact_status_key(self, status_key_value):
+        key = str(status_key_value or '').strip().lower()
+        if not key:
+            return ''
+        return re.sub(r'[\s._-]+', '', key)
+
+    def _schedule_auto_is_tech_reason_status_key(self, status_key_value):
+        compact_key = self._schedule_auto_compact_status_key(status_key_value)
+        return compact_key == 'техпричина'
+
+    def _schedule_auto_is_late_excused_status_key(self, status_key_value):
+        key = str(status_key_value or '').strip().lower()
+        if not key:
+            return False
+        if key in (SCHEDULE_AUTO_TRAINING_STATUS_KEY, 'training'):
+            return True
+        return self._schedule_auto_is_tech_reason_status_key(key)
+
+    def _schedule_auto_shift_start_excused_boundary(self, shift_interval, excused_intervals):
+        shift_start = int(shift_interval.get('start', 0))
+        shift_end = int(shift_interval.get('end', 0))
+        if shift_end <= shift_start:
+            return shift_start
+
+        covered_until = shift_start
+        for seg in self._merge_break_intervals(excused_intervals or []):
+            seg_start = int(seg.get('start', 0))
+            seg_end = int(seg.get('end', 0))
+            if seg_end <= seg_start or seg_end <= covered_until:
+                continue
+            if seg_start > covered_until:
+                break
+            covered_until = min(shift_end, max(covered_until, seg_end))
+            if covered_until >= shift_end:
+                break
+        return covered_until
+
     def _schedule_auto_flag_status_for_minutes(self, status_value, minutes_value):
         minutes_int = max(0, int(minutes_value or 0))
         if minutes_int <= 0:
@@ -8216,6 +8253,10 @@ class Database:
                 day_statuses,
                 lambda seg: str(seg.get('status_key') or '') == SCHEDULE_AUTO_TRAINING_STATUS_KEY
             )
+            day_late_excused_status = pick_status_intervals(
+                day_statuses,
+                lambda seg: self._schedule_auto_is_late_excused_status_key(seg.get('status_key'))
+            )
 
             day_shift_intervals = self._merge_break_intervals(
                 shifts_segments_by_day.get((op_id, day_value)) or []
@@ -8231,9 +8272,14 @@ class Database:
             early_leave_minutes_total = 0.0
             shifts_started_today = shifts_by_start_day.get((op_id, day_value)) or []
             if shifts_started_today:
+                next_day_statuses = statuses_by_day.get((op_id, day_value + timedelta(days=1))) or []
                 next_day_work_status = pick_status_intervals(
-                    statuses_by_day.get((op_id, day_value + timedelta(days=1))) or [],
+                    next_day_statuses,
                     lambda seg: bool(seg.get('is_work')) or str(seg.get('status_key') or '') in SCHEDULE_AUTO_WORK_STATUS_KEYS
+                )
+                next_day_late_excused_status = pick_status_intervals(
+                    next_day_statuses,
+                    lambda seg: self._schedule_auto_is_late_excused_status_key(seg.get('status_key'))
                 )
                 shifted_next_day_work_status = [
                     {
@@ -8243,8 +8289,19 @@ class Database:
                     for seg in (next_day_work_status or [])
                     if int(seg.get('end', 0)) > int(seg.get('start', 0))
                 ]
+                shifted_next_day_late_excused_status = [
+                    {
+                        'start': int(seg.get('start', 0)) + 1440,
+                        'end': int(seg.get('end', 0)) + 1440
+                    }
+                    for seg in (next_day_late_excused_status or [])
+                    if int(seg.get('end', 0)) > int(seg.get('start', 0))
+                ]
                 work_status_for_shift = self._merge_break_intervals(
                     (day_work_status or []) + shifted_next_day_work_status
+                )
+                late_excused_status_for_shift = self._merge_break_intervals(
+                    (day_late_excused_status or []) + shifted_next_day_late_excused_status
                 )
                 for shift in shifts_started_today:
                     shift_interval = {'start': int(shift['start']), 'end': int(shift['end'])}
@@ -8256,7 +8313,11 @@ class Database:
                         continue
                     first_work_start = int(shift_work_status[0].get('start', shift_interval['start']))
                     last_work_end = int(shift_work_status[-1].get('end', shift_interval['end']))
-                    late_minutes_total += max(0, first_work_start - int(shift_interval['start']))
+                    late_excused_boundary = self._schedule_auto_shift_start_excused_boundary(
+                        shift_interval,
+                        self._schedule_auto_intersect_interval_with_list(shift_interval, late_excused_status_for_shift)
+                    )
+                    late_minutes_total += max(0, first_work_start - int(late_excused_boundary))
                     early_leave_minutes_total += max(0, int(shift_interval['end']) - last_work_end)
 
             day_shift_intervals = self._merge_break_intervals(day_shift_intervals)
