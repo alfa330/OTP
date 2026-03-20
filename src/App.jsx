@@ -14299,6 +14299,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             if ((aggregatedFlagsForCell?.lateStatus || null) === 'rejected') defectLateMin = 0;
                                             if ((aggregatedFlagsForCell?.earlyLeaveStatus || null) === 'rejected') defectEarlyLeaveMin = 0;
                                             const defectTrainingMin = Number(aggregatedFlagsForCell?.trainingActive ? aggregatedFlagsForCell?.trainingMinutes : 0);
+                                            const defectTechnicalReasonMin = Number(aggregatedFlagsForCell?.technicalReasonActive ? aggregatedFlagsForCell?.technicalReasonMinutes : 0);
                                             const defectNoPhoneSec = shouldComputeDefectMetrics ? liveNoPhoneSec : 0;
                                             const overtimeOutsideShiftMin = Math.max(
                                                 shouldComputeDefectMetrics ? liveOvertimeOutsideShiftMin : 0,
@@ -14309,6 +14310,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 defectLateMin > 0 ||
                                                 defectEarlyLeaveMin > 0 ||
                                                 defectTrainingMin > 0 ||
+                                                defectTechnicalReasonMin > 0 ||
                                                 defectNoPhoneSec > 60
                                             );
                                             const hasOvertimeMarker = (viewMode === 'day' || viewMode === 'week' || viewMode === 'month') && overtimeOutsideShiftMin > 10;
@@ -14343,11 +14345,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             const latePendingSuffix = aggregatedFlagsForCell?.pendingLate && defectLateMin > 0 ? ' (не подтверждено)' : '';
                                             const earlyPendingSuffix = aggregatedFlagsForCell?.pendingEarlyLeave && defectEarlyLeaveMin > 0 ? ' (не подтверждено)' : '';
                                             const trainingPendingSuffix = aggregatedFlagsForCell?.pendingTraining && defectTrainingMin > 0 ? ' (не подтверждено)' : '';
+                                            const technicalReasonPendingSuffix = aggregatedFlagsForCell?.pendingTechnicalReason && defectTechnicalReasonMin > 0 ? ' (не подтверждено)' : '';
                                             const defectIssues = [
                                                 defectLateMin > 0 ? `Опоздание: ${Math.round(defectLateMin)} мин${latePendingSuffix}` : '',
                                                 defectEarlyLeaveMin > 0 ? `Ранний уход: ${Math.round(defectEarlyLeaveMin)} мин${earlyPendingSuffix}` : '',
                                                 defectTrainingMin > 0 ? `Тренинг: ${Math.round(defectTrainingMin)} мин${trainingPendingSuffix}` : '',
+                                                defectTechnicalReasonMin > 0 ? `Тех.причина: ${Math.round(defectTechnicalReasonMin)} мин${technicalReasonPendingSuffix}` : '',
                                                 defectNoPhoneSec > 60 ? `Без телефона в смене: ${Math.round(defectNoPhoneSec / 60)} мин` : ''
+                                            ].filter(Boolean);
+                                            const pendingFlagLabels = [
+                                                aggregatedFlagsForCell?.pendingLate && defectLateMin > 0 ? 'Опоздание' : '',
+                                                aggregatedFlagsForCell?.pendingEarlyLeave && defectEarlyLeaveMin > 0 ? 'Ранний уход' : '',
+                                                aggregatedFlagsForCell?.pendingTraining && defectTrainingMin > 0 ? 'Тренинг' : '',
+                                                aggregatedFlagsForCell?.pendingTechnicalReason && defectTechnicalReasonMin > 0 ? 'Тех.причина' : ''
                                             ].filter(Boolean);
                                             const overtimeIssues = hasOvertimeMarker
                                                 ? [`Вне смены: ${Math.round(overtimeOutsideShiftMin)} мин`]
@@ -14356,6 +14366,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 ? [`Офлайн-активность: ${offlineActivityBarsForCell.length}`]
                                                 : [];
                                             const markerTooltipText = [
+                                                pendingFlagLabels.length > 0 ? `Ожидает подтверждения: ${pendingFlagLabels.join(', ')}` : '',
                                                 offlineIssues.length > 0 ? `Офлайн: ${offlineIssues.join(', ')}` : '',
                                                 defectIssues.length > 0 ? `Проблемы: ${defectIssues.join(', ')}` : '',
                                                 overtimeIssues.length > 0 ? `Переработка: ${overtimeIssues.join(', ')}` : ''
@@ -14445,23 +14456,43 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 style={viewMode === 'day' ? { flex: 1 } : { minWidth: cellMinWidth, flex: '0 0 auto' }}
                                                 onClick={(e) => handleDayClick(e, op.id, d)}
                                             >
+                                                {pendingFlagLabels.length > 0 && (
+                                                    <span
+                                                        className="absolute top-1 left-1 z-50 flex items-center gap-1"
+                                                        title={`Ожидает подтверждения: ${pendingFlagLabels.join(', ')}`}
+                                                    >
+                                                        <span className="px-1.5 py-0.5 rounded-md bg-amber-500 text-white text-[9px] font-bold uppercase tracking-wide shadow-md shadow-amber-500/40 animate-pulse">
+                                                            Ожидает
+                                                        </span>
+                                                        <span className="px-1 py-0.5 rounded bg-amber-100 text-amber-800 text-[9px] font-semibold border border-amber-300">
+                                                            {pendingFlagLabels.length}
+                                                        </span>
+                                                    </span>
+                                                )}
                                                 {(hasDefectMarker || hasOvertimeMarker || hasOfflineMarker) && (
-                                                    <span className="absolute top-1 right-1 z-50 flex items-center gap-1" title={markerTooltipText || 'Есть недочеты/переработка'}>
+                                                    <span className="absolute top-1 right-1 z-50 flex items-center gap-1.5" title={markerTooltipText || 'Есть недочеты/переработка'}>
                                                         {hasOfflineMarker && (
                                                             <span
-                                                                className="w-2.5 h-2.5 rounded-full bg-emerald-400 border border-white shadow-sm"
+                                                                className="w-3.5 h-3.5 rounded-full bg-emerald-400 border-2 border-white ring-1 ring-emerald-500/60 shadow-md shadow-emerald-400/50"
                                                                 title={`Офлайн-активность: ${offlineActivityBarsForCell.length}`}
                                                             />
                                                         )}
                                                         {hasOvertimeMarker && (
                                                             <span
-                                                                className="w-2.5 h-2.5 rounded-full bg-emerald-600 border border-white shadow-sm"
+                                                                className="w-3.5 h-3.5 rounded-full bg-emerald-600 border-2 border-white ring-1 ring-emerald-700/60 shadow-md shadow-emerald-600/50"
                                                             />
                                                         )}
                                                         {hasDefectMarker && (
-                                                            <span
-                                                                className={`w-2.5 h-2.5 rounded-full bg-rose-600 border border-white shadow-sm${hasPendingDefectMarker ? ' animate-pulse' : ''}`}
-                                                            />
+                                                            <span className="relative inline-flex items-center justify-center">
+                                                                {hasPendingDefectMarker && (
+                                                                    <span className="absolute inline-flex h-4 w-4 rounded-full bg-amber-400 opacity-75 animate-ping"></span>
+                                                                )}
+                                                                <span
+                                                                    className={`relative w-3.5 h-3.5 rounded-full border-2 border-white ring-1 shadow-md ${hasPendingDefectMarker
+                                                                        ? 'bg-amber-500 ring-amber-700/70 shadow-amber-500/60'
+                                                                        : 'bg-rose-600 ring-rose-700/70 shadow-rose-600/60'}`}
+                                                                />
+                                                            </span>
                                                         )}
                                                     </span>
                                                 )}
