@@ -10498,6 +10498,72 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 () => (modalTechReasonStatusSegments || []).reduce((sum, seg) => sum + Math.max(0, Number(seg?.durationMin || 0)), 0),
                 [modalTechReasonStatusSegments]
             );
+            const modalStatusMatchMetrics = useMemo(() => {
+                if (isBulkSelectionModal) return null;
+                if (!modalState?.opId || !modalState?.date) return null;
+                const op = operators.find(o => o.id === modalState.opId);
+                if (!op) return null;
+                const shiftParts = getShiftPartsForDate(op, modalState.date);
+                if (!Array.isArray(shiftParts) || shiftParts.length === 0) return null;
+                const breakParts = shiftParts
+                    .flatMap(part => getBreakPartsForPart(op, part, modalState.date))
+                    .map((b) => ({
+                        start: Number(b?.start || 0),
+                        end: Number(b?.end || 0)
+                    }))
+                    .filter((b) => b.end > b.start);
+                const statusBars = Array.isArray(modalImportedStatusTimeline) ? modalImportedStatusTimeline : [];
+                if (statusBars.length === 0) return null;
+                return plannerComputeShiftStatusMatchMetrics({
+                    shiftParts,
+                    breakParts,
+                    statusBars
+                });
+            }, [isBulkSelectionModal, modalState?.opId, modalState?.date, operators, modalImportedStatusTimeline]);
+            const modalLateStatusSegments = useMemo(() => {
+                const ranges = (Array.isArray(modalStatusMatchMetrics?.perShift) ? modalStatusMatchMetrics.perShift : [])
+                    .map((sh) => {
+                        const lateMin = Number(sh?.lateMin || 0);
+                        if (lateMin <= 0) return null;
+                        const startMin = Number(sh?.lateStartMin ?? sh?.start ?? 0);
+                        const endMin = Math.min(Number(sh?.end || 0), startMin + lateMin);
+                        if (!Number.isFinite(startMin) || !Number.isFinite(endMin) || endMin <= startMin) return null;
+                        return { startMin, endMin };
+                    })
+                    .filter(Boolean);
+                const normalized = normalizePlannerModalIntervals(ranges);
+                return normalized.map((seg, idx) => ({
+                    id: `late-seg-${idx}-${Math.round(seg.startSec)}-${Math.round(seg.endSec)}`,
+                    startSec: seg.startSec,
+                    endSec: seg.endSec,
+                    startMin: seg.startMin,
+                    endMin: seg.endMin,
+                    durationSec: seg.durationSec,
+                    durationMin: Math.max(1, Math.ceil(seg.endMin) - Math.floor(seg.startMin))
+                }));
+            }, [modalStatusMatchMetrics]);
+            const modalEarlyLeaveStatusSegments = useMemo(() => {
+                const ranges = (Array.isArray(modalStatusMatchMetrics?.perShift) ? modalStatusMatchMetrics.perShift : [])
+                    .map((sh) => {
+                        const earlyLeaveMin = Number(sh?.earlyLeaveMin || 0);
+                        if (earlyLeaveMin <= 0) return null;
+                        const endMin = Number(sh?.end || 0);
+                        const startMin = Math.max(Number(sh?.start || 0), endMin - earlyLeaveMin);
+                        if (!Number.isFinite(startMin) || !Number.isFinite(endMin) || endMin <= startMin) return null;
+                        return { startMin, endMin };
+                    })
+                    .filter(Boolean);
+                const normalized = normalizePlannerModalIntervals(ranges);
+                return normalized.map((seg, idx) => ({
+                    id: `early-leave-seg-${idx}-${Math.round(seg.startSec)}-${Math.round(seg.endSec)}`,
+                    startSec: seg.startSec,
+                    endSec: seg.endSec,
+                    startMin: seg.startMin,
+                    endMin: seg.endMin,
+                    durationSec: seg.durationSec,
+                    durationMin: Math.max(1, Math.ceil(seg.endMin) - Math.floor(seg.startMin))
+                }));
+            }, [modalStatusMatchMetrics]);
             const plannerTrainingReasonOptions = useMemo(() => ([
                 "Обратная связь",
                 "Собрание",
@@ -15597,6 +15663,56 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             )}
                                         </div>
 
+                                        {item.key === 'late' && (
+                                            <div className="w-full mt-1 pt-2 border-t border-slate-100">
+                                                {modalLateStatusSegments.length > 0 ? (
+                                                    <div className="space-y-1.5">
+                                                        {modalLateStatusSegments.map((seg, segIndex) => (
+                                                            <div key={seg.id || `late-segment-${segIndex}`} className="flex flex-wrap items-center gap-2 rounded-md border border-rose-100 bg-rose-50/40 px-2 py-1.5">
+                                                                <span className="text-xs font-semibold text-rose-800 tabular-nums">
+                                                                    {plannerModalSegmentRangeText(seg)}
+                                                                </span>
+                                                                <span className="text-[11px] text-rose-700">
+                                                                    {plannerStatusFormatDuration(seg.durationSec)}
+                                                                </span>
+                                                                <span className={`px-2 py-0.5 rounded-full border text-[10px] font-semibold ${statusClass}`}>
+                                                                    {statusLabel}
+                                                                </span>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                ) : (
+                                                    <div className="text-[11px] text-slate-500">
+                                                        Интервалы опоздания не найдены в статусах за этот день.
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
+                                        {item.key === 'early_leave' && (
+                                            <div className="w-full mt-1 pt-2 border-t border-slate-100">
+                                                {modalEarlyLeaveStatusSegments.length > 0 ? (
+                                                    <div className="space-y-1.5">
+                                                        {modalEarlyLeaveStatusSegments.map((seg, segIndex) => (
+                                                            <div key={seg.id || `early-leave-segment-${segIndex}`} className="flex flex-wrap items-center gap-2 rounded-md border border-rose-100 bg-rose-50/40 px-2 py-1.5">
+                                                                <span className="text-xs font-semibold text-rose-800 tabular-nums">
+                                                                    {plannerModalSegmentRangeText(seg)}
+                                                                </span>
+                                                                <span className="text-[11px] text-rose-700">
+                                                                    {plannerStatusFormatDuration(seg.durationSec)}
+                                                                </span>
+                                                                <span className={`px-2 py-0.5 rounded-full border text-[10px] font-semibold ${statusClass}`}>
+                                                                    {statusLabel}
+                                                                </span>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                ) : (
+                                                    <div className="text-[11px] text-slate-500">
+                                                        Интервалы раннего ухода не найдены в статусах за этот день.
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
                                         {item.key === 'training' && (
                                             <div className="w-full mt-1 pt-2 border-t border-slate-100">
                                                 {modalTrainingStatusSegments.length > 0 ? (
