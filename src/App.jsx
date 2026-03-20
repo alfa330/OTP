@@ -5242,6 +5242,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const PLANNER_STATUS_NO_PHONE_ANOMALY_SECONDS = 30;
             const plannerStatusPad2 = (n) => String(n).padStart(2, '0');
             const plannerStatusNormalizeKey = (v) => String(v ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+            const plannerStatusCompactKey = (v) => plannerStatusNormalizeKey(v).replace(/[\s._-]+/g, '');
+            const plannerStatusIsTechReasonKey = (v) => plannerStatusCompactKey(v) === 'техпричина';
+            const plannerStatusIsLateExcusedKey = (v) => {
+            const key = plannerStatusNormalizeKey(v);
+            if (!key) return false;
+            return key === 'тренинг' || key === 'training' || plannerStatusIsTechReasonKey(key);
+            };
             const plannerStatusNormalizeOperatorName = (v) => String(v ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
             const plannerStatusResolveBreakNoteLabel = (stateNoteRaw) => {
             const noteKey = plannerStatusNormalizeKey(stateNoteRaw);
@@ -5250,7 +5257,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // "Авто" в рамках "Перерыв" считаем обычным перерывом.
             if (noteKey === 'авто') return 'Перерыв';
             if (noteKey === 'перезвон') return 'Перезвон';
-            if (noteKey === 'тех причина' || noteKey === 'техпричина') return 'Тех причина';
+            if (plannerStatusIsTechReasonKey(noteKey)) return 'Тех причина';
             if (noteKey === 'тренинг') return 'Тренинг';
             return String(stateNoteRaw ?? '').trim() || 'Перерыв';
             };
@@ -5271,6 +5278,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 row: cfg.row,
                 bar: cfg.bar
             });
+            if (plannerStatusIsTechReasonKey(key)) {
+                return byKey({
+                    chip: 'border-sky-200 bg-sky-50 text-sky-700',
+                    row: 'border-sky-100 bg-sky-50/60 text-sky-800',
+                    bar: '#0ea5e9'
+                });
+            }
             switch (key) {
                 case 'без телефона':
                     return byKey({
@@ -5305,12 +5319,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         chip: 'border-orange-200 bg-orange-50 text-orange-700',
                         row: 'border-orange-100 bg-orange-50/60 text-orange-800',
                         bar: '#f97316'
-                    });
-                case 'тех причина':
-                    return byKey({
-                        chip: 'border-sky-200 bg-sky-50 text-sky-700',
-                        row: 'border-sky-100 bg-sky-50/60 text-sky-800',
-                        bar: '#0ea5e9'
                     });
                 case 'тренинг':
                     return byKey({
@@ -5382,6 +5390,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             });
             return total;
             };
+            const plannerResolveShiftStartCoveredUntil = (startRaw, endRaw, intervals = []) => {
+            const shiftStart = Number(startRaw || 0);
+            const shiftEnd = Number(endRaw || shiftStart);
+            if (shiftEnd <= shiftStart) return shiftStart;
+            let coveredUntil = shiftStart;
+            const merged = mergeIntervals((intervals || []).map(i => ({ start: Number(i?.start || 0), end: Number(i?.end || 0) }))).filter(i => i.end > i.start);
+            for (const seg of merged) {
+                const segStart = Number(seg?.start || 0);
+                const segEnd = Number(seg?.end || 0);
+                if (segEnd <= coveredUntil) continue;
+                if (segStart > coveredUntil) break;
+                coveredUntil = Math.min(shiftEnd, Math.max(coveredUntil, segEnd));
+                if (coveredUntil >= shiftEnd) break;
+            }
+            return coveredUntil;
+            };
             const plannerComputeShiftStatusMatchMetrics = ({ shiftParts = [], breakParts = [], statusBars = [] } = {}) => {
             const shiftIntervals = mergeIntervals((shiftParts || []).map(p => ({ start: Number(p?.start || 0), end: Number(p?.end || 0) }))).filter(i => i.end > i.start);
             const breakIntervals = mergeIntervals((breakParts || []).map(b => ({ start: Number(b?.start || 0), end: Number(b?.end || 0) }))).filter(i => i.end > i.start);
@@ -5402,6 +5426,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const breakStatusIntervals = mergeIntervals(
                 bars
                     .filter(seg => PLANNER_IMPORTED_BREAK_STATUS_KEYS.has(seg.statusKeyNorm))
+                    .map(seg => ({ start: seg.startMin, end: seg.endMin }))
+            );
+            const lateExcusedStatusIntervals = mergeIntervals(
+                bars
+                    .filter(seg => plannerStatusIsLateExcusedKey(seg.statusKeyNorm))
                     .map(seg => ({ start: seg.startMin, end: seg.endMin }))
             );
 
@@ -5430,11 +5459,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const shiftCompliancePct = shiftDurMin > 0 ? (shiftMatchedTotalMin / shiftDurMin) * 100 : null;
                 let lateMin = 0;
                 let earlyLeaveMin = 0;
+                let lateStartMin = shiftInterval.start;
                 const hasWorkStatus = shiftWorkStatusIntervals.length > 0;
                 if (hasWorkStatus) {
                     const firstWorkStart = shiftWorkStatusIntervals[0].start;
                     const lastWorkEnd = shiftWorkStatusIntervals[shiftWorkStatusIntervals.length - 1].end;
-                    lateMin = Math.max(0, firstWorkStart - shiftInterval.start);
+                    const shiftLateExcusedIntervals = plannerIntersectIntervalWithList(shiftInterval, lateExcusedStatusIntervals);
+                    lateStartMin = plannerResolveShiftStartCoveredUntil(
+                        shiftInterval.start,
+                        shiftInterval.end,
+                        shiftLateExcusedIntervals
+                    );
+                    lateMin = Math.max(0, firstWorkStart - lateStartMin);
                     earlyLeaveMin = Math.max(0, shiftInterval.end - lastWorkEnd);
                 }
                 return {
@@ -5449,6 +5485,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     matchedTotalMin: shiftMatchedTotalMin,
                     compliancePct: shiftCompliancePct,
                     lateMin,
+                    lateStartMin,
                     earlyLeaveMin,
                     hasWorkStatus
                 };
@@ -13953,7 +13990,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 .map(sh => {
                                                     const lateMin = Number(sh?.lateMin || 0);
                                                     if (lateMin <= 0) return null;
-                                                    const start = Number(sh?.start || 0);
+                                                    const start = Number(sh?.lateStartMin ?? sh?.start ?? 0);
                                                     const end = Math.min(Number(sh?.end || 0), start + lateMin);
                                                     if (end <= start) return null;
                                                     return { start, end, lateMin };
@@ -15740,7 +15777,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         .map(sh => {
                             const lateMin = Number(sh?.lateMin || 0);
                             if (lateMin <= 0) return null;
-                            const start = Number(sh?.start || 0);
+                            const start = Number(sh?.lateStartMin ?? sh?.start ?? 0);
                             const end = Math.min(Number(sh?.end || 0), start + lateMin);
                             if (end <= start) return null;
                             return { start, end, lateMin };
@@ -17302,7 +17339,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                             .map(sh => {
                                                                                 const lateMin = Number(sh?.lateMin || 0);
                                                                                 if (lateMin <= 0) return null;
-                                                                                const start = Number(sh?.start || 0);
+                                                                                const start = Number(sh?.lateStartMin ?? sh?.start ?? 0);
                                                                                 const end = Math.min(Number(sh?.end || 0), start + lateMin);
                                                                                 if (end <= start) return null;
                                                                                 return { start, end, lateMin };
