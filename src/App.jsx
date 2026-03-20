@@ -5324,9 +5324,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             });
             if (plannerStatusIsTechReasonKey(key)) {
                 return byKey({
-                    chip: 'border-sky-200 bg-sky-50 text-sky-700',
-                    row: 'border-sky-100 bg-sky-50/60 text-sky-800',
-                    bar: '#0ea5e9'
+                    chip: 'border-violet-200 bg-violet-50 text-violet-700',
+                    row: 'border-violet-100 bg-violet-50/60 text-violet-800',
+                    bar: '#8b5cf6'
                 });
             }
             switch (key) {

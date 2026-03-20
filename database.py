@@ -7770,6 +7770,32 @@ class Database:
                 break
         return covered_until
 
+    def _schedule_auto_shift_end_excused_boundary(self, shift_interval, excused_intervals):
+        shift_start = int(shift_interval.get('start', 0))
+        shift_end = int(shift_interval.get('end', 0))
+        if shift_end <= shift_start:
+            return shift_end
+
+        covered_from = shift_end
+        merged = self._merge_break_intervals(excused_intervals or [])
+        for seg in reversed(merged):
+            seg_start = int(seg.get('start', 0))
+            seg_end = int(seg.get('end', 0))
+            if seg_end <= seg_start:
+                continue
+            seg_start = max(shift_start, seg_start)
+            seg_end = min(shift_end, seg_end)
+            if seg_end <= seg_start:
+                continue
+
+            # Нет непрерывного покрытия до конца смены — останавливаемся.
+            if seg_end < covered_from:
+                break
+            covered_from = max(shift_start, min(covered_from, seg_start))
+            if covered_from <= shift_start:
+                break
+        return covered_from
+
     def _schedule_auto_flag_status_for_minutes(self, status_value, minutes_value):
         minutes_int = max(0, int(minutes_value or 0))
         if minutes_int <= 0:
@@ -8366,12 +8392,20 @@ class Database:
                         continue
                     first_work_start = int(shift_work_status[0].get('start', shift_interval['start']))
                     last_work_end = int(shift_work_status[-1].get('end', shift_interval['end']))
+                    shift_excused_status = self._schedule_auto_intersect_interval_with_list(
+                        shift_interval,
+                        late_excused_status_for_shift
+                    )
                     late_excused_boundary = self._schedule_auto_shift_start_excused_boundary(
                         shift_interval,
-                        self._schedule_auto_intersect_interval_with_list(shift_interval, late_excused_status_for_shift)
+                        shift_excused_status
+                    )
+                    early_excused_boundary = self._schedule_auto_shift_end_excused_boundary(
+                        shift_interval,
+                        shift_excused_status
                     )
                     late_minutes_total += max(0, first_work_start - int(late_excused_boundary))
-                    early_leave_minutes_total += max(0, int(shift_interval['end']) - last_work_end)
+                    early_leave_minutes_total += max(0, int(early_excused_boundary) - last_work_end)
 
             day_shift_intervals = self._merge_break_intervals(day_shift_intervals)
             work_inside_shift_day = self._schedule_auto_overlap_minutes(day_work_status, day_shift_intervals)
