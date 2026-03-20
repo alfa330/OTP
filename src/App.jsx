@@ -6245,6 +6245,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     if (!existing) return clonePlannerOperator(base);
                     return clonePlannerOperator({
                         ...base,
+                        direction_id: (base?.direction_id ?? existing?.direction_id ?? null),
                         shifts: existing.shifts,
                         daysOff: existing.daysOff,
                         scheduleStatusPeriods: existing.scheduleStatusPeriods ?? base.scheduleStatusPeriods,
@@ -6339,9 +6340,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 open: false,
                 operatorId: null,
                 date: null,
+                activityType: 'offline_activity',
                 startTime: '09:00',
                 endTime: '10:00',
-                comment: ''
+                comment: '',
+                trainingReason: '',
+                trainingCountInHours: true,
+                technicalReason: '',
+                technicalIsMass: false,
+                technicalDirectionIds: []
             });
             const [plannerOfflineActivityActionLoading, setPlannerOfflineActivityActionLoading] = useState(false);
             const [plannerOfflineActivityModalError, setPlannerOfflineActivityModalError] = useState('');
@@ -6386,6 +6393,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [plannerBreakRulesByDirection, setPlannerBreakRulesByDirection] = useState({});
             const [plannerBreakRulesDraftByDirection, setPlannerBreakRulesDraftByDirection] = useState({});
             const [plannerSystemDirections, setPlannerSystemDirections] = useState([]);
+            const [plannerSystemDirectionItems, setPlannerSystemDirectionItems] = useState([]);
             const [showPlannerTopActionsMenu, setShowPlannerTopActionsMenu] = useState(false);
             const [showSwapJournalModal, setShowSwapJournalModal] = useState(false);
             const [swapJournalMonth, setSwapJournalMonth] = useState(() => {
@@ -7116,10 +7124,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                         const directionsPayload = await directionsResp.json().catch(() => ({}));
                         const directionsRaw = Array.isArray(directionsPayload?.directions) ? directionsPayload.directions : [];
-                        const directionNames = directionsRaw
-                            .map(item => String(item?.name || '').trim())
+                        const directionItems = directionsRaw
+                            .map(item => {
+                                const id = Number(item?.id);
+                                const name = String(item?.name || '').trim();
+                                if (!Number.isFinite(id) || id <= 0 || !name) return null;
+                                return { id: Math.trunc(id), name };
+                            })
                             .filter(Boolean)
-                            .sort((a, b) => a.localeCompare(b));
+                            .sort((a, b) => String(a?.name || '').localeCompare(String(b?.name || ''), 'ru', { sensitivity: 'base' }));
+                        if (directionItems.length > 0) {
+                            setPlannerSystemDirectionItems(directionItems);
+                        }
+                        const directionNames = directionItems.length > 0
+                            ? Array.from(new Set(directionItems.map(item => String(item?.name || '').trim()).filter(Boolean)))
+                            : directionsRaw
+                                .map(item => String(item?.name || '').trim())
+                                .filter(Boolean);
+                        directionNames.sort((a, b) => a.localeCompare(b, 'ru', { sensitivity: 'base' }));
                         if (directionNames.length > 0) {
                             setPlannerSystemDirections(directionNames);
                         }
@@ -8133,7 +8155,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         endMin: null,
                         dragging: false
                     });
-                    emitAppToast(`Начало офлайн-активности: ${minutesToTime(draftStart)}. Протяните правой кнопкой или выберите конец вторым ПКМ.`, 'info');
+                    emitAppToast(`Начало интервала активности: ${minutesToTime(draftStart)}. Протяните правой кнопкой или выберите конец вторым ПКМ.`, 'info');
                 }
                 return false;
             };
@@ -9199,9 +9221,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     open: true,
                     operatorId: normalizedOperatorId,
                     date: dayKey,
+                    activityType: 'offline_activity',
                     startTime: minutesToTime(normalizedStart),
                     endTime: minutesToTime(normalizedEnd),
-                    comment: ''
+                    comment: '',
+                    trainingReason: '',
+                    trainingCountInHours: true,
+                    technicalReason: '',
+                    technicalIsMass: false,
+                    technicalDirectionIds: []
                 });
             };
 
@@ -9211,9 +9239,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     open: false,
                     operatorId: null,
                     date: null,
+                    activityType: 'offline_activity',
                     startTime: '09:00',
                     endTime: '10:00',
-                    comment: ''
+                    comment: '',
+                    trainingReason: '',
+                    trainingCountInHours: true,
+                    technicalReason: '',
+                    technicalIsMass: false,
+                    technicalDirectionIds: []
                 });
             };
 
@@ -9234,9 +9268,25 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 });
             };
 
+            const plannerToUniquePositiveIntList = (values) => {
+                const list = Array.isArray(values) ? values : [values];
+                const out = [];
+                const seen = new Set();
+                list.forEach((item) => {
+                    const value = Number(item);
+                    if (!Number.isFinite(value)) return;
+                    const intValue = Math.trunc(value);
+                    if (intValue <= 0 || seen.has(intValue)) return;
+                    seen.add(intValue);
+                    out.push(intValue);
+                });
+                return out;
+            };
+
             const submitPlannerOfflineActivityModal = async () => {
                 const operatorId = Number(plannerOfflineActivityModalState?.operatorId);
                 const dayKey = String(plannerOfflineActivityModalState?.date || '').trim();
+                const activityType = String(plannerOfflineActivityModalState?.activityType || 'offline_activity').trim();
                 const startTime = String(plannerOfflineActivityModalState?.startTime || '').trim();
                 const endTime = String(plannerOfflineActivityModalState?.endTime || '').trim();
                 const comment = String(plannerOfflineActivityModalState?.comment || '').trim();
@@ -9258,6 +9308,83 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setPlannerOfflineActivityActionLoading(true);
                 setPlannerOfflineActivityModalError('');
                 try {
+                    if (activityType === 'training') {
+                        const reason = String(plannerOfflineActivityModalState?.trainingReason || '').trim();
+                        if (!reason) {
+                            setPlannerOfflineActivityModalError('Выберите причину тренинга.');
+                            return;
+                        }
+                        const response = await fetch(`${API_BASE_URL}/api/trainings`, {
+                            method: 'POST',
+                            credentials: 'include',
+                            headers: withAccessTokenHeader({
+                                'Content-Type': 'application/json'
+                            }),
+                            body: JSON.stringify({
+                                operator_id: operatorId,
+                                date: dayKey,
+                                start_time: startTime,
+                                end_time: endTime,
+                                reason,
+                                comment: comment || null,
+                                count_in_hours: !!plannerOfflineActivityModalState?.trainingCountInHours
+                            })
+                        });
+                        const payload = await response.json().catch(() => ({}));
+                        if (!response.ok) {
+                            throw new Error(payload?.error || `HTTP ${response.status}`);
+                        }
+                        await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
+                        emitAppToast('Тренинг сохранен', 'success');
+                        closePlannerOfflineActivityModal();
+                        return;
+                    }
+
+                    if (activityType === 'technical_reason') {
+                        const reason = String(plannerOfflineActivityModalState?.technicalReason || '').trim();
+                        const isMass = !!plannerOfflineActivityModalState?.technicalIsMass;
+                        const selectedDirectionIds = plannerToUniquePositiveIntList(
+                            plannerOfflineActivityModalState?.technicalDirectionIds
+                        );
+                        if (!reason) {
+                            setPlannerOfflineActivityModalError('Выберите причину тех.причины.');
+                            return;
+                        }
+                        if (isMass && selectedDirectionIds.length === 0) {
+                            setPlannerOfflineActivityModalError('Выберите хотя бы одно направление для массовой тех.причины.');
+                            return;
+                        }
+                        const response = await fetch(`${API_BASE_URL}/api/technical_issues`, {
+                            method: 'POST',
+                            credentials: 'include',
+                            headers: withAccessTokenHeader({
+                                'Content-Type': 'application/json'
+                            }),
+                            body: JSON.stringify({
+                                date: dayKey,
+                                start_time: startTime,
+                                end_time: endTime,
+                                reason,
+                                comment: comment || null,
+                                operator_ids: isMass ? [] : [operatorId],
+                                direction_ids: isMass ? selectedDirectionIds : []
+                            })
+                        });
+                        const payload = await response.json().catch(() => ({}));
+                        if (!response.ok) {
+                            throw new Error(payload?.error || `HTTP ${response.status}`);
+                        }
+                        await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
+                        const createdCount = Number(payload?.result?.created_count || 0);
+                        if (isMass && Number.isFinite(createdCount) && createdCount > 0) {
+                            emitAppToast(`Тех.причина сохранена: ${createdCount} записей`, 'success');
+                        } else {
+                            emitAppToast('Тех.причина сохранена', 'success');
+                        }
+                        closePlannerOfflineActivityModal();
+                        return;
+                    }
+
                     const response = await fetch(`${API_BASE_URL}/api/offline_activities`, {
                         method: 'POST',
                         credentials: 'include',
@@ -9276,7 +9403,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     if (!response.ok) {
                         throw new Error(payload?.error || `HTTP ${response.status}`);
                     }
-
                     await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
                     emitAppToast('Офлайн-активность сохранена', 'success');
                     closePlannerOfflineActivityModal();
@@ -9364,6 +9490,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return plannerFallbackTechReasonOptions;
                 }
             }, [API_BASE_URL, plannerFallbackTechReasonOptions, plannerTechReasonOptions, withAccessTokenHeader]);
+
+            useEffect(() => {
+                if (!plannerOfflineActivityModalState?.open) return;
+                if (String(plannerOfflineActivityModalState?.activityType || '') !== 'technical_reason') return;
+                loadPlannerTechReasonOptions();
+            }, [
+                plannerOfflineActivityModalState?.open,
+                plannerOfflineActivityModalState?.activityType,
+                loadPlannerTechReasonOptions
+            ]);
 
             const openPlannerTrainingModalForCurrentDay = (mode = 'add', preset = null) => {
                 const operatorId = Number(modalState?.opId);
@@ -10288,6 +10424,28 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 "Практика в офисе таксопарка",
                 "Другое"
             ]), []);
+            const plannerTechMassDirectionOptions = useMemo(() => {
+                const map = new Map();
+                (Array.isArray(plannerSystemDirectionItems) ? plannerSystemDirectionItems : []).forEach((item) => {
+                    const id = Number(item?.id);
+                    const name = String(item?.name || '').trim();
+                    if (!Number.isFinite(id) || id <= 0 || !name) return;
+                    if (!map.has(id)) {
+                        map.set(id, { id: Math.trunc(id), name });
+                    }
+                });
+                (Array.isArray(operators) ? operators : []).forEach((op) => {
+                    const id = Number(op?.direction_id);
+                    const name = String(op?.direction || op?.direction_name || '').trim();
+                    if (!Number.isFinite(id) || id <= 0 || !name) return;
+                    if (!map.has(id)) {
+                        map.set(id, { id: Math.trunc(id), name });
+                    }
+                });
+                return Array.from(map.values()).sort((a, b) =>
+                    String(a?.name || '').localeCompare(String(b?.name || ''), 'ru', { sensitivity: 'base' })
+                );
+            }, [plannerSystemDirectionItems, operators]);
             const dayViewBreaksDateStr = todayDateStr(new Date(currentDate));
             const dayBreaksByOperator = useMemo(() => {
                 if (viewMode !== 'day') return [];
@@ -14507,7 +14665,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         ? `Офлайн: ${minutesToTime(pendingOfflineRangeStartMinForCell)} — ${minutesToTime(pendingOfflineRangeEndMinForCell)}. Отпустите ПКМ, чтобы подтвердить.`
                                                         : pendingOfflineStartMinForCell != null
                                                             ? `Офлайн: начало ${minutesToTime(pendingOfflineStartMinForCell)}. Протяните правой кнопкой или выберите конец вторым ПКМ.`
-                                                            : 'ПКМ + протягивание по таймлайну: отметить офлайн-активность.'}
+                                                            : 'ПКМ + протягивание по таймлайну: выбрать интервал активности.'}
                                                 >
                                                     {cellScheduleStatus ? (
                                                         <div className="flex items-center justify-center h-full px-1">
@@ -14551,7 +14709,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                     left: `${computeLeftPercent(pendingOfflineRangeStartMinForCell)}%`,
                                                                                     width: `${((pendingOfflineRangeEndMinForCell - pendingOfflineRangeStartMinForCell) / minutesInDay) * 100}%`
                                                                                 }}
-                                                                                title={`Черновик офлайн: ${minutesToTime(pendingOfflineRangeStartMinForCell)} — ${minutesToTime(pendingOfflineRangeEndMinForCell)}`}
+                                                                                title={`Черновик активности: ${minutesToTime(pendingOfflineRangeStartMinForCell)} — ${minutesToTime(pendingOfflineRangeEndMinForCell)}`}
                                                                             />
                                                                         )}
                                                                         {pendingOfflineStartMinForCell != null && !hasPendingOfflineRangeForCell && (
@@ -14674,7 +14832,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                     left: `${computeLeftPercent(pendingOfflineRangeStartMinForCell)}%`,
                                                                                     width: `${((pendingOfflineRangeEndMinForCell - pendingOfflineRangeStartMinForCell) / minutesInDay) * 100}%`
                                                                                 }}
-                                                                                title={`Черновик офлайн: ${minutesToTime(pendingOfflineRangeStartMinForCell)} — ${minutesToTime(pendingOfflineRangeEndMinForCell)}`}
+                                                                                title={`Черновик активности: ${minutesToTime(pendingOfflineRangeStartMinForCell)} — ${minutesToTime(pendingOfflineRangeEndMinForCell)}`}
                                                                             />
                                                                         )}
                                                                         {pendingOfflineStartMinForCell != null && !hasPendingOfflineRangeForCell && (
@@ -14743,7 +14901,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     left: `${computeLeftPercent(pendingOfflineRangeStartMinForCell)}%`,
                                                                     width: `${((pendingOfflineRangeEndMinForCell - pendingOfflineRangeStartMinForCell) / minutesInDay) * 100}%`
                                                                 }}
-                                                                title={`Черновик офлайн: ${minutesToTime(pendingOfflineRangeStartMinForCell)} — ${minutesToTime(pendingOfflineRangeEndMinForCell)}`}
+                                                                title={`Черновик активности: ${minutesToTime(pendingOfflineRangeStartMinForCell)} — ${minutesToTime(pendingOfflineRangeEndMinForCell)}`}
                                                             />
                                                         )}
                                                         {pendingOfflineStartMinForCell != null && !hasPendingOfflineRangeForCell && (
@@ -16112,101 +16270,233 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     </SimpleModal>
                 )}
 
-                {plannerOfflineActivityModalState.open && (
-                    <SimpleModal
-                        open={plannerOfflineActivityModalState.open}
-                        onClose={closePlannerOfflineActivityModal}
-                        panelClassName="w-[560px] max-w-[calc(100vw-1rem)]"
-                    >
-                        <div className="mb-4 pb-3 border-b border-slate-200">
-                            <div className="flex items-center justify-between gap-3">
-                                <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                                    <FaIcon className="fas fa-user-clock text-emerald-600"></FaIcon>
-                                    Отметить офлайн-активность
-                                </h3>
+                {plannerOfflineActivityModalState.open && (() => {
+                    const activityType = String(plannerOfflineActivityModalState?.activityType || 'offline_activity');
+                    const isTraining = activityType === 'training';
+                    const isTechnical = activityType === 'technical_reason';
+                    const technicalReasonOptions = plannerTechReasonOptions.length > 0
+                        ? plannerTechReasonOptions
+                        : plannerFallbackTechReasonOptions;
+                    const technicalDirectionValues = plannerToUniquePositiveIntList(
+                        plannerOfflineActivityModalState?.technicalDirectionIds
+                    );
+                    const accentFocusClass = isTechnical
+                        ? 'focus:ring-violet-500'
+                        : (isTraining ? 'focus:ring-blue-500' : 'focus:ring-emerald-500');
+                    const saveButtonClass = isTechnical
+                        ? 'bg-violet-600 hover:bg-violet-700'
+                        : (isTraining ? 'bg-blue-600 hover:bg-blue-700' : 'bg-emerald-600 hover:bg-emerald-700');
+                    const titleText = isTechnical
+                        ? 'Отметить тех. причину'
+                        : (isTraining ? 'Отметить тренинг' : 'Отметить офлайн-активность');
+                    const titleIconClass = isTechnical
+                        ? 'fa-tools text-violet-600'
+                        : (isTraining ? 'fa-chalkboard-teacher text-blue-600' : 'fa-user-clock text-emerald-600');
+                    const saveLabel = isTechnical ? 'Сохранить тех. причину' : (isTraining ? 'Сохранить тренинг' : 'Сохранить офлайн');
+
+                    return (
+                        <SimpleModal
+                            open={plannerOfflineActivityModalState.open}
+                            onClose={closePlannerOfflineActivityModal}
+                            panelClassName="w-[560px] max-w-[calc(100vw-1rem)]"
+                        >
+                            <div className="mb-4 pb-3 border-b border-slate-200">
+                                <div className="flex items-center justify-between gap-3">
+                                    <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                                        <FaIcon className={`fas ${titleIconClass}`}></FaIcon>
+                                        {titleText}
+                                    </h3>
+                                    <button
+                                        type="button"
+                                        onClick={closePlannerOfflineActivityModal}
+                                        className="w-8 h-8 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 flex items-center justify-center"
+                                    >
+                                        <FaIcon className="fas fa-times"></FaIcon>
+                                    </button>
+                                </div>
+                                <div className="mt-1 text-xs text-slate-500">
+                                    Дата: {plannerOfflineActivityModalState.date || '—'}
+                                </div>
+                            </div>
+
+                            <div className="space-y-3">
+                                <div>
+                                    <label className="block text-xs font-medium text-slate-600 mb-1">Тип активности</label>
+                                    <select
+                                        value={activityType}
+                                        onChange={(e) => {
+                                            const nextType = String(e.target.value || 'offline_activity');
+                                            setPlannerOfflineActivityModalState(prev => ({
+                                                ...(prev || {}),
+                                                activityType: nextType
+                                            }));
+                                        }}
+                                        className={`w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 ${accentFocusClass}`}
+                                    >
+                                        <option value="training">Тренинг</option>
+                                        <option value="offline_activity">Оффлайн активность</option>
+                                        <option value="technical_reason">Тех причина</option>
+                                    </select>
+                                </div>
+
+                                <div>
+                                    <label className="block text-xs font-medium text-slate-600 mb-1">Дата</label>
+                                    <input
+                                        type="date"
+                                        value={plannerOfflineActivityModalState.date || ''}
+                                        onChange={(e) => updatePlannerOfflineActivityDraftField('date', e.target.value)}
+                                        className={`w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 ${accentFocusClass}`}
+                                    />
+                                </div>
+
+                                <div className="grid grid-cols-2 gap-3">
+                                    <div>
+                                        <label className="block text-xs font-medium text-slate-600 mb-1">Начало</label>
+                                        <input
+                                            type="time"
+                                            value={plannerOfflineActivityModalState.startTime || ''}
+                                            onChange={(e) => updatePlannerOfflineActivityDraftField('startTime', e.target.value)}
+                                            className={`w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 ${accentFocusClass}`}
+                                            step={300}
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-medium text-slate-600 mb-1">Конец</label>
+                                        <input
+                                            type="time"
+                                            value={plannerOfflineActivityModalState.endTime || ''}
+                                            onChange={(e) => updatePlannerOfflineActivityDraftField('endTime', e.target.value)}
+                                            className={`w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 ${accentFocusClass}`}
+                                            step={300}
+                                        />
+                                    </div>
+                                </div>
+
+                                {isTraining && (
+                                    <>
+                                        <div>
+                                            <label className="block text-xs font-medium text-slate-600 mb-1">Причина тренинга</label>
+                                            <select
+                                                value={plannerOfflineActivityModalState.trainingReason || ''}
+                                                onChange={(e) => updatePlannerOfflineActivityDraftField('trainingReason', e.target.value)}
+                                                className={`w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 ${accentFocusClass}`}
+                                            >
+                                                <option value="">Выберите причину</option>
+                                                {plannerTrainingReasonOptions.map(reason => (
+                                                    <option key={`planner-unified-training-reason-${reason}`} value={reason}>{reason}</option>
+                                                ))}
+                                            </select>
+                                        </div>
+                                        <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+                                            <input
+                                                type="checkbox"
+                                                checked={!!plannerOfflineActivityModalState.trainingCountInHours}
+                                                onChange={(e) => updatePlannerOfflineActivityDraftField('trainingCountInHours', !!e.target.checked)}
+                                                className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                                            />
+                                            Засчитывать в учет часов
+                                        </label>
+                                    </>
+                                )}
+
+                                {isTechnical && (
+                                    <>
+                                        <div>
+                                            <label className="block text-xs font-medium text-slate-600 mb-1">Причина тех.причины</label>
+                                            <select
+                                                value={plannerOfflineActivityModalState.technicalReason || ''}
+                                                onChange={(e) => updatePlannerOfflineActivityDraftField('technicalReason', e.target.value)}
+                                                className={`w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 ${accentFocusClass}`}
+                                            >
+                                                <option value="">Выберите причину</option>
+                                                {technicalReasonOptions.map(reason => (
+                                                    <option key={`planner-unified-tech-reason-${reason}`} value={reason}>{reason}</option>
+                                                ))}
+                                            </select>
+                                        </div>
+                                        <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+                                            <input
+                                                type="checkbox"
+                                                checked={!!plannerOfflineActivityModalState.technicalIsMass}
+                                                onChange={(e) => updatePlannerOfflineActivityDraftField('technicalIsMass', !!e.target.checked)}
+                                                className="h-4 w-4 rounded border-slate-300 text-violet-600 focus:ring-violet-500"
+                                            />
+                                            Массово по направлениям
+                                        </label>
+                                        {!!plannerOfflineActivityModalState.technicalIsMass && (
+                                            <div>
+                                                <label className="block text-xs font-medium text-slate-600 mb-1">Направления (мультивыбор)</label>
+                                                <select
+                                                    multiple
+                                                    value={technicalDirectionValues.map((id) => String(id))}
+                                                    onChange={(e) => {
+                                                        const selectedValues = Array.from(e?.target?.selectedOptions || []).map((option) => option.value);
+                                                        updatePlannerOfflineActivityDraftField(
+                                                            'technicalDirectionIds',
+                                                            plannerToUniquePositiveIntList(selectedValues)
+                                                        );
+                                                    }}
+                                                    className={`w-full min-h-[120px] px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 ${accentFocusClass}`}
+                                                >
+                                                    {plannerTechMassDirectionOptions.map((direction) => (
+                                                        <option key={`planner-unified-tech-dir-${direction.id}`} value={direction.id}>
+                                                            {direction.name}
+                                                        </option>
+                                                    ))}
+                                                </select>
+                                                {plannerTechMassDirectionOptions.length === 0 && (
+                                                    <div className="mt-1 text-[11px] text-amber-700">
+                                                        Справочник направлений не загружен. Для массовой тех.причины список направлений недоступен.
+                                                    </div>
+                                                )}
+                                                <div className="mt-1 text-[11px] text-slate-500">
+                                                    Запись будет выставлена только тем сотрудникам выбранных направлений, у кого есть смена в этом интервале.
+                                                </div>
+                                            </div>
+                                        )}
+                                    </>
+                                )}
+
+                                <div>
+                                    <label className="block text-xs font-medium text-slate-600 mb-1">Комментарий</label>
+                                    <textarea
+                                        rows={3}
+                                        value={plannerOfflineActivityModalState.comment || ''}
+                                        onChange={(e) => updatePlannerOfflineActivityDraftField('comment', e.target.value)}
+                                        className={`w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 ${accentFocusClass} resize-y`}
+                                        placeholder="Комментарий (необязательно)"
+                                    />
+                                </div>
+
+                                {plannerOfflineActivityModalError && (
+                                    <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                                        {plannerOfflineActivityModalError}
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="mt-5 pt-4 border-t border-slate-200 flex items-center justify-end gap-2">
                                 <button
                                     type="button"
                                     onClick={closePlannerOfflineActivityModal}
-                                    className="w-8 h-8 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 flex items-center justify-center"
+                                    disabled={plannerOfflineActivityActionLoading}
+                                    className="px-4 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed"
                                 >
-                                    <FaIcon className="fas fa-times"></FaIcon>
+                                    Отмена
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={submitPlannerOfflineActivityModal}
+                                    disabled={plannerOfflineActivityActionLoading}
+                                    className={`px-4 py-2 rounded-lg text-white text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2 ${saveButtonClass}`}
+                                >
+                                    <FaIcon className={`fas ${plannerOfflineActivityActionLoading ? 'fa-spinner fa-spin' : 'fa-save'}`}></FaIcon>
+                                    {plannerOfflineActivityActionLoading ? 'Сохраняем...' : saveLabel}
                                 </button>
                             </div>
-                            <div className="mt-1 text-xs text-slate-500">
-                                Дата: {plannerOfflineActivityModalState.date || '—'}
-                            </div>
-                        </div>
-
-                        <div className="space-y-3">
-                            <div>
-                                <label className="block text-xs font-medium text-slate-600 mb-1">Дата</label>
-                                <input
-                                    type="date"
-                                    value={plannerOfflineActivityModalState.date || ''}
-                                    onChange={(e) => updatePlannerOfflineActivityDraftField('date', e.target.value)}
-                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                                />
-                            </div>
-                            <div className="grid grid-cols-2 gap-3">
-                                <div>
-                                    <label className="block text-xs font-medium text-slate-600 mb-1">Начало</label>
-                                    <input
-                                        type="time"
-                                        value={plannerOfflineActivityModalState.startTime || ''}
-                                        onChange={(e) => updatePlannerOfflineActivityDraftField('startTime', e.target.value)}
-                                        className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                                        step={300}
-                                    />
-                                </div>
-                                <div>
-                                    <label className="block text-xs font-medium text-slate-600 mb-1">Конец</label>
-                                    <input
-                                        type="time"
-                                        value={plannerOfflineActivityModalState.endTime || ''}
-                                        onChange={(e) => updatePlannerOfflineActivityDraftField('endTime', e.target.value)}
-                                        className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                                        step={300}
-                                    />
-                                </div>
-                            </div>
-                            <div>
-                                <label className="block text-xs font-medium text-slate-600 mb-1">Комментарий</label>
-                                <textarea
-                                    rows={3}
-                                    value={plannerOfflineActivityModalState.comment || ''}
-                                    onChange={(e) => updatePlannerOfflineActivityDraftField('comment', e.target.value)}
-                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 resize-y"
-                                    placeholder="Комментарий (необязательно)"
-                                />
-                            </div>
-                            {plannerOfflineActivityModalError && (
-                                <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
-                                    {plannerOfflineActivityModalError}
-                                </div>
-                            )}
-                        </div>
-
-                        <div className="mt-5 pt-4 border-t border-slate-200 flex items-center justify-end gap-2">
-                            <button
-                                type="button"
-                                onClick={closePlannerOfflineActivityModal}
-                                disabled={plannerOfflineActivityActionLoading}
-                                className="px-4 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed"
-                            >
-                                Отмена
-                            </button>
-                            <button
-                                type="button"
-                                onClick={submitPlannerOfflineActivityModal}
-                                disabled={plannerOfflineActivityActionLoading}
-                                className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
-                            >
-                                <FaIcon className={`fas ${plannerOfflineActivityActionLoading ? 'fa-spinner fa-spin' : 'fa-save'}`}></FaIcon>
-                                {plannerOfflineActivityActionLoading ? 'Сохраняем...' : 'Сохранить'}
-                            </button>
-                        </div>
-                    </SimpleModal>
-                )}
+                        </SimpleModal>
+                    );
+                })()}
 
                 {plannerFineModalState.open && (
                     <SimpleModal
