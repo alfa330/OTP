@@ -9417,13 +9417,54 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             const normalizePlannerModalIntervals = (segments) => (
                 (Array.isArray(segments) ? segments : [])
-                    .map((seg) => ({
-                        startMin: Number(seg?.startMin ?? seg?.start),
-                        endMin: Number(seg?.endMin ?? seg?.end)
-                    }))
-                    .filter(seg => Number.isFinite(seg.startMin) && Number.isFinite(seg.endMin) && seg.endMin > seg.startMin)
-                    .sort((a, b) => (a.startMin - b.startMin) || (a.endMin - b.endMin))
+                    .map((seg) => {
+                        const startSecRaw = Number(seg?.startSec);
+                        const endSecRaw = Number(seg?.endSec);
+                        const startMinRaw = Number(seg?.startMin ?? seg?.start);
+                        const endMinRaw = Number(seg?.endMin ?? seg?.end);
+
+                        let startSec = Number.isFinite(startSecRaw)
+                            ? Math.round(startSecRaw)
+                            : (Number.isFinite(startMinRaw) ? Math.round(startMinRaw * 60) : NaN);
+                        let endSec = Number.isFinite(endSecRaw)
+                            ? Math.round(endSecRaw)
+                            : (Number.isFinite(endMinRaw) ? Math.round(endMinRaw * 60) : NaN);
+                        if (!Number.isFinite(startSec) || !Number.isFinite(endSec)) return null;
+
+                        startSec = Math.max(0, Math.min((24 * 60 * 60) - 1, startSec));
+                        endSec = Math.max(1, Math.min(24 * 60 * 60, endSec));
+                        if (endSec <= startSec) return null;
+
+                        return {
+                            startSec,
+                            endSec,
+                            startMin: startSec / 60,
+                            endMin: endSec / 60,
+                            durationSec: Math.max(1, endSec - startSec)
+                        };
+                    })
+                    .filter(Boolean)
+                    .sort((a, b) => (a.startSec - b.startSec) || (a.endSec - b.endSec))
             );
+
+            const plannerModalSecondToClock = (value) => {
+                const secRaw = Number(value);
+                if (!Number.isFinite(secRaw)) return '—';
+                let sec = Math.round(secRaw);
+                if (sec <= 0) return '00:00:00';
+                if (sec >= (24 * 60 * 60)) return '24:00:00';
+                const hh = Math.floor(sec / 3600);
+                const mm = Math.floor((sec % 3600) / 60);
+                const ss = sec % 60;
+                return `${cpad(hh)}:${cpad(mm)}:${cpad(ss)}`;
+            };
+
+            const plannerModalSegmentRangeText = (segment) => {
+                const normalized = normalizePlannerModalIntervals([segment]);
+                const first = normalized[0];
+                if (!first) return '—';
+                return `${plannerModalSecondToClock(first.startSec)} — ${plannerModalSecondToClock(first.endSec)}`;
+            };
 
             const plannerIntervalToApiTimes = (segment) => {
                 const startRaw = Number(segment?.startMin);
@@ -9803,7 +9844,29 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                 setPlannerTechStatusActionLoading(true);
                 setPlannerTechStatusModalError('');
+                let flagConfirmed = false;
                 try {
+                    if (isFlagConfirmMode) {
+                        const resolveResponse = await fetch(`${API_BASE_URL}/api/work_schedules/auto_flags/resolve`, {
+                            method: 'POST',
+                            credentials: 'include',
+                            headers: withAccessTokenHeader({
+                                'Content-Type': 'application/json'
+                            }),
+                            body: JSON.stringify({
+                                operator_id: operatorId,
+                                day: dayKey,
+                                flag_type: 'technical_reason',
+                                action: 'confirm'
+                            })
+                        });
+                        const resolvePayload = await resolveResponse.json().catch(() => ({}));
+                        if (!resolveResponse.ok) {
+                            throw new Error(resolvePayload?.error || `HTTP ${resolveResponse.status}`);
+                        }
+                        flagConfirmed = true;
+                    }
+
                     for (const interval of payloadIntervals) {
                         const response = await fetch(`${API_BASE_URL}/api/technical_issues`, {
                             method: 'POST',
@@ -9827,31 +9890,30 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         }
                     }
 
-                    if (isFlagConfirmMode) {
-                        const resolveResponse = await fetch(`${API_BASE_URL}/api/work_schedules/auto_flags/resolve`, {
-                            method: 'POST',
-                            credentials: 'include',
-                            headers: withAccessTokenHeader({
-                                'Content-Type': 'application/json'
-                            }),
-                            body: JSON.stringify({
-                                operator_id: operatorId,
-                                day: dayKey,
-                                flag_type: 'technical_reason',
-                                action: 'confirm'
-                            })
-                        });
-                        const resolvePayload = await resolveResponse.json().catch(() => ({}));
-                        if (!resolveResponse.ok) {
-                            throw new Error(resolvePayload?.error || `HTTP ${resolveResponse.status}`);
-                        }
-                    }
-
                     await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
                     emitAppToast(payloadIntervals.length > 1 ? 'Интервалы тех.причины подтверждены' : 'Тех.причина подтверждена', 'success');
                     closePlannerTechStatusModal();
                 } catch (error) {
                     console.error('Error saving planner technical issue from status:', error);
+                    if (flagConfirmed && isFlagConfirmMode) {
+                        try {
+                            await fetch(`${API_BASE_URL}/api/work_schedules/auto_flags/resolve`, {
+                                method: 'POST',
+                                credentials: 'include',
+                                headers: withAccessTokenHeader({
+                                    'Content-Type': 'application/json'
+                                }),
+                                body: JSON.stringify({
+                                    operator_id: operatorId,
+                                    day: dayKey,
+                                    flag_type: 'technical_reason',
+                                    action: 'pending'
+                                })
+                            });
+                        } catch (rollbackError) {
+                            console.error('Error rolling back technical_reason flag status to pending:', rollbackError);
+                        }
+                    }
                     setPlannerTechStatusModalError(String(error?.message || error || 'Не удалось сохранить тех.причину.'));
                     emitAppToast(`Ошибка сохранения тех.причины: ${error?.message || error}`, 'error');
                 } finally {
@@ -10363,35 +10425,48 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     .map((seg) => {
                         const statusKey = plannerStatusNormalizeKey(seg?.stateName || seg?.stateKey || seg?.rawStateName || seg?.rawStateKey || '');
                         if (!matchFn(statusKey)) return null;
-                        const startMin = Number(seg?.startMin ?? seg?.start ?? 0);
-                        const endMin = Number(seg?.endMin ?? seg?.end ?? 0);
-                        if (!Number.isFinite(startMin) || !Number.isFinite(endMin) || endMin <= startMin) return null;
+                        const startRaw = Number(seg?.startMin ?? seg?.start ?? 0);
+                        const endRaw = Number(seg?.endMin ?? seg?.end ?? 0);
+                        if (!Number.isFinite(startRaw) || !Number.isFinite(endRaw)) return null;
+                        let startSec = Math.round(startRaw * 60);
+                        let endSec = Math.round(endRaw * 60);
+                        startSec = Math.max(0, Math.min((24 * 60 * 60) - 1, startSec));
+                        endSec = Math.max(1, Math.min(24 * 60 * 60, endSec));
+                        if (endSec <= startSec) return null;
                         return {
-                            startMin: Math.max(0, Math.min(1440, startMin)),
-                            endMin: Math.max(0, Math.min(1440, endMin))
+                            startSec,
+                            endSec
                         };
                     })
                     .filter(Boolean)
-                    .sort((a, b) => (a.startMin - b.startMin) || (a.endMin - b.endMin));
+                    .sort((a, b) => (a.startSec - b.startSec) || (a.endSec - b.endSec));
 
                 if (raw.length === 0) return [];
 
                 const merged = [];
                 raw.forEach(seg => {
                     const last = merged[merged.length - 1];
-                    if (last && seg.startMin <= (last.endMin + 0.01)) {
-                        last.endMin = Math.max(last.endMin, seg.endMin);
+                    if (last && seg.startSec <= last.endSec) {
+                        last.endSec = Math.max(last.endSec, seg.endSec);
                         return;
                     }
                     merged.push({ ...seg });
                 });
 
-                return merged.map((seg, idx) => ({
-                    id: `${idPrefix}-seg-${idx}-${Math.round(seg.startMin)}-${Math.round(seg.endMin)}`,
-                    startMin: seg.startMin,
-                    endMin: seg.endMin,
-                    durationMin: Math.max(1, Math.round(seg.endMin - seg.startMin))
-                }));
+                return merged.map((seg, idx) => {
+                    const startMin = Math.max(0, Math.min((24 * 60) - 1, Math.floor(seg.startSec / 60)));
+                    const endMin = Math.max(0, Math.min(24 * 60, Math.ceil(seg.endSec / 60)));
+                    const durationSec = Math.max(1, seg.endSec - seg.startSec);
+                    return {
+                        id: `${idPrefix}-seg-${idx}-${Math.round(seg.startSec)}-${Math.round(seg.endSec)}`,
+                        startSec: seg.startSec,
+                        endSec: seg.endSec,
+                        startMin,
+                        endMin,
+                        durationSec,
+                        durationMin: Math.max(1, endMin - startMin)
+                    };
+                });
             }, [modalImportedStatusTimeline]);
             const modalTrainingStatusSegments = useMemo(
                 () => buildModalStatusSegments(
@@ -15463,7 +15538,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     openPlannerTrainingModalForCurrentDay('confirm_training_flag_all', {
                                                                         intervals: trainingIntervals.map(seg => ({
                                                                             startMin: seg.startMin,
-                                                                            endMin: seg.endMin
+                                                                            endMin: seg.endMin,
+                                                                            startSec: seg.startSec,
+                                                                            endSec: seg.endSec
                                                                         }))
                                                                     });
                                                                 } else {
@@ -15477,7 +15554,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     openPlannerTechStatusModalForCurrentDay('confirm_tech_flag_all', {
                                                                         intervals: techIntervals.map(seg => ({
                                                                             startMin: seg.startMin,
-                                                                            endMin: seg.endMin
+                                                                            endMin: seg.endMin,
+                                                                            startSec: seg.startSec,
+                                                                            endSec: seg.endSec
                                                                         }))
                                                                     });
                                                                 } else {
@@ -15516,7 +15595,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 onClick={() => openPlannerTrainingModalForCurrentDay('confirm_training_flag_all', {
                                                                     intervals: modalTrainingStatusSegments.map(seg => ({
                                                                         startMin: seg.startMin,
-                                                                        endMin: seg.endMin
+                                                                        endMin: seg.endMin,
+                                                                        startSec: seg.startSec,
+                                                                        endSec: seg.endSec
                                                                     }))
                                                                 })}
                                                                 disabled={plannerTrainingActionLoading || anyBusy}
@@ -15526,8 +15607,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             </button>
                                                         </div>
                                                         {modalTrainingStatusSegments.map((seg, segIndex) => {
-                                                            const startDisplay = minutesToTime(seg.startMin);
-                                                            const endDisplay = minutesToTime(Math.min(seg.endMin, (24 * 60) - 1));
+                                                            const startEndDisplay = plannerModalSegmentRangeText(seg);
                                                             const intervalStatusLabel = status === 'confirmed'
                                                                 ? 'Подтвержден'
                                                                 : status === 'rejected'
@@ -15541,10 +15621,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             return (
                                                                 <div key={seg.id || `training-segment-${segIndex}`} className="flex flex-wrap items-center gap-2 rounded-md border border-teal-100 bg-teal-50/40 px-2 py-1.5">
                                                                     <span className="text-xs font-semibold text-teal-800 tabular-nums">
-                                                                        {startDisplay} — {endDisplay}
+                                                                        {startEndDisplay}
                                                                     </span>
                                                                     <span className="text-[11px] text-teal-700">
-                                                                        {formatMinutesOnly(seg.durationMin)}
+                                                                        {plannerStatusFormatDuration(seg.durationSec)}
                                                                     </span>
                                                                     <span className={`px-2 py-0.5 rounded-full border text-[10px] font-semibold ${intervalStatusClass}`}>
                                                                         {intervalStatusLabel}
@@ -15553,7 +15633,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         type="button"
                                                                         onClick={() => openPlannerTrainingModalForCurrentDay('confirm_training_flag', {
                                                                             startMin: seg.startMin,
-                                                                            endMin: seg.endMin
+                                                                            endMin: seg.endMin,
+                                                                            startSec: seg.startSec,
+                                                                            endSec: seg.endSec
                                                                         })}
                                                                         disabled={plannerTrainingActionLoading || anyBusy}
                                                                         className="ml-auto px-2 py-1 rounded-md border border-teal-200 bg-white hover:bg-teal-50 text-teal-700 text-[11px] font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
@@ -15581,7 +15663,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 onClick={() => openPlannerTechStatusModalForCurrentDay('confirm_tech_flag_all', {
                                                                     intervals: modalTechReasonStatusSegments.map(seg => ({
                                                                         startMin: seg.startMin,
-                                                                        endMin: seg.endMin
+                                                                        endMin: seg.endMin,
+                                                                        startSec: seg.startSec,
+                                                                        endSec: seg.endSec
                                                                     }))
                                                                 })}
                                                                 disabled={plannerTechStatusActionLoading || anyBusy}
@@ -15591,8 +15675,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             </button>
                                                         </div>
                                                         {modalTechReasonStatusSegments.map((seg, segIndex) => {
-                                                            const startDisplay = minutesToTime(seg.startMin);
-                                                            const endDisplay = minutesToTime(Math.min(seg.endMin, (24 * 60) - 1));
+                                                            const startEndDisplay = plannerModalSegmentRangeText(seg);
                                                             const intervalStatusLabel = status === 'confirmed'
                                                                 ? 'Подтвержден'
                                                                 : status === 'rejected'
@@ -15606,10 +15689,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             return (
                                                                 <div key={seg.id || `tech-reason-segment-${segIndex}`} className="flex flex-wrap items-center gap-2 rounded-md border border-violet-100 bg-violet-50/40 px-2 py-1.5">
                                                                     <span className="text-xs font-semibold text-violet-800 tabular-nums">
-                                                                        {startDisplay} — {endDisplay}
+                                                                        {startEndDisplay}
                                                                     </span>
                                                                     <span className="text-[11px] text-violet-700">
-                                                                        {formatMinutesOnly(seg.durationMin)}
+                                                                        {plannerStatusFormatDuration(seg.durationSec)}
                                                                     </span>
                                                                     <span className={`px-2 py-0.5 rounded-full border text-[10px] font-semibold ${intervalStatusClass}`}>
                                                                         {intervalStatusLabel}
@@ -15618,7 +15701,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         type="button"
                                                                         onClick={() => openPlannerTechStatusModalForCurrentDay('confirm_tech_flag', {
                                                                             startMin: seg.startMin,
-                                                                            endMin: seg.endMin
+                                                                            endMin: seg.endMin,
+                                                                            startSec: seg.startSec,
+                                                                            endSec: seg.endSec
                                                                         })}
                                                                         disabled={plannerTechStatusActionLoading || anyBusy}
                                                                         className="ml-auto px-2 py-1 rounded-md border border-violet-200 bg-white hover:bg-violet-50 text-violet-700 text-[11px] font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
@@ -16054,7 +16139,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <div className="max-h-44 overflow-auto space-y-1 pr-1">
                                         {(Array.isArray(plannerTrainingModalState.intervals) ? plannerTrainingModalState.intervals : []).map((seg, idx) => (
                                             <div key={`planner-training-modal-interval-${idx}`} className="text-[11px] text-blue-900 tabular-nums">
-                                                {minutesToTime(Number(seg?.startMin || 0))} — {minutesToTime(Math.min(Number(seg?.endMin || 0), (24 * 60) - 1))}
+                                                {plannerModalSegmentRangeText(seg)}
                                             </div>
                                         ))}
                                     </div>
@@ -16188,7 +16273,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <div className="max-h-44 overflow-auto space-y-1 pr-1">
                                         {(Array.isArray(plannerTechStatusModalState.intervals) ? plannerTechStatusModalState.intervals : []).map((seg, idx) => (
                                             <div key={`planner-tech-modal-interval-${idx}`} className="text-[11px] text-violet-900 tabular-nums">
-                                                {minutesToTime(Number(seg?.startMin || 0))} — {minutesToTime(Math.min(Number(seg?.endMin || 0), (24 * 60) - 1))}
+                                                {plannerModalSegmentRangeText(seg)}
                                             </div>
                                         ))}
                                     </div>
