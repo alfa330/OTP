@@ -371,10 +371,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         }
 
         function computeTrainingDurationHours(t) {
-        if (t.duration_minutes != null) return Number((t.duration_minutes / 60).toFixed(2));
-        if (t.duration_hours != null) return Number(Number(t.duration_hours).toFixed(2));
-        const s = parseTimeToMinutes(t.start_time);
-        const e = parseTimeToMinutes(t.end_time);
+        if (!t) return 0;
+        if (t.duration_minutes != null) return Number((Number(t.duration_minutes || 0) / 60).toFixed(2));
+        const byHours = Number(t.duration_hours ?? t.hours ?? t.duration ?? t.count ?? null);
+        if (Number.isFinite(byHours) && byHours > 0) return Number(byHours.toFixed(2));
+        const s = parseTimeToMinutes(t.start_time ?? t.start);
+        const e = parseTimeToMinutes(t.end_time ?? t.end);
         if (s == null || e == null) return 0;
         let diff = e - s;
         if (diff < 0) diff += 24 * 60;
@@ -1481,7 +1483,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 for (const t of arr) {
                 const h = computeTrainingDurationHours(t) || 0;
                 totalHoursAll += h;
-                if (t.count_in_hours) totalHoursCounted += h;
+                if (t.count_in_hours !== false) totalHoursCounted += h;
                 }
             }
 
@@ -1579,8 +1581,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             ) : null;
 
             if (selectedTab === 'work_time') {
-            const work = d ? Number(d.work_time || 0) : 0;
-            const hasData = d && Number(d.work_time || 0) > 0;
+            const baseWork = d ? Number(d.work_time || 0) : 0;
+            const countedTrainingHours = (trainings || []).reduce((acc, t) => {
+                if (!t || t.count_in_hours === false) return acc;
+                return acc + (computeTrainingDurationHours(t) || 0);
+            }, 0);
+            const technicalHours = (technicalIssues || []).reduce((acc, item) => acc + (computeTechnicalIssueDurationHours(item) || 0), 0);
+            const offlineHours = (offlineActivities || []).reduce((acc, item) => acc + (computeOfflineActivityDurationHours(item) || 0), 0);
+            const work = baseWork + countedTrainingHours + technicalHours + offlineHours;
+            const hasData = work > 0;
 
             if (!hasData && isPast) {
                 return (
@@ -1640,7 +1649,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             let notCountedHours = 0;
             for (const t of trainings) {
                 const h = computeTrainingDurationHours(t);
-                if (t.count_in_hours) countedHours += h; else notCountedHours += h;
+                if (t.count_in_hours !== false) countedHours += h; else notCountedHours += h;
             }
 
             const parts = [];
@@ -1776,7 +1785,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         function getCountedTrainingHoursForRow(opId) {
             const all = trainingsMap[opId] || {};
             let sum = 0;
-            for (const d of Object.keys(all)) sum += (all[d] || []).reduce((s, t) => s + (t.count_in_hours ? computeTrainingDurationHours(t) : 0), 0);
+            for (const d of Object.keys(all)) sum += (all[d] || []).reduce((s, t) => s + ((t && t.count_in_hours !== false) ? computeTrainingDurationHours(t) : 0), 0);
             return sum;
         }
 
@@ -2202,7 +2211,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             for (const t of arr) {
                                 const h = computeTrainingDurationHours(t) || 0;
                                 totalHoursAll += h;
-                                if (t.count_in_hours) totalHoursCounted += h;
+                                if (t.count_in_hours !== false) totalHoursCounted += h;
                                 else totalHoursNotCounted += h;
                             }
                             }
@@ -2608,7 +2617,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 <div
                                     key={t.id}
                                     className={`p-3 rounded-lg border flex flex-col gap-2 ${
-                                    t.count_in_hours ? 'bg-green-50 border-green-200' : 'bg-yellow-50 border-yellow-200'
+                                    t.count_in_hours === false ? 'bg-yellow-50 border-yellow-200' : 'bg-green-50 border-green-200'
                                     }`}>
                                     <div className="flex items-center justify-between gap-2">
                                     <div className="text-sm font-medium flex items-center gap-3">
@@ -2644,7 +2653,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                     <div className="flex items-center gap-2 text-xs">
                                     <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-white border">
-                                        <FaIcon className="fas fa-info-circle" /> {t.count_in_hours ? 'Засчитывается в часы' : 'Не засчитывается'}
+                                        <FaIcon className="fas fa-info-circle" /> {t.count_in_hours === false ? 'Не засчитывается' : 'Засчитывается в часы'}
                                     </span>
                                     {t.verified && (
                                         <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-white border">
@@ -23027,7 +23036,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const trainingsForDay = Array.isArray(trainings) ? trainings.filter(t => t?.date === dateStr) : [];
                     // training hours that should be counted in work hours
                     const trainingHoursForDay = trainingsForDay.reduce((acc, t) => {
-                        if (!t || !t.count_in_hours) return acc;
+                        if (!t || t.count_in_hours === false) return acc;
                         return acc + computeTrainingDuration(t);
                     }, 0);
                     const hasTraining = trainingsForDay.length > 0;
@@ -23428,7 +23437,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 const trainingsOnDay = Array.isArray(trainings) ? trainings.filter((t) => t.date === selectedDay.dateStr) : [];
 
                                 const countedTrainingSummary = trainingsOnDay.reduce((acc, t) => {
-                                if (!t || !t.count_in_hours) return acc;
+                                if (!t || t.count_in_hours === false) return acc;
                                 const { hours } = computeTrainingDuration(t);
                                 return acc + hours;
                                 }, 0);
@@ -23463,13 +23472,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                             <div className="ml-3 flex-shrink-0 text-right">
                                                 <div className="mb-2">
-                                                {t.count_in_hours ? (
-                                                    <span className="inline-block px-2 py-1 text-xs font-semibold rounded-md bg-green-100 text-green-800">
-                                                    Засчитывается
-                                                    </span>
-                                                ) : (
+                                                {t.count_in_hours === false ? (
                                                     <span className="inline-block px-2 py-1 text-xs font-semibold rounded-md bg-gray-100 text-gray-800">
                                                     Не засчитывается
+                                                    </span>
+                                                ) : (
+                                                    <span className="inline-block px-2 py-1 text-xs font-semibold rounded-md bg-green-100 text-green-800">
+                                                    Засчитывается
                                                     </span>
                                                 )}
                                                 </div>
@@ -29100,7 +29109,35 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                           
                                           const hoursOp = hoursData?.operators?.find(o => Number(o.operator_id) === Number(user.id)) || hoursData?.operators?.[0];
                                           const totalHoursBase = Number(hoursOp?.aggregates?.regular_hours ?? hoursOp?.aggregates?.regular ?? 0);
-                                          const totalHoursTraining = Number(hoursOp?.training_hours ?? 0);
+                                          const parseHMToMinutes = (hm) => {
+                                            if (!hm || typeof hm !== 'string') return null;
+                                            const parts = hm.split(':');
+                                            if (parts.length < 2) return null;
+                                            const hh = parseInt(parts[0], 10);
+                                            const mm = parseInt(parts[1], 10);
+                                            if (Number.isNaN(hh) || Number.isNaN(mm)) return null;
+                                            return hh * 60 + mm;
+                                          };
+                                          const totalHoursTraining = (Array.isArray(operatorTrainings) ? operatorTrainings : []).reduce((sum, t) => {
+                                            if (!t) return sum;
+                                            if (t.operator_id && Number(t.operator_id) !== Number(hoursOp?.operator_id ?? user.id)) return sum;
+                                            if (t.date && String(t.date).slice(0, 7) !== selectedMonth) return sum;
+                                            if (t.count_in_hours === false) return sum;
+
+                                            const startMin = parseHMToMinutes(t.start_time);
+                                            const endMin = parseHMToMinutes(t.end_time);
+                                            let hours = 0;
+                                            if (startMin !== null && endMin !== null) {
+                                              let diff = endMin - startMin;
+                                              if (diff < 0) diff += 24 * 60;
+                                              hours = diff / 60;
+                                            } else {
+                                              const maybe = Number(t.hours ?? t.duration_hours ?? t.duration ?? t.count ?? 0);
+                                              if (Number.isFinite(maybe) && maybe > 0) hours = maybe;
+                                            }
+                                            if (!Number.isFinite(hours) || hours <= 0) hours = 1;
+                                            return sum + hours;
+                                          }, 0);
                                           const totalHoursTechnical = Number(hoursOp?.technical_issue_hours ?? 0);
                                           const totalHoursOffline = Number(hoursOp?.offline_activity_hours ?? 0);
                                           const totalHours = totalHoursBase + totalHoursTraining + totalHoursTechnical + totalHoursOffline;
@@ -29255,7 +29292,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             const norm = Number(op.norm_hours ?? 0);
                                             const fines = Number(op.fines ?? 0);
                                             const totalCalls = Number(op.aggregates?.total_calls ?? 0);
-                                            const opTrainingField = Number(op.training_hours ?? 0); // если бек присылает предрасчитанные training_hours
                                             const opTechnicalField = Number(op.technical_issue_hours ?? 0);
                                             const opOfflineField = Number(op.offline_activity_hours ?? 0);
 
@@ -29292,9 +29328,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 })
                                             : [];
 
-                                            // --- суммируем часы только для count_in_hours === true ---
+                                            // --- суммируем часы тренинга из самих записей trainings ---
                                             const trainingHoursFromList = trainingsForOp.reduce((sum, t) => {
-                                            if (!t || !t.count_in_hours) return sum;
+                                            if (!t || t.count_in_hours === false) return sum;
 
                                             // 1) пытаемся вычислить по start_time/end_time
                                             const startMin = parseHMToMinutes(t.start_time);
@@ -29316,11 +29352,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                             return sum + hours;
                                             }, 0);
-
-                                            // Avoid double counting: use backend value if present, otherwise compute from list.
-                                            const trainingHours = safeNum(opTrainingField) > 0
-                                                ? safeNum(opTrainingField)
-                                                : safeNum(trainingHoursFromList);
+                                            const trainingHours = safeNum(trainingHoursFromList);
 
                                             const technicalByDayMap = (op && typeof op.technical_issues_by_day === 'object' && !Array.isArray(op.technical_issues_by_day))
                                                 ? op.technical_issues_by_day
