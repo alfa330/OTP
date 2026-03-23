@@ -12010,6 +12010,8 @@ class Database:
             'shift_rows_saved': 0,
             'deleted_shift_rows': 0,
             'deleted_day_off_rows': 0,
+            'blacklist_skipped_entries': [],
+            'blacklist_skipped_total': 0,
             'affected_operator_ids': []
         }
         affected_operator_ids = set()
@@ -12026,6 +12028,38 @@ class Database:
             if day_obj > prev[1]:
                 prev[1] = day_obj
 
+        def _is_blacklist_shift_block_error(error):
+            text = str(error or '').strip().lower()
+            return ('чс-увольнение' in text and 'прервать' in text and 'смен' in text)
+
+        def _has_blacklist_dismissal_on_day_tx(cursor, operator_id, day_obj):
+            cursor.execute(
+                """
+                SELECT 1
+                FROM operator_schedule_status_periods
+                WHERE operator_id = %s
+                  AND status_code = 'dismissal'
+                  AND COALESCE(is_blacklist, FALSE) = TRUE
+                  AND start_date <= %s
+                  AND COALESCE(end_date, DATE '9999-12-31') >= %s
+                LIMIT 1
+                """,
+                (int(operator_id), day_obj, day_obj)
+            )
+            return cursor.fetchone() is not None
+
+        def _append_blacklist_skipped_entry(operator_id, date_obj, operator_name=None):
+            payload = {
+                'operator_id': int(operator_id),
+                'date': date_obj.strftime('%Y-%m-%d'),
+                'reason': 'blacklist_dismissal'
+            }
+            name_text = str(operator_name or '').strip()
+            if name_text:
+                payload['name'] = name_text
+            summary['blacklist_skipped_entries'].append(payload)
+            summary['blacklist_skipped_total'] += 1
+
         with self._get_cursor() as cursor:
             for item in entries:
                 if not isinstance(item, dict):
@@ -12035,6 +12069,7 @@ class Database:
                 date_value = item.get('date')
                 is_day_off = bool(item.get('is_day_off'))
                 shifts = item.get('shifts') or []
+                operator_name = item.get('operator_name') or item.get('name')
 
                 if operator_id is None:
                     raise ValueError("Missing operator_id in entry")
@@ -12049,6 +12084,10 @@ class Database:
                 date_obj = self._normalize_schedule_date(date_value)
                 affected_operator_ids.add(operator_id)
                 register_affected_day(operator_id, date_obj)
+
+                if (not is_day_off) and shifts and _has_blacklist_dismissal_on_day_tx(cursor, operator_id, date_obj):
+                    _append_blacklist_skipped_entry(operator_id, date_obj, operator_name)
+                    continue
 
                 cleared = self._clear_day_schedule_tx(cursor, operator_id, date_obj)
                 summary['deleted_shift_rows'] += int(cleared.get('deleted_shifts') or 0)
@@ -12070,20 +12109,34 @@ class Database:
                     continue
 
                 # Сохраняем несколько смен в один день после полной очистки этого дня.
+                blocked_by_blacklist = False
                 for shift in shifts:
                     if not isinstance(shift, dict):
                         raise ValueError("Each shift must be an object")
                     start_time_obj = self._normalize_schedule_time(shift.get('start') or shift.get('start_time'), 'start')
                     end_time_obj = self._normalize_schedule_time(shift.get('end') or shift.get('end_time'), 'end')
-                    self._save_shift_tx(
-                        cursor=cursor,
-                        operator_id=operator_id,
-                        shift_date=date_obj,
-                        start_time=start_time_obj,
-                        end_time=end_time_obj,
-                        breaks=shift.get('breaks') if ('breaks' in shift) else None
-                    )
+                    try:
+                        self._save_shift_tx(
+                            cursor=cursor,
+                            operator_id=operator_id,
+                            shift_date=date_obj,
+                            start_time=start_time_obj,
+                            end_time=end_time_obj,
+                            breaks=shift.get('breaks') if ('breaks' in shift) else None
+                        )
+                    except ValueError as e:
+                        if _is_blacklist_shift_block_error(e):
+                            _append_blacklist_skipped_entry(operator_id, date_obj, operator_name)
+                            rollback_cleared = self._clear_day_schedule_tx(cursor, operator_id, date_obj)
+                            summary['deleted_shift_rows'] += int(rollback_cleared.get('deleted_shifts') or 0)
+                            summary['deleted_day_off_rows'] += int(rollback_cleared.get('deleted_day_off_rows') or 0)
+                            blocked_by_blacklist = True
+                            break
+                        raise
                     summary['shift_rows_saved'] += 1
+
+                if blocked_by_blacklist:
+                    continue
 
                 summary['set_shift_days'] += 1
                 summary['days_processed'] += 1

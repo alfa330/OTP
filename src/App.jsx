@@ -8915,7 +8915,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const unmatchedCount = Array.isArray(warnings.unmatched_rows) ? warnings.unmatched_rows.length : 0;
                     const ambiguousCount = Array.isArray(warnings.ambiguous_rows) ? warnings.ambiguous_rows.length : 0;
                     const invalidCellsCount = Number(warnings.invalid_cells_total || (Array.isArray(warnings.invalid_cells) ? warnings.invalid_cells.length : 0) || 0);
-                    const hasWarnings = (invalidCellsCount + unmatchedCount + ambiguousCount) > 0;
+                    const blacklistSkippedCount = Number(
+                        warnings.blacklist_skipped_total
+                        || (Array.isArray(warnings.blacklist_skipped_entries) ? warnings.blacklist_skipped_entries.length : 0)
+                        || 0
+                    );
+                    const hasWarnings = (invalidCellsCount + unmatchedCount + ambiguousCount + blacklistSkippedCount) > 0;
                     const processedDays = Number(result.days_processed || 0);
                     setExcelImportReport({
                         kind: (processedDays > 0 && !hasWarnings) ? 'success' : 'warning',
@@ -17260,13 +17265,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         const invalidCellsCount = Number(warnings.invalid_cells_total || (Array.isArray(warnings.invalid_cells) ? warnings.invalid_cells.length : 0) || 0);
                         const unmatchedCount = Array.isArray(warnings.unmatched_rows) ? warnings.unmatched_rows.length : 0;
                         const ambiguousCount = Array.isArray(warnings.ambiguous_rows) ? warnings.ambiguous_rows.length : 0;
+                        const blacklistSkippedCount = Number(
+                            warnings.blacklist_skipped_total
+                            || (Array.isArray(warnings.blacklist_skipped_entries) ? warnings.blacklist_skipped_entries.length : 0)
+                            || 0
+                        );
                         const invalidPreview = Array.isArray(warnings.invalid_cells) ? warnings.invalid_cells.slice(0, 5) : [];
                         const unmatchedPreview = Array.isArray(warnings.unmatched_rows) ? warnings.unmatched_rows.slice(0, 5) : [];
                         const ambiguousPreview = Array.isArray(warnings.ambiguous_rows) ? warnings.ambiguous_rows.slice(0, 5) : [];
+                        const blacklistSkippedPreview = Array.isArray(warnings.blacklist_skipped_entries) ? warnings.blacklist_skipped_entries.slice(0, 5) : [];
                         const errorInvalidCells = Array.isArray(report?.details?.invalid_cells) ? report.details.invalid_cells.slice(0, 5) : [];
                         const errorInvalidCount = Number(report?.details?.invalid_cells_total || errorInvalidCells.length || 0);
                         const reportTime = report.createdAt ? new Date(report.createdAt) : null;
-                        const hasWarnings = invalidCellsCount > 0 || unmatchedCount > 0 || ambiguousCount > 0;
+                        const hasWarnings = invalidCellsCount > 0 || unmatchedCount > 0 || ambiguousCount > 0 || blacklistSkippedCount > 0;
 
                         return (
                             <>
@@ -17352,6 +17363,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 Неоднозначные ФИО: {ambiguousCount}
                                                             </span>
                                                         )}
+                                                        {blacklistSkippedCount > 0 && (
+                                                            <span className={`px-2 py-1 rounded-md border text-xs ${tone.chip}`}>
+                                                                Пропущены из-за ЧС: {blacklistSkippedCount}
+                                                            </span>
+                                                        )}
                                                     </div>
 
                                                     {invalidPreview.length > 0 && (
@@ -17389,6 +17405,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 {ambiguousPreview.map((item, idx) => (
                                                                     <div key={`excel-ambiguous-${idx}`} className="text-xs bg-white border rounded px-2 py-1 text-slate-700">
                                                                         {item?.name || '—'}{Number(item?.count) ? ` (${item.count})` : ''}
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        </div>
+                                                    )}
+
+                                                    {blacklistSkippedPreview.length > 0 && (
+                                                        <div className="mt-3">
+                                                            <div className="text-xs font-medium text-slate-700 mb-1">Пропущены из-за ЧС</div>
+                                                            <div className="space-y-1">
+                                                                {blacklistSkippedPreview.map((item, idx) => (
+                                                                    <div key={`excel-blacklist-skipped-${idx}`} className="text-xs bg-white border rounded px-2 py-1 text-slate-700">
+                                                                        {(item?.name || (item?.operator_id ? `ID ${item.operator_id}` : '—'))} • {item?.date || '—'}
                                                                     </div>
                                                                 ))}
                                                             </div>

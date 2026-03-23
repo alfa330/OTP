@@ -10642,6 +10642,7 @@ def import_work_schedules_excel():
 
                 entry = {
                     'operator_id': operator_id,
+                    'operator_name': str(op_match.get('name') or fio_text or '').strip(),
                     'date': day_obj.strftime('%Y-%m-%d'),
                     'is_day_off': (kind == 'day_off'),
                     'shifts': []
@@ -10660,6 +10661,8 @@ def import_work_schedules_excel():
                     "shift_rows_saved": 0,
                     "deleted_shift_rows": 0,
                     "deleted_day_off_rows": 0,
+                    "blacklist_skipped_entries": [],
+                    "blacklist_skipped_total": 0,
                     "affected_operator_ids": []
                 },
                 "warnings": {
@@ -10667,7 +10670,9 @@ def import_work_schedules_excel():
                     "skipped_empty_cells": skipped_empty_cells,
                     "unmatched_rows": unmatched_rows,
                     "ambiguous_rows": ambiguous_rows,
-                    "invalid_cells": invalid_cells
+                    "invalid_cells": invalid_cells,
+                    "blacklist_skipped_entries": [],
+                    "blacklist_skipped_total": 0
                 }
             }), 200
 
@@ -10681,6 +10686,8 @@ def import_work_schedules_excel():
                     "shift_rows_saved": 0,
                     "deleted_shift_rows": 0,
                     "deleted_day_off_rows": 0,
+                    "blacklist_skipped_entries": [],
+                    "blacklist_skipped_total": 0,
                     "affected_operator_ids": []
                 },
                 "warnings": {
@@ -10689,7 +10696,9 @@ def import_work_schedules_excel():
                     "unmatched_rows": unmatched_rows,
                     "ambiguous_rows": ambiguous_rows,
                     "invalid_cells": invalid_cells[:30],
-                    "invalid_cells_total": len(invalid_cells)
+                    "invalid_cells_total": len(invalid_cells),
+                    "blacklist_skipped_entries": [],
+                    "blacklist_skipped_total": 0
                 }
             }), 200
 
@@ -10793,7 +10802,9 @@ def import_work_schedules_excel():
                 "unmatched_rows": unmatched_rows,
                 "ambiguous_rows": ambiguous_rows,
                 "invalid_cells": invalid_cells[:30],
-                "invalid_cells_total": len(invalid_cells)
+                "invalid_cells_total": len(invalid_cells),
+                "blacklist_skipped_entries": result.get('blacklist_skipped_entries') or [],
+                "blacklist_skipped_total": int(result.get('blacklist_skipped_total') or 0)
             }
         }), 200
 
