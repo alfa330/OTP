@@ -50,9 +50,9 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 # === Переменные окружения =========================================================================================
 API_TOKEN = os.getenv('BOT_TOKEN')
 FLASK_API_KEY = os.getenv('FLASK_API_KEY')
-admin4 = int(os.getenv('ADMIN_ID_4', '0'))
-ADMIN_LOGIN_CD = os.getenv('ADMIN_LOGIN_CD', 'admin4')
-ADMIN_PASSWORD_CD = os.getenv('ADMIN_PASSWORD_CD', 'admin1234')
+super_admin_id = int(os.getenv('SUPER_ADMIN_ID', '0'))
+super_admin_login = os.getenv('SUPER_ADMIN_LOGIN', 'admin4')
+super_admin_password = os.getenv('SUPER_ADMIN_PASSWORD', 'admin1234')
 
 if not API_TOKEN:
     raise Exception("Переменная окружения BOT_TOKEN обязательна.")
@@ -13008,16 +13008,16 @@ def sync_schedule_statuses_to_user_statuses_job():
 # === Главный запуск =============================================================================================
 if __name__ == '__main__':
     # Инициализация администратора
-    if not db.get_user(name='Мулдир Юсупова'):
+    if not db.get_user(name='Сауле Молдагалиева'):
         db.create_user(
-            telegram_id=admin4,
-            name='Мулдир Юсупова',
-            role='admin',
+            telegram_id=super_admin_id if super_admin_id != 0 else None,
+            name='Сауле Молдагалиева',
+            role='super_admin',
             rate=1.0,
-            login=ADMIN_LOGIN_CD,
-            password=ADMIN_PASSWORD_CD
+            login=super_admin_login,
+            password=super_admin_password
         )
-        logging.info("Admin CD created")
+        logging.info("Super Admin created")
     
     # Запускаем Flask в отдельном потоке
     flask_thread = threading.Thread(target=run_flask, daemon=True)
