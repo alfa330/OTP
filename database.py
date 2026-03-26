@@ -10548,11 +10548,51 @@ class Database:
                     except Exception:
                         pass
 
-        requested_segments_raw = payload.get('requestedSegments') if isinstance(payload.get('requestedSegments'), list) else []
-        requested_segments = []
-        for seg in requested_segments_raw:
+        requested_segments_raw = payload.get('requestedSegments')
+        if not isinstance(requested_segments_raw, list):
+            requested_segments_raw = payload.get('requested_segments')
+        requested_segments_intervals = self._swap_parse_payload_segments(
+            requested_segments_raw,
+            swap_date=swap_date
+        )
+        requested_segments = self._swap_serialize_intervals_with_day_offset(requested_segments_intervals)
+
+        target_segments_raw = payload.get('targetSegments')
+        if not isinstance(target_segments_raw, list):
+            target_segments_raw = payload.get('target_segments')
+        target_segments_intervals = self._swap_parse_payload_segments(
+            target_segments_raw,
+            swap_date=swap_date
+        )
+        target_segments = self._swap_serialize_intervals_with_day_offset(target_segments_intervals)
+
+        return {
+            'swapDate': swap_date,
+            'endDate': end_date,
+            'startTime': start_time,
+            'endTime': end_time,
+            'startMin': start_min if start_min is not None else None,
+            'endMin': end_min if end_min is not None else None,
+            'requestedSegments': requested_segments,
+            'targetSegments': target_segments
+        }
+
+    def _swap_parse_payload_segments(self, raw_segments, swap_date=None):
+        if not isinstance(raw_segments, list):
+            return []
+
+        swap_date_obj = None
+        if swap_date:
+            try:
+                swap_date_obj = self._normalize_schedule_date(swap_date)
+            except Exception:
+                swap_date_obj = None
+
+        intervals = []
+        for seg in raw_segments:
             if not isinstance(seg, dict):
                 continue
+
             seg_start = seg.get('start') or seg.get('start_time')
             seg_end = seg.get('end') or seg.get('end_time')
             if not seg_start or not seg_end:
@@ -10562,38 +10602,88 @@ class Database:
                 seg_end_obj = self._normalize_schedule_time(seg_end, 'segment_end')
             except Exception:
                 continue
-            seg_start_str = seg_start_obj.strftime('%H:%M')
-            seg_end_str = seg_end_obj.strftime('%H:%M')
-            seg_start_min, seg_end_min = self._schedule_interval_minutes(seg_start_str, seg_end_str)
-            seg_start_min = int(seg_start_min)
-            seg_end_min = int(seg_end_min)
-            if seg_end_min <= seg_start_min:
+
+            day_offset_raw = seg.get('dayOffset')
+            if day_offset_raw is None:
+                day_offset_raw = seg.get('day_offset')
+            if day_offset_raw is None and swap_date_obj is not None:
+                seg_date_raw = seg.get('date') or seg.get('shiftDate') or seg.get('shift_date')
+                if seg_date_raw:
+                    try:
+                        seg_date_obj = self._normalize_schedule_date(seg_date_raw)
+                        day_offset_raw = int((seg_date_obj - swap_date_obj).days)
+                    except Exception:
+                        day_offset_raw = 0
+
+            try:
+                day_offset = int(day_offset_raw) if day_offset_raw is not None else 0
+            except Exception:
+                day_offset = 0
+            if day_offset < -1 or day_offset > 1:
                 continue
-            breaks_norm = self._normalize_shift_breaks(seg.get('breaks') if isinstance(seg.get('breaks'), list) else [])
-            clipped_breaks = []
-            for b in breaks_norm:
-                b_start = max(seg_start_min, int(b.get('start', 0)))
-                b_end = min(seg_end_min, int(b.get('end', 0)))
-                if b_end > b_start:
-                    clipped_breaks.append({'start': b_start, 'end': b_end})
-            requested_segments.append({
-                'start': _minutes_to_time(seg_start_min),
-                'end': _minutes_to_time(seg_end_min),
-                'breaks': clipped_breaks
+
+            seg_start_min = _time_to_minutes(seg_start_obj.strftime('%H:%M')) + (day_offset * 1440)
+            seg_end_min = _time_to_minutes(seg_end_obj.strftime('%H:%M')) + (day_offset * 1440)
+            if seg_end_min <= seg_start_min:
+                seg_end_min += 1440
+
+            duration = int(seg_end_min) - int(seg_start_min)
+            if duration <= 0 or duration > (24 * 60):
+                continue
+            if int(seg_start_min) < -1440 or int(seg_end_min) > 2880:
+                continue
+
+            intervals.append({
+                'start': int(seg_start_min),
+                'end': int(seg_end_min)
             })
 
-        if requested_segments:
-            requested_segments = _merge_shifts_for_date(requested_segments)
+        return self._merge_break_intervals(intervals)
 
-        return {
-            'swapDate': swap_date,
-            'endDate': end_date,
-            'startTime': start_time,
-            'endTime': end_time,
-            'startMin': start_min if start_min is not None else None,
-            'endMin': end_min if end_min is not None else None,
-            'requestedSegments': requested_segments
-        }
+    def _swap_serialize_intervals_with_day_offset(self, intervals):
+        result = []
+        for seg in self._merge_break_intervals(intervals or []):
+            seg_start = int(seg.get('start', 0))
+            seg_end = int(seg.get('end', 0))
+            if seg_end <= seg_start:
+                continue
+
+            cursor = seg_start
+            while cursor < seg_end:
+                day_offset = int(cursor // 1440)
+                day_start_abs = day_offset * 1440
+                day_end_abs = day_start_abs + 1440
+                chunk_end = min(seg_end, day_end_abs)
+                if chunk_end <= cursor:
+                    break
+
+                local_start = int(cursor - day_start_abs)
+                local_end = int(chunk_end - day_start_abs)
+                if local_end > local_start:
+                    result.append({
+                        'start': _minutes_to_time(local_start),
+                        'end': _minutes_to_time(local_end),
+                        'dayOffset': int(day_offset),
+                        'breaks': []
+                    })
+                cursor = chunk_end
+        return result
+
+    def _swap_payload_segments_to_day_map(self, segments, swap_date):
+        if not swap_date:
+            return {}
+        try:
+            swap_date_obj = self._normalize_schedule_date(swap_date)
+        except Exception:
+            return {}
+        intervals = self._swap_parse_payload_segments(segments, swap_date=swap_date_obj.strftime('%Y-%m-%d'))
+        if not intervals:
+            return {}
+        return self._swap_serialize_intervals_to_day_map(
+            intervals,
+            swap_date_obj,
+            allowed_day_offsets=[-1, 0, 1]
+        )
 
     def _build_swap_window_intervals(self, prev_day_shifts=None, day_shifts=None, next_day_shifts=None):
         intervals = []
@@ -10682,26 +10772,59 @@ class Database:
                 result.append({'start': interval_end_min, 'end': seg_end})
         return self._merge_break_intervals(result)
 
-    def _swap_serialize_intervals_for_payload(self, intervals):
-        result = []
-        for seg in (intervals or []):
-            seg_start = int(seg.get('start', 0))
-            seg_end = int(seg.get('end', 0))
-            if seg_end <= seg_start:
+    def _swap_subtract_intervals(self, intervals, subtracted_intervals):
+        result = self._merge_break_intervals(intervals or [])
+        for seg in self._merge_break_intervals(subtracted_intervals or []):
+            result = self._swap_subtract_interval(
+                result,
+                int(seg.get('start', 0)),
+                int(seg.get('end', 0))
+            )
+            if not result:
+                return []
+        return self._merge_break_intervals(result)
+
+    def _swap_interval_sets_overlap(self, left_intervals, right_intervals):
+        left = self._merge_break_intervals(left_intervals or [])
+        right = self._merge_break_intervals(right_intervals or [])
+        if not left or not right:
+            return False
+        for left_seg in left:
+            l_start = int(left_seg.get('start', 0))
+            l_end = int(left_seg.get('end', 0))
+            if l_end <= l_start:
                 continue
-            result.append({
-                'start': _minutes_to_time(seg_start),
-                'end': _minutes_to_time(seg_end),
-                'breaks': []
-            })
-        return result
+            for right_seg in right:
+                r_start = int(right_seg.get('start', 0))
+                r_end = int(right_seg.get('end', 0))
+                if r_end <= r_start:
+                    continue
+                if l_start < r_end and r_start < l_end:
+                    return True
+        return False
+
+    def _swap_serialize_intervals_for_payload(self, intervals):
+        return self._swap_serialize_intervals_with_day_offset(intervals)
 
     def _swap_intervals_signature(self, segments):
-        return sorted(
-            f"{seg.get('start')}|{seg.get('end')}"
-            for seg in (segments or [])
-            if isinstance(seg, dict) and seg.get('start') and seg.get('end')
-        )
+        sign = []
+        for seg in (segments or []):
+            if not isinstance(seg, dict):
+                continue
+            start_val = seg.get('start')
+            end_val = seg.get('end')
+            if not start_val or not end_val:
+                continue
+            day_offset_raw = seg.get('dayOffset')
+            if day_offset_raw is None:
+                day_offset_raw = seg.get('day_offset')
+            try:
+                day_offset = int(day_offset_raw) if day_offset_raw is not None else 0
+            except Exception:
+                day_offset = 0
+            sign.append(f"{day_offset}|{start_val}|{end_val}")
+        sign.sort()
+        return sign
 
     def _swap_serialize_intervals_to_day_map(self, intervals, swap_date_obj, allowed_day_offsets):
         if not isinstance(allowed_day_offsets, (list, tuple, set)):
@@ -10908,9 +11031,12 @@ class Database:
             fallback_date=start_date.strftime('%Y-%m-%d') if isinstance(start_date, date) else None
         )
         requested_segments = payload.get('requestedSegments') or []
-        totals = self._snapshot_shift_totals({
-            payload.get('swapDate') or (start_date.strftime('%Y-%m-%d') if isinstance(start_date, date) else ''): requested_segments
-        })
+        target_segments = payload.get('targetSegments') or []
+        swap_date_value = payload.get('swapDate') or (start_date.strftime('%Y-%m-%d') if isinstance(start_date, date) else '')
+        requested_day_map = self._swap_payload_segments_to_day_map(requested_segments, swap_date_value)
+        target_day_map = self._swap_payload_segments_to_day_map(target_segments, swap_date_value)
+        requested_totals = self._snapshot_shift_totals(requested_day_map or {})
+        target_totals = self._snapshot_shift_totals(target_day_map or {})
 
         def _fmt_dt(value):
             if isinstance(value, datetime):
@@ -10939,11 +11065,13 @@ class Database:
             'status': str(status),
             'requestComment': request_comment,
             'responseComment': response_comment,
-            'requestedShifts': {
-                payload.get('swapDate') or (start_date.strftime('%Y-%m-%d') if isinstance(start_date, date) else ''): requested_segments
-            },
+            'requestedShifts': requested_day_map,
             'requestedSegments': requested_segments,
-            'summary': totals,
+            'targetShifts': target_day_map,
+            'targetSegments': target_segments,
+            'summary': requested_totals,
+            'exchangeSummary': target_totals,
+            'exchangeMode': payload.get('mode'),
             'createdAt': _fmt_dt(created_at),
             'updatedAt': _fmt_dt(updated_at),
             'respondedAt': _fmt_dt(responded_at),
@@ -11109,7 +11237,8 @@ class Database:
                 day_shifts=op_day_shifts,
                 next_day_shifts=op_next_day_shifts
             )
-            if self._swap_intervals_overlap(window_intervals, interval_start_min, interval_end_min):
+            overlap_intervals = self._swap_extract_interval(window_intervals, interval_start_min, interval_end_min)
+            if not overlap_intervals:
                 continue
 
             day_display_intervals = self._swap_extract_interval(window_intervals, 0, 1440)
@@ -11147,12 +11276,16 @@ class Database:
 
             match_starts_at_request_end = any(int(iv.get('start', -1)) == int(interval_end_min) for iv in (window_intervals or []))
             match_ends_at_request_start = any(int(iv.get('end', -1)) == int(interval_start_min) for iv in (window_intervals or []))
+            overlap_minutes = sum(
+                max(0, int(seg.get('end', 0)) - int(seg.get('start', 0)))
+                for seg in (overlap_intervals or [])
+            )
 
-            priority_score = 0
+            priority_score = int(overlap_minutes)
             if match_starts_at_request_end:
-                priority_score += 1
+                priority_score += 10
             if match_ends_at_request_start:
-                priority_score += 1
+                priority_score += 10
             result.append({
                 'id': op_id,
                 'name': row[1],
@@ -11169,6 +11302,7 @@ class Database:
                 'is_next_day_off': op_is_next_day_off,
                 'matchStartsAtRequestEnd': bool(match_starts_at_request_end),
                 'matchEndsAtRequestStart': bool(match_ends_at_request_start),
+                'overlapMinutes': int(overlap_minutes),
                 'priorityScore': int(priority_score)
             })
 
@@ -11189,7 +11323,8 @@ class Database:
         start_time,
         end_time,
         end_date=None,
-        request_comment=None
+        request_comment=None,
+        target_segments=None
     ):
         requester_operator_id = int(requester_operator_id)
         target_operator_id = int(target_operator_id)
@@ -11211,6 +11346,12 @@ class Database:
         interval_start_min = interval['startMin']
         interval_end_min = interval['endMin']
         request_end_date_obj = interval['endDateObj']
+        target_requested_intervals = self._swap_parse_payload_segments(
+            target_segments,
+            swap_date=swap_date_str
+        )
+        if not target_requested_intervals:
+            raise ValueError("Выберите хотя бы одну смену выбранного оператора для обмена")
 
         request_comment_norm = None
         if request_comment is not None:
@@ -11302,16 +11443,31 @@ class Database:
 
             if not self._swap_is_interval_fully_covered(requester_window_intervals, interval_start_min, interval_end_min):
                 raise ValueError("Выбранный интервал должен полностью находиться внутри ваших смен")
-            if self._swap_intervals_overlap(target_window_intervals, interval_start_min, interval_end_min):
-                raise ValueError("У выбранного оператора уже есть смена в этом интервале")
 
             requested_intervals = self._swap_extract_interval(requester_window_intervals, interval_start_min, interval_end_min)
             requested_segments = self._swap_serialize_intervals_for_payload(requested_intervals)
             if not requested_segments:
                 raise ValueError("Не удалось сформировать сегменты смен для замены")
+            for seg in target_requested_intervals:
+                seg_start = int(seg.get('start', 0))
+                seg_end = int(seg.get('end', 0))
+                if not self._swap_is_interval_fully_covered(target_window_intervals, seg_start, seg_end):
+                    raise ValueError("У выбранного оператора больше нет одной из выбранных смен")
+
+            target_selected_intervals = self._merge_break_intervals(target_requested_intervals)
+            target_segments_norm = self._swap_serialize_intervals_for_payload(target_selected_intervals)
+            if not target_segments_norm:
+                raise ValueError("Не удалось обработать выбранные смены оператора")
+
+            target_remaining_intervals = self._swap_subtract_intervals(
+                target_window_intervals,
+                target_selected_intervals
+            )
+            if self._swap_interval_sets_overlap(target_remaining_intervals, requested_intervals):
+                raise ValueError("Выбранные смены оператора не покрывают интервал обмена")
 
             payload = {
-                'mode': 'time_range_v1',
+                'mode': 'shift_exchange_v2',
                 'swapDate': swap_date_str,
                 'endDate': request_end_date_obj.strftime('%Y-%m-%d'),
                 'interval': {
@@ -11320,7 +11476,8 @@ class Database:
                     'startMin': interval_start_min,
                     'endMin': interval_end_min
                 },
-                'requestedSegments': requested_segments
+                'requestedSegments': requested_segments,
+                'targetSegments': target_segments_norm
             }
 
             cursor.execute(
@@ -11553,18 +11710,24 @@ class Database:
             if not swap_date_str:
                 raise ValueError("Запрос не содержит дату замены")
             swap_date_obj = self._normalize_schedule_date(swap_date_str)
-            interval_start_min = payload.get('startMin')
-            interval_end_min = payload.get('endMin')
-            if interval_start_min is None or interval_end_min is None:
-                raise ValueError("Запрос не содержит корректный интервал времени")
-            interval_start_min = int(interval_start_min)
-            interval_end_min = int(interval_end_min)
-            if interval_end_min <= interval_start_min:
-                raise ValueError("Некорректный интервал времени в запросе")
-
             requested_segments = payload.get('requestedSegments') or []
             if not requested_segments:
                 raise ValueError("Запрос не содержит сегменты смен для переноса")
+            target_segments = payload.get('targetSegments') or []
+
+            requested_intervals_payload = self._swap_parse_payload_segments(
+                requested_segments,
+                swap_date=swap_date_str
+            )
+            if not requested_intervals_payload:
+                raise ValueError("Запрос не содержит корректные сегменты смен инициатора")
+
+            target_intervals_payload = self._swap_parse_payload_segments(
+                target_segments,
+                swap_date=swap_date_str
+            )
+            if target_segments and not target_intervals_payload:
+                raise ValueError("Запрос не содержит корректные сегменты смен получателя")
 
             prev_date_obj = swap_date_obj - timedelta(days=1)
             next_date_obj = swap_date_obj + timedelta(days=1)
@@ -11594,14 +11757,16 @@ class Database:
                 day_shifts=target_day_map.get(swap_date_str, []),
                 next_day_shifts=target_day_map.get(next_date_str, [])
             )
-            if self._swap_intervals_overlap(target_window_intervals, interval_start_min, interval_end_min):
-                raise ValueError("Нельзя принять запрос: у вас уже есть смена в этом интервале")
-
-            current_requested_intervals = self._swap_extract_interval(
-                requester_window_intervals,
-                interval_start_min,
-                interval_end_min
-            )
+            current_requested_intervals = []
+            for seg in requested_intervals_payload:
+                seg_start = int(seg.get('start', 0))
+                seg_end = int(seg.get('end', 0))
+                if not self._swap_is_interval_fully_covered(requester_window_intervals, seg_start, seg_end):
+                    raise ValueError("Нельзя принять запрос: у инициатора больше нет выбранной смены")
+                current_requested_intervals.extend(
+                    self._swap_extract_interval(requester_window_intervals, seg_start, seg_end)
+                )
+            current_requested_intervals = self._merge_break_intervals(current_requested_intervals)
             current_requested_segments = self._swap_serialize_intervals_for_payload(current_requested_intervals)
             if not current_requested_intervals:
                 raise ValueError("Нельзя принять запрос: у инициатора больше нет смен в этом интервале")
@@ -11611,13 +11776,44 @@ class Database:
             if requested_sign and requested_sign != current_sign:
                 raise ValueError("Нельзя принять запрос: интервалы инициатора изменились")
 
-            requester_remaining_intervals = self._swap_subtract_interval(
+            current_target_intervals = []
+            for seg in target_intervals_payload:
+                seg_start = int(seg.get('start', 0))
+                seg_end = int(seg.get('end', 0))
+                if not self._swap_is_interval_fully_covered(target_window_intervals, seg_start, seg_end):
+                    raise ValueError("Нельзя принять запрос: одна из ваших выбранных смен уже изменилась")
+                current_target_intervals.extend(
+                    self._swap_extract_interval(target_window_intervals, seg_start, seg_end)
+                )
+            current_target_intervals = self._merge_break_intervals(current_target_intervals)
+            current_target_segments = self._swap_serialize_intervals_for_payload(current_target_intervals)
+            target_sign = self._swap_intervals_signature(target_segments)
+            current_target_sign = self._swap_intervals_signature(current_target_segments)
+            if target_sign and target_sign != current_target_sign:
+                raise ValueError("Нельзя принять запрос: выбранные вами интервалы изменились")
+            if target_sign and not current_target_intervals:
+                raise ValueError("Нельзя принять запрос: выбранные вами смены больше недоступны")
+
+            requester_remaining_intervals = self._swap_subtract_intervals(
                 requester_window_intervals,
-                interval_start_min,
-                interval_end_min
+                current_requested_intervals
             )
+            target_remaining_intervals = self._swap_subtract_intervals(
+                target_window_intervals,
+                current_target_intervals
+            )
+
+            if self._swap_interval_sets_overlap(target_remaining_intervals, current_requested_intervals):
+                if target_sign:
+                    raise ValueError("Нельзя принять запрос: выбранные вами смены не покрывают интервал обмена")
+                raise ValueError("Нельзя принять запрос: у вас уже есть смена в этом интервале")
+
+            requester_next_intervals = self._merge_break_intervals([
+                *(requester_remaining_intervals or []),
+                *(current_target_intervals or [])
+            ])
             target_next_intervals = self._merge_break_intervals([
-                *(target_window_intervals or []),
+                *(target_remaining_intervals or []),
                 *(current_requested_intervals or [])
             ])
 
@@ -11628,7 +11824,7 @@ class Database:
 
             window_offsets = [-1, 0, 1]
             requester_save_day_map = self._swap_serialize_intervals_to_day_map(
-                requester_remaining_intervals,
+                requester_next_intervals,
                 swap_date_obj,
                 allowed_day_offsets=window_offsets
             )
