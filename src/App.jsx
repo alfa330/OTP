@@ -11,6 +11,7 @@ import TechnicalIssuesView from './components/technical/TechnicalIssuesView';
 import FaIcon from './components/common/FaIcon';
 import AuthEntranceSplash from './components/common/AuthEntranceSplash';
 import OrazAitSplash from './components/common/OrazAitSplash';
+import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole } from './utils/roles';
 
 const CHUNK_RELOAD_STORAGE_KEY = 'otp_chunk_reload_attempted';
 
@@ -722,7 +723,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         // ====== Upload-per-day (preview) ======
         function openUploadForDay(day) {
-            if ((user?.role === 'admin' || user?.role === 'super_admin') && !selectedSvId) {
+            if (isAdminLikeRoleFn(user?.role) && !selectedSvId) {
             fallbackToast('Выберите супервайзера перед загрузкой файла', 'error');
             return;
             }
@@ -740,7 +741,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             fallbackToast('Выберите файл', 'error');
             return;
             }
-            if ((user?.role === 'admin' || user?.role === 'super_admin') && !selectedSvId) {
+            if (isAdminLikeRoleFn(user?.role) && !selectedSvId) {
             fallbackToast('Выберите супервайзера перед загрузкой файла', 'error');
             return;
             }
@@ -788,7 +789,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             fallbackToast('Нет данных для сохранения', 'error');
             return;
             }
-            if ((user?.role === 'admin' || user?.role === 'super_admin') && !selectedSvId) {
+            if (isAdminLikeRoleFn(user?.role) && !selectedSvId) {
             fallbackToast('Выберите супервайзера перед сохранением', 'error');
             return;
             }
@@ -1942,7 +1943,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
 
             // If admin requested per-SV report, ensure a supervisor is selected
-            if ((user.role === 'admin' || user.role === 'super_admin') && reportScope === 'by_sv' && !selectedSvId) {
+            if (isAdminLikeRoleFn(user?.role) && reportScope === 'by_sv' && !selectedSvId) {
             fallbackToast('Выберите супервайзера для отчёта', 'error');
             return;
             }
@@ -2009,7 +2010,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         }
 
         // ======= RENDER =======
-        const isAdminWithoutSupervisorSelected = (user?.role === 'admin' || user?.role === 'super_admin') && !selectedSvId;
+        const isAdminWithoutSupervisorSelected = isAdminLikeRoleFn(user?.role) && !selectedSvId;
         return (
             <div className="bg-white p-5 rounded-xl shadow-md">
             <div className="flex items-center justify-between mb-4 gap-4">
@@ -14336,7 +14337,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </button>
                                             )}
 
-                                            {(user?.role === 'admin' || user?.role === 'super_admin' || user?.role === 'sv') && (
+                                            {(isAdminLikeRoleFn(user?.role) || isSupervisorRole(user?.role)) && (
                                                 <button
                                                     onClick={() => {
                                                         setShowPlannerTopActionsMenu(false);
@@ -17471,7 +17472,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 </SimpleModal>
 
                 <SimpleModal
-                    open={!!showSwapJournalModal && (user?.role === 'admin' || user?.role === 'super_admin' || user?.role === 'sv')}
+                    open={!!showSwapJournalModal && (isAdminLikeRoleFn(user?.role) || isSupervisorRole(user?.role))}
                     onClose={() => setShowSwapJournalModal(false)}
                     panelClassName="w-[calc(100vw-2rem)] max-w-[1200px]"
                 >
@@ -20038,7 +20039,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const ContestsApp = ({ user: currentUser, operators = [], directions = [] }) => {
             const { useState, useEffect } = React;
             const [activeTab, setActiveTab] = useState('baiga');
-            const isAdmin = currentUser?.role === 'admin' || currentUser?.role === 'super_admin';
+            const isAdmin = isAdminLikeRoleFn(currentUser?.role);
             const isOperatorOrSv = currentUser?.role === 'operator' || currentUser?.role === 'sv';
             const [toasts, setToasts] = useState([]);
 
@@ -21706,8 +21707,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
 
             const [user, setUser] = useState(null);
-            const isSuperAdmin = user?.role === 'super_admin';
-            const isAdminLikeRole = user?.role === 'admin' || user?.role === 'super_admin';
+            const currentUserRole = normalizeRole(user?.role);
+            const isSuperAdmin = currentUserRole === 'super_admin';
+            const isAdminLikeRole = isAdminLikeRoleFn(currentUserRole);
             const [isAuthInitializing, setIsAuthInitializing] = useState(true);
             const [showAuthEntranceSplash, setShowAuthEntranceSplash] = useState(false);
             const [showOrazAitSplash, setShowOrazAitSplash] = useState(false);
@@ -23841,8 +23843,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return;
                 }
 
-                if (user.role === 'admin' || user.role === 'super_admin') setView('sv_list');
-                else if (user.role === 'sv' || user.role === 'supervisor') setView('operators');
+                if (isAdminLikeRoleFn(user?.role)) setView('sv_list');
+                else if (isSupervisorRole(user?.role)) setView('operators');
                 else setView('hours');
             }, [user?.id, user?.role]);
 
@@ -24046,15 +24048,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 buildUpcomingBirthdays(users, (employee) => employee?.direction || 'Без направления', 14)
             ), [users, buildUpcomingBirthdays]);
 
-            const isSupervisorRole = user?.role === 'sv' || user?.role === 'supervisor';
+            const isSvRoleForBirthdays = isSupervisorRole(user?.role);
 
             const manageOperatorsBirthdaySource = useMemo(() => {
-                if (isSupervisorRole && Array.isArray(users) && users.length > 0) {
+                if (isSvRoleForBirthdays && Array.isArray(users) && users.length > 0) {
                     // For supervisors show upcoming birthdays across all operators, not only direct reports.
                     return users;
                 }
                 return Array.isArray(svData?.operators) ? svData.operators : [];
-            }, [isSupervisorRole, users, svData?.operators]);
+            }, [isSvRoleForBirthdays, users, svData?.operators]);
 
             const upcomingManageOperatorsBirthdays = useMemo(() => (
                 buildUpcomingBirthdays(
@@ -25019,7 +25021,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
 
             const fetchAdminSessions = useCallback(async ({ reset = true, query } = {}) => {
-                if (!user || (user.role !== 'admin' && user.role !== 'super_admin')) return;
+                if (!user || !isAdminLikeRoleFn(user?.role)) return;
 
                 const normalizedQuery = typeof query === 'string' ? query.trim() : adminSessionsQuery;
                 const nextOffset = reset ? 0 : adminSessionsOffset;
@@ -26469,7 +26471,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return;
                 }
 
-                if (!user || (user.role !== 'admin' && user.role !== 'super_admin')) {
+                if (!user || !isAdminLikeRoleFn(user?.role)) {
                     showToast('Только администратор может повышать сотрудников', 'error');
                     return;
                 }
@@ -27430,7 +27432,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
 
             const startQrScanner = async () => {
-                if (!user || (user.role !== 'admin' && user.role !== 'super_admin' && user.role !== 'sv')) return;
+                if (!user || !(isAdminLikeRoleFn(user?.role) || isSupervisorRole(user?.role))) return;
                 setQrScannerError('');
                 setQrApproveResult('');
 
@@ -27511,7 +27513,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
 
             const approveSensitiveQrAccess = async () => {
-                if (!user || (user.role !== 'admin' && user.role !== 'super_admin' && user.role !== 'sv')) return;
+                if (!user || !(isAdminLikeRoleFn(user?.role) || isSupervisorRole(user?.role))) return;
                 const token = extractSensitiveToken(qrApproveInput);
                 if (!token) {
                     setQrApproveResult('Укажите QR токен для подтверждения');
@@ -27574,11 +27576,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             useEffect(() => {
                 if (!user || !user.id) return;
 
-                if (user.role === 'admin' || user.role === 'super_admin') {
+                if (isAdminLikeRoleFn(user?.role)) {
                     fetchSvList();
                     fetchDirections();
                     fetchUsers();
-                } else if (user.role === 'sv' || user.role === 'supervisor') {
+                } else if (isSupervisorRole(user?.role)) {
                     fetchSvList();
                     fetchUsers();
                     fetchDirections();
@@ -27596,7 +27598,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, [user?.id, user?.role]);
 
             useEffect(() => {
-                if (!user || !user.id || (user.role !== 'sv' && user.role !== 'supervisor')) return;
+                if (!user || !user.id || !isSupervisorRole(user?.role)) return;
                 fetchSvData(selectedReportMonth || selectedMonth);
             }, [user?.id, user?.role, selectedMonth, selectedReportMonth]);
 
@@ -27628,7 +27630,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, [selectedSvId, selectedReportMonth, selectedMonth]);
 
             useEffect(() => {
-                if ((user?.role === 'admin' || user?.role === 'super_admin') && view === 'admin_sessions') {
+                if (isAdminLikeRoleFn(user?.role) && view === 'admin_sessions') {
                     refreshAdminSessions();
                 }
             }, [user?.id, user?.role, view]);
@@ -27795,8 +27797,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     ? operatorData.evaluations.reduce((sum, eval1) => sum + (parseFloat(eval1.score) || 0), 0) / operatorData.evaluations.length
                     : 0;
             const callEvaluationIframeUrl = `${APP_BASE_URL}call_evaluation.html`;
-            const isCallEvaluationView = view === 'call_evaluation' && (user.role === 'admin' || user.role === 'super_admin' || user.role === 'sv' || user.role === 'supervisor');
-            const canSeeCallEvaluation = user.role === 'admin' || user.role === 'super_admin' || user.role === 'sv' || user.role === 'supervisor';
+            const isCallEvaluationView = view === 'call_evaluation' && (isAdminLikeRoleFn(user?.role) || isSupervisorRole(user?.role));
+            const canSeeCallEvaluation = isAdminLikeRoleFn(user?.role) || isSupervisorRole(user?.role);
             const birthdayBannerVisible = !isCallEvaluationView && !birthdayBannerDismissed && Array.isArray(birthdaysToday) && birthdaysToday.length > 0;
             const birthdayBannerNames = (birthdaysToday || []).map((b) => {
                 const name = String(b?.name || 'Сотрудник').trim();

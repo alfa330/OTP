@@ -41,6 +41,39 @@ MAX_CONN = 20  # Adjust based on expected load
 POOL = None
 STATUS_IMPORT_INSERT_PAGE_SIZE = max(200, int(os.getenv('STATUS_IMPORT_INSERT_PAGE_SIZE', '2000')))
 
+ROLE_ALIASES = {
+    'supervisor': 'sv'
+}
+
+ROLE_HIERARCHY = {
+    'operator': 10,
+    'trainer': 20,
+    'sv': 30,
+    'admin': 40,
+    'super_admin': 50
+}
+
+
+def normalize_role_value(role_value: Optional[str]) -> str:
+    role_norm = str(role_value or '').strip().lower()
+    return ROLE_ALIASES.get(role_norm, role_norm)
+
+
+def role_has_min(role_value: Optional[str], required_role: str) -> bool:
+    role_level = int(ROLE_HIERARCHY.get(normalize_role_value(role_value), 0))
+    required_level = int(ROLE_HIERARCHY.get(normalize_role_value(required_role), 0))
+    if required_level <= 0:
+        return False
+    return role_level >= required_level
+
+
+def role_is_any(role_value: Optional[str], allowed_roles: List[str]) -> bool:
+    role_norm = normalize_role_value(role_value)
+    if not role_norm:
+        return False
+    allowed = {normalize_role_value(item) for item in (allowed_roles or [])}
+    return role_norm in allowed
+
 # Вставьте/адаптируйте этот helper в ваш модуль
 def _normalize_phone(phone: Optional[str]) -> Optional[str]:
     if not phone:
@@ -373,7 +406,7 @@ class Database:
                     id SERIAL PRIMARY KEY,
                     telegram_id BIGINT UNIQUE,
                     name VARCHAR(255) NOT NULL,
-                    role VARCHAR(20) NOT NULL CHECK(role IN ('admin', 'sv', 'operator')),
+                    role VARCHAR(20) NOT NULL CHECK(role IN ('super_admin', 'admin', 'sv', 'supervisor', 'trainer', 'operator')),
                     hire_date DATE,
                     login VARCHAR(255) UNIQUE,
                     password_hash VARCHAR(255),
@@ -5108,10 +5141,7 @@ class Database:
             ]
 
     def _normalize_technical_issue_role(self, role_value):
-        role_norm = str(role_value or '').strip().lower()
-        if role_norm == 'supervisor':
-            return 'sv'
-        return role_norm
+        return normalize_role_value(role_value)
 
     def _coerce_int_list(self, values):
         if values is None:
@@ -5316,7 +5346,7 @@ class Database:
 
     def _resolve_technical_issue_operator_ids_tx(self, cursor, requester_id, requester_role, operator_ids=None, direction_ids=None):
         role_norm = self._normalize_technical_issue_role(requester_role)
-        if role_norm not in ('admin', 'sv'):
+        if not (role_has_min(role_norm, 'admin') or role_norm == 'sv'):
             raise ValueError("Only admin and sv can register technical issues")
 
         operator_ids_norm = self._coerce_int_list(operator_ids)
@@ -5392,7 +5422,7 @@ class Database:
         direction_ids=None
     ):
         role_norm = self._normalize_technical_issue_role(requester_role)
-        if role_norm not in ('admin', 'sv'):
+        if not (role_has_min(role_norm, 'admin') or role_norm == 'sv'):
             raise ValueError("Only admin and sv can create technical issues")
 
         reason_text = str(reason or '').strip()
@@ -5502,7 +5532,7 @@ class Database:
         offset=0
     ):
         role_norm = self._normalize_technical_issue_role(requester_role)
-        if role_norm not in ('admin', 'sv'):
+        if not (role_has_min(role_norm, 'admin') or role_norm == 'sv'):
             raise ValueError("Only admin and sv can view technical issues")
 
         limit_int = max(1, min(int(limit or 500), 5000))
@@ -5628,7 +5658,7 @@ class Database:
 
     def delete_operator_technical_issue(self, requester_id, requester_role, issue_id):
         role_norm = self._normalize_technical_issue_role(requester_role)
-        if role_norm not in ('admin', 'sv'):
+        if not (role_has_min(role_norm, 'admin') or role_norm == 'sv'):
             raise ValueError("Only admin and sv can delete technical issues")
 
         requester_id_int = int(requester_id)
@@ -5698,7 +5728,7 @@ class Database:
         operator_id=None
     ):
         role_norm = self._normalize_technical_issue_role(requester_role)
-        if role_norm not in ('admin', 'sv'):
+        if not (role_has_min(role_norm, 'admin') or role_norm == 'sv'):
             raise ValueError("Only admin and sv can create offline activity")
 
         issue_date_obj = self._parse_technical_issue_date(activity_date, field_name='date')
@@ -5796,7 +5826,7 @@ class Database:
         offset=0
     ):
         role_norm = self._normalize_technical_issue_role(requester_role)
-        if role_norm not in ('admin', 'sv'):
+        if not (role_has_min(role_norm, 'admin') or role_norm == 'sv'):
             raise ValueError("Only admin and sv can view offline activities")
 
         limit_int = max(1, min(int(limit or 500), 5000))
@@ -5911,7 +5941,7 @@ class Database:
 
     def delete_operator_offline_activity(self, requester_id, requester_role, activity_id):
         role_norm = self._normalize_technical_issue_role(requester_role)
-        if role_norm not in ('admin', 'sv'):
+        if not (role_has_min(role_norm, 'admin') or role_norm == 'sv'):
             raise ValueError("Only admin and sv can delete offline activities")
 
         requester_id_int = int(requester_id)
@@ -11360,7 +11390,7 @@ class Database:
             month_end = date(month_start.year, month_start.month + 1, 1)
 
         role = str(requester_role or '').strip().lower()
-        if role not in ('admin', 'sv'):
+        if not (role_has_min(role, 'admin') or role == 'sv'):
             raise ValueError("Only admin and sv can view swap journal")
 
         int(requester_id)
@@ -12976,16 +13006,13 @@ class Database:
 
     @staticmethod
     def _normalize_survey_role(role):
-        role_norm = str(role or '').strip().lower()
-        if role_norm == 'supervisor':
-            return 'sv'
-        return role_norm
+        return normalize_role_value(role)
 
     def _get_visible_operator_ids_for_requester_tx(self, cursor, requester_id, requester_role):
         role = self._normalize_survey_role(requester_role)
         requester_id = int(requester_id)
 
-        if role in ('admin', 'trainer'):
+        if role_has_min(role, 'admin') or role == 'trainer':
             cursor.execute("""
                 SELECT id
                 FROM users
@@ -13280,7 +13307,7 @@ class Database:
                 raise ValueError("SURVEY_NOT_FOUND")
 
             created_by = row[1]
-            if role != 'admin' and (created_by is None or int(created_by) != requester_id):
+            if (not role_has_min(role, 'admin')) and (created_by is None or int(created_by) != requester_id):
                 raise PermissionError("SURVEY_FORBIDDEN")
 
             cursor.execute("DELETE FROM surveys WHERE id = %s", (survey_id,))
@@ -13651,11 +13678,11 @@ class Database:
         requester_id = int(requester_id)
         role = self._normalize_survey_role(requester_role)
 
-        if role not in ('admin', 'sv', 'trainer'):
+        if not (role_has_min(role, 'admin') or role in ('sv', 'trainer')):
             return []
 
         with self._get_cursor() as cursor:
-            if role in ('admin', 'trainer'):
+            if role_has_min(role, 'admin') or role == 'trainer':
                 cursor.execute("""
                     SELECT
                         s.id,
@@ -14300,9 +14327,9 @@ class Database:
             }
 
     def _task_visible_for_requester(self, requester_role, requester_id, created_by, assigned_to, assignee_role, assignee_supervisor_id):
-        role = str(requester_role or '').lower()
+        role = normalize_role_value(requester_role)
         requester_id = int(requester_id)
-        if role == 'admin':
+        if role_has_min(role, 'admin'):
             return True
         if created_by is not None and int(created_by) == requester_id:
             return True
@@ -14314,15 +14341,15 @@ class Database:
 
     def get_task_recipients(self, requester_id, requester_role):
         requester_id = int(requester_id)
-        role = str(requester_role or '').lower()
+        role = normalize_role_value(requester_role)
         with self._get_cursor() as cursor:
-            if role in ('admin', 'sv'):
+            if role_has_min(role, 'admin') or role == 'sv':
                 cursor.execute("""
                     SELECT u.id, u.name, u.role, u.supervisor_id, COALESCE(u.status, 'working')
                     FROM users u
-                    WHERE u.role IN ('admin', 'sv')
+                    WHERE u.role IN ('super_admin', 'admin', 'sv')
                       AND COALESCE(u.status, 'working') <> 'fired'
-                    ORDER BY CASE WHEN u.role = 'admin' THEN 0 ELSE 1 END, u.name
+                    ORDER BY CASE WHEN u.role IN ('super_admin', 'admin') THEN 0 ELSE 1 END, u.name
                 """)
             else:
                 return []
@@ -14404,10 +14431,10 @@ class Database:
 
     def get_tasks_for_requester(self, requester_id, requester_role):
         requester_id = int(requester_id)
-        role = str(requester_role or '').lower()
+        role = normalize_role_value(requester_role)
 
         with self._get_cursor() as cursor:
-            if role == 'admin':
+            if role_has_min(role, 'admin'):
                 cursor.execute("""
                     SELECT
                         t.id, t.subject, t.description, t.tag, t.status, t.created_at, t.updated_at,
@@ -14530,7 +14557,7 @@ class Database:
     def update_task_status(self, task_id, requester_id, requester_role, action, comment=None, completion_summary=None, completion_attachments=None):
         task_id = int(task_id)
         requester_id = int(requester_id)
-        role = str(requester_role or '').lower()
+        role = normalize_role_value(requester_role)
         action_norm = str(action or '').strip().lower()
         comment_norm = (comment or '').strip() or None
         completion_summary_norm = (completion_summary or '').strip() or None
@@ -14560,7 +14587,7 @@ class Database:
 
             is_assignee = assigned_to is not None and int(assigned_to) == requester_id
             is_reviewer = (
-                role == 'admin'
+                role_has_min(role, 'admin')
                 or (created_by is not None and int(created_by) == requester_id)
                 or (role == 'sv' and not is_assignee)
             )
@@ -14683,7 +14710,7 @@ class Database:
     def get_task_attachment_for_requester(self, attachment_id, requester_id, requester_role):
         attachment_id = int(attachment_id)
         requester_id = int(requester_id)
-        role = str(requester_role or '').lower()
+        role = normalize_role_value(requester_role)
 
         with self._get_cursor() as cursor:
             cursor.execute("""

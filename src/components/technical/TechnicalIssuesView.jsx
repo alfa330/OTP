@@ -1,6 +1,7 @@
 ﻿import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import FaIcon from '../common/FaIcon';
+import { normalizeRole, isAdminLikeRole, isSupervisorRole } from '../../utils/roles';
 
 const FALLBACK_TECHNICAL_REASONS = [
     'Не работает интернет',
@@ -23,12 +24,6 @@ const FALLBACK_TECHNICAL_REASONS = [
     'Массовая проблема с интернетом',
     'Массовая проблема с телефонией'
 ];
-
-const normalizeRole = (role) => {
-    const normalized = String(role || '').trim().toLowerCase();
-    if (normalized === 'supervisor') return 'sv';
-    return normalized;
-};
 
 const toIsoDate = (value = new Date()) => {
     try {
@@ -70,10 +65,10 @@ const TechnicalIssuesView = ({
     withAccessTokenHeader
 }) => {
     const role = normalizeRole(user?.role);
-    const canCreate = role === 'admin' || role === 'sv';
-    const canView = role === 'admin' || role === 'sv';
-    const canExport = role === 'admin';
-    const canDelete = role === 'admin' || role === 'sv';
+    const canCreate = isAdminLikeRole(role) || isSupervisorRole(role);
+    const canView = isAdminLikeRole(role) || isSupervisorRole(role);
+    const canExport = isAdminLikeRole(role);
+    const canDelete = isAdminLikeRole(role) || isSupervisorRole(role);
 
     const notify = useCallback(
         (message, type = 'info') => {
@@ -124,7 +119,7 @@ const TechnicalIssuesView = ({
         const result = list.filter((direction) => {
             const directionId = Number(direction?.id);
             if (!Number.isFinite(directionId) || directionId <= 0) return false;
-            if (role === 'admin') return true;
+            if (isAdminLikeRole(role)) return true;
             return allowedDirectionIds.has(directionId);
         });
         return result.sort((a, b) =>
