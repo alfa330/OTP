@@ -6439,11 +6439,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [swapSubmitting, setSwapSubmitting] = useState(false);
             const [swapRespondingId, setSwapRespondingId] = useState(null);
             const [showSwapCreateModal, setShowSwapCreateModal] = useState(false);
+            const [showSwapTargetSegmentsModal, setShowSwapTargetSegmentsModal] = useState(false);
             const [swapForm, setSwapForm] = useState({
                 swapDate: '',
                 endDate: '',
                 startTime: '',
                 endTime: '',
+                requestType: 'replacement',
                 targetOperatorId: '',
                 targetSegments: [],
                 comment: ''
@@ -6521,6 +6523,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const plannerExcelImportInputRef = useRef(null);
             const plannerStatusAnomalyInputRef = useRef(null);
             const plannerTopActionsMenuRef = useRef(null);
+            const swapExchangePromptHandledRef = useRef(new Set());
             const plannerUiStateStorageKey = useMemo(
                 () => `otp.work_schedules.ui_state.${user?.login || user?.name || user?.role || 'anonymous'}`,
                 [user?.login, user?.name, user?.role]
@@ -11047,6 +11050,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     dayOffset: seg.dayOffset
                 }))
             ), [normalizeSwapTargetSegments]);
+            const normalizeSwapRequestType = useCallback((value) => {
+                const normalized = String(value || '').trim().toLowerCase();
+                return normalized === 'exchange' ? 'exchange' : 'replacement';
+            }, []);
+            const swapRequestType = useMemo(
+                () => normalizeSwapRequestType(swapForm.requestType),
+                [swapForm.requestType, normalizeSwapRequestType]
+            );
+            const isSwapExchangeMode = swapRequestType === 'exchange';
             const selectedSwapTargetSegments = useMemo(
                 () => normalizeSwapTargetSegments(swapForm.targetSegments),
                 [swapForm.targetSegments, normalizeSwapTargetSegments]
@@ -11094,6 +11106,32 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         }))
                     };
                 });
+            }, [normalizeSwapTargetSegments]);
+            const getSwapCandidateSelectableSegments = useCallback((candidate) => {
+                if (!candidate || typeof candidate !== 'object') return [];
+                const rawSegments = [];
+                const dayShifts = Array.isArray(candidate?.dayShifts) ? candidate.dayShifts : [];
+                const nextDayShifts = Array.isArray(candidate?.nextDayShifts) ? candidate.nextDayShifts : [];
+                dayShifts.forEach(seg => {
+                    const start = String(seg?.start || '').trim();
+                    const end = String(seg?.end || '').trim();
+                    if (!start || !end) return;
+                    rawSegments.push({ start, end, dayOffset: 0 });
+                });
+                nextDayShifts.forEach(seg => {
+                    const start = String(seg?.start || '').trim();
+                    const end = String(seg?.end || '').trim();
+                    if (!start || !end) return;
+                    rawSegments.push({ start, end, dayOffset: 1 });
+                });
+                return normalizeSwapTargetSegments(rawSegments).map(seg => ({
+                    start: seg.start,
+                    end: seg.end,
+                    dayOffset: seg.dayOffset,
+                    absStart: seg.absStart,
+                    absEnd: seg.absEnd,
+                    durationMin: seg.durationMin
+                }));
             }, [normalizeSwapTargetSegments]);
             const mySwapSourceShiftDays = useMemo(() => {
                 const src = myLiveScheduleData || myScheduleData;
@@ -11158,13 +11196,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (!isOperatorSelfSchedules) return;
                 setSwapForm(prev => {
                     if (!Array.isArray(mySwapSourceShiftDays) || mySwapSourceShiftDays.length === 0) {
-                        if (!prev.swapDate && !prev.endDate && !prev.startTime && !prev.endTime && !prev.targetOperatorId && (!Array.isArray(prev.targetSegments) || prev.targetSegments.length === 0)) return prev;
+                        if (
+                            !prev.swapDate &&
+                            !prev.endDate &&
+                            !prev.startTime &&
+                            !prev.endTime &&
+                            normalizeSwapRequestType(prev.requestType) === 'replacement' &&
+                            !prev.targetOperatorId &&
+                            (!Array.isArray(prev.targetSegments) || prev.targetSegments.length === 0)
+                        ) return prev;
                         return {
                             ...prev,
                             swapDate: '',
                             endDate: '',
                             startTime: '',
                             endTime: '',
+                            requestType: 'replacement',
                             targetOperatorId: '',
                             targetSegments: []
                         };
@@ -11209,7 +11256,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         targetSegments: []
                     };
                 });
-            }, [isOperatorSelfSchedules, mySwapSourceShiftDays, buildLocalSwapIntervalsForDate, parseSwapRangeWithDates]);
+            }, [isOperatorSelfSchedules, mySwapSourceShiftDays, buildLocalSwapIntervalsForDate, parseSwapRangeWithDates, normalizeSwapRequestType]);
             const swapTimeValidation = useMemo(() => {
                 const swapDate = swapForm.swapDate;
                 const endDate = swapForm.endDate || swapDate;
@@ -11315,6 +11362,108 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     durationMin: Math.max(0, endMin - startMin)
                 };
             }, [swapForm.swapDate, swapForm.endDate, swapForm.startTime, swapForm.endTime, buildLocalSwapIntervalsForDate, parseSwapRangeWithDates]);
+            const findOwnFullShiftMatchForRange = useCallback((swapDateValue, endDateValue, startTimeValue, endTimeValue) => {
+                const swapDateStr = String(swapDateValue || '').trim();
+                const startTimeStr = String(startTimeValue || '').trim();
+                const endTimeStr = String(endTimeValue || '').trim();
+                if (!swapDateStr || !startTimeStr || !endTimeStr) return null;
+
+                const parsedRange = parseSwapRangeWithDates(
+                    swapDateStr,
+                    startTimeStr,
+                    String(endDateValue || swapDateStr).trim() || swapDateStr,
+                    endTimeStr
+                );
+                if (!parsedRange?.isValid) return null;
+                const selectedStart = Number(parsedRange.startMin);
+                const selectedEnd = Number(parsedRange.endMin);
+                if (!Number.isFinite(selectedStart) || !Number.isFinite(selectedEnd) || selectedEnd <= selectedStart) return null;
+
+                const src = myLiveScheduleData || myScheduleData;
+                const dayShifts = Array.isArray(src?.shifts?.[swapDateStr]) ? src.shifts[swapDateStr] : [];
+                for (const seg of dayShifts) {
+                    const segStart = timeStrToMinutesSafe(String(seg?.start || '').trim());
+                    const segEndRaw = timeStrToMinutesSafe(String(seg?.end || '').trim());
+                    if (!Number.isFinite(segStart) || !Number.isFinite(segEndRaw)) continue;
+                    let segEnd = segEndRaw;
+                    if (segEnd <= segStart) segEnd += 1440;
+                    if (segStart === selectedStart && segEnd === selectedEnd) {
+                        return {
+                            swapDate: swapDateStr,
+                            start: String(seg?.start || '').trim(),
+                            end: String(seg?.end || '').trim(),
+                            startMin: segStart,
+                            endMin: segEnd
+                        };
+                    }
+                }
+                return null;
+            }, [myLiveScheduleData, myScheduleData, parseSwapRangeWithDates, timeStrToMinutesSafe]);
+            const currentSwapFullShiftMatch = useMemo(
+                () => findOwnFullShiftMatchForRange(
+                    swapForm.swapDate,
+                    swapForm.endDate || swapForm.swapDate,
+                    swapForm.startTime,
+                    swapForm.endTime
+                ),
+                [
+                    swapForm.swapDate,
+                    swapForm.endDate,
+                    swapForm.startTime,
+                    swapForm.endTime,
+                    findOwnFullShiftMatchForRange
+                ]
+            );
+            const buildSwapPromptKey = useCallback((swapDateValue, endDateValue, startTimeValue, endTimeValue) => (
+                `${String(swapDateValue || '').trim()}|${String(endDateValue || '').trim()}|${String(startTimeValue || '').trim()}|${String(endTimeValue || '').trim()}`
+            ), []);
+            useEffect(() => {
+                if (!showSwapCreateModal) return;
+                if (isSwapExchangeMode) return;
+                if (!currentSwapFullShiftMatch) return;
+                const key = buildSwapPromptKey(
+                    swapForm.swapDate,
+                    swapTimeValidation.effectiveEndDate || swapForm.endDate || swapForm.swapDate,
+                    swapForm.startTime,
+                    swapForm.endTime
+                );
+                if (!key) return;
+                const handledSet = swapExchangePromptHandledRef.current;
+                if (handledSet.has(key)) return;
+                handledSet.add(key);
+                const confirmExchange = (typeof window === 'undefined')
+                    ? false
+                    : window.confirm('Вы выбрали полную смену. Вы хотите обменяться сменами?');
+                if (!confirmExchange) return;
+                setSwapForm(prev => ({
+                    ...prev,
+                    requestType: 'exchange',
+                    targetOperatorId: '',
+                    targetSegments: []
+                }));
+            }, [
+                showSwapCreateModal,
+                isSwapExchangeMode,
+                currentSwapFullShiftMatch,
+                buildSwapPromptKey,
+                swapForm.swapDate,
+                swapForm.endDate,
+                swapForm.startTime,
+                swapForm.endTime,
+                swapTimeValidation.effectiveEndDate
+            ]);
+            useEffect(() => {
+                if (isSwapExchangeMode) return;
+                setShowSwapTargetSegmentsModal(false);
+                if (!Array.isArray(swapForm.targetSegments) || swapForm.targetSegments.length === 0) return;
+                setSwapForm(prev => {
+                    if (!Array.isArray(prev?.targetSegments) || prev.targetSegments.length === 0) return prev;
+                    return {
+                        ...prev,
+                        targetSegments: []
+                    };
+                });
+            }, [isSwapExchangeMode, swapForm.targetSegments]);
             const swapDayTimeline = useMemo(() => {
                 const swapDate = swapForm.swapDate;
                 if (!swapDate) {
@@ -11581,7 +11730,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             swap_date: swapForm.swapDate,
                             end_date: swapTimeValidation.effectiveEndDate || swapForm.endDate || swapForm.swapDate,
                             start_time: swapForm.startTime,
-                            end_time: swapForm.endTime
+                            end_time: swapForm.endTime,
+                            overlap_only: '0',
+                            non_overlap_only: isSwapExchangeMode ? '0' : '1'
                         }).toString();
                         const response = await fetch(`${API_BASE_URL}/api/work_schedules/shift_swap/candidates?${query}`, {
                             credentials: 'include',
@@ -11599,6 +11750,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             if (!selectedId) return prev;
                             const keepSelected = candidates.some(item => String(item?.id) === selectedId);
                             if (keepSelected) return prev;
+                            setShowSwapTargetSegmentsModal(false);
                             return { ...prev, targetOperatorId: '', targetSegments: [] };
                         });
                     } catch (error) {
@@ -11620,7 +11772,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 swapForm.endDate,
                 swapForm.startTime,
                 swapForm.endTime,
-                swapTimeValidation.effectiveEndDate
+                swapTimeValidation.effectiveEndDate,
+                isSwapExchangeMode
             ]);
             const swapCandidatesFiltered = useMemo(() => {
                 const raw = Array.isArray(swapCandidates) ? swapCandidates : [];
@@ -11642,6 +11795,92 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (!selectedId) return null;
                 return (Array.isArray(swapCandidates) ? swapCandidates : []).find(item => String(item?.id) === selectedId) || null;
             }, [swapCandidates, swapForm.targetOperatorId]);
+            const selectedSwapCandidateSelectableSegments = useMemo(
+                () => getSwapCandidateSelectableSegments(selectedSwapCandidate),
+                [selectedSwapCandidate, getSwapCandidateSelectableSegments]
+            );
+            const openSwapTargetSegmentsPickerForCandidate = useCallback((candidate) => {
+                if (!candidate) return;
+                const candidateIdStr = String(candidate?.id || '').trim();
+                if (!candidateIdStr) return;
+                const options = getSwapCandidateSelectableSegments(candidate);
+                if (options.length === 0) {
+                    setSwapForm(prev => ({
+                        ...prev,
+                        targetOperatorId: candidateIdStr,
+                        targetSegments: []
+                    }));
+                    notifySwapMessage('У выбранного оператора нет смен для обмена в выбранный период', 'warning');
+                    setShowSwapTargetSegmentsModal(false);
+                    return;
+                }
+                if (options.length === 1) {
+                    const single = options[0];
+                    setSwapForm(prev => ({
+                        ...prev,
+                        targetOperatorId: candidateIdStr,
+                        targetSegments: [{
+                            start: single.start,
+                            end: single.end,
+                            dayOffset: single.dayOffset
+                        }]
+                    }));
+                    setShowSwapTargetSegmentsModal(false);
+                    return;
+                }
+                setSwapForm(prev => ({
+                    ...prev,
+                    targetOperatorId: candidateIdStr,
+                    targetSegments: String(prev?.targetOperatorId || '').trim() === candidateIdStr
+                        ? (Array.isArray(prev?.targetSegments) ? prev.targetSegments : [])
+                        : []
+                }));
+                setShowSwapTargetSegmentsModal(true);
+            }, [getSwapCandidateSelectableSegments, notifySwapMessage]);
+            const handleSelectSwapCandidate = useCallback((candidate) => {
+                const candidateIdStr = String(candidate?.id || '').trim();
+                if (!candidateIdStr) return;
+                const selectedIdStr = String(swapForm.targetOperatorId || '').trim();
+                if (selectedIdStr === candidateIdStr) {
+                    setSwapForm(prev => ({
+                        ...prev,
+                        targetOperatorId: '',
+                        targetSegments: []
+                    }));
+                    setShowSwapTargetSegmentsModal(false);
+                    return;
+                }
+                if (!isSwapExchangeMode) {
+                    setSwapForm(prev => ({
+                        ...prev,
+                        targetOperatorId: candidateIdStr,
+                        targetSegments: []
+                    }));
+                    setShowSwapTargetSegmentsModal(false);
+                    return;
+                }
+                openSwapTargetSegmentsPickerForCandidate(candidate);
+            }, [swapForm.targetOperatorId, isSwapExchangeMode, openSwapTargetSegmentsPickerForCandidate]);
+            useEffect(() => {
+                if (!showSwapTargetSegmentsModal) return;
+                if (!isSwapExchangeMode) {
+                    setShowSwapTargetSegmentsModal(false);
+                    return;
+                }
+                const selectedId = String(swapForm.targetOperatorId || '').trim();
+                if (!selectedId) {
+                    setShowSwapTargetSegmentsModal(false);
+                    return;
+                }
+                if (selectedSwapCandidateSelectableSegments.length <= 1) {
+                    setShowSwapTargetSegmentsModal(false);
+                }
+            }, [
+                showSwapTargetSegmentsModal,
+                isSwapExchangeMode,
+                swapForm.targetOperatorId,
+                selectedSwapCandidateSelectableSegments.length
+            ]);
             const buildSwapDraftFromCurrentForm = useCallback(({ notifyErrors = true } = {}) => {
                 if (!swapTimeValidation.isValid) {
                     if (notifyErrors) notifySwapMessage(swapTimeValidation.message || 'Выберите корректный интервал', 'warning');
@@ -11652,27 +11891,37 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     if (notifyErrors) notifySwapMessage('Выберите кандидата в блоке ниже', 'warning');
                     return null;
                 }
-                const targetSegments = serializeSwapTargetSegmentsForPayload(swapForm.targetSegments);
-                if (!Array.isArray(targetSegments) || targetSegments.length === 0) {
-                    if (notifyErrors) notifySwapMessage('Выберите одну или несколько смен кандидата для обмена', 'warning');
+                const requestType = normalizeSwapRequestType(swapForm.requestType);
+                if (requestType === 'exchange' && !currentSwapFullShiftMatch) {
+                    if (notifyErrors) notifySwapMessage('Для обмена выберите полную свою смену', 'warning');
                     return null;
                 }
-                const targetDurationMin = targetSegments.reduce((acc, seg) => {
-                    const startMin = timeStrToMinutesSafe(seg?.start);
-                    const endRawMin = timeStrToMinutesSafe(seg?.end);
-                    const dayOffset = Number(seg?.dayOffset ?? 0);
-                    if (!Number.isFinite(startMin) || !Number.isFinite(endRawMin) || !Number.isFinite(dayOffset)) return acc;
-                    let absStart = startMin + (Math.trunc(dayOffset) * 1440);
-                    let absEnd = endRawMin + (Math.trunc(dayOffset) * 1440);
-                    if (absEnd <= absStart) absEnd += 1440;
-                    const diff = absEnd - absStart;
-                    if (!Number.isFinite(diff) || diff <= 0) return acc;
-                    return acc + diff;
-                }, 0);
+                const targetSegments = requestType === 'exchange'
+                    ? serializeSwapTargetSegmentsForPayload(swapForm.targetSegments)
+                    : [];
+                if (requestType === 'exchange' && (!Array.isArray(targetSegments) || targetSegments.length === 0)) {
+                    if (notifyErrors) notifySwapMessage('После выбора оператора выберите его смены в отдельном окне', 'warning');
+                    return null;
+                }
+                const targetDurationMin = requestType === 'exchange'
+                    ? targetSegments.reduce((acc, seg) => {
+                        const startMin = timeStrToMinutesSafe(seg?.start);
+                        const endRawMin = timeStrToMinutesSafe(seg?.end);
+                        const dayOffset = Number(seg?.dayOffset ?? 0);
+                        if (!Number.isFinite(startMin) || !Number.isFinite(endRawMin) || !Number.isFinite(dayOffset)) return acc;
+                        let absStart = startMin + (Math.trunc(dayOffset) * 1440);
+                        let absEnd = endRawMin + (Math.trunc(dayOffset) * 1440);
+                        if (absEnd <= absStart) absEnd += 1440;
+                        const diff = absEnd - absStart;
+                        if (!Number.isFinite(diff) || diff <= 0) return acc;
+                        return acc + diff;
+                    }, 0)
+                    : 0;
                 const effectiveEndDate = swapTimeValidation.effectiveEndDate || swapForm.endDate || swapForm.swapDate;
                 const comment = String(swapForm.comment || '').trim();
                 return {
                     localId: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                    requestType,
                     targetOperatorId,
                     targetOperatorName: String(selectedSwapCandidate?.name || 'Оператор'),
                     targetSupervisorName: String(selectedSwapCandidate?.supervisorName || ''),
@@ -11690,6 +11939,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 swapForm.endDate,
                 swapForm.startTime,
                 swapForm.endTime,
+                swapForm.requestType,
                 swapForm.targetOperatorId,
                 swapForm.targetSegments,
                 swapForm.comment,
@@ -11697,11 +11947,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 swapTimeValidation.message,
                 swapTimeValidation.effectiveEndDate,
                 swapTimeValidation.durationMin,
+                currentSwapFullShiftMatch,
                 selectedSwapCandidate,
+                normalizeSwapRequestType,
                 serializeSwapTargetSegmentsForPayload,
                 timeStrToMinutesSafe
             ]);
             const getSwapDraftSignature = useCallback((draft) => {
+                const requestType = normalizeSwapRequestType(draft?.requestType);
                 const targetOperatorId = Number(draft?.targetOperatorId || 0);
                 const swapDate = String(draft?.swapDate || '');
                 const endDate = String(draft?.endDate || swapDate);
@@ -11717,8 +11970,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     .filter(Boolean)
                     .sort()
                     .join(',');
-                return `${targetOperatorId}|${swapDate}|${endDate}|${startTime}|${endTime}|${targetSegmentsSign}`;
-            }, []);
+                return `${requestType}|${targetOperatorId}|${swapDate}|${endDate}|${startTime}|${endTime}|${targetSegmentsSign}`;
+            }, [normalizeSwapRequestType]);
             const handleAddSwapDraft = () => {
                 if (swapSubmitting) return;
                 const draft = buildSwapDraftFromCurrentForm({ notifyErrors: true });
@@ -11741,6 +11994,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     comment: ''
                 }));
                 setSwapCandidatesSearch('');
+                setShowSwapTargetSegmentsModal(false);
                 notifySwapMessage('Запрос добавлен в список', 'success');
             };
             const handleRemoveSwapDraft = (localId) => {
@@ -11751,14 +12005,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 [swapDraftRequests]
             );
             const canSubmitCurrentSwapDraft = useMemo(() => {
+                const requestType = normalizeSwapRequestType(swapForm.requestType);
                 const targetOperatorId = Number(swapForm.targetOperatorId);
+                const exchangeReady = requestType !== 'exchange'
+                    || (currentSwapFullShiftMatch && selectedSwapTargetSegments.length > 0);
                 return (
                     swapTimeValidation.isValid &&
                     Number.isFinite(targetOperatorId) &&
                     targetOperatorId > 0 &&
-                    selectedSwapTargetSegments.length > 0
+                    exchangeReady
                 );
-            }, [swapForm.targetOperatorId, swapTimeValidation.isValid, selectedSwapTargetSegments.length]);
+            }, [
+                swapForm.requestType,
+                swapForm.targetOperatorId,
+                swapTimeValidation.isValid,
+                selectedSwapTargetSegments.length,
+                currentSwapFullShiftMatch,
+                normalizeSwapRequestType
+            ]);
             const canSendSwapRequests = (Array.isArray(swapDraftRequests) && swapDraftRequests.length > 0) || canSubmitCurrentSwapDraft;
             const handleCreateSwapRequest = async () => {
                 if (swapSubmitting) return;
@@ -11786,7 +12050,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     end_date: String(draft?.endDate || draft?.swapDate || ''),
                                     start_time: String(draft?.startTime || ''),
                                     end_time: String(draft?.endTime || ''),
-                                    target_segments: Array.isArray(draft?.targetSegments) ? draft.targetSegments : [],
+                                    ...(normalizeSwapRequestType(draft?.requestType) === 'exchange'
+                                        ? { target_segments: Array.isArray(draft?.targetSegments) ? draft.targetSegments : [] }
+                                        : {}),
                                     comment: String(draft?.comment || '').trim() || null
                                 })
                             });
@@ -11812,8 +12078,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     }
 
                     if (failItems.length === 0) {
+                        const onlyExchange = okItems.length > 0 && okItems.every(item => normalizeSwapRequestType(item?.draft?.requestType) === 'exchange');
+                        const onlyReplacement = okItems.length > 0 && okItems.every(item => normalizeSwapRequestType(item?.draft?.requestType) === 'replacement');
                         notifySwapMessage(
-                            okItems.length > 1 ? `Отправлено запросов: ${okItems.length}` : 'Запрос на обмен сменами отправлен',
+                            okItems.length > 1
+                                ? `Отправлено запросов: ${okItems.length}`
+                                : (onlyExchange
+                                    ? 'Запрос на обмен сменами отправлен'
+                                    : (onlyReplacement
+                                        ? 'Запрос на замену смены отправлен'
+                                        : 'Запрос отправлен')),
                             'success'
                         );
                         setSwapDraftRequests([]);
@@ -11825,6 +12099,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         }));
                         setShowSwapCreateModal(false);
                         setSwapCandidatesSearch('');
+                        setShowSwapTargetSegmentsModal(false);
+                        swapExchangePromptHandledRef.current.clear();
                     } else if (okItems.length === 0) {
                         if (!sendingCurrentOnly) {
                             setSwapDraftRequests(failItems.map(item => item?.draft).filter(Boolean));
@@ -11842,12 +12118,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setSwapSubmitting(false);
                 }
             };
-            const handleRespondSwapRequest = async (requestId, action) => {
+            const handleRespondSwapRequest = async (requestItem, action) => {
+                const requestId = Number(requestItem?.id || 0);
                 const actionNorm = String(action || '').toLowerCase();
                 if (!requestId || !['accept', 'reject'].includes(actionNorm)) return;
                 if (swapRespondingId) return;
                 if (actionNorm === 'reject') {
-                    const ok = typeof window === 'undefined' ? true : window.confirm('Отклонить запрос на обмен?');
+                    const requestMode = String(requestItem?.exchangeMode || '').toLowerCase();
+                    const isExchangeRequest = requestMode.includes('exchange') || (Array.isArray(requestItem?.targetSegments) && requestItem.targetSegments.length > 0);
+                    const ok = typeof window === 'undefined'
+                        ? true
+                        : window.confirm(isExchangeRequest ? 'Отклонить запрос на обмен?' : 'Отклонить запрос на замену?');
                     if (!ok) return;
                 }
                 try {
@@ -11868,7 +12149,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         throw new Error(payload?.error || `HTTP ${response.status}`);
                     }
                     if (actionNorm === 'accept') {
-                        notifySwapMessage('Запрос принят, смены обменяны', 'success');
+                        const requestMode = String(requestItem?.exchangeMode || '').toLowerCase();
+                        const isExchangeRequest = requestMode.includes('exchange') || (Array.isArray(requestItem?.targetSegments) && requestItem.targetSegments.length > 0);
+                        notifySwapMessage(isExchangeRequest ? 'Запрос принят, смены обменяны' : 'Запрос принят, замена применена', 'success');
                         setMyScheduleReloadNonce(v => v + 1);
                     } else {
                         notifySwapMessage('Запрос отклонен', 'success');
@@ -11880,6 +12163,47 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setSwapRespondingId(null);
                 }
             };
+            const handleSelectOwnSwapSegmentFromTimeline = useCallback((segment) => {
+                const swapDate = String(swapForm.swapDate || '').trim();
+                const startMin = Number(segment?.start);
+                const endMin = Number(segment?.end);
+                if (!swapDate || !Number.isFinite(startMin) || !Number.isFinite(endMin) || endMin <= startMin) return;
+                const startTime = minutesToTime(startMin);
+                const endTime = minutesToTime(endMin);
+                const endDate = swapDate;
+                const promptKey = buildSwapPromptKey(swapDate, endDate, startTime, endTime);
+                const fullShiftMatch = findOwnFullShiftMatchForRange(swapDate, endDate, startTime, endTime);
+                let nextRequestType = normalizeSwapRequestType(swapForm.requestType);
+                if (!fullShiftMatch) {
+                    nextRequestType = 'replacement';
+                } else if (nextRequestType !== 'exchange') {
+                    const handledSet = swapExchangePromptHandledRef.current;
+                    if (!handledSet.has(promptKey)) {
+                        handledSet.add(promptKey);
+                        const confirmExchange = (typeof window === 'undefined')
+                            ? false
+                            : window.confirm(`Вы выбрали полную смену ${formatDateRuShort(swapDate)} ${startTime} — ${endTime}. Вы хотите обменяться сменами?`);
+                        nextRequestType = confirmExchange ? 'exchange' : 'replacement';
+                    }
+                }
+                setSwapForm(prev => ({
+                    ...prev,
+                    endDate,
+                    startTime,
+                    endTime,
+                    requestType: nextRequestType,
+                    targetOperatorId: '',
+                    targetSegments: []
+                }));
+                setShowSwapTargetSegmentsModal(false);
+            }, [
+                swapForm.swapDate,
+                swapForm.requestType,
+                buildSwapPromptKey,
+                findOwnFullShiftMatchForRange,
+                normalizeSwapRequestType,
+                formatDateRuShort
+            ]);
             const handleOpenSwapModalForOwnShift = useCallback((dayCard, seg) => {
                 const swapDate = String(dayCard?.date || '').trim();
                 const startTime = String(seg?.start || '').trim();
@@ -11894,9 +12218,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (Number.isFinite(startMin) && Number.isFinite(endMin) && endMin <= startMin) {
                     endDate = todayDateStr(addDays(parseDateStr(swapDate), 1));
                 }
-                const promptText = `Вы хотите обменяться сменой ${formatDateRuShort(swapDate)} ${startTime} — ${endTime}${endDate !== swapDate ? ' (+1 день)' : ''}?`;
-                const shouldOpen = (typeof window === 'undefined') ? true : window.confirm(promptText);
-                if (!shouldOpen) return;
+                const promptText = `Вы выбрали полную смену ${formatDateRuShort(swapDate)} ${startTime} — ${endTime}${endDate !== swapDate ? ' (+1 день)' : ''}. Вы хотите обменяться сменами?`;
+                const exchangeConfirmed = (typeof window === 'undefined') ? false : window.confirm(promptText);
+                const promptKey = buildSwapPromptKey(swapDate, endDate, startTime, endTime);
+                if (promptKey) {
+                    swapExchangePromptHandledRef.current.add(promptKey);
+                }
                 setOperatorSelfTab('swaps');
                 setSwapCandidatesSearch('');
                 setSwapDraftRequests([]);
@@ -11906,12 +12233,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     endDate,
                     startTime,
                     endTime,
+                    requestType: exchangeConfirmed ? 'exchange' : 'replacement',
                     targetOperatorId: '',
                     targetSegments: [],
                     comment: ''
                 }));
+                setShowSwapTargetSegmentsModal(false);
                 setShowSwapCreateModal(true);
-            }, [formatDateRuShort, notifySwapMessage, timeStrToMinutesSafe]);
+            }, [formatDateRuShort, notifySwapMessage, timeStrToMinutesSafe, buildSwapPromptKey]);
             const loadSwapJournal = useCallback(async (monthValue = swapJournalMonth) => {
                 const month = String(monthValue || '').trim();
                 if (!month) return;
@@ -12517,7 +12846,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 onClick={() => {
                                                     setSwapCandidatesSearch('');
                                                     setSwapDraftRequests([]);
-                                                    setSwapForm(prev => ({ ...prev, targetOperatorId: '', targetSegments: [], comment: '' }));
+                                                    swapExchangePromptHandledRef.current.clear();
+                                                    setSwapForm(prev => ({ ...prev, requestType: 'replacement', targetOperatorId: '', targetSegments: [], comment: '' }));
+                                                    setShowSwapTargetSegmentsModal(false);
                                                     setShowSwapCreateModal(true);
                                                 }}
                                                 className="px-3.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium inline-flex items-center gap-1.5 transition-colors shadow-sm"
@@ -13215,7 +13546,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 open={showSwapCreateModal}
                                                 onClose={() => {
                                                     setShowSwapCreateModal(false);
+                                                    setShowSwapTargetSegmentsModal(false);
                                                     setSwapCandidatesSearch('');
+                                                    swapExchangePromptHandledRef.current.clear();
                                                 }}
                                                 fullScreenOnMobile={true}
                                                 panelClassName="sm:w-[calc(100vw-1rem)] max-w-[1200px] p-0 sm:rounded-xl"
@@ -13223,7 +13556,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <div className="p-4 sm:p-5 space-y-4">
                                                     <div className="flex items-start justify-between gap-3 pb-3 border-b border-slate-200">
                                                         <div className="min-w-0">
-                                                            <div className="text-base font-semibold text-slate-900">Создать запрос на обмен сменами</div>
+                                                            <div className="text-base font-semibold text-slate-900">
+                                                                {isSwapExchangeMode ? 'Создать запрос на обмен сменами' : 'Создать запрос на замену смены'}
+                                                            </div>
                                                             <div className="text-xs text-slate-500">
                                                                 {swapDraftRequests.length > 0 ? `В очереди: ${swapDraftRequests.length} запр.` : `Доступных дат: ${mySwapSourceShiftDays.length}`}
                                                             </div>
@@ -13232,7 +13567,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             type="button"
                                                             onClick={() => {
                                                                 setShowSwapCreateModal(false);
+                                                                setShowSwapTargetSegmentsModal(false);
                                                                 setSwapCandidatesSearch('');
+                                                                swapExchangePromptHandledRef.current.clear();
                                                             }}
                                                             className="w-8 h-8 rounded-md border border-slate-300 text-slate-500 hover:bg-slate-100 inline-flex items-center justify-center"
                                                             aria-label="Закрыть окно создания запроса"
@@ -13243,7 +13580,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <div>
                                                 <div className="flex items-center gap-2 mb-2.5">
                                                     <span className="w-5 h-5 rounded-full bg-blue-600 text-white text-[10px] font-bold flex items-center justify-center flex-shrink-0 leading-none">1</span>
-                                                    <span className="text-xs font-semibold text-slate-600 uppercase tracking-wide">Ваша смена для обмена</span>
+                                                    <span className="text-xs font-semibold text-slate-600 uppercase tracking-wide">
+                                                        {isSwapExchangeMode ? 'Ваша смена для обмена' : 'Ваша смена для замены'}
+                                                    </span>
+                                                    <span className={`px-2 py-0.5 rounded-md border text-[11px] font-medium ${
+                                                        isSwapExchangeMode
+                                                            ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                                                            : 'border-slate-200 bg-slate-50 text-slate-600'
+                                                    }`}>
+                                                        {isSwapExchangeMode ? 'Режим: обмен' : 'Режим: обычная замена'}
+                                                    </span>
                                                 </div>
                                                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 items-end">
                                                     <label className="text-sm">
@@ -13252,6 +13598,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             value={swapForm.swapDate}
                                                             onChange={(e) => {
                                                                 const nextDate = e.target.value;
+                                                                setShowSwapTargetSegmentsModal(false);
                                                                 setSwapForm(prev => ({
                                                                     ...prev,
                                                                     swapDate: nextDate,
@@ -13282,7 +13629,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         <div className="inline-flex w-full rounded-lg border border-slate-300 bg-slate-50 p-1 gap-1">
                                                                 <button
                                                                     type="button"
-                                                                    onClick={() => setSwapForm(prev => ({ ...prev, endDate: prev.swapDate || '', targetOperatorId: '', targetSegments: [] }))}
+                                                                    onClick={() => {
+                                                                        setShowSwapTargetSegmentsModal(false);
+                                                                        setSwapForm(prev => ({ ...prev, endDate: prev.swapDate || '', targetOperatorId: '', targetSegments: [] }));
+                                                                    }}
                                                                     disabled={!swapForm.swapDate}
                                                                     className={`flex-1 px-2 py-1 rounded-md border text-[11px] font-medium ${
                                                                         !swapForm.swapDate
@@ -13296,12 +13646,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 </button>
                                                                 <button
                                                                     type="button"
-                                                                    onClick={() => setSwapForm(prev => ({
-                                                                        ...prev,
-                                                                        endDate: prev.swapDate ? swapNextDayDate : '',
-                                                                        targetOperatorId: '',
-                                                                        targetSegments: []
-                                                                    }))}
+                                                                    onClick={() => {
+                                                                        setShowSwapTargetSegmentsModal(false);
+                                                                        setSwapForm(prev => ({
+                                                                            ...prev,
+                                                                            endDate: prev.swapDate ? swapNextDayDate : '',
+                                                                            targetOperatorId: '',
+                                                                            targetSegments: []
+                                                                        }));
+                                                                    }}
                                                                     disabled={!swapForm.swapDate}
                                                                     className={`flex-1 px-2 py-1 rounded-md border text-[11px] font-medium ${
                                                                         !swapForm.swapDate
@@ -13320,7 +13673,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         <input
                                                             type="time"
                                                             value={swapForm.startTime}
-                                                            onChange={(e) => setSwapForm(prev => ({ ...prev, startTime: e.target.value, targetOperatorId: '', targetSegments: [] }))}
+                                                            onChange={(e) => {
+                                                                setShowSwapTargetSegmentsModal(false);
+                                                                setSwapForm(prev => ({ ...prev, startTime: e.target.value, targetOperatorId: '', targetSegments: [] }));
+                                                            }}
                                                             className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm bg-white"
                                                             step={300}
                                                         />
@@ -13330,7 +13686,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         <input
                                                             type="time"
                                                             value={swapForm.endTime}
-                                                            onChange={(e) => setSwapForm(prev => ({ ...prev, endTime: e.target.value, targetOperatorId: '', targetSegments: [] }))}
+                                                            onChange={(e) => {
+                                                                setShowSwapTargetSegmentsModal(false);
+                                                                setSwapForm(prev => ({ ...prev, endTime: e.target.value, targetOperatorId: '', targetSegments: [] }));
+                                                            }}
                                                             className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm bg-white"
                                                             step={300}
                                                         />
@@ -13400,12 +13759,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             </div>
                                                             <div className="mt-2 flex flex-wrap gap-1.5">
                                                                 {swapDayTimeline.segments.map(seg => (
-                                                                    <span
+                                                                    <button
+                                                                        type="button"
                                                                         key={`swap-seg-chip-${seg.id}`}
-                                                                        className="px-2 py-0.5 rounded-md text-xs border border-blue-200 bg-blue-50 text-blue-700"
+                                                                        onClick={() => handleSelectOwnSwapSegmentFromTimeline(seg)}
+                                                                        className="px-2 py-0.5 rounded-md text-xs border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 transition-colors"
+                                                                        title="Выбрать весь этот интервал"
                                                                     >
                                                                         {seg.label} ({formatMinutesOnly(seg.minutes)})
-                                                                    </span>
+                                                                    </button>
                                                                 ))}
                                                             </div>
                                                             {((Array.isArray(swapDayTimeline.draftIntervals) && swapDayTimeline.draftIntervals.length > 0) || swapDayTimeline.selectedInterval) && (
@@ -13567,8 +13929,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     )}
                                                     {swapForm.targetOperatorId && (
                                                         <div className="text-slate-500 mt-1">
-                                                            Смены кандидата: {formatSwapSegmentsSummaryLabel(swapForm.swapDate, swapForm.targetSegments)}
-                                                            {' '}({formatMinutesOnly(selectedSwapTargetSegmentsTotalMinutes)})
+                                                            {isSwapExchangeMode
+                                                                ? (
+                                                                    <>
+                                                                        Смены кандидата: {formatSwapSegmentsSummaryLabel(swapForm.swapDate, swapForm.targetSegments)}
+                                                                        {' '}({formatMinutesOnly(selectedSwapTargetSegmentsTotalMinutes)})
+                                                                    </>
+                                                                )
+                                                                : 'Обычная замена: встречная смена кандидата не требуется.'}
                                                         </div>
                                                     )}
                                                     {swapCandidatesError && (
@@ -13587,7 +13955,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     </div>
                                                     {swapDraftRequests.length === 0 ? (
                                                         <div className="text-xs text-slate-600">
-                                                            Выберите свою смену, кандидата и одну/несколько его смен для обмена, затем нажмите «Добавить в список».
+                                                            {isSwapExchangeMode
+                                                                ? 'Выберите свою полную смену, кандидата и одну/несколько его смен для обмена, затем нажмите «Добавить в список».'
+                                                                : 'Выберите свою смену и кандидата, затем нажмите «Добавить в список».'}
                                                         </div>
                                                     ) : (
                                                         <div className="max-h-40 overflow-y-auto pr-1 space-y-1.5">
@@ -13615,8 +13985,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                 )} ({formatMinutesOnly(Number(draft?.durationMin) || 0)})
                                                                             </div>
                                                                             <div className="text-[11px] text-slate-700">
-                                                                                Взамен получаете: {formatSwapSegmentsSummaryLabel(String(draft?.swapDate || ''), draft?.targetSegments)}
-                                                                                {' '}({formatMinutesOnly(Number(draft?.targetDurationMin) || 0)})
+                                                                                {normalizeSwapRequestType(draft?.requestType) === 'exchange'
+                                                                                    ? (
+                                                                                        <>
+                                                                                            Взамен получаете: {formatSwapSegmentsSummaryLabel(String(draft?.swapDate || ''), draft?.targetSegments)}
+                                                                                            {' '}({formatMinutesOnly(Number(draft?.targetDurationMin) || 0)})
+                                                                                        </>
+                                                                                    )
+                                                                                    : 'Тип: обычная замена'}
                                                                             </div>
                                                                             {!!draft?.comment && (
                                                                                 <div className="text-[11px] text-slate-600">
@@ -13641,14 +14017,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <div className="mt-3 rounded-lg border border-slate-200 bg-white p-2.5 sm:p-3">
                                                     <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                                                         <div className="text-xs font-semibold text-slate-800">
-                                                            Операторы для обмена
+                                                            {isSwapExchangeMode ? 'Операторы для обмена' : 'Операторы для замены'}
                                                         </div>
                                                         <div className="text-xs text-slate-500">
                                                             {swapForm.targetOperatorId
-                                                                ? `Выбран: ${selectedSwapCandidate?.name || '1 кандидат'} • смен: ${selectedSwapTargetSegments.length}`
+                                                                ? (isSwapExchangeMode
+                                                                    ? `Выбран: ${selectedSwapCandidate?.name || '1 кандидат'} • смен: ${selectedSwapTargetSegments.length}`
+                                                                    : `Выбран: ${selectedSwapCandidate?.name || '1 кандидат'}`)
                                                                 : (String(swapCandidatesSearch || '').trim()
                                                                     ? `Найдено: ${swapCandidatesFiltered.length} из ${swapCandidates.length}`
-                                                                    : 'Сортировка по стыку интервала')}
+                                                                    : (isSwapExchangeMode ? 'Все кандидаты (с пересечением и без)' : 'Без пересечения по времени'))}
                                                         </div>
                                                     </div>
                                                     <label className="text-sm block mb-2">
@@ -13674,7 +14052,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         <div className="text-xs text-slate-500">
                                                             {String(swapCandidatesSearch || '').trim()
                                                                 ? 'По текущему поиску кандидаты не найдены.'
-                                                                : 'На выбранный интервал нет операторов со сменой.'}
+                                                                : (isSwapExchangeMode
+                                                                    ? 'Кандидаты не найдены для выбранного направления.'
+                                                                    : 'Нет операторов без пересечения на выбранный интервал.')}
                                                         </div>
                                                     ) : (
                                                         <div className="max-h-[42vh] sm:max-h-80 overflow-y-auto pr-1 space-y-2">
@@ -13709,11 +14089,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                             </div>
                                                                             <button
                                                                                 type="button"
-                                                                                onClick={() => setSwapForm(prev => ({
-                                                                                    ...prev,
-                                                                                    targetOperatorId: String(prev.targetOperatorId || '') === itemId ? '' : itemId,
-                                                                                    targetSegments: []
-                                                                                }))}
+                                                                                onClick={() => handleSelectSwapCandidate(item)}
                                                                                 className={`px-2.5 py-1 rounded-md text-xs font-medium border ${
                                                                                     isSelected
                                                                                         ? 'bg-blue-600 text-white border-blue-600'
@@ -13769,22 +14145,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                             const crossing = (typeof seg?.continuesNextDay === 'boolean')
                                                                                                 ? !!seg?.continuesNextDay
                                                                                                 : (timeToMinutes(e) <= timeToMinutes(s) && e !== '00:00');
-                                                                                            const segmentPayload = { start: s, end: e, dayOffset: 0 };
-                                                                                            const segmentSelected = isSelected && isSwapTargetSegmentSelected(segmentPayload);
                                                                                             return (
-                                                                                                <button
-                                                                                                    type="button"
+                                                                                                <span
                                                                                                     key={`swap-candidate-day-${itemId}-${segIdx}`}
-                                                                                                    onClick={() => toggleSwapTargetSegmentSelection(itemId, segmentPayload)}
-                                                                                                    className={`px-2 py-0.5 rounded border text-[11px] font-semibold tabular-nums transition-colors ${
-                                                                                                        segmentSelected
-                                                                                                            ? 'border-emerald-400 bg-emerald-100 text-emerald-900'
-                                                                                                            : 'border-blue-200 bg-blue-100 text-blue-900 hover:bg-blue-200'
-                                                                                                    }`}
-                                                                                                    title={segmentSelected ? 'Снять смену из обмена' : 'Добавить смену в обмен'}
+                                                                                                    className="px-2 py-0.5 rounded border text-[11px] font-semibold tabular-nums border-blue-200 bg-blue-100 text-blue-900"
                                                                                                 >
                                                                                                     {s} — {e}{crossing ? ' (+1)' : ''}
-                                                                                                </button>
+                                                                                                </span>
                                                                                             );
                                                                                         })
                                                                                     )}
@@ -13806,32 +14173,37 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                             nextDayShifts.map((seg, segIdx) => {
                                                                                                 const s = String(seg?.start || '');
                                                                                                 const e = String(seg?.end || '');
-                                                                                                const segmentPayload = { start: s, end: e, dayOffset: 1 };
-                                                                                                const segmentSelected = isSelected && isSwapTargetSegmentSelected(segmentPayload);
                                                                                                 return (
-                                                                                                    <button
-                                                                                                        type="button"
+                                                                                                    <span
                                                                                                         key={`swap-candidate-next-${itemId}-${segIdx}`}
-                                                                                                        onClick={() => toggleSwapTargetSegmentSelection(itemId, segmentPayload)}
-                                                                                                        className={`px-2 py-0.5 rounded border text-[11px] font-semibold tabular-nums transition-colors ${
-                                                                                                            segmentSelected
-                                                                                                                ? 'border-emerald-400 bg-emerald-100 text-emerald-900'
-                                                                                                                : 'border-violet-200 bg-violet-100 text-violet-900 hover:bg-violet-200'
-                                                                                                        }`}
-                                                                                                        title={segmentSelected ? 'Снять смену из обмена' : 'Добавить смену в обмен'}
+                                                                                                        className="px-2 py-0.5 rounded border text-[11px] font-semibold tabular-nums border-violet-200 bg-violet-100 text-violet-900"
                                                                                                     >
                                                                                                         {s} — {e}
-                                                                                                    </button>
+                                                                                                    </span>
                                                                                                 );
                                                                                             })
                                                                                         )}
                                                                                     </div>
                                                                                 )}
-                                                                                {isSelected && (
+                                                                                {isSelected && isSwapExchangeMode && (
+                                                                                    <div className="rounded border border-slate-200 bg-slate-50 px-2 py-1.5 flex items-center justify-between gap-2">
+                                                                                        <div className="text-[11px] text-slate-600">
+                                                                                            {selectedSwapTargetSegments.length === 0
+                                                                                                ? 'Смены для обмена не выбраны.'
+                                                                                                : `Выбрано смен: ${selectedSwapTargetSegments.length} • ${formatMinutesOnly(selectedSwapTargetSegmentsTotalMinutes)}`}
+                                                                                        </div>
+                                                                                        <button
+                                                                                            type="button"
+                                                                                            onClick={() => openSwapTargetSegmentsPickerForCandidate(item)}
+                                                                                            className="px-2 py-0.5 rounded border border-slate-300 bg-white text-[11px] text-slate-700 hover:bg-slate-100"
+                                                                                        >
+                                                                                            Выбрать смены
+                                                                                        </button>
+                                                                                    </div>
+                                                                                )}
+                                                                                {isSelected && !isSwapExchangeMode && (
                                                                                     <div className="text-[11px] text-slate-600 rounded border border-slate-200 bg-slate-50 px-2 py-1">
-                                                                                        {selectedSwapTargetSegments.length === 0
-                                                                                            ? 'Выберите одну или несколько смен этого оператора для обмена.'
-                                                                                            : `Выбрано смен: ${selectedSwapTargetSegments.length} • ${formatMinutesOnly(selectedSwapTargetSegmentsTotalMinutes)}`}
+                                                                                        Обычная замена: выбирать смены кандидата не нужно.
                                                                                     </div>
                                                                                 )}
                                                                             </div>
@@ -13842,6 +14214,73 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         </div>
                                                     )}
                                                 </div>
+                                                </div>
+                                            </SimpleModal>
+                                            <SimpleModal
+                                                open={showSwapTargetSegmentsModal && showSwapCreateModal && isSwapExchangeMode}
+                                                onClose={() => setShowSwapTargetSegmentsModal(false)}
+                                                panelClassName="sm:w-[560px] max-w-[calc(100vw-1rem)] p-0 sm:rounded-xl"
+                                            >
+                                                <div className="p-4 sm:p-5 space-y-3">
+                                                    <div className="flex items-start justify-between gap-3 pb-2 border-b border-slate-200">
+                                                        <div className="min-w-0">
+                                                            <div className="text-sm font-semibold text-slate-900">Выбор смен кандидата</div>
+                                                            <div className="text-xs text-slate-500">
+                                                                {selectedSwapCandidate?.name ? `Кандидат: ${selectedSwapCandidate.name}` : 'Сначала выберите кандидата'}
+                                                            </div>
+                                                        </div>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setShowSwapTargetSegmentsModal(false)}
+                                                            className="w-8 h-8 rounded-md border border-slate-300 text-slate-500 hover:bg-slate-100 inline-flex items-center justify-center"
+                                                            aria-label="Закрыть выбор смен кандидата"
+                                                        >
+                                                            <FaIcon className="fas fa-times text-sm"></FaIcon>
+                                                        </button>
+                                                    </div>
+                                                    {!selectedSwapCandidate ? (
+                                                        <div className="text-sm text-slate-600">Выберите оператора в списке кандидатов.</div>
+                                                    ) : selectedSwapCandidateSelectableSegments.length === 0 ? (
+                                                        <div className="text-sm text-slate-600">У выбранного оператора нет смен для обмена в выбранный период.</div>
+                                                    ) : (
+                                                        <>
+                                                            <div className="max-h-[46vh] overflow-y-auto pr-1 space-y-2">
+                                                                {selectedSwapCandidateSelectableSegments.map((seg, segIdx) => {
+                                                                    const segmentPayload = { start: seg.start, end: seg.end, dayOffset: seg.dayOffset };
+                                                                    const segmentSelected = isSwapTargetSegmentSelected(segmentPayload);
+                                                                    return (
+                                                                        <button
+                                                                            type="button"
+                                                                            key={`swap-target-picker-seg-${segIdx}-${seg.start}-${seg.end}-${seg.dayOffset}`}
+                                                                            onClick={() => toggleSwapTargetSegmentSelection(selectedSwapCandidate?.id, segmentPayload)}
+                                                                            className={`w-full text-left rounded-md border px-3 py-2 text-sm transition-colors ${
+                                                                                segmentSelected
+                                                                                    ? 'border-emerald-300 bg-emerald-50 text-emerald-900'
+                                                                                    : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+                                                                            }`}
+                                                                        >
+                                                                            <div className="font-medium">{formatSwapSegmentLabel(swapForm.swapDate, seg)}</div>
+                                                                            <div className="text-xs text-slate-500 mt-0.5">{formatMinutesOnly(seg.durationMin)}</div>
+                                                                        </button>
+                                                                    );
+                                                                })}
+                                                            </div>
+                                                            <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-200">
+                                                                <div className="text-xs text-slate-600">
+                                                                    {selectedSwapTargetSegments.length === 0
+                                                                        ? 'Выберите одну или несколько смен.'
+                                                                        : `Выбрано: ${selectedSwapTargetSegments.length} • ${formatMinutesOnly(selectedSwapTargetSegmentsTotalMinutes)}`}
+                                                                </div>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => setShowSwapTargetSegmentsModal(false)}
+                                                                    className="px-3 py-1.5 rounded-md bg-blue-600 text-white text-xs font-medium hover:bg-blue-700"
+                                                                >
+                                                                    Готово
+                                                                </button>
+                                                            </div>
+                                                        </>
+                                                    )}
                                                 </div>
                                             </SimpleModal>
 
@@ -13871,6 +14310,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 const statusMeta = getSwapStatusMeta(req?.status);
                                                                 const periodLabel = formatSwapIntervalLabel(req);
                                                                 const isRespondingThis = Number(swapRespondingId) === Number(req?.id);
+                                                                const requestMode = String(req?.exchangeMode || '').toLowerCase();
+                                                                const isExchangeRequest = requestMode.includes('exchange') || (Array.isArray(req?.targetSegments) && req.targetSegments.length > 0);
                                                                 return (
                                                                     <div key={`swap-in-${req?.id}`} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
                                                                         <div className="flex flex-wrap items-start justify-between gap-2">
@@ -13882,8 +14323,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                     {' '}(<span className="font-semibold tabular-nums">{formatMinutesOnly(req?.summary?.totalMinutes ?? 0)}</span>)
                                                                                 </div>
                                                                                 <div className="text-xs text-slate-500 mt-0.5">
-                                                                                    Вы отдаете: <span className="font-semibold">{formatSwapSegmentsSummaryLabel(req?.swapDate || req?.startDate || '', req?.targetSegments)}</span>
-                                                                                    {' '}(<span className="font-semibold tabular-nums">{formatMinutesOnly(req?.exchangeSummary?.totalMinutes ?? 0)}</span>)
+                                                                                    {isExchangeRequest ? (
+                                                                                        <>
+                                                                                            Вы отдаете: <span className="font-semibold">{formatSwapSegmentsSummaryLabel(req?.swapDate || req?.startDate || '', req?.targetSegments)}</span>
+                                                                                            {' '}(<span className="font-semibold tabular-nums">{formatMinutesOnly(req?.exchangeSummary?.totalMinutes ?? 0)}</span>)
+                                                                                        </>
+                                                                                    ) : 'Встречная смена не требуется'}
                                                                                 </div>
                                                                             </div>
                                                                             <span className={`px-2 py-0.5 rounded-md border text-xs font-semibold ${statusMeta.className}`}>
@@ -13904,7 +14349,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                             <div className="mt-3 flex items-center gap-2">
                                                                                 <button
                                                                                     type="button"
-                                                                                    onClick={() => handleRespondSwapRequest(req?.id, 'accept')}
+                                                                                    onClick={() => handleRespondSwapRequest(req, 'accept')}
                                                                                     disabled={!!swapRespondingId}
                                                                                     className={`px-3 py-1.5 rounded-md text-xs font-medium ${
                                                                                         isRespondingThis
@@ -13916,7 +14361,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                 </button>
                                                                                 <button
                                                                                     type="button"
-                                                                                    onClick={() => handleRespondSwapRequest(req?.id, 'reject')}
+                                                                                    onClick={() => handleRespondSwapRequest(req, 'reject')}
                                                                                     disabled={!!swapRespondingId}
                                                                                     className={`px-3 py-1.5 rounded-md text-xs font-medium ${
                                                                                         isRespondingThis
@@ -13953,6 +14398,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             {swapOutgoingRequests.map(req => {
                                                                 const statusMeta = getSwapStatusMeta(req?.status);
                                                                 const periodLabel = formatSwapIntervalLabel(req);
+                                                                const requestMode = String(req?.exchangeMode || '').toLowerCase();
+                                                                const isExchangeRequest = requestMode.includes('exchange') || (Array.isArray(req?.targetSegments) && req.targetSegments.length > 0);
                                                                 return (
                                                                     <div key={`swap-out-${req?.id}`} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
                                                                         <div className="flex flex-wrap items-start justify-between gap-2">
@@ -13964,8 +14411,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                     {' '}(<span className="font-semibold tabular-nums">{formatMinutesOnly(req?.summary?.totalMinutes ?? 0)}</span>)
                                                                                 </div>
                                                                                 <div className="text-xs text-slate-500 mt-0.5">
-                                                                                    Получаете: <span className="font-semibold">{formatSwapSegmentsSummaryLabel(req?.swapDate || req?.startDate || '', req?.targetSegments)}</span>
-                                                                                    {' '}(<span className="font-semibold tabular-nums">{formatMinutesOnly(req?.exchangeSummary?.totalMinutes ?? 0)}</span>)
+                                                                                    {isExchangeRequest ? (
+                                                                                        <>
+                                                                                            Получаете: <span className="font-semibold">{formatSwapSegmentsSummaryLabel(req?.swapDate || req?.startDate || '', req?.targetSegments)}</span>
+                                                                                            {' '}(<span className="font-semibold tabular-nums">{formatMinutesOnly(req?.exchangeSummary?.totalMinutes ?? 0)}</span>)
+                                                                                        </>
+                                                                                    ) : 'Обычная замена: без встречной смены'}
                                                                                 </div>
                                                                             </div>
                                                                             <span className={`px-2 py-0.5 rounded-md border text-xs font-semibold ${statusMeta.className}`}>
