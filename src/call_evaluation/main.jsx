@@ -1215,9 +1215,10 @@ const App = ({ user, initialSelection }) => {
     const userId = user?.id;
     const userRole = user?.role;
     const userName = user?.name;
-    const normalizedRole = String(userRole || '').toLowerCase();
-    const isAdminRole = normalizedRole === 'admin';
-    const isSupervisorRole = normalizedRole === 'sv' || normalizedRole === 'supervisor';
+    const normalizedRole = String(userRole || '').trim().toLowerCase();
+    const canonicalRole = normalizedRole === 'supervisor' ? 'sv' : normalizedRole;
+    const isAdminRole = canonicalRole === 'admin' || canonicalRole === 'super_admin';
+    const isSupervisorRole = canonicalRole === 'sv';
     const canUseCalibration = isAdminRole || isSupervisorRole;
     const canManageCalibrationRooms = isAdminRole || isSupervisorRole;
     const [calls, setCalls] = useState([]);
