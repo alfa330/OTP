@@ -10566,7 +10566,13 @@ class Database:
         )
         target_segments = self._swap_serialize_intervals_with_day_offset(target_segments_intervals)
 
+        mode_raw = payload.get('mode')
+        mode = str(mode_raw).strip() if mode_raw is not None else ''
+        if not mode:
+            mode = 'shift_exchange_v2' if target_segments else 'shift_replacement_v1'
+
         return {
+            'mode': mode,
             'swapDate': swap_date,
             'endDate': end_date,
             'startTime': start_time,
@@ -11043,6 +11049,10 @@ class Database:
                 return value.isoformat()
             return None
 
+        exchange_mode = str(payload.get('mode') or '').strip()
+        if not exchange_mode:
+            exchange_mode = 'shift_exchange_v2' if target_segments else 'shift_replacement_v1'
+
         return {
             'id': int(request_id),
             'requester': {
@@ -11071,7 +11081,7 @@ class Database:
             'targetSegments': target_segments,
             'summary': requested_totals,
             'exchangeSummary': target_totals,
-            'exchangeMode': payload.get('mode'),
+            'exchangeMode': exchange_mode,
             'createdAt': _fmt_dt(created_at),
             'updatedAt': _fmt_dt(updated_at),
             'respondedAt': _fmt_dt(responded_at),
@@ -11113,8 +11123,19 @@ class Database:
         )
         return cursor.fetchone()
 
-    def get_shift_swap_candidates(self, requester_operator_id, swap_date, start_time, end_time, end_date=None):
+    def get_shift_swap_candidates(
+        self,
+        requester_operator_id,
+        swap_date,
+        start_time,
+        end_time,
+        end_date=None,
+        overlap_only=False,
+        non_overlap_only=False
+    ):
         requester_operator_id = int(requester_operator_id)
+        overlap_only = bool(overlap_only)
+        non_overlap_only = bool(non_overlap_only)
         interval = self._normalize_swap_time_range_for_date(
             swap_date=swap_date,
             start_time=start_time,
@@ -11238,7 +11259,10 @@ class Database:
                 next_day_shifts=op_next_day_shifts
             )
             overlap_intervals = self._swap_extract_interval(window_intervals, interval_start_min, interval_end_min)
-            if not overlap_intervals:
+            has_overlap = bool(overlap_intervals)
+            if overlap_only and not has_overlap:
+                continue
+            if non_overlap_only and has_overlap:
                 continue
 
             day_display_intervals = self._swap_extract_interval(window_intervals, 0, 1440)
@@ -11302,6 +11326,7 @@ class Database:
                 'is_next_day_off': op_is_next_day_off,
                 'matchStartsAtRequestEnd': bool(match_starts_at_request_end),
                 'matchEndsAtRequestStart': bool(match_ends_at_request_start),
+                'hasOverlap': bool(has_overlap),
                 'overlapMinutes': int(overlap_minutes),
                 'priorityScore': int(priority_score)
             })
@@ -11350,8 +11375,7 @@ class Database:
             target_segments,
             swap_date=swap_date_str
         )
-        if not target_requested_intervals:
-            raise ValueError("Выберите хотя бы одну смену выбранного оператора для обмена")
+        exchange_requested = bool(target_requested_intervals)
 
         request_comment_norm = None
         if request_comment is not None:
@@ -11443,31 +11467,41 @@ class Database:
 
             if not self._swap_is_interval_fully_covered(requester_window_intervals, interval_start_min, interval_end_min):
                 raise ValueError("Выбранный интервал должен полностью находиться внутри ваших смен")
+            if exchange_requested:
+                is_full_shift_interval = any(
+                    int(seg.get('start', -1)) == int(interval_start_min)
+                    and int(seg.get('end', -1)) == int(interval_end_min)
+                    for seg in (requester_window_intervals or [])
+                )
+                if not is_full_shift_interval:
+                    raise ValueError("Для обмена нужно выбрать полную смену без обрезки интервала")
 
             requested_intervals = self._swap_extract_interval(requester_window_intervals, interval_start_min, interval_end_min)
             requested_segments = self._swap_serialize_intervals_for_payload(requested_intervals)
             if not requested_segments:
                 raise ValueError("Не удалось сформировать сегменты смен для замены")
-            for seg in target_requested_intervals:
-                seg_start = int(seg.get('start', 0))
-                seg_end = int(seg.get('end', 0))
-                if not self._swap_is_interval_fully_covered(target_window_intervals, seg_start, seg_end):
-                    raise ValueError("У выбранного оператора больше нет одной из выбранных смен")
+            target_segments_norm = []
+            if exchange_requested:
+                for seg in target_requested_intervals:
+                    seg_start = int(seg.get('start', 0))
+                    seg_end = int(seg.get('end', 0))
+                    if not self._swap_is_interval_fully_covered(target_window_intervals, seg_start, seg_end):
+                        raise ValueError("У выбранного оператора больше нет одной из выбранных смен")
 
-            target_selected_intervals = self._merge_break_intervals(target_requested_intervals)
-            target_segments_norm = self._swap_serialize_intervals_for_payload(target_selected_intervals)
-            if not target_segments_norm:
-                raise ValueError("Не удалось обработать выбранные смены оператора")
+                target_selected_intervals = self._merge_break_intervals(target_requested_intervals)
+                target_segments_norm = self._swap_serialize_intervals_for_payload(target_selected_intervals)
+                if not target_segments_norm:
+                    raise ValueError("Не удалось обработать выбранные смены оператора")
 
-            target_remaining_intervals = self._swap_subtract_intervals(
-                target_window_intervals,
-                target_selected_intervals
-            )
-            if self._swap_interval_sets_overlap(target_remaining_intervals, requested_intervals):
-                raise ValueError("Выбранные смены оператора не покрывают интервал обмена")
+                target_remaining_intervals = self._swap_subtract_intervals(
+                    target_window_intervals,
+                    target_selected_intervals
+                )
+                if self._swap_interval_sets_overlap(target_remaining_intervals, requested_intervals):
+                    raise ValueError("Выбранные смены оператора не покрывают интервал обмена")
 
             payload = {
-                'mode': 'shift_exchange_v2',
+                'mode': 'shift_exchange_v2' if exchange_requested else 'shift_replacement_v1',
                 'swapDate': swap_date_str,
                 'endDate': request_end_date_obj.strftime('%Y-%m-%d'),
                 'interval': {

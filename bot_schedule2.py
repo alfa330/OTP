@@ -9866,12 +9866,15 @@ def get_shift_swap_candidates():
     """
     Вернуть операторов-кандидатов для обмена:
     - в совместимом направлении с текущим оператором (СМЗ и Основа взаимозаменяемы)
-    - у которых есть смена в выбранном интервале времени на выбранную дату
+    - в режиме обмена: только с пересечением по выбранному интервалу
+    - в режиме обычной замены: только без пересечения по выбранному интервалу
     Query params:
       swap_date=YYYY-MM-DD
       end_date=YYYY-MM-DD (optional, default: swap_date)
       start_time=HH:MM
       end_time=HH:MM
+      overlap_only=0|1 (optional, default 0)
+      non_overlap_only=0|1 (optional, default 0)
     """
     try:
         requester_id, _user_data, err = _work_schedule_operator_requester()
@@ -9882,6 +9885,12 @@ def get_shift_swap_candidates():
         end_date = request.args.get('end_date')
         start_time = request.args.get('start_time')
         end_time = request.args.get('end_time')
+        overlap_only_raw = request.args.get('overlap_only', '0')
+        non_overlap_only_raw = request.args.get('non_overlap_only', '0')
+        overlap_only = str(overlap_only_raw).strip().lower() in ('1', 'true', 'yes', 'y')
+        non_overlap_only = str(non_overlap_only_raw).strip().lower() in ('1', 'true', 'yes', 'y')
+        if overlap_only:
+            non_overlap_only = False
         if not swap_date or not start_time or not end_time:
             return jsonify({"error": "swap_date, start_time and end_time are required"}), 400
 
@@ -9890,14 +9899,18 @@ def get_shift_swap_candidates():
             swap_date=swap_date,
             end_date=end_date,
             start_time=start_time,
-            end_time=end_time
+            end_time=end_time,
+            overlap_only=overlap_only,
+            non_overlap_only=non_overlap_only
         )
         return jsonify({
             "candidates": candidates,
             "swap_date": swap_date,
             "end_date": end_date or swap_date,
             "start_time": start_time,
-            "end_time": end_time
+            "end_time": end_time,
+            "overlap_only": overlap_only,
+            "non_overlap_only": non_overlap_only
         }), 200
 
     except ValueError as e:
