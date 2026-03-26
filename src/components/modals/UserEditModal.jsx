@@ -1,5 +1,6 @@
 ﻿import React, { useEffect, useState } from 'react';
 import FaIcon from '../common/FaIcon';
+import { isAdminLikeRole as isAdminLikeRoleFn } from '../../utils/roles';
 
 const PERIOD_STATUS_VALUES = new Set(['bs', 'sick_leave', 'annual_leave', 'dismissal']);
 const DISMISSAL_REASON_WITH_END_DATE = 'Б/С на летний период';
@@ -232,7 +233,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     const getRoleValue = (draft) => String(draft?.role || userToEdit?.role || '').trim().toLowerCase();
     const isTrainerDraft = (draft) => getRoleValue(draft) === 'trainer';
     const isOperatorDraft = (draft) => getRoleValue(draft) === 'operator';
-    const isAdminLikeRequester = user?.role === 'admin' || user?.role === 'super_admin';
+    const isAdminLikeRequester = isAdminLikeRoleFn(user?.role);
     const normalizeModalStatusValue = (value) => {
         const status = String(value ?? '').trim();
         if (status === 'unpaid_leave') return 'bs';

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import FaIcon from '../common/FaIcon';
+import { normalizeRole, isAdminLikeRole, roleIsAny } from '../../utils/roles';
 
 const QUESTION_TYPES = [
     { value: 'single', label: 'Один вариант' },
@@ -11,7 +12,7 @@ const QUESTION_TYPES = [
 const OTHER_ANSWER_MAX_LENGTH = 500;
 const QUESTION_TYPE_OTHER_ONLY = 'other_only';
 
-const isManagerRole = (role) => ['admin', 'sv', 'supervisor', 'trainer'].includes(String(role || '').trim().toLowerCase());
+const isManagerRole = (role) => isAdminLikeRole(role) || roleIsAny(role, ['sv', 'trainer']);
 const questionTypeLabel = (type) => QUESTION_TYPES.find((item) => item.value === type)?.label || type;
 const parseWeeksInput = (value) => {
     if (value === '' || value == null) return null;
@@ -138,7 +139,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
     const onSurveyProgressChangedRef = useRef(onSurveyProgressChanged);
 
     const canManage = isManagerRole(user?.role);
-    const isOperator = String(user?.role || '').toLowerCase() === 'operator';
+    const isOperator = normalizeRole(user?.role) === 'operator';
     const isRepeatMode = repeatSourceSurveyId != null;
 
     useEffect(() => { showToastRef.current = showToast; }, [showToast]);

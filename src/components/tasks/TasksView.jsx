@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import { RefreshCw } from 'lucide-react';
+import { normalizeRole, isAdminLikeRole, isSupervisorRole } from '../../utils/roles';
 
 /* ─── Google Fonts ─── */
 const fontLink = document.createElement('link');
@@ -932,6 +933,8 @@ const SkeletonList = ({ count = 4 }) => (
 
 /* ─── Main Component ─── */
 const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
+  const currentUserRole = normalizeRole(user?.role);
+  const canAccessTasks = isAdminLikeRole(currentUserRole) || isSupervisorRole(currentUserRole);
   const [tasks,               setTasks]               = useState([]);
   const [recipients,          setRecipients]          = useState([]);
   const [isTasksLoading,      setIsTasksLoading]      = useState(false);
@@ -994,10 +997,10 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
   }, [apiBaseUrl, buildHeaders, notify]);
 
   useEffect(() => {
-    if (!user || !['admin', 'sv'].includes(user.role)) return;
+    if (!user || !canAccessTasks) return;
     fetchRecipients();
     fetchTasks();
-  }, [user, fetchRecipients, fetchTasks]);
+  }, [user, canAccessTasks, fetchRecipients, fetchTasks]);
 
   // Keyboard: Ctrl/Cmd+K → focus search
   useEffect(() => {
@@ -1186,7 +1189,7 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     const assigneeId = Number(task?.assignee?.id || 0);
     const creatorId  = Number(task?.creator?.id  || 0);
     const isAssignee = assigneeId === currentUserId;
-    const canReview  = !isAssignee && (user?.role === 'admin' || creatorId === currentUserId || user?.role === 'sv');
+    const canReview  = !isAssignee && (isAdminLikeRole(currentUserRole) || creatorId === currentUserId || isSupervisorRole(currentUserRole));
     const s = task?.status;
     const btns = [];
     if (isAssignee && (s === 'assigned' || s === 'returned'))
@@ -1200,7 +1203,7 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     if (canReview && s === 'accepted')
       btns.push({ action: 'reopened', label: 'Возобновить', cls: 'tv-btn-ghost' });
     return btns;
-  }, [currentUserId, user?.role]);
+  }, [currentUserId, currentUserRole]);
 
   /* ── Render helpers ── */
   const renderTaskList = (list, emptyTitle, emptySub) => {
@@ -1279,7 +1282,7 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     );
   };
 
-  if (!user || !['admin', 'sv'].includes(user.role)) return null;
+  if (!user || !canAccessTasks) return null;
 
   const hasActiveFilters = searchQuery || filterStatus || filterTag;
 
