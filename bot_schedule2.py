@@ -13368,17 +13368,6 @@ def sync_schedule_statuses_to_user_statuses_job():
 
 # === Главный запуск =============================================================================================
 if __name__ == '__main__':
-    # Инициализация администратора
-    if not db.get_user(name='Сауле Молдагалиева'):
-        db.create_user(
-            telegram_id=super_admin_id if super_admin_id != 0 else None,
-            name='Сауле Молдагалиева',
-            role='super_admin',
-            rate=1.0,
-            login=super_admin_login,
-            password=super_admin_password
-        )
-        logging.info("Super Admin created")
     
     # Запускаем Flask в отдельном потоке
     flask_thread = threading.Thread(target=run_flask, daemon=True)
