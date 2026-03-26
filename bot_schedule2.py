@@ -1466,8 +1466,17 @@ def login():
 
         user = db.get_user_by_login(login_value)
         if user and db.verify_password(user[0], password):
+            user_profile = db.get_user(id=user[0])
+            if not user_profile:
+                return jsonify({"error": "Invalid credentials"}), 401
+
+            user_status = str(user_profile[11] or '').strip().lower()
+            if user_status in ('fired', 'dismissal'):
+                db.revoke_all_user_sessions(user_id=user[0])
+                return jsonify({"error": "User account is inactive"}), 403
+
             session_id = str(uuid.uuid4())
-            access_token = _build_access_token(user, session_id)
+            access_token = _build_access_token(user_profile, session_id)
             refresh_token = _build_refresh_token(user[0], session_id)
             db.create_user_session(
                 session_id=session_id,
@@ -1478,7 +1487,7 @@ def login():
                 ip_address=_client_ip()
             )
             _set_request_auth_context(user[0])
-            payload = _get_user_payload(user)
+            payload = _get_user_payload(user_profile)
             response = jsonify({
                 "status": "success",
                 "user": payload,
