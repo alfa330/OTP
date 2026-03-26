@@ -722,7 +722,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         // ====== Upload-per-day (preview) ======
         function openUploadForDay(day) {
-            if (user?.role === 'admin' && !selectedSvId) {
+            if ((user?.role === 'admin' || user?.role === 'super_admin') && !selectedSvId) {
             fallbackToast('Выберите супервайзера перед загрузкой файла', 'error');
             return;
             }
@@ -740,7 +740,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             fallbackToast('Выберите файл', 'error');
             return;
             }
-            if (user?.role === 'admin' && !selectedSvId) {
+            if ((user?.role === 'admin' || user?.role === 'super_admin') && !selectedSvId) {
             fallbackToast('Выберите супервайзера перед загрузкой файла', 'error');
             return;
             }
@@ -788,7 +788,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             fallbackToast('Нет данных для сохранения', 'error');
             return;
             }
-            if (user?.role === 'admin' && !selectedSvId) {
+            if ((user?.role === 'admin' || user?.role === 'super_admin') && !selectedSvId) {
             fallbackToast('Выберите супервайзера перед сохранением', 'error');
             return;
             }
@@ -1942,7 +1942,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
 
             // If admin requested per-SV report, ensure a supervisor is selected
-            if (user.role === 'admin' && reportScope === 'by_sv' && !selectedSvId) {
+            if ((user.role === 'admin' || user.role === 'super_admin') && reportScope === 'by_sv' && !selectedSvId) {
             fallbackToast('Выберите супервайзера для отчёта', 'error');
             return;
             }
@@ -2009,7 +2009,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         }
 
         // ======= RENDER =======
-        const isAdminWithoutSupervisorSelected = user?.role === 'admin' && !selectedSvId;
+        const isAdminWithoutSupervisorSelected = (user?.role === 'admin' || user?.role === 'super_admin') && !selectedSvId;
         return (
             <div className="bg-white p-5 rounded-xl shadow-md">
             <div className="flex items-center justify-between mb-4 gap-4">
@@ -14336,7 +14336,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </button>
                                             )}
 
-                                            {(user?.role === 'admin' || user?.role === 'sv') && (
+                                            {(user?.role === 'admin' || user?.role === 'super_admin' || user?.role === 'sv') && (
                                                 <button
                                                     onClick={() => {
                                                         setShowPlannerTopActionsMenu(false);
@@ -17471,7 +17471,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 </SimpleModal>
 
                 <SimpleModal
-                    open={!!showSwapJournalModal && (user?.role === 'admin' || user?.role === 'sv')}
+                    open={!!showSwapJournalModal && (user?.role === 'admin' || user?.role === 'super_admin' || user?.role === 'sv')}
                     onClose={() => setShowSwapJournalModal(false)}
                     panelClassName="w-[calc(100vw-2rem)] max-w-[1200px]"
                 >
@@ -20038,7 +20038,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const ContestsApp = ({ user: currentUser, operators = [], directions = [] }) => {
             const { useState, useEffect } = React;
             const [activeTab, setActiveTab] = useState('baiga');
-            const isAdmin = currentUser?.role === 'admin';
+            const isAdmin = currentUser?.role === 'admin' || currentUser?.role === 'super_admin';
             const isOperatorOrSv = currentUser?.role === 'operator' || currentUser?.role === 'sv';
             const [toasts, setToasts] = useState([]);
 
@@ -21079,10 +21079,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         // ── Flatten + enrich with parsed device ──────────────────────────────────
         const allRows = React.useMemo(
-            () => (adminSessions || []).map((session) => ({
-                ...session,
-                device: parseUA(session.user_agent)
-            })),
+            () => (adminSessions || []).map((session) => {
+                const normalizedRole = session?.user_role === 'super_admin' ? 'admin' : session?.user_role;
+                return {
+                    ...session,
+                    user_role: normalizedRole,
+                    user_role_original: session?.user_role || normalizedRole,
+                    device: parseUA(session.user_agent)
+                };
+            }),
             [adminSessions, parseUA]
         );
 
@@ -21701,6 +21706,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
 
             const [user, setUser] = useState(null);
+            const isSuperAdmin = user?.role === 'super_admin';
+            const isAdminLikeRole = user?.role === 'admin' || user?.role === 'super_admin';
             const [isAuthInitializing, setIsAuthInitializing] = useState(true);
             const [showAuthEntranceSplash, setShowAuthEntranceSplash] = useState(false);
             const [showOrazAitSplash, setShowOrazAitSplash] = useState(false);
@@ -21765,6 +21772,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [selectedMonth, setSelectedMonth] = useState(() => getStoredValue('selectedMonth', currentMonth));
             const [users, setUsers] = useState([]);
             const [adminUsers, setAdminUsers] = useState([]);
+            const [systemAdmins, setSystemAdmins] = useState([]);
             const [trainerUsers, setTrainerUsers] = useState([]);
             const [adminSessions, setAdminSessions] = useState([]);
             const [adminSessionsSummary, setAdminSessionsSummary] = useState({
@@ -21931,9 +21939,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [isEmployeesClosing, setIsEmployeesClosing] = useState(false);
             const [activeTab, setActiveTab] = useState("active");
             const [activeUserTab, setActiveUserTab] = useState("active");
+            const [activeAdminTab, setActiveAdminTab] = useState("active");
             const [activeOperatorsTab, setActiveOperatorsTab] = useState("active");
             const [activeSvTab, setActiveSvTab] = useState("active");
             const [activeTrainerTab, setActiveTrainerTab] = useState("active");
+            const [dismissingAdminId, setDismissingAdminId] = useState(null);
             const [employeeTableSection, setEmployeeTableSection] = useState('general');
             const EMPLOYEE_TABLE_SECTIONS = [
                 { key: 'general', label: 'Общее', icon: 'fa-solid fa-layer-group' },
@@ -23831,7 +23841,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return;
                 }
 
-                if (user.role === 'admin') setView('sv_list');
+                if (user.role === 'admin' || user.role === 'super_admin') setView('sv_list');
                 else if (user.role === 'sv' || user.role === 'supervisor') setView('operators');
                 else setView('hours');
             }, [user?.id, user?.role]);
@@ -24994,6 +25004,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             const nextUsers = Array.isArray(data.users) ? data.users : [];
                             setAdminUsers(nextUsers);
                             setUsers(nextUsers.filter((u) => String(u?.role || '').toLowerCase() === 'operator'));
+                            setSystemAdmins(nextUsers.filter((u) => String(u?.role || '').toLowerCase() === 'admin'));
                             setTrainerUsers(nextUsers.filter((u) => String(u?.role || '').toLowerCase() === 'trainer'));
                         } else {
                             showToast(data.error || 'Failed to fetch users', 'error');
@@ -25008,7 +25019,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
 
             const fetchAdminSessions = useCallback(async ({ reset = true, query } = {}) => {
-                if (!user || user.role !== 'admin') return;
+                if (!user || (user.role !== 'admin' && user.role !== 'super_admin')) return;
 
                 const normalizedQuery = typeof query === 'string' ? query.trim() : adminSessionsQuery;
                 const nextOffset = reset ? 0 : adminSessionsOffset;
@@ -25269,7 +25280,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         const isCreatedOperator = createdRole === 'operator';
                         const createdRoleLabel = createdRole === 'trainer'
                             ? 'Тренер'
-                            : (createdRole === 'sv' || createdRole === 'supervisor' ? 'Супервайзер' : 'Оператор');
+                            : createdRole === 'admin'
+                                ? 'Админ'
+                                : (createdRole === 'sv' || createdRole === 'supervisor' ? 'Супервайзер' : 'Оператор');
                         const duplicateUsersPool = (adminUsers && adminUsers.length > 0) ? adminUsers : users;
                         if (!newName) {
                             showToast('Имя обязательно.', 'error');
@@ -25794,7 +25807,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             const fetchSurveysPendingBadgeCount = async () => {
                 const role = String(user?.role || '').trim().toLowerCase();
-                const roleHasSurveyAccess = ['admin', 'sv', 'supervisor', 'trainer', 'operator'].includes(role);
+                const roleHasSurveyAccess = ['super_admin', 'admin', 'sv', 'supervisor', 'trainer', 'operator'].includes(role);
                 if (!user?.id || !roleHasSurveyAccess) {
                     if (isMounted.current) setPendingSurveysBadgeCount(0);
                     return;
@@ -26456,7 +26469,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return;
                 }
 
-                if (!user || user.role !== 'admin') {
+                if (!user || (user.role !== 'admin' && user.role !== 'super_admin')) {
                     showToast('Только администратор может повышать сотрудников', 'error');
                     return;
                 }
@@ -26503,7 +26516,53 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     if (isMounted.current) setPromotingUserId(null);
                 }
             }, [API_BASE_URL, fetchUsers, showToast, user]);
-            
+
+            const dismissAdminUser = useCallback(async (targetUser) => {
+                const targetUserId = Number(targetUser?.id);
+                if (!Number.isFinite(targetUserId)) {
+                    showToast('Некорректный админ', 'error');
+                    return;
+                }
+                if (!user || user.role !== 'super_admin') {
+                    showToast('Только супер админ может увольнять админов', 'error');
+                    return;
+                }
+                const targetUserName = String(targetUser?.name || `#${targetUserId}`).trim();
+                const currentStatus = String(targetUser?.status || '').trim().toLowerCase();
+                if (currentStatus === 'fired' || currentStatus === 'dismissal') {
+                    showToast(`"${targetUserName}" уже уволен`, 'warning');
+                    return;
+                }
+                const confirmed = window.confirm(`Уволить админа "${targetUserName}"?`);
+                if (!confirmed) return;
+
+                setDismissingAdminId(targetUserId);
+                try {
+                    const response = await axios.post(
+                        `${API_BASE_URL}/api/admin/update_user`,
+                        { user_id: targetUserId, field: 'status', value: 'fired' },
+                        {
+                            headers: withAccessTokenHeader({
+                                'X-API-Key': user.apiKey,
+                                'X-User-Id': user.id
+                            })
+                        }
+                    );
+                    const data = response?.data || {};
+                    if (data.status !== 'success') {
+                        showToast(data.error || 'Не удалось уволить админа', 'error');
+                        return;
+                    }
+                    showToast(`"${targetUserName}" уволен`, 'success');
+                    await fetchUsers();
+                } catch (err) {
+                    console.error('Dismiss admin error:', err);
+                    showToast(err.response?.data?.error || 'Не удалось уволить админа', 'error');
+                } finally {
+                    if (isMounted.current) setDismissingAdminId(null);
+                }
+            }, [API_BASE_URL, fetchUsers, showToast, user]);
+             
             const handleLogin = async () => {
                 if (!login.trim() || !password.trim()) {
                     setErrorMessage('Пожалуйста, введите логин и пароль');
@@ -26580,6 +26639,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setBirthdayBannerDismissed(false);
                     setUser(null);
                     setSvList([]);
+                    setSystemAdmins([]);
                     setSvData(null);
                     setOperatorData(null);
                     setProfileData(null);
@@ -26712,6 +26772,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 (u.supervisor_name || '').toLowerCase().includes(searchQuery.toLowerCase())
             );
 
+            const filteredAdminUsers = systemAdmins.filter(u =>
+                (u.name || '').toLowerCase().includes(searchQuery.toLowerCase())
+            );
+
             const toggleManageUsersSelection = useCallback((userId) => {
                 const numericId = Number(userId);
                 if (!Number.isFinite(numericId)) return;
@@ -26821,7 +26885,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, [users]);
 
             useEffect(() => {
-                if (view !== 'manage_users') {
+                if (view !== 'manage_users' && view !== 'employees') {
                     clearManageUsersSelection();
                 }
             }, [view, clearManageUsersSelection]);
@@ -27366,7 +27430,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
 
             const startQrScanner = async () => {
-                if (!user || (user.role !== 'admin' && user.role !== 'sv')) return;
+                if (!user || (user.role !== 'admin' && user.role !== 'super_admin' && user.role !== 'sv')) return;
                 setQrScannerError('');
                 setQrApproveResult('');
 
@@ -27447,7 +27511,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
 
             const approveSensitiveQrAccess = async () => {
-                if (!user || (user.role !== 'admin' && user.role !== 'sv')) return;
+                if (!user || (user.role !== 'admin' && user.role !== 'super_admin' && user.role !== 'sv')) return;
                 const token = extractSensitiveToken(qrApproveInput);
                 if (!token) {
                     setQrApproveResult('Укажите QR токен для подтверждения');
@@ -27510,7 +27574,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             useEffect(() => {
                 if (!user || !user.id) return;
 
-                if (user.role === 'admin') {
+                if (user.role === 'admin' || user.role === 'super_admin') {
                     fetchSvList();
                     fetchDirections();
                     fetchUsers();
@@ -27564,7 +27628,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, [selectedSvId, selectedReportMonth, selectedMonth]);
 
             useEffect(() => {
-                if (user?.role === 'admin' && view === 'admin_sessions') {
+                if ((user?.role === 'admin' || user?.role === 'super_admin') && view === 'admin_sessions') {
                     refreshAdminSessions();
                 }
             }, [user?.id, user?.role, view]);
@@ -27731,8 +27795,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     ? operatorData.evaluations.reduce((sum, eval1) => sum + (parseFloat(eval1.score) || 0), 0) / operatorData.evaluations.length
                     : 0;
             const callEvaluationIframeUrl = `${APP_BASE_URL}call_evaluation.html`;
-            const isCallEvaluationView = view === 'call_evaluation' && (user.role === 'admin' || user.role === 'sv' || user.role === 'supervisor');
-            const canSeeCallEvaluation = user.role === 'admin' || user.role === 'sv' || user.role === 'supervisor';
+            const isCallEvaluationView = view === 'call_evaluation' && (user.role === 'admin' || user.role === 'super_admin' || user.role === 'sv' || user.role === 'supervisor');
+            const canSeeCallEvaluation = user.role === 'admin' || user.role === 'super_admin' || user.role === 'sv' || user.role === 'supervisor';
             const birthdayBannerVisible = !isCallEvaluationView && !birthdayBannerDismissed && Array.isArray(birthdaysToday) && birthdaysToday.length > 0;
             const birthdayBannerNames = (birthdaysToday || []).map((b) => {
                 const name = String(b?.name || 'Сотрудник').trim();
@@ -27841,13 +27905,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                               </span>
                             </h1>
                             <ul ref={sidebarMenuScrollRef} className={`space-y-2 flex-1 min-h-0 sidebar-menu-scroll`}>
-                                {user.role === 'admin' && (
+                                {isAdminLikeRole && (
                                     <>
                                         <li className="relative" ref={sidebarEmployeesRef}>
                                             <button
                                                 onClick={handleToggleEmployeesDropdown}
                                                 className={`group w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 relative ${
-                                                    ['sv_list', 'manage_users', 'manage_trainers'].includes(view) ? 'bg-blue-700' : ''
+                                                    ['sv_list', 'manage_users', 'employees', 'manage_trainers', 'manage_admins'].includes(view) ? 'bg-blue-700' : ''
                                                 }`}
                                                 aria-expanded={showSidebarEmployeesDropdown}
                                                 aria-haspopup="menu"
@@ -27873,10 +27937,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <div className="border-t border-gray-200" />
 
                                                     <button
-                                                        onClick={() => { setView('manage_users'); setMobileMenuOpen(false); handleToggleEmployeesDropdown(true); }}
-                                                        className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'manage_users' ? 'bg-gray-100 font-medium' : ''}`}
+                                                        onClick={() => { setView(isSuperAdmin ? 'employees' : 'manage_users'); setMobileMenuOpen(false); handleToggleEmployeesDropdown(true); }}
+                                                        className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${(view === 'manage_users' || view === 'employees') ? 'bg-gray-100 font-medium' : ''}`}
                                                     >
-                                                        <FaIcon className="fas fa-user-cog mr-2"></FaIcon> Операторы
+                                                        <FaIcon className="fas fa-user-cog mr-2"></FaIcon> {isSuperAdmin ? 'Сотрудники' : 'Операторы'}
                                                     </button>
 
                                                     <div className="border-t border-gray-200" />
@@ -27887,6 +27951,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     >
                                                         <FaIcon className="fas fa-book mr-2"></FaIcon> Тренеры
                                                     </button>
+
+                                                    {isSuperAdmin && (
+                                                        <>
+                                                            <div className="border-t border-gray-200" />
+                                                            <button
+                                                                onClick={() => { setView('manage_admins'); setMobileMenuOpen(false); handleToggleEmployeesDropdown(true); }}
+                                                                className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'manage_admins' ? 'bg-gray-100 font-medium' : ''}`}
+                                                            >
+                                                                <FaIcon className="fas fa-user-shield mr-2"></FaIcon> Админы
+                                                            </button>
+                                                        </>
+                                                    )}
                                                 </div>
                                             )}
                                         </li>
@@ -28250,7 +28326,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             />
                         </div>
                         )}
-                        {user.role === 'admin' && (
+                        {isAdminLikeRole && (
                         <>
                             {view === 'qr_access' && (
                                 <>
@@ -28998,10 +29074,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 />
                                 )}
 
-                                {view === 'manage_users' && (
+                                {(view === 'manage_users' || view === 'employees') && (
                                 <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                     <div className="flex items-center justify-between mb-6">
-                                    <h2 className="text-2xl font-semibold text-gray-800">Операторы</h2>
+                                    <h2 className="text-2xl font-semibold text-gray-800">{isSuperAdmin ? 'Сотрудники' : 'Операторы'}</h2>
 
                                     <div className="flex items-center gap-3">
                                         <button
@@ -29329,6 +29405,182 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     })()
                                     )}
                                     {renderEmployeeTableSectionSwitcher()}
+                                </div>
+                                )}
+                                {view === 'manage_admins' && isSuperAdmin && (
+                                <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
+                                    <div className="flex items-center justify-between mb-6">
+                                        <h2 className="text-2xl font-semibold text-gray-800">Админы</h2>
+
+                                        <button
+                                            onClick={() => {
+                                                setUserToEdit({
+                                                    name: "",
+                                                    rate: 1.0,
+                                                    direction_id: "",
+                                                    hire_date: "",
+                                                    supervisor_id: "",
+                                                    status: "working",
+                                                    role: "admin",
+                                                });
+                                                setShowUserEditModal(true);
+                                            }}
+                                            className="inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition"
+                                        >
+                                            <FaIcon className="fas fa-user-shield"></FaIcon> Добавить админа
+                                        </button>
+                                    </div>
+
+                                    <div className="flex flex-wrap gap-3 mb-6">
+                                        {(() => {
+                                            const allAdmins = Array.isArray(systemAdmins) ? systemAdmins : [];
+                                            return USER_STATUS_FILTER_TABS.map((tab) => {
+                                                const count = allAdmins.filter((u) => isEmployeeVisibleByStatusTab(u?.status, tab.key)).length;
+                                                const isActive = activeAdminTab === tab.key;
+                                                return (
+                                                    <button
+                                                        key={tab.key}
+                                                        onClick={() => setActiveAdminTab(tab.key)}
+                                                        className={`px-4 py-2 rounded-lg font-medium text-sm transition ${isActive ? tab.activeClass : tab.idleClass}`}
+                                                    >
+                                                        {tab.label}
+                                                        <span className={`ml-2 inline-flex items-center justify-center px-2 py-0.5 text-xs rounded font-medium ${isActive ? 'bg-white/90 text-gray-800' : 'bg-white text-gray-700'}`}>
+                                                            {count}
+                                                        </span>
+                                                    </button>
+                                                );
+                                            });
+                                        })()}
+                                    </div>
+
+                                    {isAdminDataLoading ? (
+                                        <p className="text-center text-gray-600">Загрузка...</p>
+                                    ) : (
+                                        (() => {
+                                            const filteredByStatus = (systemAdmins || []).filter((u) => isEmployeeVisibleByStatusTab(u?.status, activeAdminTab));
+                                            if (filteredByStatus.length === 0) {
+                                                return <p className="text-center text-gray-600">Админы не найдены.</p>;
+                                            }
+
+                                            const searched = filteredAdminUsers.filter((u) => filteredByStatus.includes(u));
+                                            const sortedAdmins = [...searched].sort((a, b) => compareUsersByField(a, b, usersSortField));
+                                            if (sortedAdmins.length === 0) {
+                                                return <p className="text-center text-gray-600">Админы по запросу не найдены.</p>;
+                                            }
+
+                                            return (
+                                                <div className="overflow-x-auto rounded-lg border border-gray-200">
+                                                    <div className="mb-4">
+                                                        <input
+                                                            type="text"
+                                                            placeholder="Поиск по имени админа..."
+                                                            value={searchQuery}
+                                                            onChange={(e) => setSearchQuery(e.target.value)}
+                                                            className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                                        />
+                                                    </div>
+
+                                                    <table className="min-w-full table-fixed border rounded-lg w-full">
+                                                        <colgroup>
+                                                            <col style={{ width: "40%" }} />
+                                                            <col style={{ width: "25%" }} />
+                                                            <col style={{ width: "20%" }} />
+                                                            <col style={{ width: "15%" }} />
+                                                        </colgroup>
+                                                        <thead className="bg-gray-50">
+                                                            <tr>
+                                                                <th
+                                                                    onClick={() => handleUsersSort('name')}
+                                                                    className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer"
+                                                                >
+                                                                    Имя {getUsersSortIcon('name')}
+                                                                </th>
+                                                                <th
+                                                                    onClick={() => handleUsersSort('status')}
+                                                                    className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer"
+                                                                >
+                                                                    Статус {getUsersSortIcon('status')}
+                                                                </th>
+                                                                <th
+                                                                    onClick={() => handleUsersSort('hire_date')}
+                                                                    className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer"
+                                                                >
+                                                                    Дата найма {getUsersSortIcon('hire_date')}
+                                                                </th>
+                                                                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">
+                                                                    Действия
+                                                                </th>
+                                                            </tr>
+                                                        </thead>
+                                                        <tbody className="bg-white divide-y divide-gray-200">
+                                                            {sortedAdmins.map((u) => {
+                                                                const normalizedStatus = String(u?.status || '').trim().toLowerCase();
+                                                                const isDismissed = normalizedStatus === 'fired' || normalizedStatus === 'dismissal';
+                                                                return (
+                                                                    <tr key={u.id} className="transition-colors duration-200 hover:bg-gray-50">
+                                                                        <td className="px-6 py-4">
+                                                                            <div className="flex items-center gap-3 min-w-0">
+                                                                                <div className="h-9 w-9 rounded-full overflow-hidden border border-slate-200 bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-xs font-semibold text-white shrink-0">
+                                                                                    {u.avatar_url ? (
+                                                                                        <AvatarImage src={u.avatar_url} alt={u.name || 'avatar'} className="h-full w-full object-cover" />
+                                                                                    ) : (
+                                                                                        (u.name || 'U').charAt(0).toUpperCase()
+                                                                                    )}
+                                                                                </div>
+                                                                                <span className="truncate">{u.name}</span>
+                                                                            </div>
+                                                                        </td>
+                                                                        <td className="px-6 py-4">{renderEmployeeStatusBadge(u.status, u)}</td>
+                                                                        <td className="px-6 py-4">
+                                                                            {u.hire_date
+                                                                                ? (() => {
+                                                                                    const [day, month, year] = String(u.hire_date).split("-");
+                                                                                    const date = new Date(`${year}-${month}-${day}`);
+                                                                                    return date.toLocaleDateString("ru-RU");
+                                                                                })()
+                                                                                : "-"}
+                                                                        </td>
+                                                                        <td className="px-6 py-4 text-right">
+                                                                            <div className="flex items-center justify-end gap-2">
+                                                                                <button
+                                                                                    onClick={() => {
+                                                                                        setUserToEdit(u);
+                                                                                        setShowUserEditModal(true);
+                                                                                    }}
+                                                                                    className="inline-flex items-center gap-2 bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition-all duration-200"
+                                                                                >
+                                                                                    <FaIcon className="fas fa-edit"></FaIcon> Править
+                                                                                </button>
+                                                                                <button
+                                                                                    onClick={() => dismissAdminUser(u)}
+                                                                                    disabled={isDismissed || dismissingAdminId === Number(u.id)}
+                                                                                    className={`inline-flex items-center gap-2 px-3 py-1 rounded-lg text-sm transition-all duration-200 ${
+                                                                                        isDismissed
+                                                                                            ? 'bg-gray-200 text-gray-600 cursor-not-allowed'
+                                                                                            : 'bg-red-600 text-white hover:bg-red-700'
+                                                                                    } ${(dismissingAdminId === Number(u.id)) ? 'opacity-60 cursor-not-allowed' : ''}`}
+                                                                                >
+                                                                                    {dismissingAdminId === Number(u.id) ? (
+                                                                                        <>
+                                                                                            <FaIcon className="fas fa-spinner fa-spin"></FaIcon> Увольняю...
+                                                                                        </>
+                                                                                    ) : (
+                                                                                        <>
+                                                                                            <FaIcon className="fas fa-user-slash"></FaIcon> {isDismissed ? 'Уволен' : 'Уволить'}
+                                                                                        </>
+                                                                                    )}
+                                                                                </button>
+                                                                            </div>
+                                                                        </td>
+                                                                    </tr>
+                                                                );
+                                                            })}
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                            );
+                                        })()
+                                    )}
                                 </div>
                                 )}
                                 {view === 'manage_trainers' && (

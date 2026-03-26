@@ -232,6 +232,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     const getRoleValue = (draft) => String(draft?.role || userToEdit?.role || '').trim().toLowerCase();
     const isTrainerDraft = (draft) => getRoleValue(draft) === 'trainer';
     const isOperatorDraft = (draft) => getRoleValue(draft) === 'operator';
+    const isAdminLikeRequester = user?.role === 'admin' || user?.role === 'super_admin';
     const normalizeModalStatusValue = (value) => {
         const status = String(value ?? '').trim();
         if (status === 'unpaid_leave') return 'bs';
@@ -276,7 +277,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         const defaults = {
         rate: base.rate ?? 1.0,
         direction_id: isTrainerBase ? "" : (base.direction_id ?? ""),
-        supervisor_id: isTrainerBase ? "" : (base.supervisor_id ?? (user?.role === 'admin' ? "" : (user?.id ?? ""))),
+        supervisor_id: isTrainerBase ? "" : (base.supervisor_id ?? (isAdminLikeRequester ? "" : (user?.id ?? ""))),
         status: initialStatus,
         gender: base.gender ?? "",
         birth_date: base.birth_date ?? "",
@@ -525,7 +526,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         birth_date: "",
         gender: "",
         direction_id: "",
-        supervisor_id: isTrainerCreateRole ? "" : (user?.role === 'admin' ? "" : (user?.id ?? "")),
+        supervisor_id: isTrainerCreateRole ? "" : (isAdminLikeRequester ? "" : (user?.id ?? "")),
         status: "working",
         role: createRole,
         status_period_start_date: todayInputDate(),
@@ -580,7 +581,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         return;
         }
 
-        if (isCreateMode && isOperatorUser && user?.role === 'admin' && !editedUser.supervisor_id) {
+        if (isCreateMode && isOperatorUser && isAdminLikeRequester && !editedUser.supervisor_id) {
         setModalError("Супервайзер обязателен.");
         return;
         }
@@ -1346,7 +1347,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     </div>
                     )}
 
-                    {user?.role === "admin" && !isTrainerDraft(editedUser) && (
+                    {isAdminLikeRequester && isOperatorDraft(editedUser) && (
                     <div>
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Супервайзер</label>
                         <select
@@ -1381,7 +1382,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         </select>
                     </div>
 
-                    {!isTrainerDraft(editedUser) && (
+                    {isOperatorDraft(editedUser) && (
                     <div>
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Направление</label>
                         <select
@@ -1400,6 +1401,8 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     </div>
                     )}
 
+                    {isOperatorDraft(editedUser) && (
+                    <>
                     <div>
                         <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
                         <input
@@ -1412,8 +1415,6 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         <span>Наличие прокси</span>
                         </label>
                     </div>
-
-                    {isOperatorDraft(editedUser) && (
                     <div>
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">SIP номер</label>
                         <input
@@ -1424,6 +1425,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         disabled={isLoading || !!createdCredentials}
                         />
                     </div>
+                    </>
                     )}
                     </>
                 )}
@@ -1891,9 +1893,9 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
 
                         {userToEdit?.role !== "sv" && (
                             <>
-                            {user?.role === "admin" && (
+                            {isAdminLikeRequester && isOperatorDraft(editedUser) && (
                                 <div className="grid grid-cols-1 gap-4">
-                                {!isTrainerDraft(editedUser) && (
+                                {isOperatorDraft(editedUser) && (
                                 <div>
                                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Супервайзер</label>
                                     <select
@@ -1934,7 +1936,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 </div>
                             )}
 
-                            {!isTrainerDraft(editedUser) && (
+                            {isOperatorDraft(editedUser) && (
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Направление</label>
                                 <select
@@ -1953,6 +1955,8 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             </div>
                             )}
 
+                            {isOperatorDraft(editedUser) && (
+                            <>
                             <div>
                                 <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
                                 <input
@@ -1965,8 +1969,6 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 <span>Наличие прокси</span>
                                 </label>
                             </div>
-
-                            {isOperatorDraft(editedUser) && (
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">SIP номер</label>
                                 <input
@@ -1977,6 +1979,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 disabled={isLoading}
                                 />
                             </div>
+                            </>
                             )}
                             </>
                         )}

@@ -497,8 +497,23 @@ def _base64url_decode(value: str) -> bytes:
     return base64.urlsafe_b64decode((value + padding).encode('utf-8'))
 
 
+def _normalize_user_role(role) -> str:
+    role_norm = str(role or '').strip().lower()
+    if role_norm == 'supervisor':
+        return 'sv'
+    return role_norm
+
+
+def _is_super_admin_role(role) -> bool:
+    return _normalize_user_role(role) == 'super_admin'
+
+
+def _is_admin_role(role) -> bool:
+    return _normalize_user_role(role) in ('super_admin', 'admin')
+
+
 def _is_privileged_role(role: str) -> bool:
-    return role in ('admin', 'sv', 'supervisor')
+    return _normalize_user_role(role) in ('super_admin', 'admin', 'sv')
 
 
 def _mask_phone_number(phone_number):
@@ -620,8 +635,8 @@ def _sanitize_evaluations_for_access(evaluations, reveal_sensitive, hide_hidden_
 
 
 def _authorize_operator_scope(requester, requester_id, operator_id):
-    role = requester[3]
-    if role == 'admin' or role in ('sv', 'supervisor'):
+    role = _normalize_user_role(requester[3])
+    if _is_admin_role(role) or role == 'sv':
         return True
     if role == 'operator':
         return requester_id == operator_id
@@ -629,26 +644,23 @@ def _authorize_operator_scope(requester, requester_id, operator_id):
 
 
 def _ensure_call_access_for_requester(call_operator_id, requester, requester_id):
-    role = requester[3]
-    if role == 'admin':
+    role = _normalize_user_role(requester[3])
+    if _is_admin_role(role):
         return True
     if role == 'operator':
         return requester_id == call_operator_id
-    if role in ('sv', 'supervisor'):
+    if role == 'sv':
         operator = db.get_user(id=call_operator_id)
         return bool(operator and operator[3] == 'operator' and operator[6] == requester_id)
     return False
 
 
 def _is_supervisor_role(role: str) -> bool:
-    return role in ('sv', 'supervisor')
+    return _normalize_user_role(role) == 'sv'
 
 
 def _normalize_management_role(role):
-    role_norm = str(role or '').strip().lower()
-    if role_norm == 'supervisor':
-        return 'sv'
-    return role_norm
+    return _normalize_user_role(role)
 
 
 def _normalize_int_id_list(values):
@@ -1602,7 +1614,7 @@ def list_admin_sessions():
             return jsonify({"error": "Unauthorized"}), 401
 
         requester = db.get_user(id=requester_id)
-        if not requester or requester[3] != 'admin':
+        if not requester or not _is_admin_role(requester[3]):
             return jsonify({"error": "Forbidden: only admins can access"}), 403
 
         raw_limit = request.args.get('limit')
@@ -1678,7 +1690,7 @@ def revoke_admin_session(session_id):
             return jsonify({"error": "Unauthorized"}), 401
 
         requester = db.get_user(id=requester_id)
-        if not requester or requester[3] != 'admin':
+        if not requester or not _is_admin_role(requester[3]):
             return jsonify({"error": "Forbidden: only admins can access"}), 403
 
         session = db.get_user_session(session_id=session_id)
@@ -2242,6 +2254,11 @@ def api_baiga_period_scores():
 def get_admin_users():
     try:
         requester_id = int(request.headers.get('X-User-Id'))
+        requester = db.get_user(id=requester_id)
+        requester_role = _normalize_user_role(requester[3]) if requester else ''
+        visible_roles = ['operator', 'trainer']
+        if requester_role == 'super_admin':
+            visible_roles.append('admin')
         with db._get_cursor() as cursor:
             cursor.execute("""
                     SELECT
@@ -2319,8 +2336,8 @@ def get_admin_users():
                             p.id DESC
                         LIMIT 1
                     ) sp ON TRUE
-                    WHERE u.role IN ('operator', 'trainer')
-                """)
+                    WHERE u.role = ANY(%s)
+                """, (visible_roles,))
             users = []
             for row in cursor.fetchall():
                 users.append({
@@ -2482,8 +2499,11 @@ def admin_update_user():
 
         requester_id = int(request.headers.get('X-User-Id'))
         requester = db.get_user(id=requester_id)
-        if not requester or requester[3] != 'admin' and requester[3] != 'sv':
+        requester_role = _normalize_user_role(requester[3]) if requester else ''
+        if requester_role not in ('super_admin', 'admin', 'sv'):
             return jsonify({"error": "Only admins can update users"}), 403
+        if target_role in ('admin', 'super_admin') and requester_role != 'super_admin':
+            return jsonify({"error": "Only super admins can update admin users"}), 403
 
         success = db.update_user(user_id, field, value, changed_by=requester_id)  # Pass changed_by
         if not success:
@@ -2509,7 +2529,8 @@ def admin_bulk_update_users():
 
         requester_id = int(request.headers.get('X-User-Id'))
         requester = db.get_user(id=requester_id)
-        if not requester or (requester[3] != 'admin' and requester[3] != 'sv'):
+        requester_role = _normalize_user_role(requester[3]) if requester else ''
+        if requester_role not in ('super_admin', 'admin', 'sv'):
             return jsonify({"error": "Only admins can update users"}), 403
 
         user_ids = []
@@ -2614,7 +2635,7 @@ def admin_promote_to_supervisor():
             return jsonify({"error": "Invalid X-User-Id header"}), 400
 
         requester = db.get_user(id=requester_id)
-        if not requester or requester[3] != 'admin':
+        if not requester or not _is_admin_role(requester[3]):
             return jsonify({"error": "Only admins can promote users"}), 403
 
         promoted_user = db.promote_operator_to_supervisor(target_user_id, changed_by=requester_id)
@@ -2688,14 +2709,16 @@ def change_password():
             return jsonify({"error": "User not found"}), 404
 
         # Authorization checks
-        if requester[3] == 'operator' and requester_id != user_id:
+        requester_role = _normalize_user_role(requester[3])
+        target_role = _normalize_user_role(target_user[3])
+        if requester_role == 'operator' and requester_id != user_id:
             return jsonify({"error": "Operators can only change their own password"}), 403
 
-        if requester[3] == 'sv' and (target_user[3] != 'operator' or target_user[6] != requester_id) and requester_id != user_id:
+        if requester_role == 'sv' and (target_role != 'operator' or target_user[6] != requester_id) and requester_id != user_id:
             return jsonify({"error": "Supervisors can only change passwords for their operators"}), 403
 
         # Admins can change any password
-        if requester[3] != 'admin' and requester_id != user_id and not (requester[3] == 'sv' and target_user[6] == requester_id):
+        if (not _is_admin_role(requester_role)) and requester_id != user_id and not (requester_role == 'sv' and target_user[6] == requester_id):
             return jsonify({"error": "Unauthorized to change this user's password"}), 403
 
         # Update password
@@ -3233,18 +3256,20 @@ def change_login():
             return jsonify({"error": "User not found"}), 404
 
         # Authorization checks
-        if requester[3] == 'operator' and requester_id != user_id:
+        requester_role = _normalize_user_role(requester[3])
+        target_role = _normalize_user_role(target_user[3])
+        if requester_role == 'operator' and requester_id != user_id:
             return jsonify({"error": "Operators can only change their own login"}), 403
 
-        if requester[3] == 'sv' and (target_user[3] != 'operator' or target_user[6] != requester_id) and requester_id != user_id:
+        if requester_role == 'sv' and (target_role != 'operator' or target_user[6] != requester_id) and requester_id != user_id:
             return jsonify({"error": "Supervisors can only change logins for their operators"}), 403
 
         # Admins can change any login
-        if requester[3] != 'admin' and requester_id != user_id and not (requester[3] == 'sv' and target_user[6] == requester_id):
+        if (not _is_admin_role(requester_role)) and requester_id != user_id and not (requester_role == 'sv' and target_user[6] == requester_id):
             return jsonify({"error": "Unauthorized to change this user's login"}), 403
 
         # Update login
-        success = db.update_operator_login(user_id, target_user[6] if requester[3] == 'sv' or requester[3] == 'admin' else None, new_login)
+        success = db.update_operator_login(user_id, target_user[6] if requester_role in ('sv', 'admin', 'super_admin') else None, new_login)
         if not success:
             return jsonify({"error": "Failed to update login"}), 500
 
@@ -5296,14 +5321,29 @@ def add_sv():
 def add_user():
     try:
         data = request.get_json() or {}
+        requester_id_raw = request.headers.get('X-User-Id')
+        if requester_id_raw in [None, '']:
+            return jsonify({"error": "Missing X-User-Id header"}), 400
+        try:
+            requester_id = int(requester_id_raw)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid X-User-Id header"}), 400
+        requester = db.get_user(id=requester_id)
+        requester_role = _normalize_user_role(requester[3]) if requester else ''
+        if requester_role not in ('super_admin', 'admin', 'sv'):
+            return jsonify({"error": "Only admins can add users"}), 403
 
         name = str(data.get('name') or '').strip()
         if not name:
             return jsonify({"error": "Name cannot be empty"}), 400
 
         role = str(data.get('role') or 'operator').strip().lower()
-        if role not in ('operator', 'trainer'):
-            return jsonify({"error": "Unsupported role. Allowed: operator, trainer"}), 400
+        if role not in ('operator', 'trainer', 'admin'):
+            return jsonify({"error": "Unsupported role. Allowed: operator, trainer, admin"}), 400
+        if role == 'admin' and requester_role != 'super_admin':
+            return jsonify({"error": "Only super admins can create admins"}), 403
+        if requester_role == 'sv' and role != 'operator':
+            return jsonify({"error": "Supervisors can create only operators"}), 403
 
         supervisor_id = None
         direction_id = None
@@ -5335,8 +5375,16 @@ def add_user():
                 rate = float(data['rate'])
             except (TypeError, ValueError):
                 return jsonify({"error": "Invalid rate"}), 400
-        else:
+        elif role == 'trainer':
             # Trainers are never tied to a direction or supervisor.
+            supervisor_id = None
+            direction_id = None
+            try:
+                rate = float(data['rate']) if data.get('rate') else 1.0
+            except (TypeError, ValueError):
+                return jsonify({"error": "Invalid rate"}), 400
+        else:
+            # Admins are not tied to direction/supervisor.
             supervisor_id = None
             direction_id = None
             try:
@@ -5457,7 +5505,12 @@ def add_user():
         if role != 'operator':
             sip_number = None
 
-        login_prefix = 'trainer' if role == 'trainer' else 'user'
+        if role == 'trainer':
+            login_prefix = 'trainer'
+        elif role == 'admin':
+            login_prefix = 'admin'
+        else:
+            login_prefix = 'user'
         login = f"{login_prefix}_{str(uuid.uuid4())[:8]}"
         password = str(uuid.uuid4())[:8]
 
@@ -5496,16 +5549,17 @@ def add_user():
             taxipro_id=taxipro_id
         )
 
-        requester_header = request.headers.get('X-User-Id')
-        try:
-            changed_by = int(requester_header) if requester_header else None
-        except (TypeError, ValueError):
-            changed_by = None
+        changed_by = requester_id
         if role == 'trainer':
             db.update_user(user_id, 'direction_id', None, changed_by=changed_by)
             db.update_user(user_id, 'supervisor_id', None, changed_by=changed_by)
 
-        role_label = 'Тренер' if role == 'trainer' else 'Оператор'
+        if role == 'trainer':
+            role_label = 'Тренер'
+        elif role == 'admin':
+            role_label = 'Админ'
+        else:
+            role_label = 'Оператор'
         return jsonify({
             "status": "success",
             "message": f"{role_label} {name} добавлен",
@@ -6946,7 +7000,7 @@ def get_users_report():
     try:
         requester_id = int(request.headers.get('X-User-Id'))
         requester = db.get_user(id=requester_id)
-        if not requester or requester[3] != 'admin':
+        if not requester or not _is_admin_role(requester[3]):
             return jsonify({"error": "Only admins can generate users report"}), 403
         
         filename, content = db.generate_users_report()

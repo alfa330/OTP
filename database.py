@@ -403,7 +403,7 @@ class Database:
                     BEGIN
                         ALTER TABLE users
                             ADD CONSTRAINT users_role_check
-                            CHECK (role IN ('admin', 'sv', 'supervisor', 'trainer', 'operator'));
+                            CHECK (role IN ('super_admin', 'admin', 'sv', 'supervisor', 'trainer', 'operator'));
                     EXCEPTION
                         WHEN duplicate_object THEN
                             NULL;
@@ -3820,7 +3820,7 @@ class Database:
             SELECT
                 COUNT(*) AS total_sessions,
                 COUNT(DISTINCT user_id) AS total_users,
-                COUNT(*) FILTER (WHERE user_role = 'admin') AS admin_sessions,
+                COUNT(*) FILTER (WHERE user_role IN ('admin', 'super_admin')) AS admin_sessions,
                 COUNT(*) FILTER (WHERE user_role IN ('sv', 'supervisor')) AS sv_sessions,
                 COUNT(*) FILTER (WHERE user_role = 'operator') AS operator_sessions,
                 COUNT(*) FILTER (WHERE ua = '') AS unknown_sessions,
