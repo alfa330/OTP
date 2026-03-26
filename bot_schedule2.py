@@ -35,10 +35,11 @@ from passlib.hash import pbkdf2_sha256
 from werkzeug.utils import secure_filename
 from google.cloud import storage as gcs_storage
 import tempfile
-from datetime import datetime, timedelta, date as dt_date
+from datetime import datetime, timedelta, date as dt_date, timezone
 import time
 import math
 from urllib.parse import quote, urlparse, parse_qs
+from zoneinfo import ZoneInfo
 from ai_feed_back_service import generate_monthly_feedback_with_ai, generate_birthday_greeting_with_ai
 
 os.environ['TZ'] = 'Asia/Almaty'
@@ -914,6 +915,10 @@ SENSITIVE_ACCESS_ROLE_LABELS = {
     'operator': 'Оператор',
     'trainer': 'Тренер'
 }
+try:
+    SENSITIVE_ACCESS_NOTIFICATION_TZ = ZoneInfo('Asia/Almaty')
+except Exception:
+    SENSITIVE_ACCESS_NOTIFICATION_TZ = None
 
 
 def _truncate_for_telegram(text, max_chars):
@@ -964,13 +969,135 @@ def _send_telegram_text_message(chat_id, text, parse_mode='HTML'):
     return requests.post(telegram_url, json=payload, timeout=TASK_TELEGRAM_TIMEOUT_SECONDS)
 
 
-def _format_sensitive_access_notification_dt(value):
+def _coerce_sensitive_access_datetime(value):
     if value is None:
-        return '—'
-    if hasattr(value, 'strftime'):
-        return value.strftime('%Y-%m-%d %H:%M:%S')
+        return None
+    if isinstance(value, datetime):
+        return value
     text = str(value).strip()
-    return text or '—'
+    if not text:
+        return None
+
+    normalized = text.replace('Z', '+00:00')
+    try:
+        return datetime.fromisoformat(normalized)
+    except Exception:
+        pass
+
+    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M', '%d.%m.%Y %H:%M:%S'):
+        try:
+            return datetime.strptime(text, fmt)
+        except Exception:
+            continue
+    return None
+
+
+def _format_sensitive_access_notification_dt(value, assume_utc=False):
+    dt_value = _coerce_sensitive_access_datetime(value)
+    if dt_value is None:
+        text = str(value or '').strip()
+        return text or '—'
+
+    try:
+        tz = SENSITIVE_ACCESS_NOTIFICATION_TZ
+        if tz is not None:
+            if dt_value.tzinfo is None:
+                if assume_utc:
+                    dt_value = dt_value.replace(tzinfo=timezone.utc)
+                else:
+                    dt_value = dt_value.replace(tzinfo=tz)
+            dt_value = dt_value.astimezone(tz)
+        return dt_value.strftime('%d.%m.%Y %H:%M:%S (GMT+5)')
+    except Exception:
+        return dt_value.strftime('%d.%m.%Y %H:%M:%S')
+
+
+def _parse_user_agent_details(user_agent):
+    ua_raw = str(user_agent or '').strip()
+    if not ua_raw:
+        return {
+            "device": "—",
+            "os": "—",
+            "browser": "—",
+            "raw": "—"
+        }
+
+    ua = ua_raw.lower()
+
+    device = 'ПК/ноутбук'
+    if 'ipad' in ua or 'tablet' in ua:
+        device = 'Планшет'
+    elif 'iphone' in ua or 'ipod' in ua:
+        device = 'Смартфон (iPhone)'
+    elif 'android' in ua and 'mobile' in ua:
+        device = 'Смартфон (Android)'
+    elif 'android' in ua:
+        device = 'Планшет/Android-устройство'
+    elif 'mobile' in ua:
+        device = 'Мобильное устройство'
+
+    os_name = 'Не определена'
+    if 'windows nt 10.0' in ua:
+        os_name = 'Windows 10/11'
+    elif 'windows nt 6.3' in ua:
+        os_name = 'Windows 8.1'
+    elif 'windows nt 6.2' in ua:
+        os_name = 'Windows 8'
+    elif 'windows nt 6.1' in ua:
+        os_name = 'Windows 7'
+    elif 'android' in ua:
+        match = re.search(r'android\s([\d\.]+)', ua, re.IGNORECASE)
+        os_name = f"Android {match.group(1)}" if match else 'Android'
+    elif 'iphone' in ua or 'ipad' in ua or 'ios' in ua:
+        match = re.search(r'os\s(\d+(?:[_\.]\d+)*)', ua, re.IGNORECASE)
+        ios_version = match.group(1).replace('_', '.') if match else None
+        os_name = f"iOS {ios_version}" if ios_version else 'iOS'
+    elif 'mac os x' in ua or 'macintosh' in ua:
+        match = re.search(r'mac os x\s(\d+(?:[_\.]\d+)*)', ua, re.IGNORECASE)
+        mac_version = match.group(1).replace('_', '.') if match else None
+        os_name = f"macOS {mac_version}" if mac_version else 'macOS'
+    elif 'cros' in ua:
+        os_name = 'ChromeOS'
+    elif 'linux' in ua or 'x11' in ua:
+        os_name = 'Linux'
+
+    browser = 'Не определен'
+    if 'yabrowser/' in ua:
+        match = re.search(r'yabrowser/([0-9\.]+)', ua, re.IGNORECASE)
+        browser = f"Yandex Browser {match.group(1)}" if match else 'Yandex Browser'
+    elif 'edg/' in ua:
+        match = re.search(r'edg/([0-9\.]+)', ua, re.IGNORECASE)
+        browser = f"Microsoft Edge {match.group(1)}" if match else 'Microsoft Edge'
+    elif 'opr/' in ua or 'opera' in ua:
+        match = re.search(r'(?:opr|opera)/([0-9\.]+)', ua, re.IGNORECASE)
+        browser = f"Opera {match.group(1)}" if match else 'Opera'
+    elif 'samsungbrowser/' in ua:
+        match = re.search(r'samsungbrowser/([0-9\.]+)', ua, re.IGNORECASE)
+        browser = f"Samsung Browser {match.group(1)}" if match else 'Samsung Browser'
+    elif 'crios/' in ua:
+        match = re.search(r'crios/([0-9\.]+)', ua, re.IGNORECASE)
+        browser = f"Chrome (iOS) {match.group(1)}" if match else 'Chrome (iOS)'
+    elif 'chrome/' in ua and 'chromium' not in ua:
+        match = re.search(r'chrome/([0-9\.]+)', ua, re.IGNORECASE)
+        browser = f"Google Chrome {match.group(1)}" if match else 'Google Chrome'
+    elif 'fxios/' in ua:
+        match = re.search(r'fxios/([0-9\.]+)', ua, re.IGNORECASE)
+        browser = f"Firefox (iOS) {match.group(1)}" if match else 'Firefox (iOS)'
+    elif 'firefox/' in ua:
+        match = re.search(r'firefox/([0-9\.]+)', ua, re.IGNORECASE)
+        browser = f"Mozilla Firefox {match.group(1)}" if match else 'Mozilla Firefox'
+    elif 'safari/' in ua and 'chrome/' not in ua and 'crios/' not in ua and 'edg/' not in ua:
+        match = re.search(r'version/([0-9\.]+)', ua, re.IGNORECASE)
+        browser = f"Safari {match.group(1)}" if match else 'Safari'
+    elif 'telegrambot' in ua:
+        browser = 'Telegram Bot'
+
+    return {
+        "device": device,
+        "os": os_name,
+        "browser": browser,
+        "raw": ua_raw
+    }
 
 
 def _resolve_super_admin_chat_ids():
@@ -1035,13 +1162,15 @@ def _build_sensitive_access_approved_message_html(
 
     operator_role_label = SENSITIVE_ACCESS_ROLE_LABELS.get(operator_role, operator_role or '—')
     approver_role_label = SENSITIVE_ACCESS_ROLE_LABELS.get(approver_role, approver_role or '—')
+    operator_device = _parse_user_agent_details(session.get('user_agent'))
+    approver_device = _parse_user_agent_details(approval_context.get('request_user_agent'))
 
     lines = [
         "<b>🔐 QR-доступ к данным оценок открыт</b>",
         "",
         f"<b>Время события:</b> {_escape_telegram_html(_format_sensitive_access_notification_dt(datetime.now()), 40)}",
-        f"<b>Session ID:</b> <code>{_escape_telegram_html(session.get('session_id') or claims.get('session_id') or '—', 180)}</code>",
-        f"<b>QR токен действителен до:</b> {_escape_telegram_html(_format_sensitive_access_notification_dt(claims.get('expires_at')), 40)}",
+        f"<b>ID сессии:</b> <code>{_escape_telegram_html(session.get('session_id') or claims.get('session_id') or '—', 180)}</code>",
+        f"<b>QR токен действителен до:</b> {_escape_telegram_html(_format_sensitive_access_notification_dt(claims.get('expires_at'), assume_utc=True), 40)}",
         "",
         "<b>Оператор</b>",
         f"<b>ФИО:</b> {_escape_telegram_html(operator_name or '—', 120)}",
@@ -1061,16 +1190,22 @@ def _build_sensitive_access_approved_message_html(
         "",
         "<b>Сессия оператора</b>",
         f"<b>IP:</b> {_escape_telegram_html(session.get('ip_address') or '—', 64)}",
-        f"<b>User-Agent:</b> {_escape_telegram_html(session.get('user_agent') or '—', 280)}",
+        f"<b>Устройство:</b> {_escape_telegram_html(operator_device.get('device') or '—', 80)}",
+        f"<b>ОС:</b> {_escape_telegram_html(operator_device.get('os') or '—', 80)}",
+        f"<b>Браузер:</b> {_escape_telegram_html(operator_device.get('browser') or '—', 100)}",
+        f"<b>User-Agent:</b> {_escape_telegram_html(operator_device.get('raw') or '—', 240)}",
         f"<b>Создана:</b> {_escape_telegram_html(_format_sensitive_access_notification_dt(session.get('created_at')), 40)}",
-        f"<b>Last seen:</b> {_escape_telegram_html(_format_sensitive_access_notification_dt(session.get('last_seen_at')), 40)}",
+        f"<b>Последняя активность:</b> {_escape_telegram_html(_format_sensitive_access_notification_dt(session.get('last_seen_at')), 40)}",
         f"<b>Истекает:</b> {_escape_telegram_html(_format_sensitive_access_notification_dt(session.get('expires_at')), 40)}",
         f"<b>Разблокирована в:</b> {_escape_telegram_html(_format_sensitive_access_notification_dt(session.get('sensitive_data_unlocked_at')), 40)}",
         "",
         "<b>Контекст подтверждения</b>",
         f"<b>IP подтверждающего:</b> {_escape_telegram_html(approval_context.get('request_ip') or '—', 64)}",
         f"<b>Origin:</b> {_escape_telegram_html(approval_context.get('request_origin') or '—', 120)}",
-        f"<b>User-Agent подтверждающего:</b> {_escape_telegram_html(approval_context.get('request_user_agent') or '—', 280)}"
+        f"<b>Устройство подтверждающего:</b> {_escape_telegram_html(approver_device.get('device') or '—', 80)}",
+        f"<b>ОС подтверждающего:</b> {_escape_telegram_html(approver_device.get('os') or '—', 80)}",
+        f"<b>Браузер подтверждающего:</b> {_escape_telegram_html(approver_device.get('browser') or '—', 100)}",
+        f"<b>User-Agent подтверждающего:</b> {_escape_telegram_html(approver_device.get('raw') or '—', 240)}"
     ]
     message = "\n".join(lines)
     if len(message) > TELEGRAM_MAX_MESSAGE_CHARS:
