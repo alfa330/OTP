@@ -9864,9 +9864,9 @@ def get_direction_work_schedules():
 @require_api_key
 def get_shift_swap_candidates():
     """
-    Вернуть операторов-кандидатов для замены:
+    Вернуть операторов-кандидатов для обмена:
     - в совместимом направлении с текущим оператором (СМЗ и Основа взаимозаменяемы)
-    - без смен в выбранном интервале времени на выбранную дату
+    - у которых есть смена в выбранном интервале времени на выбранную дату
     Query params:
       swap_date=YYYY-MM-DD
       end_date=YYYY-MM-DD (optional, default: swap_date)
@@ -9912,7 +9912,7 @@ def get_shift_swap_candidates():
 def shift_swap_requests():
     """
     GET: входящие/исходящие запросы на замену для текущего оператора.
-    POST: создать запрос на замену.
+    POST: создать запрос на обмен сменами.
     """
     try:
         requester_id, _user_data, err = _work_schedule_operator_requester()
@@ -9939,6 +9939,7 @@ def shift_swap_requests():
         start_time = data.get('start_time')
         end_time = data.get('end_time')
         request_comment = data.get('comment')
+        target_segments = data.get('target_segments')
         if not target_operator_id or not swap_date or not start_time or not end_time:
             return jsonify({"error": "target_operator_id, swap_date, start_time and end_time are required"}), 400
 
@@ -9949,7 +9950,8 @@ def shift_swap_requests():
             end_date=end_date,
             start_time=start_time,
             end_time=end_time,
-            request_comment=request_comment
+            request_comment=request_comment,
+            target_segments=target_segments
         )
         return jsonify({
             "message": "Swap request created",
