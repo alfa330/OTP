@@ -11457,6 +11457,31 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     };
                 });
             }, [isSwapExchangeMode, swapForm.targetSegments]);
+            useEffect(() => {
+                if (!showSwapCreateModal) return;
+                if (!isSwapExchangeMode) return;
+                if (currentSwapFullShiftMatch) return;
+                setShowSwapTargetSegmentsModal(false);
+                setSwapForm(prev => {
+                    if (normalizeSwapRequestType(prev?.requestType) !== 'exchange') return prev;
+                    return {
+                        ...prev,
+                        requestType: 'replacement',
+                        targetOperatorId: '',
+                        targetSegments: []
+                    };
+                });
+            }, [
+                showSwapCreateModal,
+                isSwapExchangeMode,
+                currentSwapFullShiftMatch,
+                normalizeSwapRequestType
+            ]);
+            useEffect(() => {
+                if (!isSwapExchangeMode) return;
+                if (!Array.isArray(swapDraftRequests) || swapDraftRequests.length === 0) return;
+                setSwapDraftRequests([]);
+            }, [isSwapExchangeMode, swapDraftRequests]);
             const swapDayTimeline = useMemo(() => {
                 const swapDate = swapForm.swapDate;
                 if (!swapDate) {
@@ -11770,16 +11795,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             ]);
             const swapCandidatesFiltered = useMemo(() => {
                 const raw = Array.isArray(swapCandidates) ? swapCandidates : [];
-                const scoped = isSwapExchangeMode
-                    ? raw.filter(item => {
-                        const dayShifts = Array.isArray(item?.dayShifts) ? item.dayShifts : [];
-                        return dayShifts.length > 0;
-                    })
-                    : raw;
                 const query = String(swapCandidatesSearch || '').trim().toLowerCase();
-                if (!query) return scoped;
+                if (!query) return raw;
 
-                return scoped.filter(item => {
+                return raw.filter(item => {
                     const haystack = [
                         item?.name,
                         item?.supervisorName
@@ -11788,7 +11807,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         .join(' ');
                     return haystack.includes(query);
                 });
-            }, [swapCandidates, swapCandidatesSearch, isSwapExchangeMode]);
+            }, [swapCandidates, swapCandidatesSearch]);
             const selectedSwapCandidate = useMemo(() => {
                 const selectedId = String(swapForm.targetOperatorId || '').trim();
                 if (!selectedId) return null;
@@ -11973,6 +11992,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, [normalizeSwapRequestType]);
             const handleAddSwapDraft = () => {
                 if (swapSubmitting) return;
+                if (isSwapExchangeMode) {
+                    notifySwapMessage('В режиме обмена запрос отправляется без списка', 'warning');
+                    return;
+                }
                 const draft = buildSwapDraftFromCurrentForm({ notifyErrors: true });
                 if (!draft) return;
                 const draftSignature = getSwapDraftSignature(draft);
@@ -12022,11 +12045,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 currentSwapFullShiftMatch,
                 normalizeSwapRequestType
             ]);
-            const canSendSwapRequests = (Array.isArray(swapDraftRequests) && swapDraftRequests.length > 0) || canSubmitCurrentSwapDraft;
+            const canSendSwapRequests = isSwapExchangeMode
+                ? canSubmitCurrentSwapDraft
+                : ((Array.isArray(swapDraftRequests) && swapDraftRequests.length > 0) || canSubmitCurrentSwapDraft);
             const handleCreateSwapRequest = async () => {
                 if (swapSubmitting) return;
-                let requestsToSend = Array.isArray(swapDraftRequests) ? swapDraftRequests.slice() : [];
-                const sendingCurrentOnly = requestsToSend.length === 0;
+                const batchingEnabled = !isSwapExchangeMode;
+                let requestsToSend = batchingEnabled && Array.isArray(swapDraftRequests)
+                    ? swapDraftRequests.slice()
+                    : [];
+                const sendingCurrentOnly = !batchingEnabled || requestsToSend.length === 0;
                 if (sendingCurrentOnly) {
                     const currentDraft = buildSwapDraftFromCurrentForm({ notifyErrors: true });
                     if (!currentDraft) return;
@@ -12101,13 +12129,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         setShowSwapTargetSegmentsModal(false);
                         swapExchangePromptHandledRef.current.clear();
                     } else if (okItems.length === 0) {
-                        if (!sendingCurrentOnly) {
+                        if (batchingEnabled && !sendingCurrentOnly) {
                             setSwapDraftRequests(failItems.map(item => item?.draft).filter(Boolean));
                         }
                         const firstError = failItems[0]?.error || 'Не удалось отправить запросы';
                         notifySwapMessage(firstError, 'error');
                     } else {
-                        setSwapDraftRequests(failItems.map(item => item?.draft).filter(Boolean));
+                        if (batchingEnabled) {
+                            setSwapDraftRequests(failItems.map(item => item?.draft).filter(Boolean));
+                        }
                         notifySwapMessage(
                             `Отправлено: ${okItems.length}. Ошибок: ${failItems.length}. Проверьте выбранных кандидатов.`,
                             'warning'
@@ -13559,7 +13589,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 {isSwapExchangeMode ? 'Создать запрос на обмен сменами' : 'Создать запрос на замену смены'}
                                                             </div>
                                                             <div className="text-xs text-slate-500">
-                                                                {swapDraftRequests.length > 0 ? `В очереди: ${swapDraftRequests.length} запр.` : `Доступных дат: ${mySwapSourceShiftDays.length}`}
+                                                                {!isSwapExchangeMode && swapDraftRequests.length > 0
+                                                                    ? `В очереди: ${swapDraftRequests.length} запр.`
+                                                                    : `Доступных дат: ${mySwapSourceShiftDays.length}`}
                                                             </div>
                                                         </div>
                                                         <button
@@ -13883,23 +13915,25 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             maxLength={400}
                                                         />
                                                     </label>
-                                                    <button
-                                                        type="button"
-                                                        onClick={handleAddSwapDraft}
-                                                        disabled={swapSubmitting || !canSubmitCurrentSwapDraft}
-                                                        className={`w-full px-3 py-2 rounded-lg text-sm font-medium transition ${
-                                                            swapSubmitting || !canSubmitCurrentSwapDraft
-                                                                ? 'bg-slate-200 text-slate-500 cursor-not-allowed'
-                                                                : 'bg-white text-slate-700 border border-slate-300 hover:bg-slate-50'
-                                                        }`}
-                                                    >
-                                                        Добавить в список
-                                                    </button>
+                                                    {!isSwapExchangeMode && (
+                                                        <button
+                                                            type="button"
+                                                            onClick={handleAddSwapDraft}
+                                                            disabled={swapSubmitting || !canSubmitCurrentSwapDraft}
+                                                            className={`w-full px-3 py-2 rounded-lg text-sm font-medium transition ${
+                                                                swapSubmitting || !canSubmitCurrentSwapDraft
+                                                                    ? 'bg-slate-200 text-slate-500 cursor-not-allowed'
+                                                                    : 'bg-white text-slate-700 border border-slate-300 hover:bg-slate-50'
+                                                            }`}
+                                                        >
+                                                            Добавить в список
+                                                        </button>
+                                                    )}
                                                     <button
                                                         type="button"
                                                         onClick={handleCreateSwapRequest}
                                                         disabled={swapSubmitting || !canSendSwapRequests}
-                                                        className={`w-full lg:col-span-2 px-3 py-2 rounded-lg text-sm font-medium transition ${
+                                                        className={`w-full ${isSwapExchangeMode ? 'sm:col-span-2 lg:col-span-3' : 'lg:col-span-2'} px-3 py-2 rounded-lg text-sm font-medium transition ${
                                                             swapSubmitting || !canSendSwapRequests
                                                                 ? 'bg-slate-200 text-slate-500 cursor-not-allowed'
                                                                 : 'bg-blue-600 text-white hover:bg-blue-700'
@@ -13907,9 +13941,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     >
                                                         {swapSubmitting
                                                             ? 'Отправка...'
-                                                            : (swapDraftRequests.length > 0
-                                                                ? `Отправить запросы (${swapDraftRequests.length})`
-                                                                : 'Отправить запрос')}
+                                                            : (isSwapExchangeMode
+                                                                ? 'Отправить запрос на обмен'
+                                                                : (swapDraftRequests.length > 0
+                                                                    ? `Отправить запросы (${swapDraftRequests.length})`
+                                                                    : 'Отправить запрос'))}
                                                     </button>
                                                 </div>
                                                 <div className="mt-2 text-xs">
@@ -13942,77 +13978,77 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         <div className="text-rose-600 mt-1">{swapCandidatesError}</div>
                                                     )}
                                                 </div>
-                                                <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50/60 p-2.5 sm:p-3">
-                                                    <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-                                                        <div className="text-xs font-semibold text-amber-900 uppercase tracking-wide">
-                                                            Список к отправке
+                                                {!isSwapExchangeMode && (
+                                                    <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50/60 p-2.5 sm:p-3">
+                                                        <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                                                            <div className="text-xs font-semibold text-amber-900 uppercase tracking-wide">
+                                                                Список к отправке
+                                                            </div>
+                                                            <div className="text-xs text-amber-800">
+                                                                Добавлено: <span className="font-semibold tabular-nums">{swapDraftRequests.length}</span>
+                                                                {' '}• {formatMinutesOnly(swapDraftTotalMinutes)}
+                                                            </div>
                                                         </div>
-                                                        <div className="text-xs text-amber-800">
-                                                            Добавлено: <span className="font-semibold tabular-nums">{swapDraftRequests.length}</span>
-                                                            {' '}• {formatMinutesOnly(swapDraftTotalMinutes)}
-                                                        </div>
-                                                    </div>
-                                                    {swapDraftRequests.length === 0 ? (
-                                                        <div className="text-xs text-slate-600">
-                                                            {isSwapExchangeMode
-                                                                ? 'Выберите свою полную смену, кандидата и одну/несколько его смен для обмена, затем нажмите «Добавить в список».'
-                                                                : 'Выберите свою смену и кандидата, затем нажмите «Добавить в список».'}
-                                                        </div>
-                                                    ) : (
-                                                        <div className="max-h-40 overflow-y-auto pr-1 space-y-1.5">
-                                                            {swapDraftRequests.map((draft, idx) => {
-                                                                const tone = getSwapDraftColorTone(draft, idx);
-                                                                return (
-                                                                    <div
-                                                                        key={`swap-draft-${draft?.localId || idx}`}
-                                                                        className={`rounded-md border px-2.5 py-2 flex items-start justify-between gap-2 ${tone?.listClass || 'border-amber-200 bg-amber-50/60'}`}
-                                                                    >
-                                                                        <div className="min-w-0">
-                                                                            <div className="text-xs font-medium text-slate-900 flex items-center gap-1">
-                                                                                <span className={`inline-block w-2 h-2 rounded-full ${tone?.dotClass || 'bg-amber-500'}`}></span>
-                                                                                <span>
-                                                                                    {idx + 1}. {draft?.targetOperatorName || 'Оператор'}
-                                                                                    {draft?.targetSupervisorName ? ` • ${draft.targetSupervisorName}` : ''}
-                                                                                </span>
-                                                                            </div>
-                                                                            <div className="text-[11px] text-slate-700">
-                                                                                {formatSwapDateTimeRangeLabel(
-                                                                                    String(draft?.swapDate || ''),
-                                                                                    String(draft?.startTime || ''),
-                                                                                    String(draft?.endTime || ''),
-                                                                                    String(draft?.endDate || draft?.swapDate || '')
-                                                                                )} ({formatMinutesOnly(Number(draft?.durationMin) || 0)})
-                                                                            </div>
-                                                                            <div className="text-[11px] text-slate-700">
-                                                                                {normalizeSwapRequestType(draft?.requestType) === 'exchange'
-                                                                                    ? (
-                                                                                        <>
-                                                                                            Взамен получаете: {formatSwapSegmentsSummaryLabel(String(draft?.swapDate || ''), draft?.targetSegments)}
-                                                                                            {' '}({formatMinutesOnly(Number(draft?.targetDurationMin) || 0)})
-                                                                                        </>
-                                                                                    )
-                                                                                    : 'Тип: обычная замена'}
-                                                                            </div>
-                                                                            {!!draft?.comment && (
-                                                                                <div className="text-[11px] text-slate-600">
-                                                                                    Комментарий: {String(draft.comment)}
-                                                                                </div>
-                                                                            )}
-                                                                        </div>
-                                                                        <button
-                                                                            type="button"
-                                                                            onClick={() => handleRemoveSwapDraft(draft?.localId)}
-                                                                            className="shrink-0 w-7 h-7 rounded-md border border-rose-200 text-rose-600 bg-rose-50 hover:bg-rose-100 inline-flex items-center justify-center"
-                                                                            title="Убрать из списка"
+                                                        {swapDraftRequests.length === 0 ? (
+                                                            <div className="text-xs text-slate-600">
+                                                                Выберите свою смену и кандидата, затем нажмите «Добавить в список».
+                                                            </div>
+                                                        ) : (
+                                                            <div className="max-h-40 overflow-y-auto pr-1 space-y-1.5">
+                                                                {swapDraftRequests.map((draft, idx) => {
+                                                                    const tone = getSwapDraftColorTone(draft, idx);
+                                                                    return (
+                                                                        <div
+                                                                            key={`swap-draft-${draft?.localId || idx}`}
+                                                                            className={`rounded-md border px-2.5 py-2 flex items-start justify-between gap-2 ${tone?.listClass || 'border-amber-200 bg-amber-50/60'}`}
                                                                         >
-                                                                            <FaIcon className="fas fa-trash"></FaIcon>
-                                                                        </button>
-                                                                    </div>
-                                                                );
-                                                            })}
-                                                        </div>
-                                                    )}
-                                                </div>
+                                                                            <div className="min-w-0">
+                                                                                <div className="text-xs font-medium text-slate-900 flex items-center gap-1">
+                                                                                    <span className={`inline-block w-2 h-2 rounded-full ${tone?.dotClass || 'bg-amber-500'}`}></span>
+                                                                                    <span>
+                                                                                        {idx + 1}. {draft?.targetOperatorName || 'Оператор'}
+                                                                                        {draft?.targetSupervisorName ? ` • ${draft.targetSupervisorName}` : ''}
+                                                                                    </span>
+                                                                                </div>
+                                                                                <div className="text-[11px] text-slate-700">
+                                                                                    {formatSwapDateTimeRangeLabel(
+                                                                                        String(draft?.swapDate || ''),
+                                                                                        String(draft?.startTime || ''),
+                                                                                        String(draft?.endTime || ''),
+                                                                                        String(draft?.endDate || draft?.swapDate || '')
+                                                                                    )} ({formatMinutesOnly(Number(draft?.durationMin) || 0)})
+                                                                                </div>
+                                                                                <div className="text-[11px] text-slate-700">
+                                                                                    {normalizeSwapRequestType(draft?.requestType) === 'exchange'
+                                                                                        ? (
+                                                                                            <>
+                                                                                                Взамен получаете: {formatSwapSegmentsSummaryLabel(String(draft?.swapDate || ''), draft?.targetSegments)}
+                                                                                                {' '}({formatMinutesOnly(Number(draft?.targetDurationMin) || 0)})
+                                                                                            </>
+                                                                                        )
+                                                                                        : 'Тип: обычная замена'}
+                                                                                </div>
+                                                                                {!!draft?.comment && (
+                                                                                    <div className="text-[11px] text-slate-600">
+                                                                                        Комментарий: {String(draft.comment)}
+                                                                                    </div>
+                                                                                )}
+                                                                            </div>
+                                                                            <button
+                                                                                type="button"
+                                                                                onClick={() => handleRemoveSwapDraft(draft?.localId)}
+                                                                                className="shrink-0 w-7 h-7 rounded-md border border-rose-200 text-rose-600 bg-rose-50 hover:bg-rose-100 inline-flex items-center justify-center"
+                                                                                title="Убрать из списка"
+                                                                            >
+                                                                                <FaIcon className="fas fa-trash"></FaIcon>
+                                                                            </button>
+                                                                        </div>
+                                                                    );
+                                                                })}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                )}
                                                 <div className="mt-3 rounded-lg border border-slate-200 bg-white p-2.5 sm:p-3">
                                                     <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                                                         <div className="text-xs font-semibold text-slate-800">
@@ -14052,7 +14088,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             {String(swapCandidatesSearch || '').trim()
                                                                 ? 'По текущему поиску кандидаты не найдены.'
                                                                 : (isSwapExchangeMode
-                                                                    ? 'На выбранную дату нет смен у доступных кандидатов.'
+                                                                    ? 'Нет доступных кандидатов для обмена.'
                                                                     : 'Нет операторов без пересечения на выбранный интервал.')}
                                                         </div>
                                                     ) : (
