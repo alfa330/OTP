@@ -11485,6 +11485,8 @@ class Database:
                 for seg in target_requested_intervals:
                     seg_start = int(seg.get('start', 0))
                     seg_end = int(seg.get('end', 0))
+                    if seg_start < 0 or seg_end > 1440:
+                        raise ValueError("Для обмена можно выбрать только смены кандидата на ту же дату")
                     if not self._swap_is_interval_fully_covered(target_window_intervals, seg_start, seg_end):
                         raise ValueError("У выбранного оператора больше нет одной из выбранных смен")
 
