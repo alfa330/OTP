@@ -907,6 +907,13 @@ TASK_TAG_LABELS = {
     'problem': 'Проблема',
     'suggestion': 'Предложение'
 }
+SENSITIVE_ACCESS_ROLE_LABELS = {
+    'super_admin': 'Супер админ',
+    'admin': 'Админ',
+    'sv': 'Супервайзер',
+    'operator': 'Оператор',
+    'trainer': 'Тренер'
+}
 
 
 def _truncate_for_telegram(text, max_chars):
@@ -955,6 +962,162 @@ def _send_telegram_text_message(chat_id, text, parse_mode='HTML'):
     if parse_mode:
         payload["parse_mode"] = parse_mode
     return requests.post(telegram_url, json=payload, timeout=TASK_TELEGRAM_TIMEOUT_SECONDS)
+
+
+def _format_sensitive_access_notification_dt(value):
+    if value is None:
+        return '—'
+    if hasattr(value, 'strftime'):
+        return value.strftime('%Y-%m-%d %H:%M:%S')
+    text = str(value).strip()
+    return text or '—'
+
+
+def _resolve_super_admin_chat_ids():
+    chat_ids = []
+    seen = set()
+
+    def _add_chat_id(raw_chat_id):
+        if raw_chat_id in (None, ''):
+            return
+        try:
+            chat_id = int(str(raw_chat_id).strip())
+        except Exception:
+            return
+        if chat_id <= 0 or chat_id in seen:
+            return
+        seen.add(chat_id)
+        chat_ids.append(chat_id)
+
+    _add_chat_id(super_admin_id)
+
+    try:
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT telegram_id
+                FROM users
+                WHERE role = 'super_admin'
+                  AND telegram_id IS NOT NULL
+            """)
+            for row in cursor.fetchall() or []:
+                _add_chat_id(row[0] if isinstance(row, (tuple, list)) and row else row)
+    except Exception as e:
+        logging.error(f"Failed to resolve super admin chat ids: {e}", exc_info=True)
+
+    return chat_ids
+
+
+def _build_sensitive_access_approved_message_html(
+    approver,
+    operator,
+    claims,
+    operator_session,
+    approval_context,
+    operator_supervisor_name
+):
+    approval_context = approval_context or {}
+    session = operator_session or {}
+    claims = claims or {}
+
+    operator_id = operator[0] if isinstance(operator, (tuple, list)) and len(operator) > 0 else None
+    operator_tg = operator[1] if isinstance(operator, (tuple, list)) and len(operator) > 1 else None
+    operator_name = operator[2] if isinstance(operator, (tuple, list)) and len(operator) > 2 else None
+    operator_role = _normalize_user_role(operator[3] if isinstance(operator, (tuple, list)) and len(operator) > 3 else None)
+    operator_direction = operator[4] if isinstance(operator, (tuple, list)) and len(operator) > 4 else None
+    operator_supervisor_id = operator[6] if isinstance(operator, (tuple, list)) and len(operator) > 6 else None
+    operator_login = operator[7] if isinstance(operator, (tuple, list)) and len(operator) > 7 else None
+
+    approver_id = approver[0] if isinstance(approver, (tuple, list)) and len(approver) > 0 else None
+    approver_tg = approver[1] if isinstance(approver, (tuple, list)) and len(approver) > 1 else None
+    approver_name = approver[2] if isinstance(approver, (tuple, list)) and len(approver) > 2 else None
+    approver_role = _normalize_user_role(approver[3] if isinstance(approver, (tuple, list)) and len(approver) > 3 else None)
+    approver_login = approver[7] if isinstance(approver, (tuple, list)) and len(approver) > 7 else None
+
+    operator_role_label = SENSITIVE_ACCESS_ROLE_LABELS.get(operator_role, operator_role or '—')
+    approver_role_label = SENSITIVE_ACCESS_ROLE_LABELS.get(approver_role, approver_role or '—')
+
+    lines = [
+        "<b>🔐 QR-доступ к данным оценок открыт</b>",
+        "",
+        f"<b>Время события:</b> {_escape_telegram_html(_format_sensitive_access_notification_dt(datetime.now()), 40)}",
+        f"<b>Session ID:</b> <code>{_escape_telegram_html(session.get('session_id') or claims.get('session_id') or '—', 180)}</code>",
+        f"<b>QR токен действителен до:</b> {_escape_telegram_html(_format_sensitive_access_notification_dt(claims.get('expires_at')), 40)}",
+        "",
+        "<b>Оператор</b>",
+        f"<b>ФИО:</b> {_escape_telegram_html(operator_name or '—', 120)}",
+        f"<b>ID:</b> {_escape_telegram_html(operator_id or '—', 40)}",
+        f"<b>Роль:</b> {_escape_telegram_html(operator_role_label, 40)}",
+        f"<b>Логин:</b> {_escape_telegram_html(operator_login or '—', 80)}",
+        f"<b>Telegram ID:</b> {_escape_telegram_html(operator_tg or '—', 40)}",
+        f"<b>Направление:</b> {_escape_telegram_html(operator_direction or '—', 80)}",
+        f"<b>Супервайзер:</b> {_escape_telegram_html(operator_supervisor_name or '—', 120)} (ID: {_escape_telegram_html(operator_supervisor_id or '—', 40)})",
+        "",
+        "<b>Кто подтвердил доступ</b>",
+        f"<b>ФИО:</b> {_escape_telegram_html(approver_name or '—', 120)}",
+        f"<b>ID:</b> {_escape_telegram_html(approver_id or '—', 40)}",
+        f"<b>Роль:</b> {_escape_telegram_html(approver_role_label, 40)}",
+        f"<b>Логин:</b> {_escape_telegram_html(approver_login or '—', 80)}",
+        f"<b>Telegram ID:</b> {_escape_telegram_html(approver_tg or '—', 40)}",
+        "",
+        "<b>Сессия оператора</b>",
+        f"<b>IP:</b> {_escape_telegram_html(session.get('ip_address') or '—', 64)}",
+        f"<b>User-Agent:</b> {_escape_telegram_html(session.get('user_agent') or '—', 280)}",
+        f"<b>Создана:</b> {_escape_telegram_html(_format_sensitive_access_notification_dt(session.get('created_at')), 40)}",
+        f"<b>Last seen:</b> {_escape_telegram_html(_format_sensitive_access_notification_dt(session.get('last_seen_at')), 40)}",
+        f"<b>Истекает:</b> {_escape_telegram_html(_format_sensitive_access_notification_dt(session.get('expires_at')), 40)}",
+        f"<b>Разблокирована в:</b> {_escape_telegram_html(_format_sensitive_access_notification_dt(session.get('sensitive_data_unlocked_at')), 40)}",
+        "",
+        "<b>Контекст подтверждения</b>",
+        f"<b>IP подтверждающего:</b> {_escape_telegram_html(approval_context.get('request_ip') or '—', 64)}",
+        f"<b>Origin:</b> {_escape_telegram_html(approval_context.get('request_origin') or '—', 120)}",
+        f"<b>User-Agent подтверждающего:</b> {_escape_telegram_html(approval_context.get('request_user_agent') or '—', 280)}"
+    ]
+    message = "\n".join(lines)
+    if len(message) > TELEGRAM_MAX_MESSAGE_CHARS:
+        message = message[:TELEGRAM_MAX_MESSAGE_CHARS]
+    return message
+
+
+def _notify_super_admin_sensitive_access_approved(
+    approver,
+    operator,
+    claims,
+    operator_session,
+    approval_context,
+    operator_supervisor_name
+):
+    try:
+        super_admin_chat_ids = _resolve_super_admin_chat_ids()
+        if not super_admin_chat_ids:
+            logging.warning("Sensitive access approved, but super admin chat_id is not configured")
+            return
+
+        message = _build_sensitive_access_approved_message_html(
+            approver=approver,
+            operator=operator,
+            claims=claims,
+            operator_session=operator_session,
+            approval_context=approval_context,
+            operator_supervisor_name=operator_supervisor_name
+        )
+
+        for chat_id in super_admin_chat_ids:
+            try:
+                response = _send_telegram_text_message(chat_id=chat_id, text=message, parse_mode='HTML')
+                if response.status_code != 200:
+                    logging.error(
+                        "Failed to send sensitive access approval notification to super admin %s: %s",
+                        chat_id,
+                        _get_telegram_error_text(response)
+                    )
+            except Exception as send_error:
+                logging.error(
+                    "Error sending sensitive access approval notification to super admin %s: %s",
+                    chat_id,
+                    send_error
+                )
+    except Exception as notify_error:
+        logging.error(f"notify_super_admin_sensitive_access_approved error: {notify_error}", exc_info=True)
 
 
 def _fetch_task_notification_context(task_id):
@@ -1900,6 +2063,26 @@ def approve_sensitive_access():
         )
         if not updated:
             return jsonify({"error": "Failed to activate access for operator session"}), 409
+
+        operator_session = db.get_user_session(session_id=claims["session_id"], user_id=operator_id)
+        operator_supervisor_name = None
+        operator_supervisor_id = operator[6] if len(operator) > 6 else None
+        if operator_supervisor_id:
+            supervisor = db.get_user(id=operator_supervisor_id)
+            if supervisor:
+                operator_supervisor_name = supervisor[2]
+
+        approval_context = {
+            "request_ip": _client_ip(),
+            "request_user_agent": request.headers.get('User-Agent'),
+            "request_origin": request.headers.get('Origin')
+        }
+
+        threading.Thread(
+            target=_notify_super_admin_sensitive_access_approved,
+            args=(approver, operator, claims, operator_session, approval_context, operator_supervisor_name),
+            daemon=True
+        ).start()
 
         return jsonify({
             "status": "success",
