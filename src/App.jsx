@@ -11111,18 +11111,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (!candidate || typeof candidate !== 'object') return [];
                 const rawSegments = [];
                 const dayShifts = Array.isArray(candidate?.dayShifts) ? candidate.dayShifts : [];
-                const nextDayShifts = Array.isArray(candidate?.nextDayShifts) ? candidate.nextDayShifts : [];
                 dayShifts.forEach(seg => {
                     const start = String(seg?.start || '').trim();
                     const end = String(seg?.end || '').trim();
                     if (!start || !end) return;
                     rawSegments.push({ start, end, dayOffset: 0 });
-                });
-                nextDayShifts.forEach(seg => {
-                    const start = String(seg?.start || '').trim();
-                    const end = String(seg?.end || '').trim();
-                    if (!start || !end) return;
-                    rawSegments.push({ start, end, dayOffset: 1 });
                 });
                 return normalizeSwapTargetSegments(rawSegments).map(seg => ({
                     start: seg.start,
@@ -11777,10 +11770,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             ]);
             const swapCandidatesFiltered = useMemo(() => {
                 const raw = Array.isArray(swapCandidates) ? swapCandidates : [];
+                const scoped = isSwapExchangeMode
+                    ? raw.filter(item => {
+                        const dayShifts = Array.isArray(item?.dayShifts) ? item.dayShifts : [];
+                        return dayShifts.length > 0;
+                    })
+                    : raw;
                 const query = String(swapCandidatesSearch || '').trim().toLowerCase();
-                if (!query) return raw;
+                if (!query) return scoped;
 
-                return raw.filter(item => {
+                return scoped.filter(item => {
                     const haystack = [
                         item?.name,
                         item?.supervisorName
@@ -11789,7 +11788,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         .join(' ');
                     return haystack.includes(query);
                 });
-            }, [swapCandidates, swapCandidatesSearch]);
+            }, [swapCandidates, swapCandidatesSearch, isSwapExchangeMode]);
             const selectedSwapCandidate = useMemo(() => {
                 const selectedId = String(swapForm.targetOperatorId || '').trim();
                 if (!selectedId) return null;
@@ -14053,7 +14052,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             {String(swapCandidatesSearch || '').trim()
                                                                 ? 'По текущему поиску кандидаты не найдены.'
                                                                 : (isSwapExchangeMode
-                                                                    ? 'Кандидаты не найдены для выбранного направления.'
+                                                                    ? 'На выбранную дату нет смен у доступных кандидатов.'
                                                                     : 'Нет операторов без пересечения на выбранный интервал.')}
                                                         </div>
                                                     ) : (
@@ -14156,7 +14155,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                         })
                                                                                     )}
                                                                                 </div>
-                                                                                {(nextDayShifts.length > 0 || isNextDayOff) && (
+                                                                                {(!isSwapExchangeMode && (nextDayShifts.length > 0 || isNextDayOff)) && (
                                                                                     <div className="flex flex-wrap items-center gap-1.5">
                                                                                         <span className="text-[11px] text-slate-500">
                                                                                             {nextDayDate ? formatDateRuShort(nextDayDate) : 'След. день'}
@@ -14227,6 +14226,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             <div className="text-sm font-semibold text-slate-900">Выбор смен кандидата</div>
                                                             <div className="text-xs text-slate-500">
                                                                 {selectedSwapCandidate?.name ? `Кандидат: ${selectedSwapCandidate.name}` : 'Сначала выберите кандидата'}
+                                                            </div>
+                                                            <div className="text-[11px] text-slate-500 mt-1">
+                                                                Для обмена доступны только смены на дату {swapForm.swapDate ? formatDateRuShort(swapForm.swapDate) : 'запроса'}.
                                                             </div>
                                                         </div>
                                                         <button
