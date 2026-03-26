@@ -50,6 +50,7 @@ const MonitoringScaleModal = lazyWithRetry(() => import('./components/modals/Mon
 const DisputeModal = lazyWithRetry(() => import('./components/modals/DisputeModal'));
 const HistoryModal = lazyWithRetry(() => import('./components/modals/HistoryModal'));
 const UserEditModal = lazyWithRetry(() => import('./components/modals/UserEditModal'));
+const AccountAvatarModal = lazyWithRetry(() => import('./components/modals/AccountAvatarModal'));
 const SalaryCalculatorChat = lazyWithRetry(() => import('./components/salary/SalaryCalculatorChat'));
 
 
@@ -21710,6 +21711,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const currentUserRole = normalizeRole(user?.role);
             const isSuperAdmin = currentUserRole === 'super_admin';
             const isAdminLikeRole = isAdminLikeRoleFn(currentUserRole);
+            const canChangeAccountAvatar = isAdminLikeRole || isSupervisorRole(currentUserRole);
             const [isAuthInitializing, setIsAuthInitializing] = useState(true);
             const [showAuthEntranceSplash, setShowAuthEntranceSplash] = useState(false);
             const [showOrazAitSplash, setShowOrazAitSplash] = useState(false);
@@ -21734,6 +21736,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [currentSvForTableChange, setCurrentSvForTableChange] = useState(null);
             const [showChangeLoginForm, setShowChangeLoginForm] = useState(false);
             const [showChangePasswordForm, setShowChangePasswordForm] = useState(false);
+            const [showChangeAvatarForm, setShowChangeAvatarForm] = useState(false);
             const [newCredentials, setNewCredentials] = useState(null);
             const [loginData, setLoginData] = useState({
                 new_login: '',
@@ -26442,6 +26445,102 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             };
 
+            const handleChangeAvatar = async ({
+                avatar_file = null,
+                avatar_original_file = null,
+                avatar_remove = false
+            } = {}) => {
+                if (!user?.id) {
+                    throw new Error('Пользователь не найден');
+                }
+                if (!(isAdminLikeRoleFn(user?.role) || isSupervisorRole(user?.role))) {
+                    throw new Error('Недостаточно прав для смены аватара');
+                }
+                if (!avatar_file && !avatar_remove) {
+                    return { status: 'success', message: 'No avatar changes' };
+                }
+
+                const commonHeaders = withAccessTokenHeader({
+                    'X-API-Key': user.apiKey,
+                    'X-User-Id': user.id
+                });
+
+                let response = null;
+                if (avatar_file) {
+                    const formData = new FormData();
+                    formData.append('target_user_id', String(user.id));
+                    formData.append('avatar', avatar_file, avatar_file.name || 'avatar.webp');
+                    if (avatar_original_file) {
+                        formData.append('avatar_original', avatar_original_file, avatar_original_file.name || 'avatar-original');
+                    }
+                    response = await axios.post(
+                        `${API_BASE_URL}/api/user/avatar`,
+                        formData,
+                        { headers: commonHeaders }
+                    );
+                } else {
+                    response = await axios.delete(`${API_BASE_URL}/api/user/avatar`, {
+                        data: {
+                            target_user_id: Number(user.id),
+                            remove: true
+                        },
+                        headers: commonHeaders
+                    });
+                }
+
+                const data = response?.data || {};
+                if (data.status !== 'success') {
+                    throw new Error(data.error || 'Не удалось обновить аватар');
+                }
+
+                const nextAvatarUrl = data.avatar_url || null;
+                const nextAvatarUpdatedAt = data.avatar_updated_at || null;
+                const patchCollectionAvatar = (items) => {
+                    if (!Array.isArray(items)) return items;
+                    return items.map((item) => (
+                        Number(item?.id) === Number(user.id)
+                            ? {
+                                ...item,
+                                avatar_url: nextAvatarUrl,
+                                avatar_updated_at: nextAvatarUpdatedAt || item?.avatar_updated_at || null
+                            }
+                            : item
+                    ));
+                };
+
+                if (isMounted.current) {
+                    setUser((prev) => (prev ? {
+                        ...prev,
+                        avatar_url: nextAvatarUrl,
+                        avatar_updated_at: nextAvatarUpdatedAt || prev?.avatar_updated_at || null
+                    } : prev));
+                    setProfileData((prev) => (prev ? {
+                        ...prev,
+                        avatar_url: nextAvatarUrl,
+                        avatar_updated_at: nextAvatarUpdatedAt || prev?.avatar_updated_at || null
+                    } : prev));
+                    setUsers((prev) => patchCollectionAvatar(prev));
+                    setAdminUsers((prev) => patchCollectionAvatar(prev));
+                    setTrainerUsers((prev) => patchCollectionAvatar(prev));
+                    setSystemAdmins((prev) => patchCollectionAvatar(prev));
+                    setSvList((prev) => patchCollectionAvatar(prev));
+                    setSelectedSvData((prev) => {
+                        if (!prev || Number(prev?.id) !== Number(user.id)) return prev;
+                        return {
+                            ...prev,
+                            avatar_url: nextAvatarUrl,
+                            avatar_updated_at: nextAvatarUpdatedAt || prev?.avatar_updated_at || null
+                        };
+                    });
+                }
+
+                showToast(
+                    data.message || (avatar_remove ? 'Аватар удален' : 'Аватар обновлен'),
+                    'success'
+                );
+                return data;
+            };
+
             const fetchUserHistory = async (userId) => {
                 try {
                     setLoadingHistoryId(userId);
@@ -26651,6 +26750,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setCallEvaluationFrameReady(false);
                     setLogin('');
                     setPassword('');
+                    setShowChangeLoginForm(false);
+                    setShowChangePasswordForm(false);
+                    setShowChangeAvatarForm(false);
                     setShowLogoutConfirm(false);
                     setSelectedSvId('');
                     setSelectedSvData(null);
@@ -28223,7 +28325,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         ${showSidebarAccountDropdown && !isClosing ? "animate-dropdown" : "animate-dropdown-reverse"}`}
                                         >
                                             <button
-                                                onClick={() => { setShowChangeLoginForm(true); handleToggleDropdown(true); }}
+                                                onClick={() => {
+                                                    setShowChangeAvatarForm(false);
+                                                    setShowChangePasswordForm(false);
+                                                    setShowChangeLoginForm(true);
+                                                    handleToggleDropdown(true);
+                                                }}
                                                 className="w-full text-left px-4 py-2 hover:bg-gray-100 text-black"
                                             >
                                                 <FaIcon className="fas fa-user-edit mr-2"></FaIcon> Смена логина
@@ -28231,8 +28338,31 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                             <div className="border-t border-gray-200" />
 
+                                            {canChangeAccountAvatar && (
+                                                <>
+                                                    <button
+                                                        onClick={() => {
+                                                            setShowChangeLoginForm(false);
+                                                            setShowChangePasswordForm(false);
+                                                            setShowChangeAvatarForm(true);
+                                                            handleToggleDropdown(true);
+                                                        }}
+                                                        className="w-full text-left px-4 py-2 hover:bg-gray-100 text-black"
+                                                    >
+                                                        <FaIcon className="fas fa-image mr-2"></FaIcon> Смена аватара
+                                                    </button>
+
+                                                    <div className="border-t border-gray-200" />
+                                                </>
+                                            )}
+
                                             <button
-                                                onClick={() => { setShowChangePasswordForm(true); handleToggleDropdown(true); }}
+                                                onClick={() => {
+                                                    setShowChangeAvatarForm(false);
+                                                    setShowChangeLoginForm(false);
+                                                    setShowChangePasswordForm(true);
+                                                    handleToggleDropdown(true);
+                                                }}
                                                 className="w-full text-left px-4 py-2 hover:bg-gray-100 text-black"
                                             >
                                                 <FaIcon className="fas fa-lock mr-2"></FaIcon> Смена пароля
@@ -31814,6 +31944,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             : ""
                                     }
                                     />
+                            </Suspense>
+                        )}
+                        {showChangeAvatarForm && (
+                            <Suspense fallback={null}>
+                                <AccountAvatarModal
+                                    isOpen={showChangeAvatarForm}
+                                    onClose={() => setShowChangeAvatarForm(false)}
+                                    userName={user?.name || ''}
+                                    avatarUrl={user?.avatar_url || ''}
+                                    onSave={handleChangeAvatar}
+                                />
                             </Suspense>
                         )}
                         {showBirthdayGreetingModal && (
