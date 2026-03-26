@@ -28349,7 +28349,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         }}
                                                         className="w-full text-left px-4 py-2 hover:bg-gray-100 text-black"
                                                     >
-                                                        <FaIcon className="fas fa-image mr-2"></FaIcon> Смена аватара
+                                                        <FaIcon className="fas fa-camera mr-2"></FaIcon> Смена аватара
                                                     </button>
 
                                                     <div className="border-t border-gray-200" />
