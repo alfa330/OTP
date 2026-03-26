@@ -946,6 +946,33 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_user_sessions_expires_at
                 ON user_sessions(expires_at);
             """)
+            cursor.execute("""
+                CREATE OR REPLACE FUNCTION revoke_sessions_on_inactive_status()
+                RETURNS TRIGGER
+                LANGUAGE plpgsql
+                AS $$
+                BEGIN
+                    IF NEW.status IN ('fired', 'dismissal')
+                       AND (OLD.status IS DISTINCT FROM NEW.status) THEN
+                        UPDATE user_sessions
+                        SET revoked_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                        WHERE user_id = NEW.id
+                          AND revoked_at IS NULL;
+                    END IF;
+
+                    RETURN NEW;
+                END;
+                $$;
+            """)
+            cursor.execute("""
+                DROP TRIGGER IF EXISTS trg_revoke_sessions_on_inactive_status ON users;
+            """)
+            cursor.execute("""
+                CREATE TRIGGER trg_revoke_sessions_on_inactive_status
+                AFTER UPDATE OF status ON users
+                FOR EACH ROW
+                EXECUTE FUNCTION revoke_sessions_on_inactive_status();
+            """)
             # Work schedules (shifts) table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS work_shifts (
