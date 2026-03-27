@@ -158,6 +158,16 @@ const isOrazAitSplashDay = (date = new Date()) => {
     );
 };
 
+const canAccessLmsSectionForUser = (userLike) => {
+    const role = normalizeRole(userLike?.role);
+    const userId = Number(userLike?.id);
+    if (!Number.isFinite(userId)) return false;
+    return (
+        (role === 'super_admin' && userId === 2) ||
+        (role === 'operator' && userId === 56)
+    );
+};
+
 const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'auto' }) => (
     <img
         src={src}
@@ -22685,6 +22695,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const currentUserRole = normalizeRole(user?.role);
             const isSuperAdmin = currentUserRole === 'super_admin';
             const isAdminLikeRole = isAdminLikeRoleFn(currentUserRole);
+            const canAccessLmsSection = canAccessLmsSectionForUser(user);
             const canChangeAccountAvatar = isAdminLikeRole || isSupervisorRole(currentUserRole);
             const [isAuthInitializing, setIsAuthInitializing] = useState(true);
             const [showAuthEntranceSplash, setShowAuthEntranceSplash] = useState(false);
@@ -24814,12 +24825,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setView('surveys');
                     return;
                 }
-                if (user.role === 'trainee') {
-                    setView('lms');
-                    return;
-                }
 
-                if (savedView) {
+                if (savedView && (savedView !== 'lms' || canAccessLmsSection)) {
                     setView(savedView);
                     return;
                 }
@@ -24827,16 +24834,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (isAdminLikeRoleFn(user?.role)) setView('sv_list');
                 else if (isSupervisorRole(user?.role)) setView('operators');
                 else setView('hours');
-            }, [user?.id, user?.role]);
+            }, [user?.id, user?.role, canAccessLmsSection]);
 
             useEffect(() => {
                 if (user?.role === 'trainer' && view !== 'surveys') {
                     setView('surveys');
                 }
-                if (user?.role === 'trainee' && view !== 'lms') {
-                    setView('lms');
+                if (view === 'lms' && !canAccessLmsSection) {
+                    if (isAdminLikeRoleFn(user?.role)) setView('sv_list');
+                    else if (isSupervisorRole(user?.role)) setView('operators');
+                    else if (user?.role === 'trainer') setView('surveys');
+                    else setView('hours');
                 }
-            }, [user?.role, view]);
+            }, [user?.role, view, canAccessLmsSection]);
             
             useEffect(() => {
                 if (view && user) { // Only save if user is logged in
@@ -28990,14 +29000,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                               </span>
                             </h1>
                             <ul ref={sidebarMenuScrollRef} className={`space-y-2 flex-1 min-h-0 sidebar-menu-scroll`}>
-                                <li>
-                                    <button
-                                        onClick={() => { setView('lms'); setMobileMenuOpen(false); }}
-                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'lms' ? 'bg-blue-700' : ''}`}
-                                    >
-                                        <FaIcon className="fas fa-graduation-cap"></FaIcon> <span className="sidebar-text">Обучение</span>
-                                    </button>
-                                </li>
+                                {canAccessLmsSection && (
+                                    <li>
+                                        <button
+                                            onClick={() => { setView('lms'); setMobileMenuOpen(false); }}
+                                            className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'lms' ? 'bg-blue-700' : ''}`}
+                                        >
+                                            <FaIcon className="fas fa-graduation-cap"></FaIcon> <span className="sidebar-text">Обучение</span>
+                                        </button>
+                                    </li>
+                                )}
                                 {isAdminLikeRole && (
                                     <>
                                         <li className="relative" ref={sidebarEmployeesRef}>
@@ -29403,7 +29415,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             </div>
                         </div>
                         )}
-                        {view === 'lms' && (
+                        {canAccessLmsSection && view === 'lms' && (
                             <LmsView
                                 user={user}
                                 apiBaseUrl={API_BASE_URL}
