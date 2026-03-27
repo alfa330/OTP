@@ -12099,7 +12099,7 @@ class Database:
                 DELETE FROM work_shifts
                 WHERE operator_id = %s
                   AND shift_date >= %s
-                RETURNING id
+                RETURNING id, shift_date
             """, (operator_id, start_date_obj))
         else:
             cursor.execute("""
@@ -12107,17 +12107,24 @@ class Database:
                 WHERE operator_id = %s
                   AND shift_date >= %s
                   AND shift_date <= %s
-                RETURNING id
+                RETURNING id, shift_date
             """, (operator_id, start_date_obj, end_date_obj))
 
         deleted_rows = cursor.fetchall() or []
         deleted_shifts_count = len(deleted_rows)
+        max_deleted_shift_date = None
+        for _, shift_date_value in deleted_rows:
+            if shift_date_value is None:
+                continue
+            if max_deleted_shift_date is None or shift_date_value > max_deleted_shift_date:
+                max_deleted_shift_date = shift_date_value
 
         if end_date_obj is None:
             cursor.execute("""
                 DELETE FROM days_off
                 WHERE operator_id = %s
                   AND day_off_date >= %s
+                RETURNING day_off_date
             """, (operator_id, start_date_obj))
         else:
             cursor.execute("""
@@ -12125,12 +12132,24 @@ class Database:
                 WHERE operator_id = %s
                   AND day_off_date >= %s
                   AND day_off_date <= %s
+                RETURNING day_off_date
             """, (operator_id, start_date_obj, end_date_obj))
 
-        deleted_days_off_count = int(cursor.rowcount or 0)
+        deleted_day_off_rows = cursor.fetchall() or []
+        deleted_days_off_count = len(deleted_day_off_rows)
+        max_deleted_day_off_date = None
+        for row in deleted_day_off_rows:
+            day_off_date_value = row[0] if isinstance(row, tuple) and row else None
+            if day_off_date_value is None:
+                continue
+            if max_deleted_day_off_date is None or day_off_date_value > max_deleted_day_off_date:
+                max_deleted_day_off_date = day_off_date_value
+
         return {
             'deleted_shifts': deleted_shifts_count,
-            'deleted_day_off_rows': deleted_days_off_count
+            'deleted_day_off_rows': deleted_days_off_count,
+            'max_deleted_shift_date': max_deleted_shift_date,
+            'max_deleted_day_off_date': max_deleted_day_off_date
         }
 
     def _clear_day_schedule_tx(self, cursor, operator_id, target_date):
@@ -12968,17 +12987,27 @@ class Database:
                 created_by_id
             ))
             saved_row = cursor.fetchone()
-            self._delete_shifts_for_period_tx(
+            deleted_schedule = self._delete_shifts_for_period_tx(
                 cursor=cursor,
                 operator_id=operator_id,
                 start_date=start_date_obj,
                 end_date=end_date_obj
             )
+            recalc_end_date_obj = end_date_obj
+            if recalc_end_date_obj is None:
+                recalc_end_date_obj = start_date_obj
+                if isinstance(deleted_schedule, dict):
+                    max_deleted_shift_date = deleted_schedule.get('max_deleted_shift_date')
+                    max_deleted_day_off_date = deleted_schedule.get('max_deleted_day_off_date')
+                    if isinstance(max_deleted_shift_date, date) and max_deleted_shift_date > recalc_end_date_obj:
+                        recalc_end_date_obj = max_deleted_shift_date
+                    if isinstance(max_deleted_day_off_date, date) and max_deleted_day_off_date > recalc_end_date_obj:
+                        recalc_end_date_obj = max_deleted_day_off_date
             self._recalculate_auto_daily_hours_tx(
                 cursor=cursor,
                 operator_ids=[operator_id],
                 start_date=start_date_obj,
-                end_date=end_date_obj
+                end_date=recalc_end_date_obj
             )
             self._sync_user_statuses_from_schedule_periods_tx(cursor, operator_ids=[operator_id])
             return self._serialize_schedule_status_period(saved_row)
