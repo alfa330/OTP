@@ -5225,6 +5225,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const mm = m % 60;
             return `${cpad(hh)}:${cpad(mm)}`;
             };
+            const minutesToTimeWithDayOffset = (m) => {
+            const total = Math.round(Number(m) || 0);
+            const dayOffset = Math.floor(total / (24 * 60));
+            const base = ((total % (24 * 60)) + (24 * 60)) % (24 * 60);
+            const hh = Math.floor(base / 60);
+            const mm = base % 60;
+            const timeText = `${cpad(hh)}:${cpad(mm)}`;
+            if (dayOffset > 0) return `${timeText} (+${dayOffset})`;
+            if (dayOffset < 0) return `${timeText} (${dayOffset})`;
+            return timeText;
+            };
             const todayDateStr = (d = new Date()) => {
             const yyyy = d.getFullYear();
             const mm = String(d.getMonth() + 1).padStart(2, '0');
@@ -15488,24 +15499,28 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     shiftParts: parts
                                                 })
                                                 : null;
-                                            const specialStatusBreakPartsForCell = breakPartsForCell;
+                                            const specialStatusBaseMetrics = statusMatchMetricsForCell || shiftBoundaryMetricsForCell || null;
                                             const specialStatusMatchMetrics = plannerStatusSpecialDayViewEnabled
-                                                ? (statusMatchMetricsForCell
+                                                ? (specialStatusBaseMetrics
                                                     ? {
-                                                        ...statusMatchMetricsForCell,
+                                                        ...specialStatusBaseMetrics,
+                                                        perShift: Array.isArray(shiftBoundaryMetricsForCell?.perShift)
+                                                            ? shiftBoundaryMetricsForCell.perShift
+                                                            : (Array.isArray(statusMatchMetricsForCell?.perShift) ? statusMatchMetricsForCell.perShift : []),
                                                         lateTotalMin: Number(shiftBoundaryMetricsForCell?.lateTotalMin ?? statusMatchMetricsForCell?.lateTotalMin ?? 0),
                                                         earlyLeaveTotalMin: Number(shiftBoundaryMetricsForCell?.earlyLeaveTotalMin ?? statusMatchMetricsForCell?.earlyLeaveTotalMin ?? 0)
                                                     }
-                                                    : shiftBoundaryMetricsForCell)
+                                                    : null)
                                                 : null;
                                             const liveLateMin = Number(shiftBoundaryMetricsForCell?.lateTotalMin ?? statusMatchMetricsForCell?.lateTotalMin ?? 0);
                                             const liveEarlyLeaveMin = Number(shiftBoundaryMetricsForCell?.earlyLeaveTotalMin ?? statusMatchMetricsForCell?.earlyLeaveTotalMin ?? 0);
                                             const liveNoPhoneSec = Number(noPhoneShiftMetricsForCell?.noPhoneSec || 0);
                                             const liveOvertimeOutsideShiftMin = Number(statusMatchMetricsForCell?.workOutsideShiftMin || 0);
-                                            let defectLateMin = shouldComputeDefectMetrics
+                                            const shouldUseLiveBoundaryDefects = shouldComputeDefectMetrics || shouldComputeBoundaryDefectMetrics;
+                                            let defectLateMin = shouldUseLiveBoundaryDefects
                                                 ? liveLateMin
                                                 : Number(aggregatedFlagsForCell?.lateActive ? aggregatedFlagsForCell?.lateMinutes : 0);
-                                            let defectEarlyLeaveMin = shouldComputeDefectMetrics
+                                            let defectEarlyLeaveMin = shouldUseLiveBoundaryDefects
                                                 ? liveEarlyLeaveMin
                                                 : Number(aggregatedFlagsForCell?.earlyLeaveActive ? aggregatedFlagsForCell?.earlyLeaveMinutes : 0);
                                             if ((aggregatedFlagsForCell?.lateStatus || null) === 'rejected') defectLateMin = 0;
@@ -15583,6 +15598,39 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 defectIssues.length > 0 ? `Проблемы: ${defectIssues.join(', ')}` : '',
                                                 overtimeIssues.length > 0 ? `Переработка: ${overtimeIssues.join(', ')}` : ''
                                             ].filter(Boolean).join('\n');
+                                            const specialTimelineStatusBars = importedStatusBarsForShiftContextCell;
+                                            const specialTimelineShiftPartMap = new Map();
+                                            (parts || []).forEach((p) => {
+                                                const key = `${String(p?.sourceDate || d)}|${Number(p?.sourceIndex ?? -1)}`;
+                                                const start = Number(p?.start || 0);
+                                                const end = Number(p?.end || 0);
+                                                if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return;
+                                                specialTimelineShiftPartMap.set(key, {
+                                                    ...p,
+                                                    start,
+                                                    end
+                                                });
+                                            });
+                                            (shiftStartPartsForCell || []).forEach((p) => {
+                                                const key = `${String(p?.sourceDate || d)}|${Number(p?.sourceIndex ?? -1)}`;
+                                                const start = Number(p?.start || 0);
+                                                const end = Number(p?.end || 0);
+                                                if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return;
+                                                const existing = specialTimelineShiftPartMap.get(key);
+                                                if (!existing || end > Number(existing?.end || 0)) {
+                                                    specialTimelineShiftPartMap.set(key, {
+                                                        ...p,
+                                                        start,
+                                                        end
+                                                    });
+                                                }
+                                            });
+                                            const specialTimelineShiftParts = Array.from(specialTimelineShiftPartMap.values())
+                                                .sort((a, b) => (Number(a?.start || 0) - Number(b?.start || 0)));
+                                            const specialTimelineBreakParts = specialTimelineShiftParts
+                                                .flatMap(p => getBreakPartsForPart(op, p, d))
+                                                .map(b => ({ start: Number(b?.start || 0), end: Number(b?.end || 0) }))
+                                                .filter(b => b.end > b.start);
                                             const specialStatusLateBars = (specialStatusMatchMetrics?.perShift || [])
                                                 .map(sh => {
                                                     const lateMin = Number(sh?.lateMin || 0);
@@ -15596,17 +15644,34 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             const specialStatusOvertimeBars = (specialStatusMatchMetrics?.workOutsideShiftIntervals || [])
                                                 .map((interval, idx) => {
                                                     const start = Math.max(0, Number(interval?.start || 0));
-                                                    const end = Math.min(1440, Number(interval?.end || 0));
+                                                    const end = Number(interval?.end || 0);
                                                     if (end <= start) return null;
                                                     return { id: idx, start, end, min: end - start };
                                                 })
                                                 .filter(Boolean);
-                                            const specialStatusTimelineTrackBaseWidth = 24 * 40;
+                                            const specialTimelineMaxEnd = Math.max(
+                                                1440,
+                                                ...specialTimelineShiftParts.map((p) => Number(p?.end || 0)),
+                                                ...specialTimelineBreakParts.map((b) => Number(b?.end || 0)),
+                                                ...specialTimelineStatusBars.map((seg) => Number(seg?.endMin ?? seg?.end ?? 0)),
+                                                ...specialStatusLateBars.map((seg) => Number(seg?.end || 0)),
+                                                ...specialStatusOvertimeBars.map((seg) => Number(seg?.end || 0)),
+                                                ...offlineActivityBarsForCell.map((seg) => Number(seg?.endMin || 0)),
+                                                ...technicalIssueBarsForCell.map((seg) => Number(seg?.endMin || 0))
+                                            );
+                                            const specialTimelineMinutes = Math.max(1440, Math.min(2880, Math.ceil(specialTimelineMaxEnd)));
+                                            const specialTimelineHourCount = Math.max(24, Math.ceil(specialTimelineMinutes / 60));
+                                            const specialStatusTimelineTrackBaseWidth = specialTimelineHourCount * 40;
                                             const specialStatusTimelineTrackWidthPx = Math.max(
                                                 specialStatusTimelineTrackBaseWidth,
                                                 Math.round(specialStatusTimelineTrackBaseWidth * (plannerStatusTimelineZoom || 1))
                                             );
                                             const specialStatusTimelineTrackStyle = { width: `${specialStatusTimelineTrackWidthPx}px`, minWidth: '100%' };
+                                            const specialTimelineLeftPercent = (minuteValue) => {
+                                                const minute = Number(minuteValue || 0);
+                                                const bounded = Math.max(0, Math.min(specialTimelineMinutes, minute));
+                                                return (bounded / specialTimelineMinutes) * 100;
+                                            };
                                             const origArr = (op.shifts?.[d] ?? []).map((s, idx) => {
                                             const sM = timeToMinutes(s.start);
                                             const eM = timeToMinutes(s.end);
@@ -15754,14 +15819,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         onMouseUp={(e) => handleOfflineTimelineRightMouseUp(e, op.id, d)}
                                                                     >
                                                                         <div className="absolute inset-0 flex pointer-events-none">
-                                                                            {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0 border-slate-100" />))}
+                                                                            {Array.from({ length: specialTimelineHourCount }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0 border-slate-100" />))}
                                                                         </div>
                                                                         {hasPendingOfflineRangeForCell && (
                                                                             <div
                                                                                 className={`absolute top-0 bottom-0 z-50 pointer-events-none border-x-2 border-emerald-600/90 ${pendingOfflineIsDraggingForCell ? 'bg-emerald-400/35' : 'bg-emerald-300/30'}`}
                                                                                 style={{
-                                                                                    left: `${computeLeftPercent(pendingOfflineRangeStartMinForCell)}%`,
-                                                                                    width: `${((pendingOfflineRangeEndMinForCell - pendingOfflineRangeStartMinForCell) / minutesInDay) * 100}%`
+                                                                                    left: `${specialTimelineLeftPercent(pendingOfflineRangeStartMinForCell)}%`,
+                                                                                    width: `${((pendingOfflineRangeEndMinForCell - pendingOfflineRangeStartMinForCell) / specialTimelineMinutes) * 100}%`
                                                                                 }}
                                                                                 title={`Черновик активности: ${minutesToTime(pendingOfflineRangeStartMinForCell)} — ${minutesToTime(pendingOfflineRangeEndMinForCell)}`}
                                                                             />
@@ -15769,7 +15834,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         {pendingOfflineStartMinForCell != null && !hasPendingOfflineRangeForCell && (
                                                                             <div
                                                                                 className="absolute top-0 bottom-0 z-50 border-l-2 border-emerald-600/90 pointer-events-none"
-                                                                                style={{ left: `${computeLeftPercent(pendingOfflineStartMinForCell)}%` }}
+                                                                                style={{ left: `${specialTimelineLeftPercent(pendingOfflineStartMinForCell)}%` }}
                                                                             />
                                                                         )}
                                                                         {offlineActivityBarsForCell.map((seg, segIdx) => (
@@ -15777,8 +15842,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                 key={`special-offline-activity-${seg.id ?? segIdx}`}
                                                                                 className="absolute bottom-2 h-1.5 z-30 rounded-sm bg-emerald-500/85 border border-emerald-700/80"
                                                                                 style={{
-                                                                                    left: `${computeLeftPercent(seg.startMin)}%`,
-                                                                                    width: `${((seg.endMin - seg.startMin) / minutesInDay) * 100}%`
+                                                                                    left: `${specialTimelineLeftPercent(seg.startMin)}%`,
+                                                                                    width: `${((seg.endMin - seg.startMin) / specialTimelineMinutes) * 100}%`
                                                                                 }}
                                                                                 title={seg.title}
                                                                             />
@@ -15788,30 +15853,30 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                 key={`special-tech-issue-${seg.id ?? segIdx}`}
                                                                                 className="absolute bottom-0 h-1.5 z-30 rounded-sm bg-violet-500/85 border border-violet-700/80"
                                                                                 style={{
-                                                                                    left: `${computeLeftPercent(seg.startMin)}%`,
-                                                                                    width: `${((seg.endMin - seg.startMin) / minutesInDay) * 100}%`
+                                                                                    left: `${specialTimelineLeftPercent(seg.startMin)}%`,
+                                                                                    width: `${((seg.endMin - seg.startMin) / specialTimelineMinutes) * 100}%`
                                                                                 }}
                                                                                 title={seg.title}
                                                                             />
                                                                         ))}
-                                                                        {parts.map((p, idx) => (
+                                                                        {specialTimelineShiftParts.map((p, idx) => (
                                                                             <React.Fragment key={`special-part-${idx}`}>
                                                                                 <div
                                                                                     className="absolute top-1/2 -translate-y-1/2 h-5 text-xs overflow-hidden flex items-center justify-between"
                                                                                     style={{
-                                                                                        left: `${computeLeftPercent(p.start)}%`,
-                                                                                        width: `${((p.end - p.start) / minutesInDay) * 100}%`,
+                                                                                        left: `${specialTimelineLeftPercent(p.start)}%`,
+                                                                                        width: `${((p.end - p.start) / specialTimelineMinutes) * 100}%`,
                                                                                         background: ((op.shifts?.[p.sourceDate]?.[p.sourceIndex] && timeToMinutes(op.shifts[p.sourceDate][p.sourceIndex].end) <= timeToMinutes(op.shifts[p.sourceDate][p.sourceIndex].start)) ? "linear-gradient(90deg,#f97316,#ea580c)" : "linear-gradient(90deg,#60a5fa,#2563eb)"),
                                                                                         color: "white",
                                                                                     }}
                                                                                     title={(() => {
                                                                                         const srcSeg = op.shifts?.[p.sourceDate]?.[p.sourceIndex];
-                                                                                        if (!srcSeg) return `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`;
+                                                                                        if (!srcSeg) return `${minutesToTimeWithDayOffset(p.start)} — ${minutesToTimeWithDayOffset(p.end)}`;
                                                                                         const srcStart = timeToMinutes(srcSeg.start);
                                                                                         const srcEnd = timeToMinutes(srcSeg.end);
                                                                                         const isCrossing = srcEnd <= srcStart;
                                                                                         if (isCrossing && srcSeg.end !== '00:00') return `${srcSeg.start} — ${srcSeg.end} (+1)`;
-                                                                                        return `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`;
+                                                                                        return `${minutesToTimeWithDayOffset(p.start)} — ${minutesToTimeWithDayOffset(p.end)}`;
                                                                                     })()}
                                                                                 >
                                                                                     <button
@@ -15827,8 +15892,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                         key={`special-break-${idx}-${bi}`}
                                                                                         className="absolute top-1/2 -translate-y-1/2 h-5 z-30"
                                                                                         style={{
-                                                                                            left: `${computeLeftPercent(b.start)}%`,
-                                                                                            width: `${((b.end - b.start) / minutesInDay) * 100}%`,
+                                                                                            left: `${specialTimelineLeftPercent(b.start)}%`,
+                                                                                            width: `${((b.end - b.start) / specialTimelineMinutes) * 100}%`,
                                                                                             background: "linear-gradient(90deg,#fde68a,#f59e0b)"
                                                                                         }}
                                                                                         title={getBreakTimelineTitle(b)}
@@ -15841,10 +15906,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                 key={`special-late-${lateIdx}`}
                                                                                 className="absolute top-0 bottom-0 z-40 border-l border-rose-700/80 bg-rose-500/35"
                                                                                 style={{
-                                                                                    left: `${computeLeftPercent(late.start)}%`,
-                                                                                    width: `${((late.end - late.start) / minutesInDay) * 100}%`
+                                                                                    left: `${specialTimelineLeftPercent(late.start)}%`,
+                                                                                    width: `${((late.end - late.start) / specialTimelineMinutes) * 100}%`
                                                                                 }}
-                                                                                title={`Опоздание • ${minutesToTime(late.start)} — ${minutesToTime(late.end)} • ${Math.round(late.lateMin)} мин`}
+                                                                                title={`Опоздание • ${minutesToTimeWithDayOffset(late.start)} — ${minutesToTimeWithDayOffset(late.end)} • ${Math.round(late.lateMin)} мин`}
                                                                             />
                                                                         ))}
                                                                         {specialStatusOvertimeBars.map((ot) => (
@@ -15852,13 +15917,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                 key={`special-overtime-${ot.id}`}
                                                                                 className="absolute top-0 bottom-0 z-40 border-l border-emerald-700/80 bg-emerald-500/35"
                                                                                 style={{
-                                                                                    left: `${computeLeftPercent(ot.start)}%`,
-                                                                                    width: `${((ot.end - ot.start) / minutesInDay) * 100}%`
+                                                                                    left: `${specialTimelineLeftPercent(ot.start)}%`,
+                                                                                    width: `${((ot.end - ot.start) / specialTimelineMinutes) * 100}%`
                                                                                 }}
-                                                                                title={`Переработка • ${minutesToTime(ot.start)} — ${minutesToTime(ot.end)} • ${Math.round(ot.min)} мин`}
+                                                                                title={`Переработка • ${minutesToTimeWithDayOffset(ot.start)} — ${minutesToTimeWithDayOffset(ot.end)} • ${Math.round(ot.min)} мин`}
                                                                             />
                                                                         ))}
-                                                                        {parts.length === 0 && (
+                                                                        {specialTimelineShiftParts.length === 0 && (
                                                                             <div className="absolute inset-0 flex items-center justify-center text-[11px] text-slate-400">Нет смены</div>
                                                                         )}
                                                                     </div>
@@ -15877,14 +15942,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         onMouseUp={(e) => handleOfflineTimelineRightMouseUp(e, op.id, d)}
                                                                     >
                                                                         <div className="absolute inset-0 flex pointer-events-none">
-                                                                            {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0 border-slate-100" />))}
+                                                                            {Array.from({ length: specialTimelineHourCount }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0 border-slate-100" />))}
                                                                         </div>
                                                                         {hasPendingOfflineRangeForCell && (
                                                                             <div
                                                                                 className={`absolute top-0 bottom-0 z-50 pointer-events-none border-x-2 border-emerald-600/90 ${pendingOfflineIsDraggingForCell ? 'bg-emerald-400/30' : 'bg-emerald-300/25'}`}
                                                                                 style={{
-                                                                                    left: `${computeLeftPercent(pendingOfflineRangeStartMinForCell)}%`,
-                                                                                    width: `${((pendingOfflineRangeEndMinForCell - pendingOfflineRangeStartMinForCell) / minutesInDay) * 100}%`
+                                                                                    left: `${specialTimelineLeftPercent(pendingOfflineRangeStartMinForCell)}%`,
+                                                                                    width: `${((pendingOfflineRangeEndMinForCell - pendingOfflineRangeStartMinForCell) / specialTimelineMinutes) * 100}%`
                                                                                 }}
                                                                                 title={`Черновик активности: ${minutesToTime(pendingOfflineRangeStartMinForCell)} — ${minutesToTime(pendingOfflineRangeEndMinForCell)}`}
                                                                             />
@@ -15892,25 +15957,25 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         {pendingOfflineStartMinForCell != null && !hasPendingOfflineRangeForCell && (
                                                                             <div
                                                                                 className="absolute top-0 bottom-0 z-50 border-l-2 border-emerald-600/90 pointer-events-none"
-                                                                                style={{ left: `${computeLeftPercent(pendingOfflineStartMinForCell)}%` }}
+                                                                                style={{ left: `${specialTimelineLeftPercent(pendingOfflineStartMinForCell)}%` }}
                                                                             />
                                                                         )}
-                                                                        {importedStatusBarsForCell.map((seg, segIdx) => {
+                                                                        {specialTimelineStatusBars.map((seg, segIdx) => {
                                                                             const tone = getPlannerImportedStatusTone(seg.stateName || seg.stateKey);
                                                                             return (
                                                                                 <div
                                                                                     key={`special-status-${segIdx}`}
                                                                                     className="absolute top-1/2 -translate-y-1/2 h-5"
                                                                                     style={{
-                                                                                        left: `${computeLeftPercent(seg.startMin)}%`,
-                                                                                        width: `${((seg.endMin - seg.startMin) / minutesInDay) * 100}%`,
+                                                                                        left: `${specialTimelineLeftPercent(seg.startMin)}%`,
+                                                                                        width: `${((seg.endMin - seg.startMin) / specialTimelineMinutes) * 100}%`,
                                                                                         background: tone.bar
                                                                                     }}
-                                                                                    title={`${seg.stateName} • ${minutesToTime(seg.startMin)} — ${minutesToTime(seg.endMin)}`}
+                                                                                    title={`${seg.stateName} • ${minutesToTimeWithDayOffset(seg.startMin)} — ${minutesToTimeWithDayOffset(seg.endMin)}`}
                                                                                 />
                                                                             );
                                                                         })}
-                                                                        {plannerStatusEffectiveAnalysis && importedStatusBarsForCell.length === 0 && (
+                                                                        {plannerStatusEffectiveAnalysis && specialTimelineStatusBars.length === 0 && (
                                                                             <div className="absolute inset-0 flex items-center justify-center text-[11px] text-slate-400">Нет статусов</div>
                                                                         )}
                                                                         {!plannerStatusEffectiveAnalysis && (
