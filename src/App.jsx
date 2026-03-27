@@ -5923,6 +5923,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         let durationSec = Math.round(Number(seg?.durationSec ?? seg?.duration_sec ?? 0));
                         if (!Number.isFinite(durationSec) || durationSec <= 0) durationSec = Math.max(0, Math.round((end - start) / 1000));
                         if (durationSec <= 0) return;
+                        const isWork = Boolean(seg?.isWork ?? seg?.is_work);
+                        const isBreak = Boolean(seg?.isBreak ?? seg?.is_break);
                         const isNoPhone = statusKey === PLANNER_STATUS_NO_PHONE_KEY;
                         const isNoPhoneAnomaly = isNoPhone && durationSec > PLANNER_STATUS_NO_PHONE_ANOMALY_SECONDS;
                         const preparedSeg = {
@@ -5936,6 +5938,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             start,
                             end,
                             durationSec,
+                            isWork,
+                            isBreak,
                             isNoPhone,
                             isNoPhoneAnomaly
                         };
@@ -17872,6 +17876,30 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const previewShiftIntervals = mergeIntervals(
                         previewParts.map(p => ({ start: Number(p?.start || 0), end: Number(p?.end || 0) }))
                     ).filter(i => i.end > i.start);
+                    const previewWorkStatusIntervalsInShift = mergeIntervals(
+                        (Array.isArray(previewStatusBars) ? previewStatusBars : [])
+                            .map(seg => {
+                                const start = Number(seg?.startMin ?? seg?.start ?? 0);
+                                const end = Number(seg?.endMin ?? seg?.end ?? 0);
+                                if (end <= start) return null;
+                                const statusKeyNorm = plannerStatusNormalizeKey(
+                                    seg?.stateKey
+                                    || seg?.statusKey
+                                    || seg?.rawStateKey
+                                    || seg?.raw_state_key
+                                    || seg?.stateName
+                                    || seg?.statusName
+                                    || ''
+                                );
+                                const statusIsWork = Boolean(seg?.isWork ?? seg?.is_work);
+                                if (!statusIsWork && !PLANNER_IMPORTED_WORK_STATUS_KEYS.has(statusKeyNorm)) return null;
+                                return { start, end };
+                            })
+                            .filter(Boolean)
+                    );
+                    const previewWorkInShiftMin = (previewShiftIntervals.length > 0 && previewWorkStatusIntervalsInShift.length > 0)
+                        ? plannerOverlapMinutesBetweenIntervalSets(previewShiftIntervals, previewWorkStatusIntervalsInShift)
+                        : 0;
                     const previewStatusTotalsInShift = (() => {
                         if (!previewShiftIntervals.length || !previewStatusBars.length) return [];
                         const totals = new Map();
@@ -17966,9 +17994,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </div>
                                         </div>
                                         <div className="rounded-lg border border-slate-200 bg-white px-2 py-1.5">
-                                            <div className="text-[10px] uppercase tracking-wide text-slate-500">В смене</div>
+                                            <div className="text-[10px] uppercase tracking-wide text-slate-500">В работе в смене</div>
                                             <div className="text-sm font-semibold text-slate-900 tabular-nums">
-                                                {previewMetrics ? formatMinutesOnly(previewMetrics.matchedWorkMin + previewMetrics.matchedBreakMin) : '—'}
+                                                {previewShiftIntervals.length > 0 ? formatMinutesOnly(previewWorkInShiftMin) : '—'}
                                             </div>
                                         </div>
                                         <div className="rounded-lg border border-rose-200 bg-rose-50 px-2 py-1.5">
