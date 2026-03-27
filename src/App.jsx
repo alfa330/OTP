@@ -8,6 +8,7 @@ import SalaryCalculationResult from './components/salary/SalaryCalculationResult
 import TasksView from './components/tasks/TasksView';
 import SurveysView from './components/surveys/SurveysView';
 import TechnicalIssuesView from './components/technical/TechnicalIssuesView';
+import LmsView from './components/lms/LmsView';
 import FaIcon from './components/common/FaIcon';
 import AuthEntranceSplash from './components/common/AuthEntranceSplash';
 import OrazAitSplash from './components/common/OrazAitSplash';
@@ -24813,6 +24814,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setView('surveys');
                     return;
                 }
+                if (user.role === 'trainee') {
+                    setView('lms');
+                    return;
+                }
 
                 if (savedView) {
                     setView(savedView);
@@ -24827,6 +24832,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             useEffect(() => {
                 if (user?.role === 'trainer' && view !== 'surveys') {
                     setView('surveys');
+                }
+                if (user?.role === 'trainee' && view !== 'lms') {
+                    setView('lms');
                 }
             }, [user?.role, view]);
             
@@ -28982,6 +28990,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                               </span>
                             </h1>
                             <ul ref={sidebarMenuScrollRef} className={`space-y-2 flex-1 min-h-0 sidebar-menu-scroll`}>
+                                <li>
+                                    <button
+                                        onClick={() => { setView('lms'); setMobileMenuOpen(false); }}
+                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'lms' ? 'bg-blue-700' : ''}`}
+                                    >
+                                        <FaIcon className="fas fa-graduation-cap"></FaIcon> <span className="sidebar-text">Обучение</span>
+                                    </button>
+                                </li>
                                 {isAdminLikeRole && (
                                     <>
                                         <li className="relative" ref={sidebarEmployeesRef}>
@@ -29255,7 +29271,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </li>
                                     </>
                                 )}
-                                {user.role !== 'trainer' && (
+                                {user.role !== 'trainer' && user.role !== 'trainee' && (
                                     <li>
                                         <button onClick={() => { setView('salary'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'salary' ? 'bg-blue-700' : ''}`}>
                                             <FaIcon className="fas fa-calculator"></FaIcon> <span className="sidebar-text">Калькулятор зарплаты</span>
@@ -29386,6 +29402,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 </button>
                             </div>
                         </div>
+                        )}
+                        {view === 'lms' && (
+                            <LmsView
+                                user={user}
+                                apiBaseUrl={API_BASE_URL}
+                                withAccessTokenHeader={withAccessTokenHeader}
+                                showToast={showToast}
+                            />
                         )}
                         {user.role === 'operator' && (
                         <div className="bg-white p-4 rounded-xl shadow-sm mb-6 border border-gray-200 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
