@@ -5481,7 +5481,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
             return coveredUntil;
             };
-            const plannerComputeShiftStatusMatchMetrics = ({ shiftParts = [], breakParts = [], statusBars = [], prevDayStatusBars = [], nextDayStatusBars = [] } = {}) => {
+            const plannerComputeShiftStatusMatchMetrics = ({ shiftParts = [], breakParts = [], statusBars = [] } = {}) => {
             const shiftIntervals = mergeIntervals((shiftParts || []).map(p => ({ start: Number(p?.start || 0), end: Number(p?.end || 0) }))).filter(i => i.end > i.start);
             const breakIntervals = mergeIntervals((breakParts || []).map(b => ({ start: Number(b?.start || 0), end: Number(b?.end || 0) }))).filter(i => i.end > i.start);
             const workScheduleIntervals = plannerSubtractIntervals(shiftIntervals, breakIntervals);
@@ -5505,36 +5505,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             );
             const lateExcusedStatusIntervals = mergeIntervals(
                 bars
-                .filter(seg => plannerStatusIsLateExcusedKey(seg.statusKeyNorm))
-                .map(seg => ({ start: seg.startMin, end: seg.endMin }))
-            );
-            const boundaryContinuationToleranceMin = 3;
-            const prevDayBars = (prevDayStatusBars || [])
-                .map(seg => ({
-                    startMin: Number(seg?.startMin ?? seg?.start ?? 0),
-                    endMin: Number(seg?.endMin ?? seg?.end ?? 0),
-                    statusKeyNorm: plannerStatusNormalizeKey(seg?.stateName || seg?.stateKey || '')
-                }))
-                .filter(seg => seg.endMin > seg.startMin);
-            const nextDayBars = (nextDayStatusBars || [])
-                .map(seg => ({
-                    startMin: Number(seg?.startMin ?? seg?.start ?? 0),
-                    endMin: Number(seg?.endMin ?? seg?.end ?? 0),
-                    statusKeyNorm: plannerStatusNormalizeKey(seg?.stateName || seg?.stateKey || '')
-                }))
-                .filter(seg => seg.endMin > seg.startMin);
-            const prevDayWorkIntervals = mergeIntervals(
-                prevDayBars
-                    .filter(seg => PLANNER_IMPORTED_WORK_STATUS_KEYS.has(seg.statusKeyNorm))
+                    .filter(seg => plannerStatusIsLateExcusedKey(seg.statusKeyNorm))
                     .map(seg => ({ start: seg.startMin, end: seg.endMin }))
             );
-            const nextDayWorkIntervals = mergeIntervals(
-                nextDayBars
-                    .filter(seg => PLANNER_IMPORTED_WORK_STATUS_KEYS.has(seg.statusKeyNorm))
-                    .map(seg => ({ start: seg.startMin, end: seg.endMin }))
-            );
-            const hasWorkNearPrevDayEnd = prevDayWorkIntervals.some(seg => Number(seg?.end || 0) >= (1440 - boundaryContinuationToleranceMin));
-            const hasWorkNearNextDayStart = nextDayWorkIntervals.some(seg => Number(seg?.start || 0) <= boundaryContinuationToleranceMin);
 
             const totalScheduledMin = plannerIntervalsTotalMinutes(shiftIntervals);
             const scheduledBreakMin = plannerIntervalsTotalMinutes(breakIntervals);
@@ -5562,8 +5535,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 let lateMin = 0;
                 let earlyLeaveMin = 0;
                 let lateStartMin = shiftInterval.start;
-                const continuesFromPrevDay = Boolean(part?.continuesFromPrevDay) || (shiftInterval.start <= 0 && hasWorkNearPrevDayEnd);
-                const continuesToNextDay = Boolean(part?.continuesToNextDay) || (shiftInterval.end >= 1440 && hasWorkNearNextDayStart);
                 const hasWorkStatus = shiftWorkStatusIntervals.length > 0;
                 if (hasWorkStatus) {
                     const firstWorkStart = shiftWorkStatusIntervals[0].start;
@@ -5574,8 +5545,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         shiftInterval.end,
                         shiftLateExcusedIntervals
                     );
-                    lateMin = continuesFromPrevDay ? 0 : Math.max(0, firstWorkStart - lateStartMin);
-                    earlyLeaveMin = continuesToNextDay ? 0 : Math.max(0, shiftInterval.end - lastWorkEnd);
+                    lateMin = Math.max(0, firstWorkStart - lateStartMin);
+                    earlyLeaveMin = Math.max(0, shiftInterval.end - lastWorkEnd);
                 }
                 return {
                     id: `${String(part?.sourceDate || '')}:${Number(part?.sourceIndex ?? idx)}`,
@@ -5591,8 +5562,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     lateMin,
                     lateStartMin,
                     earlyLeaveMin,
-                    continuesFromPrevDay,
-                    continuesToNextDay,
                     hasWorkStatus
                 };
             }).sort((a, b) => a.start - b.start);
@@ -10246,20 +10215,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 arr.forEach((sh, idx) => {
                 const s = timeToMinutes(sh.start);
                 let e = timeToMinutes(sh.end);
-                const crossesMidnight = e <= s;
-                if (crossesMidnight) e += 1440;
+                if (e <= s) e += 1440;
                 const segStart = Math.max(0, s);
                 const segEnd = Math.min(1440, e);
-                if (segEnd > segStart) {
-                    parts.push({
-                        start: segStart,
-                        end: segEnd,
-                        sourceDate: dateStr,
-                        sourceIndex: idx,
-                        continuesFromPrevDay: false,
-                        continuesToNextDay: crossesMidnight
-                    });
-                }
+                if (segEnd > segStart) parts.push({ start: segStart, end: segEnd, sourceDate: dateStr, sourceIndex: idx });
                 });
                 const date = parseDateStr(dateStr);
                 const prev = addDays(date, -1);
@@ -10272,16 +10231,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     pe += 1440;
                     const partStart = 0;
                     const partEnd = Math.min(1440, pe - 1440);
-                    if (partEnd > partStart) {
-                        parts.push({
-                            start: partStart,
-                            end: partEnd,
-                            sourceDate: prevStr,
-                            sourceIndex: idx,
-                            continuesFromPrevDay: true,
-                            continuesToNextDay: false
-                        });
-                    }
+                    if (partEnd > partStart) parts.push({ start: partStart, end: partEnd, sourceDate: prevStr, sourceIndex: idx });
                 }
                 });
                 return parts;
@@ -10604,25 +10554,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     .filter((b) => b.end > b.start);
                 const statusBars = Array.isArray(modalImportedStatusTimeline) ? modalImportedStatusTimeline : [];
                 if (statusBars.length === 0) return null;
-                const operatorNameKey = plannerStatusNormalizeOperatorName(op?.name);
-                const modalDateObj = parseDateStr(modalState.date);
-                const hasValidModalDate = modalDateObj && !Number.isNaN(modalDateObj.getTime());
-                const modalPrevDayKey = hasValidModalDate ? todayDateStr(addDays(modalDateObj, -1)) : '';
-                const modalNextDayKey = hasValidModalDate ? todayDateStr(addDays(modalDateObj, 1)) : '';
-                const prevDayStatusBars = (operatorNameKey && modalPrevDayKey)
-                    ? (importedStatusTimelineByOperatorDateKey.get(`${operatorNameKey}|${modalPrevDayKey}`) || [])
-                    : [];
-                const nextDayStatusBars = (operatorNameKey && modalNextDayKey)
-                    ? (importedStatusTimelineByOperatorDateKey.get(`${operatorNameKey}|${modalNextDayKey}`) || [])
-                    : [];
                 return plannerComputeShiftStatusMatchMetrics({
                     shiftParts,
                     breakParts,
-                    statusBars,
-                    prevDayStatusBars,
-                    nextDayStatusBars
+                    statusBars
                 });
-            }, [isBulkSelectionModal, modalState?.opId, modalState?.date, operators, modalImportedStatusTimeline, importedStatusTimelineByOperatorDateKey]);
+            }, [isBulkSelectionModal, modalState?.opId, modalState?.date, operators, modalImportedStatusTimeline]);
             const modalLateStatusSegments = useMemo(() => {
                 const ranges = (Array.isArray(modalStatusMatchMetrics?.perShift) ? modalStatusMatchMetrics.perShift : [])
                     .map((sh) => {
@@ -15371,20 +15308,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         {visibleRange.map(d => {
                                             const parts = getShiftPartsForDate(op, d);
                                             const aggregatedFlagsForCell = getPlannerAggregatedFlagsForDate(op, d);
-                                            const operatorNameKeyForCell = plannerStatusNormalizeOperatorName(op?.name);
-                                            const cellDateObj = parseDateStr(d);
-                                            const hasValidCellDate = cellDateObj && !Number.isNaN(cellDateObj.getTime());
-                                            const cellPrevDayKey = hasValidCellDate ? todayDateStr(addDays(cellDateObj, -1)) : '';
-                                            const cellNextDayKey = hasValidCellDate ? todayDateStr(addDays(cellDateObj, 1)) : '';
-                                            const importedStatusBarsForCell = (operatorNameKeyForCell && d)
-                                                ? (importedStatusTimelineByOperatorDateKey.get(`${operatorNameKeyForCell}|${d}`) || [])
-                                                : [];
-                                            const importedPrevStatusBarsForCell = (operatorNameKeyForCell && cellPrevDayKey)
-                                                ? (importedStatusTimelineByOperatorDateKey.get(`${operatorNameKeyForCell}|${cellPrevDayKey}`) || [])
-                                                : [];
-                                            const importedNextStatusBarsForCell = (operatorNameKeyForCell && cellNextDayKey)
-                                                ? (importedStatusTimelineByOperatorDateKey.get(`${operatorNameKeyForCell}|${cellNextDayKey}`) || [])
-                                                : [];
+                                            const importedStatusBarsForCell = importedStatusTimelineByOperatorDateKey.get(`${plannerStatusNormalizeOperatorName(op?.name)}|${d}`) || [];
                                             const technicalIssueBarsForCell = (Array.isArray(op?.technicalIssueTimelineDays?.[d]) ? op.technicalIssueTimelineDays[d] : [])
                                                 .map((seg, idx) => {
                                                     const startRaw = Number(seg?.startMin ?? seg?.start_min ?? seg?.start ?? 0);
@@ -15432,9 +15356,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 ? plannerComputeShiftStatusMatchMetrics({
                                                     shiftParts: parts,
                                                     breakParts: breakPartsForCell,
-                                                    statusBars: importedStatusBarsForCell,
-                                                    prevDayStatusBars: importedPrevStatusBarsForCell,
-                                                    nextDayStatusBars: importedNextStatusBarsForCell
+                                                    statusBars: importedStatusBarsForCell
                                                 })
                                                 : null;
                                             const noPhoneShiftMetricsForCell = shouldComputeDefectMetrics
@@ -17746,20 +17668,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         .flatMap(p => getBreakPartsForPart(modalPreviewOp, p, modalPreviewDate))
                         .map(b => ({ start: Math.max(0, Math.min(1440, Number(b?.start || 0))), end: Math.max(0, Math.min(1440, Number(b?.end || 0))) }))
                         .filter(b => b.end > b.start);
-                    const previewOperatorNameKey = plannerStatusNormalizeOperatorName(modalPreviewOp?.name);
-                    const previewDateObj = parseDateStr(modalPreviewDate);
-                    const hasValidPreviewDate = previewDateObj && !Number.isNaN(previewDateObj.getTime());
-                    const previewPrevDayKey = hasValidPreviewDate ? todayDateStr(addDays(previewDateObj, -1)) : '';
-                    const previewNextDayKey = hasValidPreviewDate ? todayDateStr(addDays(previewDateObj, 1)) : '';
-                    const previewStatusBars = (previewOperatorNameKey && modalPreviewDate)
-                        ? (importedStatusTimelineByOperatorDateKey.get(`${previewOperatorNameKey}|${modalPreviewDate}`) || [])
-                        : [];
-                    const previewPrevDayStatusBars = (previewOperatorNameKey && previewPrevDayKey)
-                        ? (importedStatusTimelineByOperatorDateKey.get(`${previewOperatorNameKey}|${previewPrevDayKey}`) || [])
-                        : [];
-                    const previewNextDayStatusBars = (previewOperatorNameKey && previewNextDayKey)
-                        ? (importedStatusTimelineByOperatorDateKey.get(`${previewOperatorNameKey}|${previewNextDayKey}`) || [])
-                        : [];
+                    const previewStatusBars = importedStatusTimelineByOperatorDateKey.get(`${plannerStatusNormalizeOperatorName(modalPreviewOp?.name)}|${modalPreviewDate}`) || [];
                     const previewOfflineBars = (Array.isArray(modalPreviewOp?.offlineActivityTimelineDays?.[modalPreviewDate]) ? modalPreviewOp.offlineActivityTimelineDays[modalPreviewDate] : [])
                         .map((seg, idx) => {
                             const startRaw = Number(seg?.startMin ?? seg?.start_min ?? seg?.start ?? 0);
@@ -17781,9 +17690,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         ? plannerComputeShiftStatusMatchMetrics({
                             shiftParts: previewParts,
                             breakParts: previewBreakParts,
-                            statusBars: previewStatusBars,
-                            prevDayStatusBars: previewPrevDayStatusBars,
-                            nextDayStatusBars: previewNextDayStatusBars
+                            statusBars: previewStatusBars
                         })
                         : null;
                     const previewShiftIntervals = mergeIntervals(
@@ -19393,23 +19300,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                 return { ...seg, startMin: mins.start, endMin: mins.end };
                                                                             })
                                                                             .filter(Boolean);
-                                                                        const anomalyOperatorNameKey = plannerStatusNormalizeOperatorName(op?.operatorName || matchedPlannerOperator?.name);
-                                                                        const anomalyDateObj = parseDateStr(day.dateKey);
-                                                                        const hasValidAnomalyDate = anomalyDateObj && !Number.isNaN(anomalyDateObj.getTime());
-                                                                        const anomalyPrevDayKey = hasValidAnomalyDate ? todayDateStr(addDays(anomalyDateObj, -1)) : '';
-                                                                        const anomalyNextDayKey = hasValidAnomalyDate ? todayDateStr(addDays(anomalyDateObj, 1)) : '';
-                                                                        const anomalyPrevDayStatusBars = (anomalyOperatorNameKey && anomalyPrevDayKey)
-                                                                            ? (importedStatusTimelineByOperatorDateKey.get(`${anomalyOperatorNameKey}|${anomalyPrevDayKey}`) || [])
-                                                                            : [];
-                                                                        const anomalyNextDayStatusBars = (anomalyOperatorNameKey && anomalyNextDayKey)
-                                                                            ? (importedStatusTimelineByOperatorDateKey.get(`${anomalyOperatorNameKey}|${anomalyNextDayKey}`) || [])
-                                                                            : [];
                                                                         const shiftStatusMatchMetrics = plannerComputeShiftStatusMatchMetrics({
                                                                             shiftParts: plannedShiftParts,
                                                                             breakParts: plannedBreakParts,
-                                                                            statusBars: statusTimelineBars,
-                                                                            prevDayStatusBars: anomalyPrevDayStatusBars,
-                                                                            nextDayStatusBars: anomalyNextDayStatusBars
+                                                                            statusBars: statusTimelineBars
                                                                         });
                                                                         const shiftLateBars = (shiftStatusMatchMetrics?.perShift || [])
                                                                             .map(sh => {
