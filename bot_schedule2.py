@@ -13235,6 +13235,19 @@ async def show_operator_evaluations(message: types.Message):
 LMS_LEARNER_ROLES = ('operator', 'trainee')
 LMS_MANAGER_ROLES = ('sv', 'trainer', 'admin', 'super_admin')
 LMS_FULL_ADMIN_ROLES = ('admin', 'super_admin')
+LMS_ALLOWED_ACCOUNTS = (
+    ('super_admin', 2),
+    ('operator', 56)
+)
+
+
+def _lms_is_allowed_account(user_id, role):
+    role_norm = _normalize_user_role(role)
+    try:
+        uid = int(user_id)
+    except Exception:
+        return False
+    return any(role_norm == item_role and uid == item_id for item_role, item_id in LMS_ALLOWED_ACCOUNTS)
 
 
 def _lms_now():
@@ -13462,6 +13475,9 @@ def _lms_resolve_request(required_scope='learner'):
         return None, None, None, jsonify({"error": message}), status_code
 
     requester_role = _normalize_user_role(requester[3])
+    if not _lms_is_allowed_account(requester_id, requester_role):
+        return None, None, None, jsonify({"error": "LMS section is restricted for this account"}), 403
+
     if required_scope == 'learner':
         if requester_role not in LMS_LEARNER_ROLES:
             return None, None, None, jsonify({"error": "Learner role required"}), 403
