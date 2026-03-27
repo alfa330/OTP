@@ -15642,8 +15642,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             return { text, crossing: crossesForDisplay, idx };
                                             });
                                             const prevArr = op.shifts?.[todayDateStr(addDays(parseDateStr(d), -1))] ?? [];
-                                            const prevCont = (viewMode === 'day')
-                                            ? prevArr
+                                            const prevCont = prevArr
                                                 .map((s, idx) => {
                                                     const sM = timeToMinutes(s.start);
                                                     const eM = timeToMinutes(s.end);
@@ -15652,24 +15651,36 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     if (!crossesForDisplay) return null;
                                                     return { text: `${s.start} — ${s.end} (+1)`, crossing: true, idx };
                                                 })
-                                                .filter(Boolean)
-                                            : [];
+                                                .filter(Boolean);
                                             const labelList = [...origArr, ...prevCont];
                                             const displayParts = (viewMode === 'day') ? parts : parts.filter(p => p.sourceDate === d);
                                             const durationHours = (viewMode === 'day')
                                                 ? displayParts.reduce((acc, p) => acc + (p.end - p.start) / 60, 0)
-                                                : (op.shifts?.[d] ?? []).reduce((acc, s) => {
-                                                    const sM = timeToMinutes(s.start);
-                                                    let eM = timeToMinutes(s.end);
-                                                    if (eM <= sM) eM += 1440;
-                                                    return acc + ((eM - sM) / 60);
-                                                }, 0);
+                                                : (() => {
+                                                    const ownShifts = op.shifts?.[d] ?? [];
+                                                    if (ownShifts.length > 0) {
+                                                        return ownShifts.reduce((acc, s) => {
+                                                            const sM = timeToMinutes(s.start);
+                                                            let eM = timeToMinutes(s.end);
+                                                            if (eM <= sM) eM += 1440;
+                                                            return acc + ((eM - sM) / 60);
+                                                        }, 0);
+                                                    }
+                                                    return parts.reduce((acc, p) => acc + (p.end - p.start) / 60, 0);
+                                                })();
                                             const hasShift = (viewMode === 'day')
                                                 ? (parts.length > 0 || labelList.length > 0)
                                                 : (labelList.length > 0);
                                             const cellScheduleStatus = getPlannerScheduleStatusForDate(op, d);
                                             const cellScheduleStatusTone = cellScheduleStatus ? getScheduleStatusTone(cellScheduleStatus.statusCode) : null;
                                             const isDayOff = op.daysOff?.includes(d) ?? false;
+                                            const hasCarryShiftPart = parts.length > 0;
+                                            const showCarryDayOffBadge = (viewMode === 'day') && isDayOff && hasCarryShiftPart && !cellScheduleStatus;
+                                            const showTopRightIndicators = showCarryDayOffBadge || hasDefectMarker || hasOvertimeMarker || hasOfflineMarker;
+                                            const topRightIndicatorsTitle = [
+                                                showCarryDayOffBadge ? 'День отмечен как выходной' : '',
+                                                markerTooltipText
+                                            ].filter(Boolean).join('\n');
                                             const isSelected = selectedDayKeySet.has(makeSelectedCellKey(op.id, d));
                                             let bgColor = ' bg-white';
                                             let borderClass = ' border-slate-300';
@@ -15707,8 +15718,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         </span>
                                                     </span>
                                                 )}
-                                                {(hasDefectMarker || hasOvertimeMarker || hasOfflineMarker) && (
-                                                    <span className="absolute top-0.5 right-0.5 z-50 flex items-center gap-1" title={markerTooltipText || 'Есть недочеты/переработка'}>
+                                                {showTopRightIndicators && (
+                                                    <span className="absolute top-0.5 right-0.5 z-50 flex items-center gap-1" title={topRightIndicatorsTitle || 'Есть недочеты/переработка'}>
+                                                        {showCarryDayOffBadge && (
+                                                            <span className="px-1 py-[1px] rounded bg-sky-100 text-sky-700 text-[8px] font-semibold border border-sky-300 leading-none">
+                                                                Вых
+                                                            </span>
+                                                        )}
                                                         {hasOfflineMarker && (
                                                             <span
                                                                 className="w-2.5 h-2.5 rounded-full bg-emerald-400 border border-white ring-1 ring-emerald-500/60 shadow-sm shadow-emerald-400/45"
@@ -15753,7 +15769,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 {cellScheduleStatus.label || 'Статус'}
                                                             </div>
                                                         </div>
-                                                    ) : isDayOff ? (
+                                                    ) : (isDayOff && !hasCarryShiftPart) ? (
                                                         <div className="flex items-center justify-center h-full">
                                                             <div className="text-sm font-medium text-sky-600">Выходной</div>
                                                         </div>
@@ -16066,7 +16082,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 {cellScheduleStatus.label || 'Статус'}
                                                             </div>
                                                         </div>
-                                                    ) : isDayOff ? (
+                                                    ) : (isDayOff && !hasShift) ? (
                                                         <div className="flex items-center justify-center h-full">
                                                             <div className="text-xs font-medium text-sky-600">Выходной</div>
                                                         </div>
