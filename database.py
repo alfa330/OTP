@@ -9536,13 +9536,13 @@ class Database:
 
         if start_date_obj and end_date_obj:
             query += " AND status_date >= %s AND status_date <= %s"
-            params.extend([start_date_obj, end_date_obj])
+            params.extend([start_date_obj - timedelta(days=1), end_date_obj + timedelta(days=1)])
         elif start_date_obj:
             query += " AND status_date >= %s"
-            params.append(start_date_obj)
+            params.append(start_date_obj - timedelta(days=1))
         elif end_date_obj:
             query += " AND status_date <= %s"
-            params.append(end_date_obj)
+            params.append(end_date_obj + timedelta(days=1))
 
         query += " ORDER BY operator_id, status_date, start_at, end_at, id"
         cursor.execute(query, params)
