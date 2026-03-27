@@ -8,6 +8,7 @@ import csv
 import hashlib
 import base64
 import hmac
+import secrets
 import jwt
 from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -18,7 +19,7 @@ from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.dispatcher import FSMContext
-from flask import Flask, request, jsonify, send_file, g
+from flask import Flask, request, jsonify, send_file, g, redirect
 from flask_cors import CORS
 from functools import wraps
 from openpyxl import load_workbook, Workbook
@@ -85,6 +86,12 @@ JWT_COOKIE_PARTITIONED = os.getenv('JWT_COOKIE_PARTITIONED', 'true').lower() == 
 JWT_TOKEN_PEPPER = os.getenv('JWT_TOKEN_PEPPER', JWT_SECRET)
 SENSITIVE_QR_SECRET = os.getenv('SENSITIVE_QR_SECRET', JWT_SECRET)
 SENSITIVE_QR_TTL_SECONDS = int(os.getenv('SENSITIVE_QR_TTL_SECONDS', '300'))
+LMS_HEARTBEAT_SECONDS = int(os.getenv('LMS_HEARTBEAT_SECONDS', '15'))
+LMS_STALE_GAP_SECONDS = int(os.getenv('LMS_STALE_GAP_SECONDS', '45'))
+LMS_COMPLETION_THRESHOLD = float(os.getenv('LMS_COMPLETION_THRESHOLD', '95'))
+LMS_DEFAULT_PASS_THRESHOLD = float(os.getenv('LMS_DEFAULT_PASS_THRESHOLD', '80'))
+LMS_DEFAULT_ATTEMPT_LIMIT = int(os.getenv('LMS_DEFAULT_ATTEMPT_LIMIT', '3'))
+LMS_CERTIFICATE_STORAGE = (os.getenv('LMS_CERTIFICATE_STORAGE') or 'db').strip().lower()
 
 ALLOWED_ORIGINS = {
     "https://alfa330.github.io",
@@ -507,6 +514,7 @@ def _normalize_user_role(role) -> str:
 
 ROLE_HIERARCHY = {
     'operator': 10,
+    'trainee': 10,
     'trainer': 20,
     'sv': 30,
     'admin': 40,
@@ -913,6 +921,7 @@ SENSITIVE_ACCESS_ROLE_LABELS = {
     'admin': 'Админ',
     'sv': 'Супервайзер',
     'operator': 'Оператор',
+    'trainee': 'Стажер',
     'trainer': 'Тренер'
 }
 try:
@@ -2609,7 +2618,7 @@ def get_admin_users():
         requester_id = int(request.headers.get('X-User-Id'))
         requester = db.get_user(id=requester_id)
         requester_role = _normalize_user_role(requester[3]) if requester else ''
-        visible_roles = ['operator', 'trainer']
+        visible_roles = ['operator', 'trainee', 'trainer']
         if requester_role == 'super_admin':
             visible_roles.append('admin')
         with db._get_cursor() as cursor:
@@ -5695,12 +5704,12 @@ def add_user():
             return jsonify({"error": "Name cannot be empty"}), 400
 
         role = str(data.get('role') or 'operator').strip().lower()
-        if role not in ('operator', 'trainer', 'admin'):
-            return jsonify({"error": "Unsupported role. Allowed: operator, trainer, admin"}), 400
+        if role not in ('operator', 'trainee', 'trainer', 'admin'):
+            return jsonify({"error": "Unsupported role. Allowed: operator, trainee, trainer, admin"}), 400
         if role == 'admin' and requester_role != 'super_admin':
             return jsonify({"error": "Only super admins can create admins"}), 403
-        if requester_role == 'sv' and role != 'operator':
-            return jsonify({"error": "Supervisors can create only operators"}), 403
+        if requester_role == 'sv' and role not in ('operator', 'trainee'):
+            return jsonify({"error": "Supervisors can create only operators or trainees"}), 403
 
         supervisor_id = None
         direction_id = None
@@ -5713,25 +5722,32 @@ def add_user():
         except ValueError:
             return jsonify({"error": "Invalid hire_date format. Use YYYY-MM-DD"}), 400
 
-        if role == 'operator':
+        if role in ('operator', 'trainee'):
             supervisor_raw = data.get('supervisor_id')
             if supervisor_raw not in [None, '']:
                 try:
                     supervisor_id = int(supervisor_raw)
                 except (TypeError, ValueError):
                     return jsonify({"error": "Invalid supervisor_id"}), 400
-            if not data.get('direction_id'):
+            if role == 'operator' and not data.get('direction_id'):
                 return jsonify({"error": "Missing required field: direction_id"}), 400
-            if not data.get('rate'):
+            if role == 'operator' and not data.get('rate'):
                 return jsonify({"error": "Missing required field: rate"}), 400
-            try:
-                direction_id = int(data['direction_id'])
-            except (TypeError, ValueError):
-                return jsonify({"error": "Invalid direction_id"}), 400
-            try:
-                rate = float(data['rate'])
-            except (TypeError, ValueError):
-                return jsonify({"error": "Invalid rate"}), 400
+            if role == 'operator':
+                try:
+                    direction_id = int(data['direction_id'])
+                except (TypeError, ValueError):
+                    return jsonify({"error": "Invalid direction_id"}), 400
+                try:
+                    rate = float(data['rate'])
+                except (TypeError, ValueError):
+                    return jsonify({"error": "Invalid rate"}), 400
+            else:
+                direction_id = None
+                try:
+                    rate = float(data['rate']) if data.get('rate') else 1.0
+                except (TypeError, ValueError):
+                    return jsonify({"error": "Invalid rate"}), 400
         elif role == 'trainer':
             # Trainers are never tied to a direction or supervisor.
             supervisor_id = None
@@ -5866,6 +5882,8 @@ def add_user():
             login_prefix = 'trainer'
         elif role == 'admin':
             login_prefix = 'admin'
+        elif role == 'trainee':
+            login_prefix = 'trainee'
         else:
             login_prefix = 'user'
         login = f"{login_prefix}_{str(uuid.uuid4())[:8]}"
@@ -5915,6 +5933,8 @@ def add_user():
             role_label = 'Тренер'
         elif role == 'admin':
             role_label = 'Админ'
+        elif role == 'trainee':
+            role_label = 'Стажер'
         else:
             role_label = 'Оператор'
         return jsonify({
@@ -13211,6 +13231,3188 @@ async def show_operator_evaluations(message: types.Message):
 
 # Остальной код остается аналогичным предыдущей версии, но с использованием базы данных
 # ... (код для удаления СВ, изменения таблиц, просмотра оценок и т.д.) ...
+
+LMS_LEARNER_ROLES = ('operator', 'trainee')
+LMS_MANAGER_ROLES = ('sv', 'trainer', 'admin', 'super_admin')
+LMS_FULL_ADMIN_ROLES = ('admin', 'super_admin')
+
+
+def _lms_now():
+    return datetime.now()
+
+
+def _lms_parse_json(value, default):
+    if value is None:
+        return default
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return default
+        try:
+            return json.loads(raw)
+        except Exception:
+            return default
+    return default
+
+
+def _lms_to_float(value, default=0.0):
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _lms_to_int(value, default=0):
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _lms_parse_bool(value, default=False):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        norm = value.strip().lower()
+        if norm in ('1', 'true', 'yes', 'y', 'on'):
+            return True
+        if norm in ('0', 'false', 'no', 'n', 'off'):
+            return False
+    return bool(default)
+
+
+def _lms_normalize_text(value):
+    text = str(value or '').strip().lower()
+    return re.sub(r'\s+', ' ', text)
+
+
+def _lms_normalize_answer_text(value):
+    text = _lms_normalize_text(value)
+    text = re.sub(r'[^0-9a-zа-яё\s]+', ' ', text, flags=re.IGNORECASE)
+    return re.sub(r'\s+', ' ', text).strip()
+
+
+def _lms_parse_datetime(value):
+    if value in (None, ''):
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            return value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value
+    raw = str(value).strip()
+    if not raw:
+        return None
+    direct_formats = (
+        '%Y-%m-%d %H:%M:%S',
+        '%Y-%m-%d %H:%M',
+        '%Y-%m-%d'
+    )
+    for fmt in direct_formats:
+        try:
+            return datetime.strptime(raw, fmt)
+        except Exception:
+            continue
+    try:
+        parsed = datetime.fromisoformat(raw.replace('Z', '+00:00'))
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
+    except Exception:
+        return None
+
+
+def _lms_deadline_status(due_at, completed_at):
+    if completed_at:
+        if due_at and completed_at > due_at:
+            return 'orange'
+        return 'green'
+    if due_at and _lms_now() > due_at:
+        return 'red'
+    return None
+
+
+def _lms_bucket_name():
+    return (
+        (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_LMS') or '').strip()
+        or (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_TASKS') or '').strip()
+        or (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET') or '').strip()
+    )
+
+
+def _lms_signed_url(bucket_name, blob_path, expires_minutes=120):
+    bucket_name = str(bucket_name or '').strip()
+    blob_path = str(blob_path or '').strip()
+    if not bucket_name or not blob_path:
+        return None
+    try:
+        client = get_gcs_client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(blob_path)
+        return blob.generate_signed_url(
+            version='v4',
+            expiration=timedelta(minutes=max(1, int(expires_minutes))),
+            method='GET'
+        )
+    except Exception:
+        return None
+
+
+def _lms_emit_notification(cursor, user_id, notification_type, title, message=None, payload=None):
+    cursor.execute("""
+        INSERT INTO lms_notifications (user_id, notification_type, title, message, payload)
+        VALUES (%s, %s, %s, %s, %s::jsonb)
+    """, (
+        int(user_id),
+        str(notification_type or 'info').strip()[:50] or 'info',
+        str(title or '').strip()[:255] or 'Уведомление LMS',
+        (str(message or '').strip() or None),
+        json.dumps(payload or {}, ensure_ascii=False)
+    ))
+
+
+def _lms_audit(cursor, actor_id, actor_role, action, entity_type, entity_id=None, details=None):
+    cursor.execute("""
+        INSERT INTO lms_admin_audit_log (actor_id, actor_role, action, entity_type, entity_id, details)
+        VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+    """, (
+        int(actor_id) if actor_id is not None else None,
+        str(actor_role or '').strip()[:20] or None,
+        str(action or '').strip()[:100] or 'unknown',
+        str(entity_type or '').strip()[:50] or 'unknown',
+        int(entity_id) if entity_id is not None else None,
+        json.dumps(details or {}, ensure_ascii=False)
+    ))
+
+
+def _lms_verify_url(verify_token):
+    base = (request.url_root or '').rstrip('/')
+    return f"{base}/api/lms/certificates/verify/{verify_token}"
+
+
+def _lms_escape_pdf_text(text):
+    value = str(text or '')
+    value = value.replace('\\', '\\\\')
+    value = value.replace('(', '\\(')
+    value = value.replace(')', '\\)')
+    return value
+
+
+def _lms_build_simple_pdf(lines):
+    stream_lines = []
+    y = 780
+    for idx, line in enumerate(lines):
+        font_size = 20 if idx == 0 else 12
+        stream_lines.append(f"BT /F1 {font_size} Tf 50 {y} Td ({_lms_escape_pdf_text(line)}) Tj ET")
+        y -= 28 if idx == 0 else 22
+    stream = '\n'.join(stream_lines).encode('latin-1', errors='replace')
+
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+        b"<< /Length " + str(len(stream)).encode('ascii') + b" >>\nstream\n" + stream + b"\nendstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
+    ]
+
+    data = bytearray()
+    data.extend(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = [0]
+    for index, obj in enumerate(objects, start=1):
+        offsets.append(len(data))
+        data.extend(f"{index} 0 obj\n".encode('ascii'))
+        data.extend(obj)
+        data.extend(b"\nendobj\n")
+
+    xref_offset = len(data)
+    total_objects = len(objects) + 1
+    data.extend(f"xref\n0 {total_objects}\n".encode('ascii'))
+    data.extend(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        data.extend(f"{offset:010d} 00000 n \n".encode('ascii'))
+    data.extend(
+        f"trailer\n<< /Size {total_objects} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n".encode('ascii')
+    )
+    return bytes(data)
+
+
+def _lms_generate_certificate_pdf(certificate_number, learner_name, course_title, issued_at, score_percent, verify_token):
+    issue_dt = issued_at if isinstance(issued_at, datetime) else _lms_now()
+    verify_url = _lms_verify_url(verify_token)
+    lines = [
+        "OTP LMS CERTIFICATE",
+        f"Certificate: {certificate_number}",
+        f"Learner: {learner_name or '-'}",
+        f"Course: {course_title or '-'}",
+        f"Issued at: {issue_dt.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"Score: {float(score_percent or 0):.2f}%",
+        f"QR verify token: {verify_token}",
+        f"Verify URL: {verify_url}",
+    ]
+    return _lms_build_simple_pdf(lines)
+
+
+def _lms_resolve_request(required_scope='learner'):
+    requester_id, requester, error = _resolve_requester()
+    if error:
+        message, status_code = error
+        return None, None, None, jsonify({"error": message}), status_code
+
+    requester_role = _normalize_user_role(requester[3])
+    if required_scope == 'learner':
+        if requester_role not in LMS_LEARNER_ROLES:
+            return None, None, None, jsonify({"error": "Learner role required"}), 403
+    elif required_scope == 'manager':
+        if requester_role not in LMS_MANAGER_ROLES:
+            return None, None, None, jsonify({"error": "Manager role required"}), 403
+    elif required_scope == 'full_admin':
+        if requester_role not in LMS_FULL_ADMIN_ROLES:
+            return None, None, None, jsonify({"error": "Admin role required"}), 403
+    elif required_scope == 'manager_or_learner':
+        if requester_role not in LMS_MANAGER_ROLES and requester_role not in LMS_LEARNER_ROLES:
+            return None, None, None, jsonify({"error": "LMS role required"}), 403
+
+    return requester_id, requester, requester_role, None, None
+
+
+def _lms_visible_learner_ids(requester_id, requester_role):
+    try:
+        return db.get_visible_lms_learner_ids_for_requester(requester_id, requester_role)
+    except Exception:
+        return []
+
+
+def _lms_material_row_to_payload(row):
+    bucket = row[5]
+    blob_path = row[6]
+    signed_url = _lms_signed_url(bucket, blob_path, expires_minutes=240)
+    return {
+        "id": int(row[0]),
+        "lesson_id": int(row[1]),
+        "title": row[2],
+        "material_type": row[3],
+        "content_text": row[4],
+        "url": signed_url or row[7],
+        "content_url": row[7],
+        "signed_url": signed_url,
+        "mime_type": row[8],
+        "metadata": _lms_parse_json(row[9], {}),
+        "position": int(row[10] or 1)
+    }
+
+
+def _lms_ensure_progress_and_session_tx(cursor, assignment_id, lesson_id, user_id):
+    now = _lms_now()
+    cursor.execute("""
+        SELECT
+            id, status, max_position_seconds, confirmed_seconds, completion_ratio,
+            active_seconds, last_heartbeat_at, tab_hidden_count, stale_gap_count, started_at, completed_at
+        FROM lms_lesson_progress
+        WHERE assignment_id = %s AND lesson_id = %s AND user_id = %s
+        LIMIT 1
+    """, (assignment_id, lesson_id, user_id))
+    progress = cursor.fetchone()
+    if not progress:
+        cursor.execute("""
+            INSERT INTO lms_lesson_progress (
+                assignment_id, lesson_id, user_id, status, started_at, updated_at
+            )
+            VALUES (%s, %s, %s, 'in_progress', %s, %s)
+            RETURNING
+                id, status, max_position_seconds, confirmed_seconds, completion_ratio,
+                active_seconds, last_heartbeat_at, tab_hidden_count, stale_gap_count, started_at, completed_at
+        """, (assignment_id, lesson_id, user_id, now, now))
+        progress = cursor.fetchone()
+    elif progress[1] == 'not_started':
+        cursor.execute("""
+            UPDATE lms_lesson_progress
+            SET status = 'in_progress',
+                started_at = COALESCE(started_at, %s),
+                updated_at = %s
+            WHERE id = %s
+            RETURNING
+                id, status, max_position_seconds, confirmed_seconds, completion_ratio,
+                active_seconds, last_heartbeat_at, tab_hidden_count, stale_gap_count, started_at, completed_at
+        """, (now, now, progress[0]))
+        progress = cursor.fetchone()
+
+    cursor.execute("""
+        SELECT
+            id, started_at, ended_at, last_heartbeat_at, is_active, max_position_seconds,
+            confirmed_seconds, active_seconds, tab_hidden_count, stale_gap_count
+        FROM lms_learning_sessions
+        WHERE assignment_id = %s AND lesson_id = %s AND user_id = %s AND is_active = TRUE
+        ORDER BY id DESC
+        LIMIT 1
+    """, (assignment_id, lesson_id, user_id))
+    session = cursor.fetchone()
+    if not session:
+        cursor.execute("""
+            INSERT INTO lms_learning_sessions (
+                assignment_id, lesson_id, user_id, started_at, last_heartbeat_at, last_visible_at, is_active
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, TRUE)
+            RETURNING
+                id, started_at, ended_at, last_heartbeat_at, is_active, max_position_seconds,
+                confirmed_seconds, active_seconds, tab_hidden_count, stale_gap_count
+        """, (assignment_id, lesson_id, user_id, now, now, now))
+        session = cursor.fetchone()
+
+    return progress, session
+
+
+def _lms_get_lesson_context_tx(cursor, user_id, lesson_id):
+    cursor.execute("""
+        SELECT
+            a.id as assignment_id,
+            a.course_id,
+            a.course_version_id,
+            a.status,
+            a.due_at,
+            l.id as lesson_id,
+            l.title,
+            l.description,
+            l.duration_seconds,
+            COALESCE(l.allow_fast_forward, FALSE),
+            COALESCE(l.completion_threshold, %s),
+            m.title as module_title
+        FROM lms_lessons l
+        JOIN lms_modules m ON m.id = l.module_id
+        JOIN lms_course_versions cv ON cv.id = m.course_version_id
+        JOIN lms_course_assignments a
+            ON a.course_version_id = cv.id
+           AND a.user_id = %s
+        WHERE l.id = %s
+        LIMIT 1
+    """, (LMS_COMPLETION_THRESHOLD, user_id, lesson_id))
+    row = cursor.fetchone()
+    if not row:
+        return None
+
+    assignment_id = int(row[0])
+    lesson_id = int(row[5])
+    progress, session = _lms_ensure_progress_and_session_tx(cursor, assignment_id, lesson_id, int(user_id))
+    return {
+        "assignment_id": assignment_id,
+        "course_id": int(row[1]),
+        "course_version_id": int(row[2]),
+        "assignment_status": row[3],
+        "due_at": row[4],
+        "lesson_id": lesson_id,
+        "lesson_title": row[6],
+        "lesson_description": row[7],
+        "duration_seconds": int(row[8] or 0),
+        "allow_fast_forward": bool(row[9]),
+        "completion_threshold": float(row[10] or LMS_COMPLETION_THRESHOLD),
+        "module_title": row[11],
+        "progress": progress,
+        "session": session
+    }
+
+
+def _lms_try_issue_certificate_tx(cursor, assignment_id, user_id, score_percent=None, test_attempt_id=None):
+    cursor.execute("""
+        SELECT id, certificate_number, verify_token, status, issued_at
+        FROM lms_certificates
+        WHERE assignment_id = %s
+        ORDER BY id DESC
+        LIMIT 1
+    """, (assignment_id,))
+    existing = cursor.fetchone()
+    if existing and existing[3] == 'active':
+        return {
+            "id": int(existing[0]),
+            "certificate_number": existing[1],
+            "verify_token": existing[2],
+            "status": existing[3],
+            "issued_at": existing[4]
+        }
+
+    cursor.execute("""
+        SELECT a.course_id, c.title, u.name
+        FROM lms_course_assignments a
+        JOIN lms_courses c ON c.id = a.course_id
+        JOIN users u ON u.id = a.user_id
+        WHERE a.id = %s AND a.user_id = %s
+        LIMIT 1
+    """, (assignment_id, user_id))
+    base = cursor.fetchone()
+    if not base:
+        return None
+
+    course_id = int(base[0])
+    course_title = base[1]
+    learner_name = base[2]
+    issued_at = _lms_now()
+
+    certificate_number = None
+    for _ in range(5):
+        candidate = f"OTP-LMS-{issued_at.strftime('%Y%m%d')}-{secrets.token_hex(4).upper()}"
+        cursor.execute("SELECT id FROM lms_certificates WHERE certificate_number = %s LIMIT 1", (candidate,))
+        if not cursor.fetchone():
+            certificate_number = candidate
+            break
+    if not certificate_number:
+        certificate_number = f"OTP-LMS-{issued_at.strftime('%Y%m%d%H%M%S')}-{secrets.token_hex(3).upper()}"
+
+    verify_token = secrets.token_urlsafe(24).replace('-', '').replace('_', '')
+    pdf_bytes = _lms_generate_certificate_pdf(
+        certificate_number=certificate_number,
+        learner_name=learner_name,
+        course_title=course_title,
+        issued_at=issued_at,
+        score_percent=score_percent,
+        verify_token=verify_token
+    )
+
+    storage_type = 'db'
+    pdf_data = pdf_bytes
+    gcs_bucket = None
+    gcs_blob_path = None
+    if LMS_CERTIFICATE_STORAGE == 'gcs':
+        bucket_name = _lms_bucket_name()
+        if bucket_name:
+            try:
+                client = get_gcs_client()
+                bucket = client.bucket(bucket_name)
+                blob_path = (
+                    f"lms/certificates/{issued_at.strftime('%Y/%m/%d')}/"
+                    f"{certificate_number}.pdf"
+                )
+                blob = bucket.blob(blob_path)
+                blob.upload_from_string(pdf_bytes, content_type='application/pdf')
+                storage_type = 'gcs'
+                pdf_data = None
+                gcs_bucket = bucket_name
+                gcs_blob_path = blob_path
+            except Exception:
+                storage_type = 'db'
+                pdf_data = pdf_bytes
+                gcs_bucket = None
+                gcs_blob_path = None
+
+    cursor.execute("""
+        INSERT INTO lms_certificates (
+            assignment_id, course_id, user_id, test_attempt_id,
+            certificate_number, verify_token, score_percent, status, issued_at,
+            pdf_storage_type, pdf_data, gcs_bucket, gcs_blob_path, metadata
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, 'active', %s, %s, %s, %s, %s, %s::jsonb)
+        RETURNING id
+    """, (
+        assignment_id,
+        course_id,
+        user_id,
+        (int(test_attempt_id) if test_attempt_id is not None else None),
+        certificate_number,
+        verify_token,
+        (float(score_percent) if score_percent is not None else None),
+        issued_at,
+        storage_type,
+        pdf_data,
+        gcs_bucket,
+        gcs_blob_path,
+        json.dumps({
+            "verify_url": _lms_verify_url(verify_token)
+        }, ensure_ascii=False)
+    ))
+    cert_id = int(cursor.fetchone()[0])
+
+    _lms_emit_notification(
+        cursor,
+        user_id=user_id,
+        notification_type='certificate',
+        title='Сертификат сформирован',
+        message=f"Курс «{course_title}» завершен. Сертификат #{certificate_number} доступен для скачивания.",
+        payload={"certificate_id": cert_id, "verify_token": verify_token}
+    )
+    return {
+        "id": cert_id,
+        "certificate_number": certificate_number,
+        "verify_token": verify_token,
+        "status": "active",
+        "issued_at": issued_at
+    }
+
+
+def _lms_try_complete_assignment_tx(cursor, assignment_id, user_id, score_percent=None, test_attempt_id=None):
+    cursor.execute("""
+        SELECT id, course_id, course_version_id, due_at, status, completed_at
+        FROM lms_course_assignments
+        WHERE id = %s AND user_id = %s
+        LIMIT 1
+    """, (assignment_id, user_id))
+    assignment = cursor.fetchone()
+    if not assignment:
+        return {"completed": False, "reason": "ASSIGNMENT_NOT_FOUND"}
+
+    course_version_id = assignment[2]
+    due_at = assignment[3]
+    existing_completed_at = assignment[5]
+
+    cursor.execute("""
+        SELECT COUNT(*)
+        FROM lms_lessons l
+        JOIN lms_modules m ON m.id = l.module_id
+        WHERE m.course_version_id = %s
+    """, (course_version_id,))
+    total_lessons = int(cursor.fetchone()[0] or 0)
+
+    cursor.execute("""
+        SELECT COUNT(*)
+        FROM lms_lesson_progress
+        WHERE assignment_id = %s
+          AND user_id = %s
+          AND status = 'completed'
+    """, (assignment_id, user_id))
+    completed_lessons = int(cursor.fetchone()[0] or 0)
+
+    if total_lessons > 0 and completed_lessons < total_lessons:
+        return {
+            "completed": False,
+            "reason": "LESSONS_INCOMPLETE",
+            "total_lessons": total_lessons,
+            "completed_lessons": completed_lessons
+        }
+
+    cursor.execute("""
+        SELECT COUNT(*)
+        FROM lms_tests
+        WHERE course_version_id = %s
+          AND status <> 'archived'
+    """, (course_version_id,))
+    total_tests = int(cursor.fetchone()[0] or 0)
+
+    cursor.execute("""
+        SELECT COUNT(DISTINCT ta.test_id)
+        FROM lms_test_attempts ta
+        JOIN lms_tests t ON t.id = ta.test_id
+        WHERE ta.assignment_id = %s
+          AND ta.user_id = %s
+          AND ta.passed = TRUE
+          AND t.course_version_id = %s
+    """, (assignment_id, user_id, course_version_id))
+    passed_tests = int(cursor.fetchone()[0] or 0)
+
+    if total_tests > 0 and passed_tests < total_tests:
+        return {
+            "completed": False,
+            "reason": "TESTS_INCOMPLETE",
+            "total_tests": total_tests,
+            "passed_tests": passed_tests
+        }
+
+    completed_at = existing_completed_at or _lms_now()
+    deadline_status = _lms_deadline_status(due_at, completed_at)
+    cursor.execute("""
+        UPDATE lms_course_assignments
+        SET status = 'completed',
+            completed_at = %s,
+            completion_color_status = %s,
+            updated_at = %s
+        WHERE id = %s
+    """, (completed_at, deadline_status, _lms_now(), assignment_id))
+
+    certificate = _lms_try_issue_certificate_tx(
+        cursor,
+        assignment_id=assignment_id,
+        user_id=user_id,
+        score_percent=score_percent,
+        test_attempt_id=test_attempt_id
+    )
+
+    return {
+        "completed": True,
+        "completed_at": completed_at,
+        "deadline_status": deadline_status,
+        "certificate": certificate
+    }
+
+
+def _lms_fetch_test_questions_tx(cursor, test_id, include_correct=False):
+    cursor.execute("""
+        SELECT id, question_type, prompt, points, position, required, metadata, correct_text_answers
+        FROM lms_questions
+        WHERE test_id = %s
+        ORDER BY position ASC, id ASC
+    """, (test_id,))
+    question_rows = cursor.fetchall()
+    questions = []
+    for q in question_rows:
+        q_id = int(q[0])
+        q_type = str(q[1] or '').strip().lower()
+        cursor.execute("""
+            SELECT id, option_key, option_text, position, is_correct, match_key, metadata
+            FROM lms_question_options
+            WHERE question_id = %s
+            ORDER BY position ASC, id ASC
+        """, (q_id,))
+        option_rows = cursor.fetchall()
+        options = []
+        for opt in option_rows:
+            item = {
+                "id": int(opt[0]),
+                "key": opt[1],
+                "text": opt[2],
+                "position": int(opt[3] or 1),
+                "metadata": _lms_parse_json(opt[6], {})
+            }
+            if include_correct:
+                item["is_correct"] = bool(opt[4])
+                item["match_key"] = opt[5]
+            options.append(item)
+
+        question_payload = {
+            "id": q_id,
+            "type": q_type,
+            "prompt": q[2],
+            "points": float(q[3] or 1.0),
+            "position": int(q[4] or 1),
+            "required": bool(q[5]),
+            "metadata": _lms_parse_json(q[6], {}),
+            "options": options
+        }
+        if include_correct:
+            question_payload["correct_text_answers"] = _lms_parse_json(q[7], [])
+        questions.append(question_payload)
+    return questions
+
+
+def _lms_extract_selected_option_ids(answer_payload):
+    selected = []
+    payload = answer_payload
+    if isinstance(payload, dict):
+        if isinstance(payload.get('option_ids'), list):
+            selected.extend(payload.get('option_ids') or [])
+        elif payload.get('option_id') is not None:
+            selected.append(payload.get('option_id'))
+        elif isinstance(payload.get('value'), list):
+            selected.extend(payload.get('value') or [])
+        elif payload.get('value') is not None:
+            selected.append(payload.get('value'))
+    elif isinstance(payload, list):
+        selected.extend(payload)
+    elif payload is not None:
+        selected.append(payload)
+
+    out = []
+    for value in selected:
+        try:
+            parsed = int(value)
+        except Exception:
+            continue
+        if parsed not in out:
+            out.append(parsed)
+    return out
+
+
+def _lms_answer_to_matching_map(answer_payload):
+    if isinstance(answer_payload, dict):
+        pairs = answer_payload.get('pairs')
+        if isinstance(pairs, dict):
+            return {str(k): str(v) for k, v in pairs.items()}
+        if isinstance(pairs, list):
+            mapped = {}
+            for item in pairs:
+                if not isinstance(item, dict):
+                    continue
+                left = item.get('left')
+                right = item.get('right')
+                if left in (None, ''):
+                    continue
+                mapped[str(left)] = str(right) if right is not None else ''
+            return mapped
+    if isinstance(answer_payload, list):
+        mapped = {}
+        for item in answer_payload:
+            if not isinstance(item, dict):
+                continue
+            left = item.get('left')
+            right = item.get('right')
+            if left in (None, ''):
+                continue
+            mapped[str(left)] = str(right) if right is not None else ''
+        return mapped
+    return {}
+
+
+def _lms_finalize_attempt_tx(cursor, attempt_id, user_id):
+    cursor.execute("""
+        SELECT
+            ta.id, ta.assignment_id, ta.test_id, ta.user_id, ta.status, ta.started_at,
+            t.title, t.pass_threshold, t.attempt_limit
+        FROM lms_test_attempts ta
+        JOIN lms_tests t ON t.id = ta.test_id
+        WHERE ta.id = %s AND ta.user_id = %s
+        LIMIT 1
+    """, (attempt_id, user_id))
+    attempt = cursor.fetchone()
+    if not attempt:
+        return None
+
+    if attempt[4] != 'in_progress':
+        cursor.execute("""
+            SELECT score_percent, passed, finished_at, status
+            FROM lms_test_attempts
+            WHERE id = %s
+        """, (attempt_id,))
+        ready = cursor.fetchone()
+        return {
+            "attempt_id": int(attempt_id),
+            "assignment_id": int(attempt[1]),
+            "test_id": int(attempt[2]),
+            "status": ready[3] if ready else attempt[4],
+            "score_percent": float(ready[0] or 0.0) if ready else 0.0,
+            "passed": bool(ready[1]) if ready and ready[1] is not None else False,
+            "finished_at": ready[2] if ready else None,
+            "already_finished": True
+        }
+
+    questions = _lms_fetch_test_questions_tx(cursor, int(attempt[2]), include_correct=True)
+    cursor.execute("""
+        SELECT question_id, answer_payload
+        FROM lms_test_attempt_answers
+        WHERE attempt_id = %s
+    """, (attempt_id,))
+    raw_answers = cursor.fetchall()
+    answer_by_q = {}
+    for row in raw_answers:
+        answer_by_q[int(row[0])] = _lms_parse_json(row[1], {})
+
+    total_points = 0.0
+    scored_points = 0.0
+    breakdown = []
+
+    for question in questions:
+        q_id = int(question['id'])
+        q_type = str(question.get('type') or '').strip().lower()
+        q_points = float(question.get('points') or 1.0)
+        total_points += q_points
+        payload = answer_by_q.get(q_id, {})
+        is_correct = False
+
+        if q_type in ('single', 'multiple'):
+            expected = [int(opt['id']) for opt in question.get('options', []) if opt.get('is_correct')]
+            expected_set = set(expected)
+            selected_set = set(_lms_extract_selected_option_ids(payload))
+            is_correct = selected_set == expected_set and (q_type != 'single' or len(selected_set) == 1)
+        elif q_type == 'true_false':
+            expected_options = [opt for opt in question.get('options', []) if opt.get('is_correct')]
+            expected_bool = None
+            if expected_options:
+                text = _lms_normalize_text(expected_options[0].get('text'))
+                expected_bool = text in ('true', 'верно', 'истина', 'да')
+            if expected_bool is None:
+                expected_bool = _lms_parse_bool((question.get('metadata') or {}).get('correct'), False)
+
+            selected_bool = None
+            if isinstance(payload, dict):
+                if 'value' in payload:
+                    selected_bool = _lms_parse_bool(payload.get('value'), False)
+                elif 'answer' in payload:
+                    selected_bool = _lms_parse_bool(payload.get('answer'), False)
+                elif payload.get('option_id') is not None:
+                    selected = _lms_extract_selected_option_ids(payload)
+                    if selected:
+                        option_map = {int(opt['id']): opt for opt in question.get('options', [])}
+                        selected_option = option_map.get(int(selected[0]))
+                        if selected_option:
+                            selected_bool = _lms_normalize_text(selected_option.get('text')) in ('true', 'верно', 'истина', 'да')
+            elif isinstance(payload, bool):
+                selected_bool = payload
+
+            if selected_bool is not None:
+                is_correct = (selected_bool == expected_bool)
+        elif q_type == 'matching':
+            expected_map = {}
+            for opt in question.get('options', []):
+                key = opt.get('key')
+                match_key = opt.get('match_key')
+                if key not in (None, '') and match_key not in (None, ''):
+                    expected_map[str(key)] = str(match_key)
+            if not expected_map:
+                for pair in (question.get('metadata') or {}).get('pairs', []):
+                    if not isinstance(pair, dict):
+                        continue
+                    left = pair.get('left')
+                    right = pair.get('right')
+                    if left in (None, '') or right in (None, ''):
+                        continue
+                    expected_map[str(left)] = str(right)
+            answer_map = _lms_answer_to_matching_map(payload)
+            is_correct = bool(expected_map) and answer_map == expected_map
+        elif q_type == 'text':
+            accepted = question.get('correct_text_answers') or []
+            if not accepted:
+                accepted = (question.get('metadata') or {}).get('accepted_answers') or []
+            normalized_accepted = {_lms_normalize_answer_text(item) for item in accepted if str(item or '').strip()}
+            submitted = ''
+            if isinstance(payload, dict):
+                submitted = payload.get('text') or payload.get('value') or payload.get('answer') or ''
+            else:
+                submitted = payload
+            submitted_norm = _lms_normalize_answer_text(submitted)
+            is_correct = bool(submitted_norm) and submitted_norm in normalized_accepted
+
+        points_awarded = q_points if is_correct else 0.0
+        scored_points += points_awarded
+        cursor.execute("""
+            INSERT INTO lms_test_attempt_answers (
+                attempt_id, question_id, answer_payload, is_correct, points_awarded, answered_at
+            )
+            VALUES (%s, %s, %s::jsonb, %s, %s, %s)
+            ON CONFLICT (attempt_id, question_id)
+            DO UPDATE SET
+                answer_payload = EXCLUDED.answer_payload,
+                is_correct = EXCLUDED.is_correct,
+                points_awarded = EXCLUDED.points_awarded,
+                answered_at = EXCLUDED.answered_at
+        """, (
+            attempt_id,
+            q_id,
+            json.dumps(payload, ensure_ascii=False),
+            is_correct,
+            points_awarded,
+            _lms_now()
+        ))
+
+        breakdown.append({
+            "question_id": q_id,
+            "type": q_type,
+            "is_correct": is_correct,
+            "points_awarded": points_awarded,
+            "points_total": q_points
+        })
+
+    score_percent = 0.0
+    if total_points > 0:
+        score_percent = round((scored_points / total_points) * 100.0, 2)
+
+    pass_threshold = float(attempt[7] if attempt[7] is not None else LMS_DEFAULT_PASS_THRESHOLD)
+    passed = score_percent >= pass_threshold
+    finished_at = _lms_now()
+    started_at = attempt[5]
+    duration_seconds = None
+    if isinstance(started_at, datetime):
+        duration_seconds = max(0, int((finished_at - started_at).total_seconds()))
+
+    cursor.execute("""
+        UPDATE lms_test_attempts
+        SET status = 'finished',
+            score_percent = %s,
+            passed = %s,
+            finished_at = %s,
+            duration_seconds = %s
+        WHERE id = %s
+    """, (score_percent, passed, finished_at, duration_seconds, attempt_id))
+
+    completion = _lms_try_complete_assignment_tx(
+        cursor,
+        assignment_id=int(attempt[1]),
+        user_id=int(user_id),
+        score_percent=score_percent if passed else None,
+        test_attempt_id=int(attempt_id) if passed else None
+    )
+
+    title = 'Тест пройден' if passed else 'Тест не пройден'
+    text = (
+        f"Результат: {score_percent:.2f}% (порог {pass_threshold:.2f}%)."
+        + (" Поздравляем!" if passed else " Можно попробовать снова, если есть попытки.")
+    )
+    _lms_emit_notification(
+        cursor,
+        user_id=user_id,
+        notification_type='test_result',
+        title=title,
+        message=text,
+        payload={
+            "attempt_id": int(attempt_id),
+            "test_id": int(attempt[2]),
+            "score_percent": score_percent,
+            "passed": passed
+        }
+    )
+
+    return {
+        "attempt_id": int(attempt_id),
+        "assignment_id": int(attempt[1]),
+        "test_id": int(attempt[2]),
+        "status": "finished",
+        "score_percent": score_percent,
+        "pass_threshold": pass_threshold,
+        "passed": passed,
+        "finished_at": finished_at,
+        "duration_seconds": duration_seconds,
+        "total_points": round(total_points, 2),
+        "scored_points": round(scored_points, 2),
+        "breakdown": breakdown,
+        "assignment_completion": completion
+    }
+
+
+def _lms_course_structure_tx(cursor, course_id, course_version_id):
+    cursor.execute("""
+        SELECT
+            c.id, c.title, c.description, c.category, c.status,
+            c.default_pass_threshold, c.default_attempt_limit,
+            cv.id, cv.version_number, cv.status, cv.pass_threshold, cv.attempt_limit
+        FROM lms_courses c
+        JOIN lms_course_versions cv ON cv.id = %s AND cv.course_id = c.id
+        WHERE c.id = %s
+        LIMIT 1
+    """, (course_version_id, course_id))
+    header = cursor.fetchone()
+    if not header:
+        return None
+
+    cursor.execute("""
+        SELECT id, title, description, position
+        FROM lms_modules
+        WHERE course_version_id = %s
+        ORDER BY position ASC, id ASC
+    """, (course_version_id,))
+    modules_rows = cursor.fetchall()
+
+    cursor.execute("""
+        SELECT
+            l.id, l.module_id, l.title, l.description, l.position,
+            l.duration_seconds, COALESCE(l.allow_fast_forward, FALSE), COALESCE(l.completion_threshold, %s)
+        FROM lms_lessons l
+        JOIN lms_modules m ON m.id = l.module_id
+        WHERE m.course_version_id = %s
+        ORDER BY m.position ASC, l.position ASC, l.id ASC
+    """, (LMS_COMPLETION_THRESHOLD, course_version_id))
+    lessons_rows = cursor.fetchall()
+
+    cursor.execute("""
+        SELECT
+            id, lesson_id, title, material_type, content_text, gcs_bucket, gcs_blob_path,
+            content_url, mime_type, metadata, position
+        FROM lms_lesson_materials
+        WHERE lesson_id IN (
+            SELECT l.id
+            FROM lms_lessons l
+            JOIN lms_modules m ON m.id = l.module_id
+            WHERE m.course_version_id = %s
+        )
+        ORDER BY position ASC, id ASC
+    """, (course_version_id,))
+    material_rows = cursor.fetchall()
+
+    cursor.execute("""
+        SELECT id, module_id, title, description, pass_threshold, attempt_limit, is_final, status
+        FROM lms_tests
+        WHERE course_version_id = %s
+          AND status <> 'archived'
+        ORDER BY id ASC
+    """, (course_version_id,))
+    tests_rows = cursor.fetchall()
+
+    material_by_lesson = {}
+    for row in material_rows:
+        material_by_lesson.setdefault(int(row[1]), []).append(_lms_material_row_to_payload(row))
+
+    lessons_by_module = {}
+    for row in lessons_rows:
+        lesson_id = int(row[0])
+        module_id = int(row[1])
+        lessons_by_module.setdefault(module_id, []).append({
+            "id": lesson_id,
+            "module_id": module_id,
+            "title": row[2],
+            "description": row[3],
+            "position": int(row[4] or 1),
+            "duration_seconds": int(row[5] or 0),
+            "allow_fast_forward": bool(row[6]),
+            "completion_threshold": float(row[7] or LMS_COMPLETION_THRESHOLD),
+            "materials": material_by_lesson.get(lesson_id, [])
+        })
+
+    modules = []
+    for row in modules_rows:
+        module_id = int(row[0])
+        modules.append({
+            "id": module_id,
+            "title": row[1],
+            "description": row[2],
+            "position": int(row[3] or 1),
+            "lessons": lessons_by_module.get(module_id, [])
+        })
+
+    tests = []
+    for row in tests_rows:
+        test_id = int(row[0])
+        cursor.execute("SELECT COUNT(*) FROM lms_questions WHERE test_id = %s", (test_id,))
+        question_count = int(cursor.fetchone()[0] or 0)
+        tests.append({
+            "id": test_id,
+            "module_id": int(row[1]) if row[1] is not None else None,
+            "title": row[2],
+            "description": row[3],
+            "pass_threshold": float(row[4] if row[4] is not None else LMS_DEFAULT_PASS_THRESHOLD),
+            "attempt_limit": int(row[5] if row[5] is not None else LMS_DEFAULT_ATTEMPT_LIMIT),
+            "is_final": bool(row[6]),
+            "status": row[7],
+            "question_count": question_count
+        })
+
+    return {
+        "id": int(header[0]),
+        "title": header[1],
+        "description": header[2],
+        "category": header[3],
+        "status": header[4],
+        "default_pass_threshold": float(header[5] if header[5] is not None else LMS_DEFAULT_PASS_THRESHOLD),
+        "default_attempt_limit": int(header[6] if header[6] is not None else LMS_DEFAULT_ATTEMPT_LIMIT),
+        "course_version": {
+            "id": int(header[7]),
+            "version_number": int(header[8] or 1),
+            "status": header[9],
+            "pass_threshold": float(header[10] if header[10] is not None else LMS_DEFAULT_PASS_THRESHOLD),
+            "attempt_limit": int(header[11] if header[11] is not None else LMS_DEFAULT_ATTEMPT_LIMIT)
+        },
+        "modules": modules,
+        "tests": tests
+    }
+
+
+@app.route('/api/lms/home', methods=['GET'])
+@require_api_key
+def lms_home():
+    requester_id, requester, requester_role, error_response, status_code = _lms_resolve_request('learner')
+    if error_response:
+        return error_response, status_code
+
+    try:
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    a.id, a.course_id, a.course_version_id, a.status, a.due_at, a.started_at, a.completed_at,
+                    c.title, c.description, c.category
+                FROM lms_course_assignments a
+                JOIN lms_courses c ON c.id = a.course_id
+                WHERE a.user_id = %s
+                ORDER BY COALESCE(a.due_at, a.created_at) ASC, a.id DESC
+            """, (requester_id,))
+            assignment_rows = cursor.fetchall()
+
+            courses = []
+            for row in assignment_rows:
+                assignment_id = int(row[0])
+                course_version_id = int(row[2]) if row[2] is not None else None
+
+                cursor.execute("""
+                    SELECT COUNT(*)
+                    FROM lms_lessons l
+                    JOIN lms_modules m ON m.id = l.module_id
+                    WHERE m.course_version_id = %s
+                """, (course_version_id,))
+                total_lessons = int(cursor.fetchone()[0] or 0)
+
+                cursor.execute("""
+                    SELECT COUNT(*)
+                    FROM lms_lesson_progress
+                    WHERE assignment_id = %s
+                      AND user_id = %s
+                      AND status = 'completed'
+                """, (assignment_id, requester_id))
+                completed_lessons = int(cursor.fetchone()[0] or 0)
+
+                cursor.execute("""
+                    SELECT MAX(score_percent)
+                    FROM lms_test_attempts
+                    WHERE assignment_id = %s
+                      AND user_id = %s
+                      AND status = 'finished'
+                """, (assignment_id, requester_id))
+                best_score_raw = cursor.fetchone()[0]
+
+                cursor.execute("""
+                    SELECT id, status
+                    FROM lms_certificates
+                    WHERE assignment_id = %s
+                    ORDER BY id DESC
+                    LIMIT 1
+                """, (assignment_id,))
+                cert_row = cursor.fetchone()
+
+                progress_percent = 0.0
+                if total_lessons > 0:
+                    progress_percent = round((completed_lessons / total_lessons) * 100.0, 2)
+                elif row[3] == 'completed':
+                    progress_percent = 100.0
+
+                deadline_status = _lms_deadline_status(row[4], row[6])
+                courses.append({
+                    "assignment_id": assignment_id,
+                    "course_id": int(row[1]),
+                    "course_version_id": course_version_id,
+                    "title": row[7],
+                    "description": row[8],
+                    "category": row[9],
+                    "status": row[3],
+                    "due_at": row[4].isoformat() if row[4] else None,
+                    "started_at": row[5].isoformat() if row[5] else None,
+                    "completed_at": row[6].isoformat() if row[6] else None,
+                    "deadline_status": deadline_status,
+                    "progress_percent": progress_percent,
+                    "completed_lessons": completed_lessons,
+                    "total_lessons": total_lessons,
+                    "best_score": float(best_score_raw) if best_score_raw is not None else None,
+                    "certificate": (
+                        {
+                            "id": int(cert_row[0]),
+                            "status": cert_row[1]
+                        } if cert_row else None
+                    )
+                })
+
+            cursor.execute("""
+                SELECT COUNT(*)
+                FROM lms_notifications
+                WHERE user_id = %s
+                  AND is_read = FALSE
+            """, (requester_id,))
+            unread_count = int(cursor.fetchone()[0] or 0)
+
+        return jsonify({
+            "status": "success",
+            "role": requester_role,
+            "heartbeat_seconds": LMS_HEARTBEAT_SECONDS,
+            "stale_gap_seconds": LMS_STALE_GAP_SECONDS,
+            "completion_threshold_percent": LMS_COMPLETION_THRESHOLD,
+            "unread_notifications": unread_count,
+            "courses": courses
+        }), 200
+    except Exception as e:
+        logging.exception("Error in /api/lms/home")
+        return jsonify({"error": f"Failed to load LMS home: {str(e)}"}), 500
+
+
+@app.route('/api/lms/courses', methods=['GET'])
+@require_api_key
+def lms_courses():
+    requester_id, _, _, error_response, status_code = _lms_resolve_request('learner')
+    if error_response:
+        return error_response, status_code
+
+    try:
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    a.id, a.course_id, a.course_version_id, a.status, a.due_at, a.started_at, a.completed_at,
+                    c.title, c.description, c.category
+                FROM lms_course_assignments a
+                JOIN lms_courses c ON c.id = a.course_id
+                WHERE a.user_id = %s
+                ORDER BY c.title ASC
+            """, (requester_id,))
+            rows = cursor.fetchall()
+
+            items = []
+            for row in rows:
+                due_at = row[4]
+                completed_at = row[6]
+                items.append({
+                    "assignment_id": int(row[0]),
+                    "course_id": int(row[1]),
+                    "course_version_id": int(row[2]) if row[2] is not None else None,
+                    "status": row[3],
+                    "title": row[7],
+                    "description": row[8],
+                    "category": row[9],
+                    "due_at": due_at.isoformat() if due_at else None,
+                    "started_at": row[5].isoformat() if row[5] else None,
+                    "completed_at": completed_at.isoformat() if completed_at else None,
+                    "deadline_status": _lms_deadline_status(due_at, completed_at)
+                })
+
+        return jsonify({"status": "success", "courses": items}), 200
+    except Exception as e:
+        logging.exception("Error in /api/lms/courses")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/lms/courses/<int:course_id>', methods=['GET'])
+@require_api_key
+def lms_course_detail(course_id):
+    requester_id, _, _, error_response, status_code = _lms_resolve_request('learner')
+    if error_response:
+        return error_response, status_code
+
+    try:
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id, course_version_id, status, due_at, started_at, completed_at
+                FROM lms_course_assignments
+                WHERE user_id = %s
+                  AND course_id = %s
+                LIMIT 1
+            """, (requester_id, course_id))
+            assignment = cursor.fetchone()
+            if not assignment:
+                return jsonify({"error": "Course is not assigned to learner"}), 404
+
+            assignment_id = int(assignment[0])
+            course_version_id = int(assignment[1]) if assignment[1] is not None else None
+            if course_version_id is None:
+                cursor.execute("SELECT current_version_id FROM lms_courses WHERE id = %s", (course_id,))
+                row = cursor.fetchone()
+                if not row or row[0] is None:
+                    return jsonify({"error": "Course version is not available"}), 404
+                course_version_id = int(row[0])
+
+            structure = _lms_course_structure_tx(cursor, course_id, course_version_id)
+            if not structure:
+                return jsonify({"error": "Course not found"}), 404
+
+            cursor.execute("""
+                SELECT
+                    lesson_id, status, completion_ratio, max_position_seconds,
+                    confirmed_seconds, active_seconds, completed_at
+                FROM lms_lesson_progress
+                WHERE assignment_id = %s
+                  AND user_id = %s
+            """, (assignment_id, requester_id))
+            progress_rows = cursor.fetchall()
+            lesson_progress = {}
+            for row in progress_rows:
+                lesson_progress[int(row[0])] = {
+                    "status": row[1],
+                    "completion_ratio": float(row[2] or 0.0),
+                    "max_position_seconds": float(row[3] or 0.0),
+                    "confirmed_seconds": float(row[4] or 0.0),
+                    "active_seconds": int(row[5] or 0),
+                    "completed_at": row[6].isoformat() if row[6] else None
+                }
+
+            cursor.execute("""
+                SELECT
+                    test_id,
+                    MAX(score_percent) FILTER (WHERE status = 'finished') AS best_score,
+                    BOOL_OR(COALESCE(passed, FALSE)) FILTER (WHERE status = 'finished') AS passed_any,
+                    COUNT(*) AS attempts_used
+                FROM lms_test_attempts
+                WHERE assignment_id = %s
+                  AND user_id = %s
+                GROUP BY test_id
+            """, (assignment_id, requester_id))
+            attempts = {}
+            for row in cursor.fetchall():
+                attempts[int(row[0])] = {
+                    "best_score": float(row[1]) if row[1] is not None else None,
+                    "passed_any": bool(row[2]) if row[2] is not None else False,
+                    "attempts_used": int(row[3] or 0)
+                }
+
+            structure["assignment"] = {
+                "id": assignment_id,
+                "status": assignment[2],
+                "due_at": assignment[3].isoformat() if assignment[3] else None,
+                "started_at": assignment[4].isoformat() if assignment[4] else None,
+                "completed_at": assignment[5].isoformat() if assignment[5] else None,
+                "deadline_status": _lms_deadline_status(assignment[3], assignment[5]),
+                "lesson_progress": lesson_progress,
+                "tests": attempts
+            }
+
+        return jsonify({"status": "success", "course": structure}), 200
+    except Exception as e:
+        logging.exception("Error in /api/lms/courses/<course_id>")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/lms/courses/<int:course_id>/start', methods=['POST'])
+@require_api_key
+def lms_start_course(course_id):
+    requester_id, _, _, error_response, status_code = _lms_resolve_request('learner')
+    if error_response:
+        return error_response, status_code
+
+    try:
+        now = _lms_now()
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                UPDATE lms_course_assignments
+                SET status = CASE WHEN status = 'assigned' THEN 'in_progress' ELSE status END,
+                    started_at = COALESCE(started_at, %s),
+                    updated_at = %s
+                WHERE user_id = %s
+                  AND course_id = %s
+                RETURNING id, status, started_at, due_at
+            """, (now, now, requester_id, course_id))
+            updated = cursor.fetchone()
+            if not updated:
+                return jsonify({"error": "Course is not assigned to learner"}), 404
+
+        return jsonify({
+            "status": "success",
+            "assignment_id": int(updated[0]),
+            "assignment_status": updated[1],
+            "started_at": updated[2].isoformat() if updated[2] else None,
+            "due_at": updated[3].isoformat() if updated[3] else None
+        }), 200
+    except Exception as e:
+        logging.exception("Error in /api/lms/courses/<course_id>/start")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/lms/lessons/<int:lesson_id>', methods=['GET'])
+@require_api_key
+def lms_lesson_detail(lesson_id):
+    requester_id, _, _, error_response, status_code = _lms_resolve_request('learner')
+    if error_response:
+        return error_response, status_code
+
+    try:
+        with db._get_cursor() as cursor:
+            context = _lms_get_lesson_context_tx(cursor, requester_id, lesson_id)
+            if not context:
+                return jsonify({"error": "Lesson is not available for learner"}), 404
+
+            cursor.execute("""
+                UPDATE lms_course_assignments
+                SET status = CASE WHEN status = 'assigned' THEN 'in_progress' ELSE status END,
+                    started_at = COALESCE(started_at, %s),
+                    updated_at = %s
+                WHERE id = %s
+            """, (_lms_now(), _lms_now(), context["assignment_id"]))
+
+            cursor.execute("""
+                SELECT
+                    id, lesson_id, title, material_type, content_text, gcs_bucket, gcs_blob_path,
+                    content_url, mime_type, metadata, position
+                FROM lms_lesson_materials
+                WHERE lesson_id = %s
+                ORDER BY position ASC, id ASC
+            """, (lesson_id,))
+            materials = [_lms_material_row_to_payload(row) for row in cursor.fetchall()]
+
+            progress = context["progress"]
+            session = context["session"]
+            completion_ratio = float(progress[4] or 0.0)
+            required_ratio = max(float(context["completion_threshold"]), float(LMS_COMPLETION_THRESHOLD))
+
+        return jsonify({
+            "status": "success",
+            "lesson": {
+                "id": context["lesson_id"],
+                "title": context["lesson_title"],
+                "description": context["lesson_description"],
+                "module_title": context["module_title"],
+                "duration_seconds": context["duration_seconds"],
+                "allow_fast_forward": context["allow_fast_forward"],
+                "completion_threshold": required_ratio
+            },
+            "assignment_id": context["assignment_id"],
+            "session": {
+                "id": int(session[0]),
+                "started_at": session[1].isoformat() if session[1] else None,
+                "last_heartbeat_at": session[3].isoformat() if session[3] else None,
+                "is_active": bool(session[4]),
+                "max_position_seconds": float(session[5] or 0.0),
+                "confirmed_seconds": float(session[6] or 0.0),
+                "active_seconds": int(session[7] or 0),
+                "tab_hidden_count": int(session[8] or 0),
+                "stale_gap_count": int(session[9] or 0)
+            },
+            "progress": {
+                "id": int(progress[0]),
+                "status": progress[1],
+                "max_position_seconds": float(progress[2] or 0.0),
+                "confirmed_seconds": float(progress[3] or 0.0),
+                "completion_ratio": completion_ratio,
+                "active_seconds": int(progress[5] or 0),
+                "last_heartbeat_at": progress[6].isoformat() if progress[6] else None,
+                "tab_hidden_count": int(progress[7] or 0),
+                "stale_gap_count": int(progress[8] or 0),
+                "can_complete": completion_ratio >= required_ratio
+            },
+            "anti_cheat": {
+                "heartbeat_seconds": LMS_HEARTBEAT_SECONDS,
+                "stale_gap_seconds": LMS_STALE_GAP_SECONDS,
+                "completion_threshold_percent": required_ratio
+            },
+            "materials": materials
+        }), 200
+    except Exception as e:
+        logging.exception("Error in /api/lms/lessons/<lesson_id>")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/lms/lessons/<int:lesson_id>/event', methods=['POST'])
+@require_api_key
+def lms_lesson_event(lesson_id):
+    requester_id, _, _, error_response, status_code = _lms_resolve_request('learner')
+    if error_response:
+        return error_response, status_code
+
+    data = request.get_json(silent=True) or {}
+    event_type = str(data.get('event_type') or '').strip().lower() or 'unknown'
+    payload = data.get('payload') if isinstance(data.get('payload'), dict) else {}
+    client_ts = _lms_parse_datetime(data.get('client_ts'))
+
+    try:
+        with db._get_cursor() as cursor:
+            context = _lms_get_lesson_context_tx(cursor, requester_id, lesson_id)
+            if not context:
+                return jsonify({"error": "Lesson is not available for learner"}), 404
+
+            progress = context["progress"]
+            session = context["session"]
+            progress_id = int(progress[0])
+            session_id = int(session[0])
+            allow_fast_forward = bool(context["allow_fast_forward"])
+            progress_max = float(progress[2] or 0.0)
+
+            blocked_seek = False
+            allowed_position = None
+            if event_type == 'seek':
+                to_seconds = _lms_to_float(
+                    payload.get('to_seconds')
+                    if isinstance(payload, dict) else None,
+                    default=_lms_to_float(data.get('to_seconds'), default=0.0)
+                )
+                from_seconds = _lms_to_float(
+                    payload.get('from_seconds')
+                    if isinstance(payload, dict) else None,
+                    default=_lms_to_float(data.get('from_seconds'), default=0.0)
+                )
+                payload = {
+                    **(payload or {}),
+                    "from_seconds": from_seconds,
+                    "to_seconds": to_seconds
+                }
+
+                if not allow_fast_forward:
+                    allowed_position = progress_max + max(3.0, float(LMS_HEARTBEAT_SECONDS) * 2.0)
+                    if to_seconds > allowed_position:
+                        blocked_seek = True
+
+            if event_type == 'visibility':
+                is_visible = _lms_parse_bool(payload.get('is_visible') if isinstance(payload, dict) else None, True)
+                if not is_visible:
+                    cursor.execute("""
+                        UPDATE lms_lesson_progress
+                        SET tab_hidden_count = COALESCE(tab_hidden_count, 0) + 1,
+                            last_event_at = %s,
+                            updated_at = %s
+                        WHERE id = %s
+                    """, (_lms_now(), _lms_now(), progress_id))
+                    cursor.execute("""
+                        UPDATE lms_learning_sessions
+                        SET tab_hidden_count = COALESCE(tab_hidden_count, 0) + 1
+                        WHERE id = %s
+                    """, (session_id,))
+
+            if blocked_seek:
+                payload = {**(payload or {}), "blocked": True, "allowed_position": allowed_position}
+                event_name = 'seek_blocked'
+            else:
+                event_name = event_type
+
+            cursor.execute("""
+                INSERT INTO lms_learning_events (
+                    session_id, lesson_id, user_id, event_type, payload, client_ts, created_at
+                )
+                VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s)
+            """, (
+                session_id,
+                lesson_id,
+                requester_id,
+                event_name,
+                json.dumps(payload or {}, ensure_ascii=False),
+                client_ts,
+                _lms_now()
+            ))
+
+            if blocked_seek:
+                return jsonify({
+                    "status": "blocked",
+                    "reason": "FORWARD_SEEK_NOT_ALLOWED",
+                    "allowed_position": allowed_position
+                }), 409
+
+        return jsonify({"status": "success"}), 200
+    except Exception as e:
+        logging.exception("Error in /api/lms/lessons/<lesson_id>/event")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/lms/lessons/<int:lesson_id>/heartbeat', methods=['POST'])
+@require_api_key
+def lms_lesson_heartbeat(lesson_id):
+    requester_id, _, _, error_response, status_code = _lms_resolve_request('learner')
+    if error_response:
+        return error_response, status_code
+
+    data = request.get_json(silent=True) or {}
+    raw_position = data.get('position_seconds')
+    tab_visible = _lms_parse_bool(data.get('tab_visible'), True)
+
+    try:
+        with db._get_cursor() as cursor:
+            context = _lms_get_lesson_context_tx(cursor, requester_id, lesson_id)
+            if not context:
+                return jsonify({"error": "Lesson is not available for learner"}), 404
+
+            progress = context["progress"]
+            session = context["session"]
+
+            progress_id = int(progress[0])
+            session_id = int(session[0])
+            lesson_duration = float(context["duration_seconds"] or 0.0)
+            allow_fast_forward = bool(context["allow_fast_forward"])
+
+            now = _lms_now()
+            requested_position = max(0.0, _lms_to_float(raw_position, default=0.0))
+            progress_max = float(progress[2] or 0.0)
+            progress_confirmed = float(progress[3] or 0.0)
+            progress_active = int(progress[5] or 0)
+            progress_tab_hidden = int(progress[7] or 0)
+            progress_stale = int(progress[8] or 0)
+
+            last_heartbeat = session[3] or progress[6]
+            gap_seconds = None
+            stale_gap = False
+            if isinstance(last_heartbeat, datetime):
+                gap_seconds = max(0.0, (now - last_heartbeat).total_seconds())
+                stale_gap = gap_seconds > float(LMS_STALE_GAP_SECONDS)
+
+            blocked_forward_seek = False
+            allowed_position = None
+            effective_position = requested_position
+            if not allow_fast_forward:
+                allowed_position = progress_max + max(3.0, float(LMS_HEARTBEAT_SECONDS) * 2.0)
+                if effective_position > allowed_position:
+                    effective_position = allowed_position
+                    blocked_forward_seek = True
+
+            next_max = max(progress_max, effective_position)
+            next_confirmed = progress_confirmed
+            active_increment = 0
+
+            if tab_visible and not stale_gap:
+                next_confirmed = max(next_confirmed, effective_position)
+                if gap_seconds is not None:
+                    active_increment = int(min(gap_seconds, float(LMS_STALE_GAP_SECONDS)))
+                else:
+                    active_increment = int(LMS_HEARTBEAT_SECONDS)
+
+            next_active = progress_active + active_increment
+            next_tab_hidden = progress_tab_hidden + (0 if tab_visible else 1)
+            next_stale = progress_stale + (1 if stale_gap else 0)
+            completion_ratio = 100.0 if lesson_duration <= 0 else min(100.0, round((next_confirmed / lesson_duration) * 100.0, 2))
+
+            cursor.execute("""
+                UPDATE lms_lesson_progress
+                SET status = CASE WHEN status = 'not_started' THEN 'in_progress' ELSE status END,
+                    max_position_seconds = %s,
+                    confirmed_seconds = %s,
+                    completion_ratio = %s,
+                    active_seconds = %s,
+                    last_heartbeat_at = %s,
+                    last_event_at = %s,
+                    tab_hidden_count = %s,
+                    stale_gap_count = %s,
+                    started_at = COALESCE(started_at, %s),
+                    updated_at = %s
+                WHERE id = %s
+            """, (
+                next_max,
+                next_confirmed,
+                completion_ratio,
+                next_active,
+                now,
+                now,
+                next_tab_hidden,
+                next_stale,
+                now,
+                now,
+                progress_id
+            ))
+
+            cursor.execute("""
+                UPDATE lms_learning_sessions
+                SET
+                    last_heartbeat_at = %s,
+                    last_visible_at = CASE WHEN %s THEN %s ELSE last_visible_at END,
+                    max_position_seconds = %s,
+                    confirmed_seconds = %s,
+                    active_seconds = %s,
+                    tab_hidden_count = %s,
+                    stale_gap_count = %s
+                WHERE id = %s
+            """, (
+                now,
+                tab_visible,
+                now,
+                max(float(session[5] or 0.0), next_max),
+                max(float(session[6] or 0.0), next_confirmed),
+                int(session[7] or 0) + active_increment,
+                int(session[8] or 0) + (0 if tab_visible else 1),
+                int(session[9] or 0) + (1 if stale_gap else 0),
+                session_id
+            ))
+
+            cursor.execute("""
+                INSERT INTO lms_learning_events (
+                    session_id, lesson_id, user_id, event_type, payload, client_ts, created_at
+                )
+                VALUES (%s, %s, %s, 'heartbeat', %s::jsonb, %s, %s)
+            """, (
+                session_id,
+                lesson_id,
+                requester_id,
+                json.dumps({
+                    "requested_position_seconds": requested_position,
+                    "effective_position_seconds": effective_position,
+                    "tab_visible": tab_visible,
+                    "stale_gap": stale_gap,
+                    "blocked_forward_seek": blocked_forward_seek
+                }, ensure_ascii=False),
+                _lms_parse_datetime(data.get('client_ts')),
+                now
+            ))
+
+        return jsonify({
+            "status": "success",
+            "position_seconds": effective_position,
+            "completion_ratio": completion_ratio,
+            "active_seconds": next_active,
+            "stale_gap": stale_gap,
+            "blocked_forward_seek": blocked_forward_seek,
+            "allowed_position": allowed_position if blocked_forward_seek else None
+        }), 200
+    except Exception as e:
+        logging.exception("Error in /api/lms/lessons/<lesson_id>/heartbeat")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/lms/lessons/<int:lesson_id>/complete', methods=['POST'])
+@require_api_key
+def lms_lesson_complete(lesson_id):
+    requester_id, _, _, error_response, status_code = _lms_resolve_request('learner')
+    if error_response:
+        return error_response, status_code
+
+    try:
+        with db._get_cursor() as cursor:
+            context = _lms_get_lesson_context_tx(cursor, requester_id, lesson_id)
+            if not context:
+                return jsonify({"error": "Lesson is not available for learner"}), 404
+
+            progress = context["progress"]
+            progress_id = int(progress[0])
+            current_ratio = float(progress[4] or 0.0)
+            last_heartbeat_at = progress[6]
+            required_ratio = max(float(context["completion_threshold"]), float(LMS_COMPLETION_THRESHOLD))
+
+            if current_ratio < required_ratio:
+                return jsonify({
+                    "error": "Lesson completion threshold is not reached",
+                    "required_ratio": required_ratio,
+                    "current_ratio": current_ratio
+                }), 409
+
+            if isinstance(last_heartbeat_at, datetime):
+                gap = (_lms_now() - last_heartbeat_at).total_seconds()
+                if gap > float(LMS_STALE_GAP_SECONDS):
+                    return jsonify({
+                        "error": "Heartbeat is stale, lesson completion denied",
+                        "stale_gap_seconds": LMS_STALE_GAP_SECONDS,
+                        "current_gap_seconds": round(gap, 2)
+                    }), 409
+
+            now = _lms_now()
+            cursor.execute("""
+                UPDATE lms_lesson_progress
+                SET status = 'completed',
+                    completion_ratio = GREATEST(completion_ratio, %s),
+                    completed_at = COALESCE(completed_at, %s),
+                    updated_at = %s
+                WHERE id = %s
+                RETURNING completed_at, completion_ratio
+            """, (required_ratio, now, now, progress_id))
+            updated = cursor.fetchone()
+
+            completion = _lms_try_complete_assignment_tx(
+                cursor,
+                assignment_id=context["assignment_id"],
+                user_id=requester_id
+            )
+
+            _lms_emit_notification(
+                cursor,
+                user_id=requester_id,
+                notification_type='lesson_completed',
+                title='Урок завершен',
+                message=f"Урок «{context['lesson_title']}» отмечен как завершенный.",
+                payload={"lesson_id": lesson_id, "assignment_id": context["assignment_id"]}
+            )
+
+        return jsonify({
+            "status": "success",
+            "lesson_id": lesson_id,
+            "completed_at": updated[0].isoformat() if updated and updated[0] else None,
+            "completion_ratio": float(updated[1] or required_ratio) if updated else required_ratio,
+            "assignment_completion": completion
+        }), 200
+    except Exception as e:
+        logging.exception("Error in /api/lms/lessons/<lesson_id>/complete")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/lms/tests/<int:test_id>/start', methods=['POST'])
+@require_api_key
+def lms_test_start(test_id):
+    requester_id, _, _, error_response, status_code = _lms_resolve_request('learner')
+    if error_response:
+        return error_response, status_code
+
+    try:
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    a.id as assignment_id,
+                    a.course_id,
+                    a.course_version_id,
+                    a.status as assignment_status,
+                    t.id as test_id,
+                    t.title,
+                    COALESCE(t.pass_threshold, cv.pass_threshold, c.default_pass_threshold, %s),
+                    COALESCE(t.attempt_limit, cv.attempt_limit, c.default_attempt_limit, %s)
+                FROM lms_tests t
+                JOIN lms_course_versions cv ON cv.id = t.course_version_id
+                JOIN lms_courses c ON c.id = cv.course_id
+                JOIN lms_course_assignments a
+                    ON a.course_version_id = cv.id
+                   AND a.user_id = %s
+                WHERE t.id = %s
+                  AND t.status <> 'archived'
+                LIMIT 1
+            """, (
+                LMS_DEFAULT_PASS_THRESHOLD,
+                LMS_DEFAULT_ATTEMPT_LIMIT,
+                requester_id,
+                test_id
+            ))
+            row = cursor.fetchone()
+            if not row:
+                return jsonify({"error": "Test is not available for learner"}), 404
+
+            assignment_id = int(row[0])
+            course_version_id = int(row[2])
+            pass_threshold = float(row[6] or LMS_DEFAULT_PASS_THRESHOLD)
+            attempt_limit = int(row[7] or LMS_DEFAULT_ATTEMPT_LIMIT)
+
+            cursor.execute("""
+                SELECT COUNT(*)
+                FROM lms_lessons l
+                JOIN lms_modules m ON m.id = l.module_id
+                WHERE m.course_version_id = %s
+            """, (course_version_id,))
+            total_lessons = int(cursor.fetchone()[0] or 0)
+
+            cursor.execute("""
+                SELECT COUNT(*)
+                FROM lms_lesson_progress
+                WHERE assignment_id = %s
+                  AND user_id = %s
+                  AND status = 'completed'
+            """, (assignment_id, requester_id))
+            completed_lessons = int(cursor.fetchone()[0] or 0)
+
+            if total_lessons > 0 and completed_lessons < total_lessons:
+                return jsonify({
+                    "error": "Lessons must be completed before test start",
+                    "completed_lessons": completed_lessons,
+                    "total_lessons": total_lessons
+                }), 409
+
+            cursor.execute("""
+                SELECT id, attempt_no
+                FROM lms_test_attempts
+                WHERE assignment_id = %s
+                  AND test_id = %s
+                  AND user_id = %s
+                  AND status = 'in_progress'
+                ORDER BY id DESC
+                LIMIT 1
+            """, (assignment_id, test_id, requester_id))
+            active_attempt = cursor.fetchone()
+            if active_attempt:
+                attempt_id = int(active_attempt[0])
+                attempt_no = int(active_attempt[1])
+            else:
+                cursor.execute("""
+                    SELECT COUNT(*)
+                    FROM lms_test_attempts
+                    WHERE assignment_id = %s
+                      AND test_id = %s
+                      AND user_id = %s
+                """, (assignment_id, test_id, requester_id))
+                attempts_used = int(cursor.fetchone()[0] or 0)
+                if attempts_used >= attempt_limit:
+                    return jsonify({
+                        "error": "Attempt limit reached",
+                        "attempt_limit": attempt_limit,
+                        "attempts_used": attempts_used
+                    }), 409
+
+                attempt_no = attempts_used + 1
+                cursor.execute("""
+                    INSERT INTO lms_test_attempts (
+                        assignment_id, test_id, user_id, attempt_no, status, started_at
+                    )
+                    VALUES (%s, %s, %s, %s, 'in_progress', %s)
+                    RETURNING id
+                """, (assignment_id, test_id, requester_id, attempt_no, _lms_now()))
+                attempt_id = int(cursor.fetchone()[0])
+
+            questions = _lms_fetch_test_questions_tx(cursor, test_id, include_correct=False)
+
+        return jsonify({
+            "status": "success",
+            "attempt": {
+                "id": attempt_id,
+                "attempt_no": attempt_no,
+                "assignment_id": assignment_id,
+                "test_id": int(test_id),
+                "pass_threshold": pass_threshold,
+                "attempt_limit": attempt_limit
+            },
+            "questions": questions
+        }), 200
+    except Exception as e:
+        logging.exception("Error in /api/lms/tests/<test_id>/start")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/lms/tests/attempts/<int:attempt_id>/answer', methods=['PATCH'])
+@require_api_key
+def lms_test_answer(attempt_id):
+    requester_id, _, _, error_response, status_code = _lms_resolve_request('learner')
+    if error_response:
+        return error_response, status_code
+
+    data = request.get_json(silent=True) or {}
+    question_id = data.get('question_id')
+    if question_id in (None, ''):
+        return jsonify({"error": "question_id is required"}), 400
+    try:
+        question_id = int(question_id)
+    except Exception:
+        return jsonify({"error": "Invalid question_id"}), 400
+
+    raw_answer = data.get('answer_payload', data.get('answer'))
+    if raw_answer is None:
+        raw_answer = {}
+
+    try:
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id, test_id, status
+                FROM lms_test_attempts
+                WHERE id = %s AND user_id = %s
+                LIMIT 1
+            """, (attempt_id, requester_id))
+            attempt = cursor.fetchone()
+            if not attempt:
+                return jsonify({"error": "Attempt not found"}), 404
+            if attempt[2] != 'in_progress':
+                return jsonify({"error": "Attempt is not in progress"}), 409
+
+            cursor.execute("""
+                SELECT id
+                FROM lms_questions
+                WHERE id = %s AND test_id = %s
+                LIMIT 1
+            """, (question_id, int(attempt[1])))
+            qrow = cursor.fetchone()
+            if not qrow:
+                return jsonify({"error": "Question does not belong to this attempt"}), 404
+
+            cursor.execute("""
+                INSERT INTO lms_test_attempt_answers (
+                    attempt_id, question_id, answer_payload, answered_at
+                )
+                VALUES (%s, %s, %s::jsonb, %s)
+                ON CONFLICT (attempt_id, question_id)
+                DO UPDATE SET
+                    answer_payload = EXCLUDED.answer_payload,
+                    answered_at = EXCLUDED.answered_at
+            """, (
+                attempt_id,
+                question_id,
+                json.dumps(raw_answer, ensure_ascii=False),
+                _lms_now()
+            ))
+
+        return jsonify({"status": "success", "attempt_id": attempt_id, "question_id": question_id}), 200
+    except Exception as e:
+        logging.exception("Error in /api/lms/tests/attempts/<attempt_id>/answer")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/lms/tests/attempts/<int:attempt_id>/finish', methods=['POST'])
+@require_api_key
+def lms_test_finish(attempt_id):
+    requester_id, _, _, error_response, status_code = _lms_resolve_request('learner')
+    if error_response:
+        return error_response, status_code
+
+    try:
+        with db._get_cursor() as cursor:
+            result = _lms_finalize_attempt_tx(cursor, attempt_id, requester_id)
+            if not result:
+                return jsonify({"error": "Attempt not found"}), 404
+
+        return jsonify({"status": "success", "result": result}), 200
+    except Exception as e:
+        logging.exception("Error in /api/lms/tests/attempts/<attempt_id>/finish")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/lms/tests/attempts/<int:attempt_id>/result', methods=['GET'])
+@require_api_key
+def lms_test_result(attempt_id):
+    requester_id, _, _, error_response, status_code = _lms_resolve_request('learner')
+    if error_response:
+        return error_response, status_code
+
+    try:
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    ta.id, ta.assignment_id, ta.test_id, ta.attempt_no, ta.status,
+                    ta.score_percent, ta.passed, ta.started_at, ta.finished_at, ta.duration_seconds,
+                    t.title, t.pass_threshold
+                FROM lms_test_attempts ta
+                JOIN lms_tests t ON t.id = ta.test_id
+                WHERE ta.id = %s
+                  AND ta.user_id = %s
+                LIMIT 1
+            """, (attempt_id, requester_id))
+            attempt = cursor.fetchone()
+            if not attempt:
+                return jsonify({"error": "Attempt not found"}), 404
+
+            cursor.execute("""
+                SELECT
+                    q.id, q.question_type, q.prompt, q.points,
+                    a.answer_payload, a.is_correct, a.points_awarded, a.answered_at
+                FROM lms_questions q
+                LEFT JOIN lms_test_attempt_answers a
+                  ON a.question_id = q.id
+                 AND a.attempt_id = %s
+                WHERE q.test_id = %s
+                ORDER BY q.position ASC, q.id ASC
+            """, (attempt_id, int(attempt[2])))
+            answer_rows = cursor.fetchall()
+            answers = []
+            for row in answer_rows:
+                answers.append({
+                    "question_id": int(row[0]),
+                    "type": row[1],
+                    "prompt": row[2],
+                    "points_total": float(row[3] or 1.0),
+                    "answer_payload": _lms_parse_json(row[4], {}),
+                    "is_correct": (bool(row[5]) if row[5] is not None else None),
+                    "points_awarded": (float(row[6]) if row[6] is not None else None),
+                    "answered_at": row[7].isoformat() if row[7] else None
+                })
+
+            cursor.execute("""
+                SELECT id, certificate_number, verify_token, status
+                FROM lms_certificates
+                WHERE assignment_id = %s
+                ORDER BY id DESC
+                LIMIT 1
+            """, (int(attempt[1]),))
+            cert = cursor.fetchone()
+
+        return jsonify({
+            "status": "success",
+            "attempt": {
+                "id": int(attempt[0]),
+                "assignment_id": int(attempt[1]),
+                "test_id": int(attempt[2]),
+                "attempt_no": int(attempt[3]),
+                "status": attempt[4],
+                "score_percent": float(attempt[5]) if attempt[5] is not None else None,
+                "passed": bool(attempt[6]) if attempt[6] is not None else None,
+                "started_at": attempt[7].isoformat() if attempt[7] else None,
+                "finished_at": attempt[8].isoformat() if attempt[8] else None,
+                "duration_seconds": int(attempt[9] or 0),
+                "test_title": attempt[10],
+                "pass_threshold": float(attempt[11] if attempt[11] is not None else LMS_DEFAULT_PASS_THRESHOLD)
+            },
+            "answers": answers,
+            "certificate": (
+                {
+                    "id": int(cert[0]),
+                    "certificate_number": cert[1],
+                    "verify_token": cert[2],
+                    "verify_url": _lms_verify_url(cert[2]),
+                    "status": cert[3]
+                } if cert else None
+            )
+        }), 200
+    except Exception as e:
+        logging.exception("Error in /api/lms/tests/attempts/<attempt_id>/result")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/lms/certificates', methods=['GET'])
+@require_api_key
+def lms_certificates():
+    requester_id, _, _, error_response, status_code = _lms_resolve_request('learner')
+    if error_response:
+        return error_response, status_code
+
+    try:
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    c.id, c.assignment_id, c.course_id, c.certificate_number, c.verify_token,
+                    c.score_percent, c.status, c.issued_at, c.revoked_at, c.revoke_reason
+                FROM lms_certificates c
+                WHERE c.user_id = %s
+                ORDER BY c.issued_at DESC, c.id DESC
+            """, (requester_id,))
+            rows = cursor.fetchall()
+
+            items = []
+            for row in rows:
+                items.append({
+                    "id": int(row[0]),
+                    "assignment_id": int(row[1]) if row[1] is not None else None,
+                    "course_id": int(row[2]),
+                    "certificate_number": row[3],
+                    "verify_token": row[4],
+                    "verify_url": _lms_verify_url(row[4]),
+                    "score_percent": float(row[5]) if row[5] is not None else None,
+                    "status": row[6],
+                    "issued_at": row[7].isoformat() if row[7] else None,
+                    "revoked_at": row[8].isoformat() if row[8] else None,
+                    "revoke_reason": row[9]
+                })
+
+        return jsonify({"status": "success", "certificates": items}), 200
+    except Exception as e:
+        logging.exception("Error in /api/lms/certificates")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/lms/certificates/<int:certificate_id>/download', methods=['GET'])
+@require_api_key
+def lms_certificate_download(certificate_id):
+    requester_id, _, _, error_response, status_code = _lms_resolve_request('learner')
+    if error_response:
+        return error_response, status_code
+
+    try:
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    certificate_number, pdf_storage_type, pdf_data, gcs_bucket, gcs_blob_path, status
+                FROM lms_certificates
+                WHERE id = %s
+                  AND user_id = %s
+                LIMIT 1
+            """, (certificate_id, requester_id))
+            row = cursor.fetchone()
+            if not row:
+                return jsonify({"error": "Certificate not found"}), 404
+
+            cert_number = row[0] or f"LMS-{certificate_id}"
+            storage_type = row[1] or 'db'
+
+            if storage_type == 'gcs' and row[3] and row[4]:
+                signed_url = _lms_signed_url(row[3], row[4], expires_minutes=30)
+                if signed_url:
+                    return redirect(signed_url, code=302)
+
+            pdf_data = row[2]
+            if isinstance(pdf_data, memoryview):
+                pdf_data = pdf_data.tobytes()
+            elif isinstance(pdf_data, bytearray):
+                pdf_data = bytes(pdf_data)
+
+            if not pdf_data:
+                return jsonify({"error": "Certificate file is unavailable"}), 404
+
+            return send_file(
+                BytesIO(pdf_data),
+                as_attachment=True,
+                download_name=f"{cert_number}.pdf",
+                mimetype='application/pdf'
+            )
+    except Exception as e:
+        logging.exception("Error in /api/lms/certificates/<certificate_id>/download")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/lms/notifications', methods=['GET'])
+@require_api_key
+def lms_notifications():
+    requester_id, _, _, error_response, status_code = _lms_resolve_request('learner')
+    if error_response:
+        return error_response, status_code
+
+    limit = _lms_to_int(request.args.get('limit'), default=100)
+    limit = min(max(limit, 1), 500)
+    try:
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id, notification_type, title, message, payload, is_read, read_at, created_at
+                FROM lms_notifications
+                WHERE user_id = %s
+                ORDER BY created_at DESC, id DESC
+                LIMIT %s
+            """, (requester_id, limit))
+            rows = cursor.fetchall()
+
+            items = []
+            for row in rows:
+                items.append({
+                    "id": int(row[0]),
+                    "type": row[1],
+                    "title": row[2],
+                    "message": row[3],
+                    "payload": _lms_parse_json(row[4], {}),
+                    "is_read": bool(row[5]),
+                    "read_at": row[6].isoformat() if row[6] else None,
+                    "created_at": row[7].isoformat() if row[7] else None
+                })
+        return jsonify({"status": "success", "notifications": items}), 200
+    except Exception as e:
+        logging.exception("Error in /api/lms/notifications")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/lms/notifications/<int:notification_id>/read', methods=['POST'])
+@require_api_key
+def lms_notification_read(notification_id):
+    requester_id, _, _, error_response, status_code = _lms_resolve_request('learner')
+    if error_response:
+        return error_response, status_code
+
+    try:
+        with db._get_cursor() as cursor:
+            now = _lms_now()
+            cursor.execute("""
+                UPDATE lms_notifications
+                SET is_read = TRUE,
+                    read_at = COALESCE(read_at, %s)
+                WHERE id = %s
+                  AND user_id = %s
+                RETURNING id
+            """, (now, notification_id, requester_id))
+            updated = cursor.fetchone()
+            if not updated:
+                return jsonify({"error": "Notification not found"}), 404
+        return jsonify({"status": "success", "notification_id": notification_id}), 200
+    except Exception as e:
+        logging.exception("Error in /api/lms/notifications/<notification_id>/read")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/lms/certificates/verify/<string:token>', methods=['GET'])
+def lms_verify_certificate(token):
+    verify_token = str(token or '').strip()
+    if not verify_token:
+        return jsonify({"error": "Invalid token"}), 400
+
+    try:
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    c.id, c.certificate_number, c.verify_token, c.status, c.issued_at,
+                    c.revoked_at, c.revoke_reason, c.score_percent,
+                    u.id, u.name,
+                    cr.id, cr.title
+                FROM lms_certificates c
+                JOIN users u ON u.id = c.user_id
+                JOIN lms_courses cr ON cr.id = c.course_id
+                WHERE c.verify_token = %s
+                LIMIT 1
+            """, (verify_token,))
+            row = cursor.fetchone()
+            if not row:
+                return jsonify({"status": "not_found", "valid": False}), 404
+
+            valid = (row[3] == 'active')
+            return jsonify({
+                "status": "success",
+                "valid": valid,
+                "certificate": {
+                    "id": int(row[0]),
+                    "certificate_number": row[1],
+                    "verify_token": row[2],
+                    "status": row[3],
+                    "issued_at": row[4].isoformat() if row[4] else None,
+                    "revoked_at": row[5].isoformat() if row[5] else None,
+                    "revoke_reason": row[6],
+                    "score_percent": float(row[7]) if row[7] is not None else None,
+                    "learner": {
+                        "id": int(row[8]),
+                        "name": row[9]
+                    },
+                    "course": {
+                        "id": int(row[10]),
+                        "title": row[11]
+                    }
+                }
+            }), 200
+    except Exception as e:
+        logging.exception("Error in /api/lms/certificates/verify/<token>")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/lms/admin/courses', methods=['GET', 'POST', 'PATCH'])
+@require_api_key
+def lms_admin_courses():
+    requester_id, _, requester_role, error_response, status_code = _lms_resolve_request('manager')
+    if error_response:
+        return error_response, status_code
+
+    try:
+        if request.method == 'GET':
+            course_id = _lms_to_int(request.args.get('course_id'), default=0)
+            with db._get_cursor() as cursor:
+                if course_id > 0:
+                    cursor.execute("SELECT current_version_id FROM lms_courses WHERE id = %s LIMIT 1", (course_id,))
+                    base = cursor.fetchone()
+                    if not base:
+                        return jsonify({"error": "Course not found"}), 404
+                    version_id = int(base[0]) if base[0] is not None else None
+                    if not version_id:
+                        return jsonify({"error": "Course has no active version"}), 404
+                    detail = _lms_course_structure_tx(cursor, course_id, version_id)
+                    return jsonify({"status": "success", "course": detail}), 200
+
+                cursor.execute("""
+                    SELECT
+                        c.id, c.slug, c.title, c.description, c.category, c.status,
+                        c.default_pass_threshold, c.default_attempt_limit,
+                        c.current_version_id,
+                        cv.version_number, cv.status, cv.pass_threshold, cv.attempt_limit
+                    FROM lms_courses c
+                    LEFT JOIN lms_course_versions cv ON cv.id = c.current_version_id
+                    ORDER BY c.updated_at DESC, c.id DESC
+                """)
+                rows = cursor.fetchall()
+                courses = []
+                for row in rows:
+                    courses.append({
+                        "id": int(row[0]),
+                        "slug": row[1],
+                        "title": row[2],
+                        "description": row[3],
+                        "category": row[4],
+                        "status": row[5],
+                        "default_pass_threshold": float(row[6] if row[6] is not None else LMS_DEFAULT_PASS_THRESHOLD),
+                        "default_attempt_limit": int(row[7] if row[7] is not None else LMS_DEFAULT_ATTEMPT_LIMIT),
+                        "current_version_id": int(row[8]) if row[8] is not None else None,
+                        "current_version": {
+                            "version_number": int(row[9]) if row[9] is not None else None,
+                            "status": row[10],
+                            "pass_threshold": float(row[11]) if row[11] is not None else None,
+                            "attempt_limit": int(row[12]) if row[12] is not None else None
+                        } if row[8] is not None else None
+                    })
+                return jsonify({"status": "success", "courses": courses}), 200
+
+        data = request.get_json(silent=True) or {}
+        if request.method == 'POST':
+            title = str(data.get('title') or '').strip()
+            if not title:
+                return jsonify({"error": "title is required"}), 400
+
+            description = str(data.get('description') or '').strip() or None
+            category = str(data.get('category') or '').strip() or None
+            pass_threshold = min(100.0, max(0.0, _lms_to_float(data.get('pass_threshold'), LMS_DEFAULT_PASS_THRESHOLD)))
+            attempt_limit = max(1, _lms_to_int(data.get('attempt_limit'), LMS_DEFAULT_ATTEMPT_LIMIT))
+            modules = data.get('modules') if isinstance(data.get('modules'), list) else []
+            tests = data.get('tests') if isinstance(data.get('tests'), list) else []
+            if not tests and isinstance(data.get('test'), dict):
+                tests = [data.get('test')]
+
+            base_slug = re.sub(r'[^a-z0-9]+', '-', title.lower()).strip('-') or 'course'
+            slug = f"{base_slug[:80]}-{secrets.token_hex(3)}"
+
+            with db._get_cursor() as cursor:
+                now = _lms_now()
+                cursor.execute("""
+                    INSERT INTO lms_courses (
+                        slug, title, description, category, status,
+                        default_pass_threshold, default_attempt_limit,
+                        created_by, updated_by, created_at, updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, 'draft', %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                """, (slug, title, description, category, pass_threshold, attempt_limit, requester_id, requester_id, now, now))
+                course_id = int(cursor.fetchone()[0])
+
+                cursor.execute("""
+                    INSERT INTO lms_course_versions (
+                        course_id, version_number, title, description, status,
+                        pass_threshold, attempt_limit, anti_cheat_settings, created_by, created_at
+                    )
+                    VALUES (%s, 1, %s, %s, 'draft', %s, %s, %s::jsonb, %s, %s)
+                    RETURNING id
+                """, (
+                    course_id,
+                    title,
+                    description,
+                    pass_threshold,
+                    attempt_limit,
+                    json.dumps({
+                        "heartbeat_seconds": LMS_HEARTBEAT_SECONDS,
+                        "stale_gap_seconds": LMS_STALE_GAP_SECONDS,
+                        "completion_threshold_percent": LMS_COMPLETION_THRESHOLD
+                    }, ensure_ascii=False),
+                    requester_id,
+                    now
+                ))
+                version_id = int(cursor.fetchone()[0])
+
+                cursor.execute("UPDATE lms_courses SET current_version_id = %s WHERE id = %s", (version_id, course_id))
+
+                created_module_ids = []
+                for module_index, module in enumerate(modules, start=1):
+                    if not isinstance(module, dict):
+                        continue
+                    module_title = str(module.get('title') or '').strip()
+                    if not module_title:
+                        continue
+                    module_desc = str(module.get('description') or '').strip() or None
+                    module_pos = max(1, _lms_to_int(module.get('position'), module_index))
+                    cursor.execute("""
+                        INSERT INTO lms_modules (course_version_id, title, description, position, created_at)
+                        VALUES (%s, %s, %s, %s, %s)
+                        RETURNING id
+                    """, (version_id, module_title, module_desc, module_pos, now))
+                    module_id = int(cursor.fetchone()[0])
+                    created_module_ids.append(module_id)
+
+                    lessons = module.get('lessons') if isinstance(module.get('lessons'), list) else []
+                    for lesson_index, lesson in enumerate(lessons, start=1):
+                        if not isinstance(lesson, dict):
+                            continue
+                        lesson_title = str(lesson.get('title') or '').strip()
+                        if not lesson_title:
+                            continue
+                        cursor.execute("""
+                            INSERT INTO lms_lessons (
+                                module_id, title, description, position, duration_seconds,
+                                allow_fast_forward, completion_threshold, created_at
+                            )
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        """, (
+                            module_id,
+                            lesson_title,
+                            str(lesson.get('description') or '').strip() or None,
+                            max(1, _lms_to_int(lesson.get('position'), lesson_index)),
+                            max(0, _lms_to_int(lesson.get('duration_seconds'), 0)),
+                            _lms_parse_bool(lesson.get('allow_fast_forward'), False),
+                            min(100.0, max(0.0, _lms_to_float(lesson.get('completion_threshold'), LMS_COMPLETION_THRESHOLD))),
+                            now
+                        ))
+
+                for test_index, test in enumerate(tests, start=1):
+                    if not isinstance(test, dict):
+                        continue
+                    test_title = str(test.get('title') or '').strip() or f"Тест {test_index}"
+                    test_module_id = test.get('module_id')
+                    if test_module_id not in created_module_ids:
+                        test_module_id = None
+                    cursor.execute("""
+                        INSERT INTO lms_tests (
+                            course_version_id, module_id, title, description, pass_threshold,
+                            attempt_limit, is_final, status, created_at
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, 'draft', %s)
+                        RETURNING id
+                    """, (
+                        version_id,
+                        test_module_id,
+                        test_title,
+                        str(test.get('description') or '').strip() or None,
+                        min(100.0, max(0.0, _lms_to_float(test.get('pass_threshold'), pass_threshold))),
+                        max(1, _lms_to_int(test.get('attempt_limit'), attempt_limit)),
+                        _lms_parse_bool(test.get('is_final'), True),
+                        now
+                    ))
+                    test_id = int(cursor.fetchone()[0])
+
+                    questions = test.get('questions') if isinstance(test.get('questions'), list) else []
+                    for q_index, question in enumerate(questions, start=1):
+                        if not isinstance(question, dict):
+                            continue
+                        prompt = str(question.get('prompt') or question.get('text') or '').strip()
+                        if not prompt:
+                            continue
+                        q_type = str(question.get('type') or 'single').strip().lower()
+                        if q_type in ('single_choice',):
+                            q_type = 'single'
+                        if q_type in ('multiple_choice', 'multi'):
+                            q_type = 'multiple'
+                        if q_type in ('boolean', 'truefalse'):
+                            q_type = 'true_false'
+                        if q_type not in ('single', 'multiple', 'true_false', 'matching', 'text'):
+                            q_type = 'single'
+
+                        cursor.execute("""
+                            INSERT INTO lms_questions (
+                                test_id, question_type, prompt, points, position, required, metadata, correct_text_answers, created_at
+                            )
+                            VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s)
+                            RETURNING id
+                        """, (
+                            test_id,
+                            q_type,
+                            prompt,
+                            max(0.1, _lms_to_float(question.get('points'), 1.0)),
+                            max(1, _lms_to_int(question.get('position'), q_index)),
+                            _lms_parse_bool(question.get('required'), True),
+                            json.dumps(question.get('metadata') if isinstance(question.get('metadata'), dict) else {}, ensure_ascii=False),
+                            json.dumps(question.get('correct_text_answers') if isinstance(question.get('correct_text_answers'), list) else [], ensure_ascii=False),
+                            now
+                        ))
+                        question_id = int(cursor.fetchone()[0])
+
+                        options = question.get('options') if isinstance(question.get('options'), list) else []
+                        if q_type == 'true_false' and not options:
+                            correct_bool = _lms_parse_bool(question.get('correct'), True)
+                            options = [
+                                {"text": "True", "is_correct": correct_bool, "key": "true"},
+                                {"text": "False", "is_correct": (not correct_bool), "key": "false"}
+                            ]
+
+                        for o_index, option in enumerate(options, start=1):
+                            if isinstance(option, dict):
+                                opt_text = str(option.get('text') or option.get('label') or '').strip()
+                                opt_key = str(option.get('key') or '').strip() or None
+                                is_correct = _lms_parse_bool(option.get('is_correct'), False)
+                                match_key = str(option.get('match_key') or option.get('right') or '').strip() or None
+                                opt_meta = option.get('metadata') if isinstance(option.get('metadata'), dict) else {}
+                                opt_position = max(1, _lms_to_int(option.get('position'), o_index))
+                            else:
+                                opt_text = str(option or '').strip()
+                                opt_key = None
+                                is_correct = False
+                                match_key = None
+                                opt_meta = {}
+                                opt_position = o_index
+                            if not opt_text:
+                                continue
+                            cursor.execute("""
+                                INSERT INTO lms_question_options (
+                                    question_id, option_key, option_text, position, is_correct, match_key, metadata
+                                )
+                                VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)
+                            """, (
+                                question_id,
+                                opt_key,
+                                opt_text,
+                                opt_position,
+                                is_correct,
+                                match_key,
+                                json.dumps(opt_meta, ensure_ascii=False)
+                            ))
+
+                _lms_audit(
+                    cursor,
+                    actor_id=requester_id,
+                    actor_role=requester_role,
+                    action='create_course',
+                    entity_type='lms_course',
+                    entity_id=course_id,
+                    details={"course_version_id": version_id}
+                )
+
+            return jsonify({"status": "success", "course_id": course_id, "course_version_id": version_id}), 201
+
+        if request.method == 'PATCH':
+            course_id = _lms_to_int(data.get('course_id'), default=0)
+            if course_id <= 0:
+                return jsonify({"error": "course_id is required"}), 400
+            with db._get_cursor() as cursor:
+                cursor.execute("SELECT id, current_version_id FROM lms_courses WHERE id = %s", (course_id,))
+                course_row = cursor.fetchone()
+                if not course_row:
+                    return jsonify({"error": "Course not found"}), 404
+
+                updates = []
+                params = []
+                if 'title' in data:
+                    updates.append("title = %s")
+                    params.append(str(data.get('title') or '').strip())
+                if 'description' in data:
+                    updates.append("description = %s")
+                    params.append(str(data.get('description') or '').strip() or None)
+                if 'category' in data:
+                    updates.append("category = %s")
+                    params.append(str(data.get('category') or '').strip() or None)
+                if 'status' in data:
+                    status = str(data.get('status') or '').strip().lower()
+                    if status not in ('draft', 'published', 'archived'):
+                        return jsonify({"error": "Invalid status"}), 400
+                    updates.append("status = %s")
+                    params.append(status)
+                if 'pass_threshold' in data:
+                    updates.append("default_pass_threshold = %s")
+                    params.append(min(100.0, max(0.0, _lms_to_float(data.get('pass_threshold'), LMS_DEFAULT_PASS_THRESHOLD))))
+                if 'attempt_limit' in data:
+                    updates.append("default_attempt_limit = %s")
+                    params.append(max(1, _lms_to_int(data.get('attempt_limit'), LMS_DEFAULT_ATTEMPT_LIMIT)))
+                updates.append("updated_by = %s")
+                params.append(requester_id)
+                updates.append("updated_at = %s")
+                params.append(_lms_now())
+
+                cursor.execute(f"UPDATE lms_courses SET {', '.join(updates)} WHERE id = %s", params + [course_id])
+
+                version_id = _lms_to_int(data.get('course_version_id'), default=int(course_row[1] or 0))
+                version_updates = []
+                version_params = []
+                if version_id > 0:
+                    if 'version_status' in data:
+                        status = str(data.get('version_status') or '').strip().lower()
+                        if status not in ('draft', 'published', 'archived'):
+                            return jsonify({"error": "Invalid version_status"}), 400
+                        version_updates.append("status = %s")
+                        version_params.append(status)
+                    if 'version_title' in data:
+                        version_updates.append("title = %s")
+                        version_params.append(str(data.get('version_title') or '').strip() or None)
+                    if 'version_description' in data:
+                        version_updates.append("description = %s")
+                        version_params.append(str(data.get('version_description') or '').strip() or None)
+                    if 'pass_threshold' in data:
+                        version_updates.append("pass_threshold = %s")
+                        version_params.append(min(100.0, max(0.0, _lms_to_float(data.get('pass_threshold'), LMS_DEFAULT_PASS_THRESHOLD))))
+                    if 'attempt_limit' in data:
+                        version_updates.append("attempt_limit = %s")
+                        version_params.append(max(1, _lms_to_int(data.get('attempt_limit'), LMS_DEFAULT_ATTEMPT_LIMIT)))
+                    if version_updates:
+                        cursor.execute(f"""
+                            UPDATE lms_course_versions
+                            SET {', '.join(version_updates)}
+                            WHERE id = %s AND course_id = %s
+                        """, version_params + [version_id, course_id])
+
+                _lms_audit(
+                    cursor,
+                    actor_id=requester_id,
+                    actor_role=requester_role,
+                    action='update_course',
+                    entity_type='lms_course',
+                    entity_id=course_id,
+                    details={"payload_keys": list(data.keys())}
+                )
+
+            return jsonify({"status": "success", "course_id": course_id}), 200
+
+        return jsonify({"error": "Method not allowed"}), 405
+    except Exception as e:
+        logging.exception("Error in /api/lms/admin/courses")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/lms/admin/courses/<int:course_id>/publish', methods=['POST'])
+@require_api_key
+def lms_admin_publish_course(course_id):
+    requester_id, _, requester_role, error_response, status_code = _lms_resolve_request('manager')
+    if error_response:
+        return error_response, status_code
+
+    data = request.get_json(silent=True) or {}
+    version_id_raw = data.get('course_version_id')
+    try:
+        version_id = int(version_id_raw) if version_id_raw not in (None, '') else None
+    except Exception:
+        return jsonify({"error": "Invalid course_version_id"}), 400
+
+    try:
+        with db._get_cursor() as cursor:
+            cursor.execute("SELECT id FROM lms_courses WHERE id = %s", (course_id,))
+            if not cursor.fetchone():
+                return jsonify({"error": "Course not found"}), 404
+
+            if version_id is None:
+                cursor.execute("""
+                    SELECT id
+                    FROM lms_course_versions
+                    WHERE course_id = %s
+                    ORDER BY version_number DESC, id DESC
+                    LIMIT 1
+                """, (course_id,))
+                row = cursor.fetchone()
+                if not row:
+                    return jsonify({"error": "Course has no versions"}), 404
+                version_id = int(row[0])
+            else:
+                cursor.execute("""
+                    SELECT id
+                    FROM lms_course_versions
+                    WHERE id = %s
+                      AND course_id = %s
+                    LIMIT 1
+                """, (version_id, course_id))
+                if not cursor.fetchone():
+                    return jsonify({"error": "Version not found for course"}), 404
+
+            now = _lms_now()
+            cursor.execute("""
+                UPDATE lms_course_versions
+                SET status = 'archived'
+                WHERE course_id = %s
+                  AND status = 'published'
+                  AND id <> %s
+            """, (course_id, version_id))
+            cursor.execute("""
+                UPDATE lms_course_versions
+                SET status = 'published',
+                    published_by = %s,
+                    published_at = %s
+                WHERE id = %s
+            """, (requester_id, now, version_id))
+            cursor.execute("""
+                UPDATE lms_tests
+                SET status = 'published'
+                WHERE course_version_id = %s
+            """, (version_id,))
+            cursor.execute("""
+                UPDATE lms_courses
+                SET status = 'published',
+                    current_version_id = %s,
+                    updated_by = %s,
+                    updated_at = %s
+                WHERE id = %s
+            """, (version_id, requester_id, now, course_id))
+
+            _lms_audit(
+                cursor,
+                actor_id=requester_id,
+                actor_role=requester_role,
+                action='publish_course',
+                entity_type='lms_course',
+                entity_id=course_id,
+                details={"course_version_id": version_id}
+            )
+
+        return jsonify({"status": "success", "course_id": course_id, "course_version_id": version_id}), 200
+    except Exception as e:
+        logging.exception("Error in /api/lms/admin/courses/<course_id>/publish")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/lms/admin/courses/<int:course_id>/assignments', methods=['POST'])
+@require_api_key
+def lms_admin_assign_course(course_id):
+    requester_id, _, requester_role, error_response, status_code = _lms_resolve_request('manager')
+    if error_response:
+        return error_response, status_code
+
+    data = request.get_json(silent=True) or {}
+    user_ids_raw = data.get('user_ids') if isinstance(data.get('user_ids'), list) else []
+    if not user_ids_raw:
+        return jsonify({"error": "user_ids must be a non-empty list"}), 400
+
+    due_at = _lms_parse_datetime(data.get('due_at'))
+    version_id_raw = data.get('course_version_id')
+    try:
+        version_id = int(version_id_raw) if version_id_raw not in (None, '') else None
+    except Exception:
+        return jsonify({"error": "Invalid course_version_id"}), 400
+
+    user_ids = []
+    for item in user_ids_raw:
+        try:
+            parsed = int(item)
+        except Exception:
+            continue
+        if parsed > 0 and parsed not in user_ids:
+            user_ids.append(parsed)
+    if not user_ids:
+        return jsonify({"error": "No valid user_ids"}), 400
+
+    visible_learner_ids = None
+    if requester_role in ('sv', 'trainer'):
+        visible_learner_ids = set(_lms_visible_learner_ids(requester_id, requester_role))
+
+    try:
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id, current_version_id
+                FROM lms_courses
+                WHERE id = %s
+                LIMIT 1
+            """, (course_id,))
+            course_row = cursor.fetchone()
+            if not course_row:
+                return jsonify({"error": "Course not found"}), 404
+
+            if version_id is None:
+                version_id = int(course_row[1]) if course_row[1] is not None else None
+            if not version_id:
+                cursor.execute("""
+                    SELECT id
+                    FROM lms_course_versions
+                    WHERE course_id = %s
+                    ORDER BY version_number DESC, id DESC
+                    LIMIT 1
+                """, (course_id,))
+                row = cursor.fetchone()
+                if not row:
+                    return jsonify({"error": "Course version not found"}), 404
+                version_id = int(row[0])
+
+            cursor.execute("""
+                SELECT id
+                FROM lms_course_versions
+                WHERE id = %s
+                  AND course_id = %s
+                LIMIT 1
+            """, (version_id, course_id))
+            if not cursor.fetchone():
+                return jsonify({"error": "course_version_id does not belong to course"}), 400
+
+            assigned = []
+            skipped = []
+            now = _lms_now()
+            for user_id in user_ids:
+                if visible_learner_ids is not None and user_id not in visible_learner_ids:
+                    skipped.append({"user_id": user_id, "reason": "not_visible_for_manager"})
+                    continue
+
+                cursor.execute("SELECT id, role FROM users WHERE id = %s LIMIT 1", (user_id,))
+                user_row = cursor.fetchone()
+                if not user_row:
+                    skipped.append({"user_id": user_id, "reason": "user_not_found"})
+                    continue
+                role = _normalize_user_role(user_row[1])
+                if role not in LMS_LEARNER_ROLES:
+                    skipped.append({"user_id": user_id, "reason": "user_not_learner"})
+                    continue
+
+                cursor.execute("""
+                    INSERT INTO lms_course_assignments (
+                        course_id, course_version_id, user_id, assigned_by, due_at, status, created_at, updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, 'assigned', %s, %s)
+                    ON CONFLICT (course_id, user_id)
+                    DO UPDATE SET
+                        course_version_id = EXCLUDED.course_version_id,
+                        assigned_by = EXCLUDED.assigned_by,
+                        due_at = EXCLUDED.due_at,
+                        status = CASE
+                            WHEN lms_course_assignments.status = 'completed' THEN 'assigned'
+                            ELSE lms_course_assignments.status
+                        END,
+                        completed_at = CASE
+                            WHEN lms_course_assignments.status = 'completed' THEN NULL
+                            ELSE lms_course_assignments.completed_at
+                        END,
+                        completion_color_status = CASE
+                            WHEN lms_course_assignments.status = 'completed' THEN NULL
+                            ELSE lms_course_assignments.completion_color_status
+                        END,
+                        updated_at = EXCLUDED.updated_at
+                    RETURNING id
+                """, (course_id, version_id, user_id, requester_id, due_at, now, now))
+                assignment_id = int(cursor.fetchone()[0])
+
+                _lms_emit_notification(
+                    cursor,
+                    user_id=user_id,
+                    notification_type='assignment',
+                    title='Назначен новый курс',
+                    message='Вам назначен новый курс в разделе Обучение.',
+                    payload={
+                        "assignment_id": assignment_id,
+                        "course_id": course_id,
+                        "course_version_id": version_id,
+                        "due_at": due_at.isoformat() if due_at else None
+                    }
+                )
+                assigned.append({"user_id": user_id, "assignment_id": assignment_id})
+
+            _lms_audit(
+                cursor,
+                actor_id=requester_id,
+                actor_role=requester_role,
+                action='assign_course',
+                entity_type='lms_course',
+                entity_id=course_id,
+                details={
+                    "course_version_id": version_id,
+                    "assigned_count": len(assigned),
+                    "skipped_count": len(skipped)
+                }
+            )
+
+        return jsonify({
+            "status": "success",
+            "course_id": course_id,
+            "course_version_id": version_id,
+            "assigned": assigned,
+            "skipped": skipped
+        }), 200
+    except Exception as e:
+        logging.exception("Error in /api/lms/admin/courses/<course_id>/assignments")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/lms/admin/materials/upload', methods=['POST'])
+@require_api_key
+def lms_admin_upload_materials():
+    requester_id, _, requester_role, error_response, status_code = _lms_resolve_request('manager')
+    if error_response:
+        return error_response, status_code
+
+    try:
+        files = request.files.getlist('files')
+        if not files:
+            single = request.files.get('file')
+            files = [single] if single else []
+        files = [f for f in files if f and f.filename]
+        if not files:
+            return jsonify({"error": "No files were uploaded"}), 400
+
+        bucket_name = _lms_bucket_name()
+        if not bucket_name:
+            return jsonify({"error": "LMS GCS bucket is not configured"}), 500
+
+        lesson_id_raw = request.form.get('lesson_id')
+        lesson_id = None
+        if lesson_id_raw not in (None, ''):
+            try:
+                lesson_id = int(lesson_id_raw)
+            except Exception:
+                return jsonify({"error": "Invalid lesson_id"}), 400
+
+        client = get_gcs_client()
+        bucket = client.bucket(bucket_name)
+        uploaded = []
+        now = _lms_now()
+        with db._get_cursor() as cursor:
+            if lesson_id is not None:
+                cursor.execute("SELECT id FROM lms_lessons WHERE id = %s", (lesson_id,))
+                if not cursor.fetchone():
+                    return jsonify({"error": "Lesson not found"}), 404
+
+            for idx, file_storage in enumerate(files, start=1):
+                safe_name = secure_filename(file_storage.filename or f"material_{idx}")
+                content = file_storage.read() or b''
+                content_type = (file_storage.mimetype or '').strip() or 'application/octet-stream'
+                blob_path = (
+                    f"lms/materials/{now.strftime('%Y/%m/%d')}/"
+                    f"{uuid.uuid4().hex}_{safe_name}"
+                )
+                blob = bucket.blob(blob_path)
+                blob.upload_from_string(content, content_type=content_type)
+                signed_url = _lms_signed_url(bucket_name, blob_path, expires_minutes=240)
+
+                material_id = None
+                if lesson_id is not None:
+                    title = str(request.form.get('title') or safe_name).strip() or safe_name
+                    material_type = str(request.form.get('material_type') or 'file').strip().lower()
+                    if material_type not in ('video', 'pdf', 'link', 'text', 'file'):
+                        material_type = 'file'
+                    position = max(1, _lms_to_int(request.form.get('position'), idx))
+                    cursor.execute("""
+                        INSERT INTO lms_lesson_materials (
+                            lesson_id, title, material_type, content_url,
+                            gcs_bucket, gcs_blob_path, mime_type, metadata, position, created_by, created_at
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s)
+                        RETURNING id
+                    """, (
+                        lesson_id,
+                        title,
+                        material_type,
+                        signed_url or f"gs://{bucket_name}/{blob_path}",
+                        bucket_name,
+                        blob_path,
+                        content_type,
+                        json.dumps({"uploaded_file_name": safe_name}, ensure_ascii=False),
+                        position,
+                        requester_id,
+                        now
+                    ))
+                    material_id = int(cursor.fetchone()[0])
+
+                uploaded.append({
+                    "material_id": material_id,
+                    "file_name": safe_name,
+                    "content_type": content_type,
+                    "size": len(content),
+                    "bucket": bucket_name,
+                    "blob_path": blob_path,
+                    "signed_url": signed_url
+                })
+
+            _lms_audit(
+                cursor,
+                actor_id=requester_id,
+                actor_role=requester_role,
+                action='upload_material',
+                entity_type='lms_lesson',
+                entity_id=lesson_id,
+                details={"files": [item["file_name"] for item in uploaded]}
+            )
+
+        return jsonify({"status": "success", "uploaded": uploaded}), 200
+    except Exception as e:
+        logging.exception("Error in /api/lms/admin/materials/upload")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/lms/admin/progress', methods=['GET'])
+@require_api_key
+def lms_admin_progress():
+    requester_id, _, requester_role, error_response, status_code = _lms_resolve_request('manager')
+    if error_response:
+        return error_response, status_code
+
+    try:
+        course_id_filter = _lms_to_int(request.args.get('course_id'), default=0)
+        user_id_filter = _lms_to_int(request.args.get('user_id'), default=0)
+        visible_ids = None
+        if requester_role in ('sv', 'trainer'):
+            visible_ids = set(_lms_visible_learner_ids(requester_id, requester_role))
+
+        with db._get_cursor() as cursor:
+            params = []
+            where = ["1=1"]
+            if course_id_filter > 0:
+                where.append("a.course_id = %s")
+                params.append(course_id_filter)
+            if user_id_filter > 0:
+                where.append("a.user_id = %s")
+                params.append(user_id_filter)
+            if visible_ids is not None:
+                if not visible_ids:
+                    return jsonify({"status": "success", "rows": []}), 200
+                where.append("a.user_id = ANY(%s)")
+                params.append(list(visible_ids))
+
+            cursor.execute(f"""
+                SELECT
+                    a.id, a.course_id, c.title, a.course_version_id,
+                    a.user_id, u.name, u.role,
+                    a.status, a.due_at, a.started_at, a.completed_at, a.completion_color_status,
+                    COALESCE(lp.total_lessons, 0) AS total_lessons,
+                    COALESCE(lp.completed_lessons, 0) AS completed_lessons,
+                    COALESCE(tp.total_tests, 0) AS total_tests,
+                    COALESCE(tp.passed_tests, 0) AS passed_tests
+                FROM lms_course_assignments a
+                JOIN lms_courses c ON c.id = a.course_id
+                JOIN users u ON u.id = a.user_id
+                LEFT JOIN LATERAL (
+                    SELECT
+                        COUNT(*) AS total_lessons,
+                        COUNT(*) FILTER (WHERE p.status = 'completed') AS completed_lessons
+                    FROM lms_lessons l
+                    JOIN lms_modules m ON m.id = l.module_id
+                    LEFT JOIN lms_lesson_progress p
+                      ON p.assignment_id = a.id
+                     AND p.lesson_id = l.id
+                     AND p.user_id = a.user_id
+                    WHERE m.course_version_id = a.course_version_id
+                ) lp ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT
+                        COUNT(*) AS total_tests,
+                        COUNT(*) FILTER (WHERE EXISTS (
+                            SELECT 1
+                            FROM lms_test_attempts ta
+                            WHERE ta.assignment_id = a.id
+                              AND ta.user_id = a.user_id
+                              AND ta.test_id = t.id
+                              AND ta.passed = TRUE
+                        )) AS passed_tests
+                    FROM lms_tests t
+                    WHERE t.course_version_id = a.course_version_id
+                      AND t.status <> 'archived'
+                ) tp ON TRUE
+                WHERE {" AND ".join(where)}
+                ORDER BY a.updated_at DESC, a.id DESC
+            """, params)
+            rows = cursor.fetchall()
+
+            payload = []
+            for row in rows:
+                deadline_status = row[11] or _lms_deadline_status(row[8], row[10])
+                total_lessons = int(row[12] or 0)
+                completed_lessons = int(row[13] or 0)
+                progress_percent = 0.0
+                if total_lessons > 0:
+                    progress_percent = round((completed_lessons / total_lessons) * 100.0, 2)
+                elif row[7] == 'completed':
+                    progress_percent = 100.0
+                payload.append({
+                    "assignment_id": int(row[0]),
+                    "course_id": int(row[1]),
+                    "course_title": row[2],
+                    "course_version_id": int(row[3]) if row[3] is not None else None,
+                    "user_id": int(row[4]),
+                    "user_name": row[5],
+                    "user_role": row[6],
+                    "status": row[7],
+                    "due_at": row[8].isoformat() if row[8] else None,
+                    "started_at": row[9].isoformat() if row[9] else None,
+                    "completed_at": row[10].isoformat() if row[10] else None,
+                    "deadline_status": deadline_status,
+                    "total_lessons": total_lessons,
+                    "completed_lessons": completed_lessons,
+                    "progress_percent": progress_percent,
+                    "total_tests": int(row[14] or 0),
+                    "passed_tests": int(row[15] or 0)
+                })
+
+        return jsonify({"status": "success", "rows": payload}), 200
+    except Exception as e:
+        logging.exception("Error in /api/lms/admin/progress")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/lms/admin/attempts', methods=['GET'])
+@require_api_key
+def lms_admin_attempts():
+    requester_id, _, requester_role, error_response, status_code = _lms_resolve_request('manager')
+    if error_response:
+        return error_response, status_code
+
+    limit = min(max(_lms_to_int(request.args.get('limit'), default=200), 1), 1000)
+    try:
+        visible_ids = None
+        if requester_role in ('sv', 'trainer'):
+            visible_ids = set(_lms_visible_learner_ids(requester_id, requester_role))
+
+        with db._get_cursor() as cursor:
+            params = []
+            where = ["1=1"]
+
+            course_id_filter = _lms_to_int(request.args.get('course_id'), default=0)
+            if course_id_filter > 0:
+                where.append("a.course_id = %s")
+                params.append(course_id_filter)
+
+            user_id_filter = _lms_to_int(request.args.get('user_id'), default=0)
+            if user_id_filter > 0:
+                where.append("ta.user_id = %s")
+                params.append(user_id_filter)
+
+            if visible_ids is not None:
+                if not visible_ids:
+                    return jsonify({"status": "success", "attempts": []}), 200
+                where.append("ta.user_id = ANY(%s)")
+                params.append(list(visible_ids))
+
+            params.append(limit)
+            cursor.execute(f"""
+                SELECT
+                    ta.id, ta.assignment_id, ta.test_id, ta.user_id, u.name, u.role,
+                    ta.attempt_no, ta.status, ta.score_percent, ta.passed,
+                    ta.started_at, ta.finished_at, ta.duration_seconds,
+                    t.title, a.course_id, c.title
+                FROM lms_test_attempts ta
+                JOIN users u ON u.id = ta.user_id
+                JOIN lms_tests t ON t.id = ta.test_id
+                JOIN lms_course_assignments a ON a.id = ta.assignment_id
+                JOIN lms_courses c ON c.id = a.course_id
+                WHERE {" AND ".join(where)}
+                ORDER BY ta.started_at DESC, ta.id DESC
+                LIMIT %s
+            """, params)
+            rows = cursor.fetchall()
+
+            attempts = []
+            for row in rows:
+                attempts.append({
+                    "attempt_id": int(row[0]),
+                    "assignment_id": int(row[1]),
+                    "test_id": int(row[2]),
+                    "user_id": int(row[3]),
+                    "user_name": row[4],
+                    "user_role": row[5],
+                    "attempt_no": int(row[6] or 1),
+                    "status": row[7],
+                    "score_percent": float(row[8]) if row[8] is not None else None,
+                    "passed": bool(row[9]) if row[9] is not None else None,
+                    "started_at": row[10].isoformat() if row[10] else None,
+                    "finished_at": row[11].isoformat() if row[11] else None,
+                    "duration_seconds": int(row[12] or 0) if row[12] is not None else None,
+                    "test_title": row[13],
+                    "course_id": int(row[14]),
+                    "course_title": row[15]
+                })
+
+        return jsonify({"status": "success", "attempts": attempts}), 200
+    except Exception as e:
+        logging.exception("Error in /api/lms/admin/attempts")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/lms/admin/certificates/<int:certificate_id>/revoke', methods=['POST'])
+@require_api_key
+def lms_admin_revoke_certificate(certificate_id):
+    requester_id, _, requester_role, error_response, status_code = _lms_resolve_request('full_admin')
+    if error_response:
+        return error_response, status_code
+
+    data = request.get_json(silent=True) or {}
+    reason = str(data.get('reason') or '').strip() or 'Revoked by administrator'
+
+    try:
+        with db._get_cursor() as cursor:
+            now = _lms_now()
+            cursor.execute("""
+                UPDATE lms_certificates
+                SET status = 'revoked',
+                    revoked_at = %s,
+                    revoked_by = %s,
+                    revoke_reason = %s
+                WHERE id = %s
+                RETURNING user_id, certificate_number
+            """, (now, requester_id, reason, certificate_id))
+            row = cursor.fetchone()
+            if not row:
+                return jsonify({"error": "Certificate not found"}), 404
+
+            user_id = int(row[0])
+            certificate_number = row[1]
+            _lms_emit_notification(
+                cursor,
+                user_id=user_id,
+                notification_type='certificate_revoked',
+                title='Сертификат отозван',
+                message=f"Сертификат #{certificate_number} отозван администратором.",
+                payload={"certificate_id": certificate_id, "reason": reason}
+            )
+            _lms_audit(
+                cursor,
+                actor_id=requester_id,
+                actor_role=requester_role,
+                action='revoke_certificate',
+                entity_type='lms_certificate',
+                entity_id=certificate_id,
+                details={"reason": reason}
+            )
+
+        return jsonify({"status": "success", "certificate_id": certificate_id}), 200
+    except Exception as e:
+        logging.exception("Error in /api/lms/admin/certificates/<certificate_id>/revoke")
+        return jsonify({"error": str(e)}), 500
 
 def extract_fio_and_links(spreadsheet_url):
     try:

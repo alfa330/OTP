@@ -1,5 +1,6 @@
 export const ROLE_HIERARCHY = Object.freeze({
     operator: 10,
+    trainee: 10,
     trainer: 20,
     sv: 30,
     admin: 40,

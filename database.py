@@ -47,6 +47,7 @@ ROLE_ALIASES = {
 
 ROLE_HIERARCHY = {
     'operator': 10,
+    'trainee': 10,
     'trainer': 20,
     'sv': 30,
     'admin': 40,
@@ -406,7 +407,7 @@ class Database:
                     id SERIAL PRIMARY KEY,
                     telegram_id BIGINT UNIQUE,
                     name VARCHAR(255) NOT NULL,
-                    role VARCHAR(20) NOT NULL CHECK(role IN ('super_admin', 'admin', 'sv', 'supervisor', 'trainer', 'operator')),
+                    role VARCHAR(20) NOT NULL CHECK(role IN ('super_admin', 'admin', 'sv', 'supervisor', 'trainer', 'operator', 'trainee')),
                     hire_date DATE,
                     login VARCHAR(255) UNIQUE,
                     password_hash VARCHAR(255),
@@ -436,7 +437,7 @@ class Database:
                     BEGIN
                         ALTER TABLE users
                             ADD CONSTRAINT users_role_check
-                            CHECK (role IN ('super_admin', 'admin', 'sv', 'supervisor', 'trainer', 'operator'));
+                            CHECK (role IN ('super_admin', 'admin', 'sv', 'supervisor', 'trainer', 'operator', 'trainee'));
                     EXCEPTION
                         WHEN duplicate_object THEN
                             NULL;
@@ -1571,8 +1572,294 @@ class Database:
                         UNIQUE(operator_id, day)
                     );
 
-                    CREATE INDEX IF NOT EXISTS idx_baiga_daily_scores_day ON baiga_daily_scores(day);
-                    CREATE INDEX IF NOT EXISTS idx_baiga_daily_scores_operator ON baiga_daily_scores(operator_id);
+                CREATE INDEX IF NOT EXISTS idx_baiga_daily_scores_day ON baiga_daily_scores(day);
+                CREATE INDEX IF NOT EXISTS idx_baiga_daily_scores_operator ON baiga_daily_scores(operator_id);
+
+                -- LMS core entities
+                CREATE TABLE IF NOT EXISTS lms_courses (
+                    id SERIAL PRIMARY KEY,
+                    slug VARCHAR(255) UNIQUE,
+                    title VARCHAR(255) NOT NULL,
+                    description TEXT,
+                    category VARCHAR(100),
+                    status VARCHAR(20) NOT NULL DEFAULT 'draft' CHECK(status IN ('draft', 'published', 'archived')),
+                    default_pass_threshold NUMERIC(5,2) NOT NULL DEFAULT 80.00 CHECK(default_pass_threshold >= 0 AND default_pass_threshold <= 100),
+                    default_attempt_limit INTEGER NOT NULL DEFAULT 3 CHECK(default_attempt_limit >= 1),
+                    current_version_id INTEGER,
+                    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+
+                CREATE TABLE IF NOT EXISTS lms_course_versions (
+                    id SERIAL PRIMARY KEY,
+                    course_id INTEGER NOT NULL REFERENCES lms_courses(id) ON DELETE CASCADE,
+                    version_number INTEGER NOT NULL CHECK(version_number >= 1),
+                    title VARCHAR(255),
+                    description TEXT,
+                    status VARCHAR(20) NOT NULL DEFAULT 'draft' CHECK(status IN ('draft', 'published', 'archived')),
+                    pass_threshold NUMERIC(5,2) NOT NULL DEFAULT 80.00 CHECK(pass_threshold >= 0 AND pass_threshold <= 100),
+                    attempt_limit INTEGER NOT NULL DEFAULT 3 CHECK(attempt_limit >= 1),
+                    anti_cheat_settings JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    published_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    published_at TIMESTAMP,
+                    UNIQUE(course_id, version_number)
+                );
+
+                ALTER TABLE lms_courses
+                ADD COLUMN IF NOT EXISTS current_version_id INTEGER;
+
+                DO $$
+                BEGIN
+                    ALTER TABLE lms_courses
+                    ADD CONSTRAINT lms_courses_current_version_fk
+                    FOREIGN KEY (current_version_id)
+                    REFERENCES lms_course_versions(id)
+                    ON DELETE SET NULL;
+                EXCEPTION
+                    WHEN duplicate_object THEN
+                        NULL;
+                END $$;
+
+                CREATE TABLE IF NOT EXISTS lms_modules (
+                    id SERIAL PRIMARY KEY,
+                    course_version_id INTEGER NOT NULL REFERENCES lms_course_versions(id) ON DELETE CASCADE,
+                    title VARCHAR(255) NOT NULL,
+                    description TEXT,
+                    position INTEGER NOT NULL DEFAULT 1 CHECK(position >= 1),
+                    created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+
+                CREATE TABLE IF NOT EXISTS lms_lessons (
+                    id SERIAL PRIMARY KEY,
+                    module_id INTEGER NOT NULL REFERENCES lms_modules(id) ON DELETE CASCADE,
+                    title VARCHAR(255) NOT NULL,
+                    description TEXT,
+                    position INTEGER NOT NULL DEFAULT 1 CHECK(position >= 1),
+                    duration_seconds INTEGER NOT NULL DEFAULT 0 CHECK(duration_seconds >= 0),
+                    allow_fast_forward BOOLEAN NOT NULL DEFAULT FALSE,
+                    completion_threshold NUMERIC(5,2) NOT NULL DEFAULT 95.00 CHECK(completion_threshold >= 0 AND completion_threshold <= 100),
+                    created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+
+                CREATE TABLE IF NOT EXISTS lms_lesson_materials (
+                    id SERIAL PRIMARY KEY,
+                    lesson_id INTEGER NOT NULL REFERENCES lms_lessons(id) ON DELETE CASCADE,
+                    title VARCHAR(255) NOT NULL,
+                    material_type VARCHAR(20) NOT NULL CHECK(material_type IN ('video', 'pdf', 'link', 'text', 'file')),
+                    content_text TEXT,
+                    content_url TEXT,
+                    gcs_bucket VARCHAR(255),
+                    gcs_blob_path TEXT,
+                    mime_type VARCHAR(255),
+                    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    position INTEGER NOT NULL DEFAULT 1 CHECK(position >= 1),
+                    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+
+                CREATE TABLE IF NOT EXISTS lms_tests (
+                    id SERIAL PRIMARY KEY,
+                    course_version_id INTEGER NOT NULL REFERENCES lms_course_versions(id) ON DELETE CASCADE,
+                    module_id INTEGER REFERENCES lms_modules(id) ON DELETE SET NULL,
+                    title VARCHAR(255) NOT NULL,
+                    description TEXT,
+                    pass_threshold NUMERIC(5,2) NOT NULL DEFAULT 80.00 CHECK(pass_threshold >= 0 AND pass_threshold <= 100),
+                    attempt_limit INTEGER NOT NULL DEFAULT 3 CHECK(attempt_limit >= 1),
+                    time_limit_minutes INTEGER CHECK(time_limit_minutes IS NULL OR time_limit_minutes > 0),
+                    is_final BOOLEAN NOT NULL DEFAULT TRUE,
+                    status VARCHAR(20) NOT NULL DEFAULT 'draft' CHECK(status IN ('draft', 'published', 'archived')),
+                    created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+
+                CREATE TABLE IF NOT EXISTS lms_questions (
+                    id SERIAL PRIMARY KEY,
+                    test_id INTEGER NOT NULL REFERENCES lms_tests(id) ON DELETE CASCADE,
+                    question_type VARCHAR(20) NOT NULL CHECK(question_type IN ('single', 'multiple', 'true_false', 'matching', 'text')),
+                    prompt TEXT NOT NULL,
+                    points NUMERIC(8,2) NOT NULL DEFAULT 1 CHECK(points > 0),
+                    position INTEGER NOT NULL DEFAULT 1 CHECK(position >= 1),
+                    required BOOLEAN NOT NULL DEFAULT TRUE,
+                    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    correct_text_answers JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+
+                CREATE TABLE IF NOT EXISTS lms_question_options (
+                    id SERIAL PRIMARY KEY,
+                    question_id INTEGER NOT NULL REFERENCES lms_questions(id) ON DELETE CASCADE,
+                    option_key VARCHAR(255),
+                    option_text TEXT NOT NULL,
+                    position INTEGER NOT NULL DEFAULT 1 CHECK(position >= 1),
+                    is_correct BOOLEAN NOT NULL DEFAULT FALSE,
+                    match_key VARCHAR(255),
+                    metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+                );
+
+                CREATE TABLE IF NOT EXISTS lms_course_assignments (
+                    id SERIAL PRIMARY KEY,
+                    course_id INTEGER NOT NULL REFERENCES lms_courses(id) ON DELETE CASCADE,
+                    course_version_id INTEGER REFERENCES lms_course_versions(id) ON DELETE SET NULL,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    assigned_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    due_at TIMESTAMP,
+                    started_at TIMESTAMP,
+                    completed_at TIMESTAMP,
+                    status VARCHAR(20) NOT NULL DEFAULT 'assigned' CHECK(status IN ('assigned', 'in_progress', 'completed')),
+                    completion_color_status VARCHAR(20) CHECK(completion_color_status IN ('green', 'orange', 'red')),
+                    created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    UNIQUE(course_id, user_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS lms_lesson_progress (
+                    id SERIAL PRIMARY KEY,
+                    assignment_id INTEGER NOT NULL REFERENCES lms_course_assignments(id) ON DELETE CASCADE,
+                    lesson_id INTEGER NOT NULL REFERENCES lms_lessons(id) ON DELETE CASCADE,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    status VARCHAR(20) NOT NULL DEFAULT 'not_started' CHECK(status IN ('not_started', 'in_progress', 'completed')),
+                    max_position_seconds NUMERIC(10,2) NOT NULL DEFAULT 0,
+                    confirmed_seconds NUMERIC(10,2) NOT NULL DEFAULT 0,
+                    completion_ratio NUMERIC(5,2) NOT NULL DEFAULT 0,
+                    active_seconds INTEGER NOT NULL DEFAULT 0,
+                    last_heartbeat_at TIMESTAMP,
+                    last_event_at TIMESTAMP,
+                    tab_hidden_count INTEGER NOT NULL DEFAULT 0,
+                    stale_gap_count INTEGER NOT NULL DEFAULT 0,
+                    anti_cheat_flags JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    started_at TIMESTAMP,
+                    completed_at TIMESTAMP,
+                    created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    UNIQUE(assignment_id, lesson_id, user_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS lms_learning_sessions (
+                    id SERIAL PRIMARY KEY,
+                    assignment_id INTEGER NOT NULL REFERENCES lms_course_assignments(id) ON DELETE CASCADE,
+                    lesson_id INTEGER NOT NULL REFERENCES lms_lessons(id) ON DELETE CASCADE,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    started_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    ended_at TIMESTAMP,
+                    last_heartbeat_at TIMESTAMP,
+                    last_visible_at TIMESTAMP,
+                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                    max_position_seconds NUMERIC(10,2) NOT NULL DEFAULT 0,
+                    confirmed_seconds NUMERIC(10,2) NOT NULL DEFAULT 0,
+                    active_seconds INTEGER NOT NULL DEFAULT 0,
+                    tab_hidden_count INTEGER NOT NULL DEFAULT 0,
+                    stale_gap_count INTEGER NOT NULL DEFAULT 0,
+                    client_fingerprint VARCHAR(255)
+                );
+
+                CREATE TABLE IF NOT EXISTS lms_learning_events (
+                    id SERIAL PRIMARY KEY,
+                    session_id INTEGER REFERENCES lms_learning_sessions(id) ON DELETE CASCADE,
+                    lesson_id INTEGER NOT NULL REFERENCES lms_lessons(id) ON DELETE CASCADE,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    event_type VARCHAR(50) NOT NULL,
+                    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    client_ts TIMESTAMP,
+                    created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+
+                CREATE TABLE IF NOT EXISTS lms_test_attempts (
+                    id SERIAL PRIMARY KEY,
+                    assignment_id INTEGER NOT NULL REFERENCES lms_course_assignments(id) ON DELETE CASCADE,
+                    test_id INTEGER NOT NULL REFERENCES lms_tests(id) ON DELETE CASCADE,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    attempt_no INTEGER NOT NULL CHECK(attempt_no >= 1),
+                    status VARCHAR(20) NOT NULL DEFAULT 'in_progress' CHECK(status IN ('in_progress', 'finished', 'expired')),
+                    score_percent NUMERIC(6,2),
+                    passed BOOLEAN,
+                    started_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    finished_at TIMESTAMP,
+                    duration_seconds INTEGER,
+                    proctor_flags JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    UNIQUE(assignment_id, test_id, attempt_no)
+                );
+
+                CREATE TABLE IF NOT EXISTS lms_test_attempt_answers (
+                    id SERIAL PRIMARY KEY,
+                    attempt_id INTEGER NOT NULL REFERENCES lms_test_attempts(id) ON DELETE CASCADE,
+                    question_id INTEGER NOT NULL REFERENCES lms_questions(id) ON DELETE CASCADE,
+                    answer_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    is_correct BOOLEAN,
+                    points_awarded NUMERIC(8,2),
+                    answered_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    UNIQUE(attempt_id, question_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS lms_certificates (
+                    id SERIAL PRIMARY KEY,
+                    assignment_id INTEGER REFERENCES lms_course_assignments(id) ON DELETE SET NULL,
+                    course_id INTEGER NOT NULL REFERENCES lms_courses(id) ON DELETE CASCADE,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    test_attempt_id INTEGER REFERENCES lms_test_attempts(id) ON DELETE SET NULL,
+                    certificate_number VARCHAR(64) NOT NULL UNIQUE,
+                    verify_token VARCHAR(128) NOT NULL UNIQUE,
+                    score_percent NUMERIC(6,2),
+                    status VARCHAR(20) NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'revoked')),
+                    issued_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    revoked_at TIMESTAMP,
+                    revoked_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    revoke_reason TEXT,
+                    pdf_storage_type VARCHAR(16) NOT NULL DEFAULT 'db' CHECK(pdf_storage_type IN ('db', 'gcs')),
+                    pdf_data BYTEA,
+                    gcs_bucket VARCHAR(255),
+                    gcs_blob_path TEXT,
+                    metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+                );
+
+                CREATE TABLE IF NOT EXISTS lms_notifications (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    notification_type VARCHAR(50) NOT NULL,
+                    title VARCHAR(255) NOT NULL,
+                    message TEXT,
+                    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    is_read BOOLEAN NOT NULL DEFAULT FALSE,
+                    read_at TIMESTAMP,
+                    created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+
+                CREATE TABLE IF NOT EXISTS lms_admin_audit_log (
+                    id SERIAL PRIMARY KEY,
+                    actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    actor_role VARCHAR(20),
+                    action VARCHAR(100) NOT NULL,
+                    entity_type VARCHAR(50) NOT NULL,
+                    entity_id INTEGER,
+                    details JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+
+                -- LMS indexes
+                CREATE INDEX IF NOT EXISTS idx_lms_courses_status ON lms_courses(status);
+                CREATE INDEX IF NOT EXISTS idx_lms_course_versions_course_status ON lms_course_versions(course_id, status);
+                CREATE INDEX IF NOT EXISTS idx_lms_modules_course_version_position ON lms_modules(course_version_id, position);
+                CREATE INDEX IF NOT EXISTS idx_lms_lessons_module_position ON lms_lessons(module_id, position);
+                CREATE INDEX IF NOT EXISTS idx_lms_lesson_materials_lesson_position ON lms_lesson_materials(lesson_id, position);
+                CREATE INDEX IF NOT EXISTS idx_lms_tests_course_version ON lms_tests(course_version_id);
+                CREATE INDEX IF NOT EXISTS idx_lms_questions_test_position ON lms_questions(test_id, position);
+                CREATE INDEX IF NOT EXISTS idx_lms_question_options_question_position ON lms_question_options(question_id, position);
+                CREATE INDEX IF NOT EXISTS idx_lms_assignments_user_status ON lms_course_assignments(user_id, status);
+                CREATE INDEX IF NOT EXISTS idx_lms_assignments_course ON lms_course_assignments(course_id);
+                CREATE INDEX IF NOT EXISTS idx_lms_assignments_due_at ON lms_course_assignments(due_at);
+                CREATE INDEX IF NOT EXISTS idx_lms_lesson_progress_assignment ON lms_lesson_progress(assignment_id);
+                CREATE INDEX IF NOT EXISTS idx_lms_lesson_progress_user_lesson ON lms_lesson_progress(user_id, lesson_id);
+                CREATE INDEX IF NOT EXISTS idx_lms_learning_sessions_lesson_user_active ON lms_learning_sessions(lesson_id, user_id, is_active);
+                CREATE INDEX IF NOT EXISTS idx_lms_learning_events_session_created ON lms_learning_events(session_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_lms_test_attempts_assignment_test ON lms_test_attempts(assignment_id, test_id);
+                CREATE INDEX IF NOT EXISTS idx_lms_test_attempts_user_started ON lms_test_attempts(user_id, started_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_lms_attempt_answers_attempt ON lms_test_attempt_answers(attempt_id);
+                CREATE INDEX IF NOT EXISTS idx_lms_certificates_user_status ON lms_certificates(user_id, status);
+                CREATE INDEX IF NOT EXISTS idx_lms_certificates_token ON lms_certificates(verify_token);
+                CREATE INDEX IF NOT EXISTS idx_lms_notifications_user_read ON lms_notifications(user_id, is_read, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_lms_admin_audit_actor_created ON lms_admin_audit_log(actor_id, created_at DESC);
             """)
 
     def create_user(
@@ -13327,6 +13614,38 @@ class Database:
     def get_visible_operator_ids_for_requester(self, requester_id, requester_role):
         with self._get_cursor() as cursor:
             return self._get_visible_operator_ids_for_requester_tx(cursor, requester_id, requester_role)
+
+    def _get_visible_lms_learner_ids_for_requester_tx(self, cursor, requester_id, requester_role):
+        role = self._normalize_survey_role(requester_role)
+        requester_id = int(requester_id)
+
+        if role_has_min(role, 'admin') or role == 'trainer':
+            cursor.execute("""
+                SELECT id
+                FROM users
+                WHERE role IN ('operator', 'trainee')
+                  AND COALESCE(status, 'working') <> 'fired'
+            """)
+            return [int(row[0]) for row in cursor.fetchall()]
+
+        if role == 'sv':
+            cursor.execute("""
+                SELECT id
+                FROM users
+                WHERE role IN ('operator', 'trainee')
+                  AND supervisor_id = %s
+                  AND COALESCE(status, 'working') <> 'fired'
+            """, (requester_id,))
+            return [int(row[0]) for row in cursor.fetchall()]
+
+        if role in ('operator', 'trainee'):
+            return [requester_id]
+
+        return []
+
+    def get_visible_lms_learner_ids_for_requester(self, requester_id, requester_role):
+        with self._get_cursor() as cursor:
+            return self._get_visible_lms_learner_ids_for_requester_tx(cursor, requester_id, requester_role)
 
     def create_survey(self, title, description, created_by, assignment, questions, operator_ids, repeat_from_survey_id=None, is_test=False):
         title_norm = str(title or '').strip()
