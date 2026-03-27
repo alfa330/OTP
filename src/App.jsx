@@ -5481,6 +5481,28 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
             return coveredUntil;
             };
+            const plannerResolveShiftEndCoveredFrom = (startRaw, endRaw, intervals = []) => {
+            const shiftStart = Number(startRaw || 0);
+            const shiftEnd = Number(endRaw || shiftStart);
+            if (shiftEnd <= shiftStart) return shiftEnd;
+            let coveredFrom = shiftEnd;
+            const merged = mergeIntervals(
+                (intervals || [])
+                    .map(i => ({ start: Number(i?.start || 0), end: Number(i?.end || 0) }))
+                    .filter(i => i.end > i.start)
+            );
+            for (let i = merged.length - 1; i >= 0; i -= 1) {
+                const seg = merged[i];
+                const segStart = Math.max(shiftStart, Number(seg?.start || 0));
+                const segEnd = Math.min(shiftEnd, Number(seg?.end || 0));
+                if (segEnd <= segStart) continue;
+                // Нужна непрерывная "уважительная" зона до конца смены.
+                if (segEnd < coveredFrom) break;
+                coveredFrom = Math.max(shiftStart, Math.min(coveredFrom, segStart));
+                if (coveredFrom <= shiftStart) break;
+            }
+            return coveredFrom;
+            };
             const plannerComputeShiftStatusMatchMetrics = ({ shiftParts = [], breakParts = [], statusBars = [] } = {}) => {
             const shiftIntervals = mergeIntervals((shiftParts || []).map(p => ({ start: Number(p?.start || 0), end: Number(p?.end || 0) }))).filter(i => i.end > i.start);
             const breakIntervals = mergeIntervals((breakParts || []).map(b => ({ start: Number(b?.start || 0), end: Number(b?.end || 0) }))).filter(i => i.end > i.start);
@@ -5545,8 +5567,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         shiftInterval.end,
                         shiftLateExcusedIntervals
                     );
+                    const earlyLeaveBoundaryMin = plannerResolveShiftEndCoveredFrom(
+                        shiftInterval.start,
+                        shiftInterval.end,
+                        shiftLateExcusedIntervals
+                    );
                     lateMin = Math.max(0, firstWorkStart - lateStartMin);
-                    earlyLeaveMin = Math.max(0, shiftInterval.end - lastWorkEnd);
+                    earlyLeaveMin = Math.max(0, earlyLeaveBoundaryMin - lastWorkEnd);
                 }
                 return {
                     id: `${String(part?.sourceDate || '')}:${Number(part?.sourceIndex ?? idx)}`,
@@ -7526,15 +7553,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             const visibleRange = useMemo(() => (viewMode === 'day' ? dayRange : viewMode === 'week' ? weekRange : monthRange), [viewMode, dayRange, weekRange, monthRange]);
             const plannerStatusFetchRange = useMemo(() => {
-                const baseDate = (currentDate instanceof Date && !Number.isNaN(currentDate.getTime()))
+                const normalizedVisibleDays = (Array.isArray(visibleRange) ? visibleRange : [])
+                    .map(day => String(day || '').trim())
+                    .filter(Boolean)
+                    .sort((a, b) => a.localeCompare(b));
+                const startCandidate = normalizedVisibleDays[0] || todayDateStr(currentDate instanceof Date ? currentDate : new Date());
+                const endCandidate = normalizedVisibleDays[normalizedVisibleDays.length - 1] || startCandidate;
+                const startObj = parseDateStr(startCandidate);
+                const endObj = parseDateStr(endCandidate);
+                const fallbackDate = (currentDate instanceof Date && !Number.isNaN(currentDate.getTime()))
                     ? currentDate
                     : new Date();
-                const anchor = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate());
+                const safeStart = (startObj && !Number.isNaN(startObj.getTime())) ? startObj : fallbackDate;
+                const safeEnd = (endObj && !Number.isNaN(endObj.getTime())) ? endObj : safeStart;
                 return {
-                    start: todayDateStr(addDays(anchor, -1)),
-                    end: todayDateStr(addDays(anchor, 1))
+                    start: todayDateStr(addDays(safeStart, -1)),
+                    end: todayDateStr(addDays(safeEnd, 1))
                 };
-            }, [currentDate]);
+            }, [visibleRange, currentDate]);
             const plannerStatusFetchRangeKey = useMemo(
                 () => plannerStatusRangeKey(plannerStatusFetchRange?.start, plannerStatusFetchRange?.end),
                 [plannerStatusRangeKey, plannerStatusFetchRange?.start, plannerStatusFetchRange?.end]
@@ -7696,6 +7732,54 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                 return map;
             }, [plannerStatusEffectiveAnalysis]);
+            const getImportedStatusBarsForShiftContext = useCallback((operatorNameRaw, dateKeyRaw) => {
+                const operatorNameKey = plannerStatusNormalizeOperatorName(operatorNameRaw);
+                const dateKey = String(dateKeyRaw || '').trim();
+                if (!operatorNameKey || !dateKey) return [];
+                const dateObj = parseDateStr(dateKey);
+                if (!dateObj || Number.isNaN(dateObj.getTime())) return [];
+
+                const dayKeys = [
+                    { dayKey: todayDateStr(addDays(dateObj, -1)), offset: -1440 },
+                    { dayKey: dateKey, offset: 0 },
+                    { dayKey: todayDateStr(addDays(dateObj, 1)), offset: 1440 }
+                ];
+                const seen = new Set();
+                const merged = [];
+
+                dayKeys.forEach(({ dayKey, offset }) => {
+                    const dayBars = importedStatusTimelineByOperatorDateKey.get(`${operatorNameKey}|${dayKey}`) || [];
+                    (Array.isArray(dayBars) ? dayBars : []).forEach(seg => {
+                        const startRaw = Number(seg?.startMin ?? seg?.start ?? 0);
+                        const endRaw = Number(seg?.endMin ?? seg?.end ?? 0);
+                        if (!Number.isFinite(startRaw) || !Number.isFinite(endRaw) || endRaw <= startRaw) return;
+                        const startMin = startRaw + offset;
+                        const endMin = endRaw + offset;
+                        if (!Number.isFinite(startMin) || !Number.isFinite(endMin) || endMin <= startMin) return;
+
+                        const dedupeKey = [
+                            String(seg?.start || ''),
+                            String(seg?.end || ''),
+                            String(seg?.stateKey || seg?.statusKey || ''),
+                            String(seg?.rawStateKey || seg?.raw_state_key || ''),
+                            String(seg?.stateNote || seg?.state_note || ''),
+                            String(startMin),
+                            String(endMin)
+                        ].join('|');
+                        if (seen.has(dedupeKey)) return;
+                        seen.add(dedupeKey);
+
+                        merged.push({
+                            ...seg,
+                            startMin,
+                            endMin
+                        });
+                    });
+                });
+
+                merged.sort((a, b) => (Number(a?.startMin || 0) - Number(b?.startMin || 0)) || (Number(a?.endMin || 0) - Number(b?.endMin || 0)));
+                return merged;
+            }, [importedStatusTimelineByOperatorDateKey]);
 
             const buildEditTimelineStatusFocusKey = (seg, idx = 0) => (
                 `${Number(seg?.startMin ?? seg?.start ?? 0)}:${Number(seg?.endMin ?? seg?.end ?? 0)}:${plannerStatusNormalizeKey(seg?.stateName || seg?.stateKey || '')}:${idx}`
@@ -10236,6 +10320,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 });
                 return parts;
             };
+            const getShiftStartPartsForDate = (op, dateStr) => {
+                const parts = [];
+                const arr = op?.shifts?.[dateStr] ?? [];
+                arr.forEach((sh, idx) => {
+                const start = timeToMinutes(sh?.start);
+                let end = timeToMinutes(sh?.end);
+                if (end <= start) end += 1440;
+                if (!Number.isFinite(start) || !Number.isFinite(end)) return;
+                if (end <= start) return;
+                parts.push({
+                    start,
+                    end,
+                    sourceDate: dateStr,
+                    sourceIndex: idx
+                });
+                });
+                return parts;
+            };
 
             const totalsPerHourForDate = (dateStr) => {
                 const totals = Array.from({ length: 24 }).map(() => 0);
@@ -10472,6 +10574,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (!operatorNameKey) return [];
                 return importedStatusTimelineByOperatorDateKey.get(`${operatorNameKey}|${modalState.date}`) || [];
             }, [isBulkSelectionModal, modalState?.opId, modalState?.date, operators, importedStatusTimelineByOperatorDateKey]);
+            const modalImportedStatusTimelineForShiftContext = useMemo(() => {
+                if (isBulkSelectionModal) return [];
+                if (!modalState?.opId || !modalState?.date) return [];
+                const op = operators.find(o => o.id === modalState.opId);
+                return getImportedStatusBarsForShiftContext(op?.name, modalState.date);
+            }, [isBulkSelectionModal, modalState?.opId, modalState?.date, operators, getImportedStatusBarsForShiftContext]);
             const buildModalStatusSegments = useCallback((matchFn, idPrefix = 'status') => {
                 const raw = (Array.isArray(modalImportedStatusTimeline) ? modalImportedStatusTimeline : [])
                     .map((seg) => {
@@ -10543,7 +10651,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (!modalState?.opId || !modalState?.date) return null;
                 const op = operators.find(o => o.id === modalState.opId);
                 if (!op) return null;
-                const shiftParts = getShiftPartsForDate(op, modalState.date);
+                const shiftParts = getShiftStartPartsForDate(op, modalState.date);
                 if (!Array.isArray(shiftParts) || shiftParts.length === 0) return null;
                 const breakParts = shiftParts
                     .flatMap(part => getBreakPartsForPart(op, part, modalState.date))
@@ -10552,14 +10660,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         end: Number(b?.end || 0)
                     }))
                     .filter((b) => b.end > b.start);
-                const statusBars = Array.isArray(modalImportedStatusTimeline) ? modalImportedStatusTimeline : [];
+                const statusBars = Array.isArray(modalImportedStatusTimelineForShiftContext) ? modalImportedStatusTimelineForShiftContext : [];
                 if (statusBars.length === 0) return null;
                 return plannerComputeShiftStatusMatchMetrics({
                     shiftParts,
                     breakParts,
                     statusBars
                 });
-            }, [isBulkSelectionModal, modalState?.opId, modalState?.date, operators, modalImportedStatusTimeline]);
+            }, [isBulkSelectionModal, modalState?.opId, modalState?.date, operators, modalImportedStatusTimelineForShiftContext]);
             const modalLateStatusSegments = useMemo(() => {
                 const ranges = (Array.isArray(modalStatusMatchMetrics?.perShift) ? modalStatusMatchMetrics.perShift : [])
                     .map((sh) => {
@@ -15307,8 +15415,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <div className="flex gap-2" style={{ whiteSpace: 'nowrap' }}>
                                         {visibleRange.map(d => {
                                             const parts = getShiftPartsForDate(op, d);
+                                            const shiftStartPartsForCell = getShiftStartPartsForDate(op, d);
                                             const aggregatedFlagsForCell = getPlannerAggregatedFlagsForDate(op, d);
                                             const importedStatusBarsForCell = importedStatusTimelineByOperatorDateKey.get(`${plannerStatusNormalizeOperatorName(op?.name)}|${d}`) || [];
+                                            const importedStatusBarsForShiftContextCell = getImportedStatusBarsForShiftContext(op?.name, d);
                                             const technicalIssueBarsForCell = (Array.isArray(op?.technicalIssueTimelineDays?.[d]) ? op.technicalIssueTimelineDays[d] : [])
                                                 .map((seg, idx) => {
                                                     const startRaw = Number(seg?.startMin ?? seg?.start_min ?? seg?.start ?? 0);
@@ -15351,12 +15461,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 .flatMap(p => getBreakPartsForPart(op, p, d))
                                                 .map(b => ({ start: Number(b?.start || 0), end: Number(b?.end || 0) }))
                                                 .filter(b => b.end > b.start);
+                                            const shiftStartBreakPartsForCell = shiftStartPartsForCell
+                                                .flatMap(p => getBreakPartsForPart(op, p, d))
+                                                .map(b => ({ start: Number(b?.start || 0), end: Number(b?.end || 0) }))
+                                                .filter(b => b.end > b.start);
                                             const shouldComputeDefectMetrics = (viewMode === 'day' || viewMode === 'week' || viewMode === 'month') && parts.length > 0 && importedStatusBarsForCell.length > 0;
+                                            const shouldComputeBoundaryDefectMetrics = (viewMode === 'day' || viewMode === 'week' || viewMode === 'month') && shiftStartPartsForCell.length > 0 && importedStatusBarsForShiftContextCell.length > 0;
                                             const statusMatchMetricsForCell = shouldComputeDefectMetrics
                                                 ? plannerComputeShiftStatusMatchMetrics({
                                                     shiftParts: parts,
                                                     breakParts: breakPartsForCell,
                                                     statusBars: importedStatusBarsForCell
+                                                })
+                                                : null;
+                                            const shiftBoundaryMetricsForCell = shouldComputeBoundaryDefectMetrics
+                                                ? plannerComputeShiftStatusMatchMetrics({
+                                                    shiftParts: shiftStartPartsForCell,
+                                                    breakParts: shiftStartBreakPartsForCell,
+                                                    statusBars: importedStatusBarsForShiftContextCell
                                                 })
                                                 : null;
                                             const noPhoneShiftMetricsForCell = shouldComputeDefectMetrics
@@ -15368,10 +15490,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 : null;
                                             const specialStatusBreakPartsForCell = breakPartsForCell;
                                             const specialStatusMatchMetrics = plannerStatusSpecialDayViewEnabled
-                                                ? statusMatchMetricsForCell
+                                                ? (statusMatchMetricsForCell
+                                                    ? {
+                                                        ...statusMatchMetricsForCell,
+                                                        lateTotalMin: Number(shiftBoundaryMetricsForCell?.lateTotalMin ?? statusMatchMetricsForCell?.lateTotalMin ?? 0),
+                                                        earlyLeaveTotalMin: Number(shiftBoundaryMetricsForCell?.earlyLeaveTotalMin ?? statusMatchMetricsForCell?.earlyLeaveTotalMin ?? 0)
+                                                    }
+                                                    : shiftBoundaryMetricsForCell)
                                                 : null;
-                                            const liveLateMin = Number(statusMatchMetricsForCell?.lateTotalMin || 0);
-                                            const liveEarlyLeaveMin = Number(statusMatchMetricsForCell?.earlyLeaveTotalMin || 0);
+                                            const liveLateMin = Number(shiftBoundaryMetricsForCell?.lateTotalMin ?? statusMatchMetricsForCell?.lateTotalMin ?? 0);
+                                            const liveEarlyLeaveMin = Number(shiftBoundaryMetricsForCell?.earlyLeaveTotalMin ?? statusMatchMetricsForCell?.earlyLeaveTotalMin ?? 0);
                                             const liveNoPhoneSec = Number(noPhoneShiftMetricsForCell?.noPhoneSec || 0);
                                             const liveOvertimeOutsideShiftMin = Number(statusMatchMetricsForCell?.workOutsideShiftMin || 0);
                                             let defectLateMin = shouldComputeDefectMetrics
@@ -17664,11 +17792,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     if (!modalPreviewOp || !modalPreviewDate) return null;
 
                     const previewParts = getShiftPartsForDate(modalPreviewOp, modalPreviewDate);
+                    const previewShiftStartParts = getShiftStartPartsForDate(modalPreviewOp, modalPreviewDate);
                     const previewBreakParts = previewParts
                         .flatMap(p => getBreakPartsForPart(modalPreviewOp, p, modalPreviewDate))
                         .map(b => ({ start: Math.max(0, Math.min(1440, Number(b?.start || 0))), end: Math.max(0, Math.min(1440, Number(b?.end || 0))) }))
                         .filter(b => b.end > b.start);
+                    const previewShiftStartBreakParts = previewShiftStartParts
+                        .flatMap(p => getBreakPartsForPart(modalPreviewOp, p, modalPreviewDate))
+                        .map(b => ({ start: Number(b?.start || 0), end: Number(b?.end || 0) }))
+                        .filter(b => b.end > b.start);
                     const previewStatusBars = importedStatusTimelineByOperatorDateKey.get(`${plannerStatusNormalizeOperatorName(modalPreviewOp?.name)}|${modalPreviewDate}`) || [];
+                    const previewStatusBarsForShiftContext = getImportedStatusBarsForShiftContext(modalPreviewOp?.name, modalPreviewDate);
                     const previewOfflineBars = (Array.isArray(modalPreviewOp?.offlineActivityTimelineDays?.[modalPreviewDate]) ? modalPreviewOp.offlineActivityTimelineDays[modalPreviewDate] : [])
                         .map((seg, idx) => {
                             const startRaw = Number(seg?.startMin ?? seg?.start_min ?? seg?.start ?? 0);
@@ -17686,11 +17820,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             };
                         })
                         .filter(Boolean);
-                    const previewMetrics = (previewParts.length > 0 && previewStatusBars.length > 0)
+                    const previewMetrics = (previewShiftStartParts.length > 0 && previewStatusBarsForShiftContext.length > 0)
                         ? plannerComputeShiftStatusMatchMetrics({
-                            shiftParts: previewParts,
-                            breakParts: previewBreakParts,
-                            statusBars: previewStatusBars
+                            shiftParts: previewShiftStartParts,
+                            breakParts: previewShiftStartBreakParts,
+                            statusBars: previewStatusBarsForShiftContext
                         })
                         : null;
                     const previewShiftIntervals = mergeIntervals(
@@ -19287,22 +19421,25 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         const timelineList = (op.timeline || []).filter(seg => !onlyAnomalies || !!seg?.isNoPhoneAnomalyInShift);
                                                                         const matchedPlannerOperator = plannerOperatorByNameKey.get(normalizeImportedOperatorName(op.operatorName));
                                                                         const plannedShiftParts = matchedPlannerOperator ? getShiftPartsForDate(matchedPlannerOperator, day.dateKey) : [];
+                                                                        const plannedShiftStartParts = matchedPlannerOperator ? getShiftStartPartsForDate(matchedPlannerOperator, day.dateKey) : [];
                                                                         const plannedBreakParts = matchedPlannerOperator
                                                                             ? plannedShiftParts
                                                                                 .flatMap(p => getBreakPartsForPart(matchedPlannerOperator, p, day.dateKey))
                                                                                 .map(b => ({ start: Math.max(0, Math.min(1440, b.start)), end: Math.max(0, Math.min(1440, b.end)) }))
                                                                                 .filter(b => b.end > b.start)
                                                                             : [];
-                                                                        const statusTimelineBars = timelineList
-                                                                            .map(seg => {
-                                                                                const mins = importedSegmentToDayMinutes(seg, day.dateKey);
-                                                                                if (!mins) return null;
-                                                                                return { ...seg, startMin: mins.start, endMin: mins.end };
-                                                                            })
-                                                                            .filter(Boolean);
+                                                                        const plannedShiftStartBreakParts = matchedPlannerOperator
+                                                                            ? plannedShiftStartParts
+                                                                                .flatMap(p => getBreakPartsForPart(matchedPlannerOperator, p, day.dateKey))
+                                                                                .map(b => ({ start: Number(b?.start || 0), end: Number(b?.end || 0) }))
+                                                                                .filter(b => b.end > b.start)
+                                                                            : [];
+                                                                        const statusTimelineBars = matchedPlannerOperator
+                                                                            ? getImportedStatusBarsForShiftContext(matchedPlannerOperator?.name, day.dateKey)
+                                                                            : [];
                                                                         const shiftStatusMatchMetrics = plannerComputeShiftStatusMatchMetrics({
-                                                                            shiftParts: plannedShiftParts,
-                                                                            breakParts: plannedBreakParts,
+                                                                            shiftParts: plannedShiftStartParts,
+                                                                            breakParts: plannedShiftStartBreakParts,
                                                                             statusBars: statusTimelineBars
                                                                         });
                                                                         const shiftLateBars = (shiftStatusMatchMetrics?.perShift || [])
