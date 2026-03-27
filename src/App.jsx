@@ -269,6 +269,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 console.error('ErrorBoundary caught:', error, errorInfo);
             }
 
+            handleHardReload = async () => {
+                try {
+                    if (typeof window === 'undefined') {
+                        return;
+                    }
+
+                    if ('caches' in window) {
+                        const cacheKeys = await window.caches.keys();
+                        await Promise.all(cacheKeys.map((key) => window.caches.delete(key)));
+                    }
+
+                    const url = new URL(window.location.href);
+                    url.searchParams.set('v', Date.now().toString());
+                    window.location.replace(url.toString());
+                } catch (reloadError) {
+                    console.error('Hard reload failed:', reloadError);
+                    window.location.reload();
+                }
+            };
+
             render() {
                 if (this.state.hasError) {
                     return (
@@ -277,6 +297,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 <h1 className="text-2xl font-bold mb-4 text-center text-red-500">Ошибка приложения</h1>
                                 <p className="text-center">Произошла ошибка: {this.state.error?.message || 'Неизвестная ошибка'}</p>
                                 <p className="text-center">Пожалуйста, напишите Руслану или попробуйте обновить страницу.</p>
+                                <div className="mt-6 flex justify-center">
+                                    <button
+                                        type="button"
+                                        onClick={this.handleHardReload}
+                                        className="px-4 py-2 rounded-md bg-red-500 text-white font-medium hover:bg-red-600 transition-colors"
+                                    >
+                                        Перезагрузить
+                                    </button>
+                                </div>
                             </div>
                         </div>
                     );
