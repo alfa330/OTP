@@ -538,9 +538,9 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
   const [quizAnswers, setQuizAnswers] = useState({});
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
-  const [courses, setCourses] = useState(COURSES);
-  const [certificates, setCertificates] = useState(CERTIFICATES);
-  const [notifications, setNotifications] = useState(NOTIFICATIONS);
+  const [courses, setCourses] = useState([]);
+  const [certificates, setCertificates] = useState([]);
+  const [notifications, setNotifications] = useState([]);
   const [adminCourses, setAdminCourses] = useState([]);
   const [adminProgressRows, setAdminProgressRows] = useState([]);
   const [adminAttempts, setAdminAttempts] = useState([]);
@@ -934,11 +934,11 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
           <AdminView
             tab={adminTab}
             setTab={setAdminTab}
-            courses={courses}
             adminCourses={adminCourses}
             progressRows={adminProgressRows}
             attempts={adminAttempts}
             loading={loadingAdmin}
+            onOpenBuilder={() => setView("builder")}
           />
         )}
       </main>
@@ -3023,7 +3023,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
 
 // ─── ADMIN VIEW ───────────────────────────────────────────────────────────────
 
-function AdminView({ tab, setTab, courses = [], adminCourses = [], progressRows = [], attempts = [], loading = false }) {
+function AdminView({ tab, setTab, adminCourses = [], progressRows = [], attempts = [], loading = false, onOpenBuilder }) {
   const tabs = [
     { id: "analytics", label: "Аналитика", icon: BarChart2 },
     { id: "employees", label: "Сотрудники", icon: Users },
@@ -3088,10 +3088,6 @@ function AdminView({ tab, setTab, courses = [], adminCourses = [], progressRows 
       lastActive: agg?.lastAt ? toRelativeTime(agg.lastAt.toISOString()) : row.lastActive,
     };
   });
-  if (!employeeRows.length) {
-    employeeRows = EMPLOYEES;
-  }
-
   const courseStatMap = new Map();
   safeProgressRows.forEach((row) => {
     const courseId = Number(row?.course_id || 0);
@@ -3123,11 +3119,7 @@ function AdminView({ tab, setTab, courses = [], adminCourses = [], progressRows 
       progress: progressPercent,
     };
   });
-  if (!courseRows.length) {
-    courseRows = Array.isArray(courses) && courses.length ? courses : COURSES;
-  }
-
-  const failRows = safeAttempts
+  const failStatsRows = safeAttempts
     .filter((item) => item?.score_percent != null)
     .sort((a, b) => Number(a?.score_percent || 0) - Number(b?.score_percent || 0))
     .slice(0, 4)
@@ -3137,7 +3129,6 @@ function AdminView({ tab, setTab, courses = [], adminCourses = [], progressRows 
       failRate: Math.max(0, 100 - Math.round(Number(item?.score_percent || 0))),
       course: item?.course_title || "Курс",
     }));
-  const failStatsRows = failRows.length ? failRows : QUESTION_FAIL_STATS;
 
   const overallComplete = employeeRows.length ? Math.round(employeeRows.reduce((a, e) => a + (e.courses ? (e.completed / e.courses) : 0), 0) / employeeRows.length * 100) : 0;
   const avgScore = employeeRows.length ? Math.round(employeeRows.reduce((a, e) => a + Number(e.avgScore || 0), 0) / employeeRows.length) : 0;
@@ -3168,7 +3159,15 @@ function AdminView({ tab, setTab, courses = [], adminCourses = [], progressRows 
           <p className="text-sm text-slate-500 mt-0.5">Управление курсами и прогрессом сотрудников</p>
           {loading && <p className="text-xs text-indigo-600 mt-1">Обновление данных...</p>}
         </div>
-        <button className="flex items-center gap-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm px-4 py-2.5 rounded-xl font-medium transition-colors"><Download size={15} /> Экспорт отчёта</button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => onOpenBuilder?.()}
+            className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm px-4 py-2.5 rounded-xl font-medium transition-colors shadow-sm shadow-indigo-200"
+          >
+            <Plus size={15} /> Создать курс
+          </button>
+          <button className="flex items-center gap-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm px-4 py-2.5 rounded-xl font-medium transition-colors"><Download size={15} /> Экспорт отчёта</button>
+        </div>
       </div>
 
       <div className="flex items-center gap-1 mb-8 bg-slate-100 p-1 rounded-xl w-fit">
