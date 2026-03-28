@@ -1744,12 +1744,12 @@ function TextLesson({ lesson, onCompleteLesson }) {
 
 function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast }) {
   const [playing, setPlaying] = useState(false);
-  const [progress, setProgress] = useState(Math.max(0, Math.min(100, Number(lesson?.completionRatio || 22))));
+  const [progress, setProgress] = useState(Math.max(0, Math.min(100, Number(lesson?.completionRatio ?? (String(lesson?.status || "").toLowerCase() === "completed" ? 100 : 0)))));
   const [activeTab, setActiveTab] = useState("transcript");
   const [tabHidden, setTabHidden] = useState(false);
   const [completing, setCompleting] = useState(false);
   const [completed, setCompleted] = useState(String(lesson?.status || "").toLowerCase() === "completed");
-  const [totalSeconds, setTotalSeconds] = useState(Math.max(60, Number(lesson?.durationSeconds || 18 * 60)));
+  const [totalSeconds, setTotalSeconds] = useState(Math.max(1, Number(lesson?.durationSeconds || 18 * 60)));
   const heartbeatRef = useRef(null);
   const videoRef = useRef(null);
   const progressRef = useRef(progress);
@@ -1769,7 +1769,8 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
   });
   const videoDurationMeta = Number(videoMaterial?.metadata?.duration_seconds || 0);
   const videoUrl = videoMaterial?.url || videoMaterial?.signed_url || videoMaterial?.content_url || "";
-  const currentSeconds = Math.floor((progress * totalSeconds) / 100);
+  const safeTotalSeconds = Math.max(1, Number(totalSeconds || 0));
+  const currentSeconds = Math.floor((progress * safeTotalSeconds) / 100);
   const transcriptMaterial = materials.find((item) => String(item?.material_type || "").toLowerCase() === "text" && item?.content_text);
   const transcriptText = String(transcriptMaterial?.content_text || lesson?.description || "").trim();
   const lessonFiles = materials.filter((item) => {
@@ -1779,8 +1780,8 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
   });
 
   useEffect(() => {
-    const next = Math.max(0, Math.min(100, Number(lesson?.completionRatio || (String(lesson?.status || "").toLowerCase() === "completed" ? 100 : 22))));
-    const fallbackDuration = Math.max(60, Math.round(Number(videoDurationMeta || lesson?.durationSeconds || 18 * 60)));
+    const next = Math.max(0, Math.min(100, Number(lesson?.completionRatio ?? (String(lesson?.status || "").toLowerCase() === "completed" ? 100 : 0))));
+    const fallbackDuration = Math.max(1, Number(videoDurationMeta || lesson?.durationSeconds || 18 * 60));
     setProgress(next);
     setTotalSeconds(fallbackDuration);
     setCompleted(String(lesson?.status || "").toLowerCase() === "completed");
@@ -1805,7 +1806,7 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
     const positionSecondsFromVideo = Number(videoRef.current?.currentTime || 0);
     const localSeconds = Number.isFinite(positionSecondsFromVideo) && positionSecondsFromVideo >= 0
       ? positionSecondsFromVideo
-      : Math.floor((progressRef.current * totalSeconds) / 100);
+      : Math.floor((progressRef.current * safeTotalSeconds) / 100);
     const payload = await lmsRequest(`/api/lms/lessons/${lessonId}/heartbeat`, {
       method: "POST",
       body: {
@@ -1816,13 +1817,13 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
     });
     if (payload?.position_seconds != null && Number.isFinite(Number(payload.position_seconds))) {
       const serverPosition = Math.max(0, Number(payload.position_seconds));
-      const nextProgress = Math.max(0, Math.min(100, (serverPosition / totalSeconds) * 100));
+      const nextProgress = Math.max(0, Math.min(100, (serverPosition / safeTotalSeconds) * 100));
       setProgress(nextProgress);
       progressRef.current = nextProgress;
       maxAllowedSecondsRef.current = Math.max(maxAllowedSecondsRef.current, serverPosition);
     }
     return payload || null;
-  }, [canTrack, lmsRequest, lessonId, totalSeconds]);
+  }, [canTrack, lmsRequest, lessonId, safeTotalSeconds]);
 
   useEffect(() => {
     const sendVisibilityEvent = async (isVisible) => {
@@ -1885,38 +1886,43 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
     if (!video) return;
     const mediaDuration = Number(video.duration || 0);
     if (!Number.isFinite(mediaDuration) || mediaDuration <= 0) return;
-    const safeDuration = Math.max(60, Math.round(mediaDuration));
-    setTotalSeconds((prev) => (Math.abs(prev - safeDuration) >= 1 ? safeDuration : prev));
+    const safeDuration = Math.max(1, mediaDuration);
+    setTotalSeconds((prev) => (Math.abs(prev - safeDuration) >= 0.25 ? safeDuration : prev));
     const resumePosition = Math.max(0, Math.min(mediaDuration, (progressRef.current / 100) * mediaDuration));
     if (resumePosition > 0 && Math.abs(Number(video.currentTime || 0) - resumePosition) > 1.5) {
       video.currentTime = resumePosition;
     }
-    maxAllowedSecondsRef.current = Math.max(maxAllowedSecondsRef.current, Number(video.currentTime || 0));
+    const normalizedProgress = Math.max(0, Math.min(100, Number(progressRef.current || 0)));
+    const restoredAllowed = Math.max(0, (normalizedProgress / 100) * safeDuration);
+    maxAllowedSecondsRef.current = Math.max(Number(video.currentTime || 0), restoredAllowed);
   }, []);
 
   const handleTimeUpdate = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
-    const mediaDuration = Number(video.duration || totalSeconds || 0);
+    const mediaDuration = Number(video.duration || safeTotalSeconds || 0);
     const currentTime = Math.max(0, Number(video.currentTime || 0));
     if (!Number.isFinite(mediaDuration) || mediaDuration <= 0) return;
-    const safeDuration = Math.max(60, Math.round(mediaDuration));
-    if (Math.abs(totalSeconds - safeDuration) >= 1) {
+    const safeDuration = Math.max(1, mediaDuration);
+    if (Math.abs(totalSeconds - safeDuration) >= 0.25) {
       setTotalSeconds(safeDuration);
     }
     maxAllowedSecondsRef.current = Math.max(maxAllowedSecondsRef.current, currentTime);
     const nextProgress = Math.max(0, Math.min(100, (currentTime / safeDuration) * 100));
     setProgress(nextProgress);
     progressRef.current = nextProgress;
-  }, [totalSeconds]);
+  }, [safeTotalSeconds, totalSeconds]);
 
   const handleSeeking = () => {
     const video = videoRef.current;
     if (!video || lesson?.allowFastForward) return;
     const current = Math.max(0, Number(video.currentTime || 0));
-    const allowed = maxAllowedSecondsRef.current + 2;
+    const allowed = maxAllowedSecondsRef.current + 0.75;
     if (current > allowed) {
       video.currentTime = Math.max(0, maxAllowedSecondsRef.current);
+      const correctedProgress = Math.max(0, Math.min(100, (maxAllowedSecondsRef.current / Math.max(1, Number(video.duration || safeTotalSeconds || 0))) * 100));
+      setProgress(correctedProgress);
+      progressRef.current = correctedProgress;
       const nowTs = Date.now();
       if (nowTs - seekToastAtRef.current > 1500) {
         seekToastAtRef.current = nowTs;
@@ -1932,6 +1938,23 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
   const handleVideoPause = () => {
     setPlaying(false);
     void sendHeartbeat().catch(() => {});
+  };
+
+  const togglePlayback = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (video.paused) {
+      void video.play().catch(() => {});
+      return;
+    }
+    video.pause();
+  };
+
+  const formatVideoClock = (seconds) => {
+    const safe = Math.max(0, Math.floor(Number(seconds || 0)));
+    const minutes = Math.floor(safe / 60);
+    const secs = safe % 60;
+    return `${minutes}:${String(secs).padStart(2, "0")}`;
   };
 
   const handleComplete = useCallback(async () => {
@@ -1978,20 +2001,34 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
 
       <div className="bg-slate-900 rounded-2xl overflow-hidden mb-6 relative aspect-video">
         {videoUrl ? (
-          <video
-            ref={videoRef}
-            src={videoUrl}
-            className="w-full h-full bg-black"
-            controls
-            playsInline
-            preload="metadata"
-            controlsList="nodownload noplaybackrate"
-            onLoadedMetadata={handleLoadedMetadata}
-            onTimeUpdate={handleTimeUpdate}
-            onSeeking={handleSeeking}
-            onPlay={handleVideoPlay}
-            onPause={handleVideoPause}
-          />
+          <>
+            <video
+              ref={videoRef}
+              src={videoUrl}
+              className="w-full h-full bg-black cursor-pointer"
+              controls={false}
+              playsInline
+              preload="metadata"
+              disablePictureInPicture
+              controlsList="nodownload noplaybackrate nofullscreen"
+              onClick={togglePlayback}
+              onLoadedMetadata={handleLoadedMetadata}
+              onTimeUpdate={handleTimeUpdate}
+              onSeeking={handleSeeking}
+              onPlay={handleVideoPlay}
+              onPause={handleVideoPause}
+            />
+            {!playing && !completed && (
+              <button
+                type="button"
+                onClick={togglePlayback}
+                className="absolute inset-0 m-auto w-16 h-16 rounded-full bg-white/20 hover:bg-white/30 text-white flex items-center justify-center transition-colors backdrop-blur-sm"
+                aria-label="Play"
+              >
+                <Play size={26} className="ml-1" />
+              </button>
+            )}
+          </>
         ) : (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-center px-4">
             <Video size={24} className="text-white/50" />
@@ -2001,9 +2038,18 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
       </div>
 
       <div className="flex items-center gap-4 mb-6 p-4 bg-white rounded-xl border border-slate-200">
+        <button
+          type="button"
+          onClick={togglePlayback}
+          disabled={!videoUrl}
+          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed text-xs font-semibold text-slate-700 transition-colors"
+        >
+          {playing ? <Pause size={13} /> : <Play size={13} />}
+          {playing ? "Пауза" : "Воспроизвести"}
+        </button>
         <div className="flex items-center gap-2 text-xs text-slate-500"><Eye size={13} /> Просмотрено: {Math.round(progress)}%</div>
         <div className="flex items-center gap-2 text-xs text-emerald-600 font-medium"><CheckCircle size={13} /> Засчитывается только реальное время</div>
-        <div className="ml-auto text-xs text-slate-500 flex items-center gap-2"><Clock size={13} /> {Math.floor(currentSeconds / 60)} мин просмотрено</div>
+        <div className="ml-auto text-xs text-slate-500 flex items-center gap-2"><Clock size={13} /> {formatVideoClock(currentSeconds)} / {formatVideoClock(safeTotalSeconds)}</div>
         {completed && <div className="flex items-center gap-1.5 text-xs text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-full font-semibold"><CheckCircle size={12} /> Урок завершён</div>}
       </div>
 
