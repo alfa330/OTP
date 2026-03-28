@@ -1749,35 +1749,82 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
   const [tabHidden, setTabHidden] = useState(false);
   const [completing, setCompleting] = useState(false);
   const [completed, setCompleted] = useState(String(lesson?.status || "").toLowerCase() === "completed");
-  const intervalRef = useRef(null);
+  const [totalSeconds, setTotalSeconds] = useState(Math.max(60, Number(lesson?.durationSeconds || 18 * 60)));
   const heartbeatRef = useRef(null);
+  const videoRef = useRef(null);
   const progressRef = useRef(progress);
   const visibleRef = useRef(typeof document !== "undefined" ? !document.hidden : true);
+  const maxAllowedSecondsRef = useRef(0);
+  const seekToastAtRef = useRef(0);
   const autoCompleteTriggeredRef = useRef(false);
 
-  const totalSeconds = Math.max(60, Number(lesson?.durationSeconds || 18 * 60));
+  const lessonId = Number(lesson?.apiLessonId || 0);
+  const canTrack = apiMode && typeof lmsRequest === "function" && lessonId > 0;
   const completionThreshold = Math.max(1, Math.min(100, Number(lesson?.completionThreshold || 95)));
-  const currentSeconds = Math.floor((progress * totalSeconds) / 100);
   const materials = Array.isArray(lesson?.materials) ? lesson.materials : [];
+  const videoMaterial = materials.find((item) => {
+    const type = String(item?.material_type || item?.type || "").toLowerCase();
+    const url = item?.url || item?.signed_url || item?.content_url;
+    return type === "video" && Boolean(url);
+  });
+  const videoDurationMeta = Number(videoMaterial?.metadata?.duration_seconds || 0);
+  const videoUrl = videoMaterial?.url || videoMaterial?.signed_url || videoMaterial?.content_url || "";
+  const currentSeconds = Math.floor((progress * totalSeconds) / 100);
   const transcriptMaterial = materials.find((item) => String(item?.material_type || "").toLowerCase() === "text" && item?.content_text);
   const transcriptText = String(transcriptMaterial?.content_text || lesson?.description || "").trim();
-  const lessonFiles = materials.filter((item) => item?.url || item?.signed_url || item?.content_url);
+  const lessonFiles = materials.filter((item) => {
+    const type = String(item?.material_type || item?.type || "").toLowerCase();
+    if (type === "video") return false;
+    return Boolean(item?.url || item?.signed_url || item?.content_url);
+  });
 
   useEffect(() => {
     const next = Math.max(0, Math.min(100, Number(lesson?.completionRatio || (String(lesson?.status || "").toLowerCase() === "completed" ? 100 : 22))));
+    const fallbackDuration = Math.max(60, Math.round(Number(videoDurationMeta || lesson?.durationSeconds || 18 * 60)));
     setProgress(next);
+    setTotalSeconds(fallbackDuration);
     setCompleted(String(lesson?.status || "").toLowerCase() === "completed");
     setPlaying(false);
+    maxAllowedSecondsRef.current = Math.max(0, (next / 100) * fallbackDuration);
+    if (videoRef.current) {
+      try {
+        videoRef.current.pause();
+      } catch (_) {
+        // ignore
+      }
+    }
     autoCompleteTriggeredRef.current = false;
-  }, [lesson?.id, lesson?.apiLessonId, lesson?.completionRatio, lesson?.status]);
+  }, [lesson?.id, lesson?.apiLessonId, lesson?.completionRatio, lesson?.status, lesson?.durationSeconds, videoDurationMeta]);
 
   useEffect(() => {
     progressRef.current = progress;
   }, [progress]);
 
+  const sendHeartbeat = useCallback(async () => {
+    if (!canTrack) return null;
+    const positionSecondsFromVideo = Number(videoRef.current?.currentTime || 0);
+    const localSeconds = Number.isFinite(positionSecondsFromVideo) && positionSecondsFromVideo >= 0
+      ? positionSecondsFromVideo
+      : Math.floor((progressRef.current * totalSeconds) / 100);
+    const payload = await lmsRequest(`/api/lms/lessons/${lessonId}/heartbeat`, {
+      method: "POST",
+      body: {
+        position_seconds: Math.max(0, Math.floor(localSeconds)),
+        tab_visible: visibleRef.current,
+        client_ts: new Date().toISOString(),
+      },
+    });
+    if (payload?.position_seconds != null && Number.isFinite(Number(payload.position_seconds))) {
+      const serverPosition = Math.max(0, Number(payload.position_seconds));
+      const nextProgress = Math.max(0, Math.min(100, (serverPosition / totalSeconds) * 100));
+      setProgress(nextProgress);
+      progressRef.current = nextProgress;
+      maxAllowedSecondsRef.current = Math.max(maxAllowedSecondsRef.current, serverPosition);
+    }
+    return payload || null;
+  }, [canTrack, lmsRequest, lessonId, totalSeconds]);
+
   useEffect(() => {
-    const canTrack = apiMode && typeof lmsRequest === "function" && Number(lesson?.apiLessonId) > 0;
-    const lessonId = Number(lesson?.apiLessonId || 0);
     const sendVisibilityEvent = async (isVisible) => {
       if (!canTrack || !lessonId) return;
       try {
@@ -1799,6 +1846,9 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
       visibleRef.current = isVisible;
       if (!isVisible && playing) {
         setPlaying(false);
+        if (videoRef.current && !videoRef.current.paused) {
+          videoRef.current.pause();
+        }
         setTabHidden(true);
         setTimeout(() => setTabHidden(false), 3000);
       }
@@ -1806,71 +1856,83 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
     };
     document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
-  }, [apiMode, lmsRequest, lesson?.apiLessonId, playing]);
+  }, [canTrack, lmsRequest, lessonId, playing]);
 
   useEffect(() => {
-    if (playing) {
-      intervalRef.current = setInterval(() => {
-        setProgress((prev) => {
-          if (prev >= 100) {
-            clearInterval(intervalRef.current);
-            setPlaying(false);
-            return 100;
-          }
-          return Math.min(100, prev + 0.3);
-        });
-      }, 200);
-    } else {
-      clearInterval(intervalRef.current);
-    }
-    return () => clearInterval(intervalRef.current);
-  }, [playing]);
-
-  useEffect(() => {
-    const canHeartbeat = apiMode && typeof lmsRequest === "function" && Number(lesson?.apiLessonId) > 0;
-    const lessonId = Number(lesson?.apiLessonId || 0);
-    if (!playing || !canHeartbeat || !lessonId) {
+    if (!playing || !canTrack || !lessonId) {
       clearInterval(heartbeatRef.current);
       return undefined;
     }
 
     heartbeatRef.current = setInterval(async () => {
       try {
-        const positionSeconds = Math.floor((progressRef.current * totalSeconds) / 100);
-        const payload = await lmsRequest(`/api/lms/lessons/${lessonId}/heartbeat`, {
-          method: "POST",
-          body: {
-            position_seconds: positionSeconds,
-            tab_visible: visibleRef.current,
-            client_ts: new Date().toISOString(),
-          },
-        });
-        if (payload?.position_seconds != null && Number.isFinite(Number(payload.position_seconds))) {
-          const nextProgress = Math.max(0, Math.min(100, (Number(payload.position_seconds) / totalSeconds) * 100));
-          setProgress(nextProgress);
-        }
+        await sendHeartbeat();
       } catch (_) {
-        // heartbeat errors are non-fatal for local playback
+        // non-fatal
       }
     }, 5000);
 
     return () => clearInterval(heartbeatRef.current);
-  }, [playing, apiMode, lmsRequest, lesson?.apiLessonId, totalSeconds]);
+  }, [playing, canTrack, lessonId, sendHeartbeat]);
 
   const syncHeartbeatBeforeComplete = useCallback(async () => {
-    const canHeartbeat = apiMode && typeof lmsRequest === "function" && Number(lesson?.apiLessonId) > 0;
-    if (!canHeartbeat) return;
-    const lessonId = Number(lesson?.apiLessonId || 0);
-    const positionSeconds = Math.floor((progressRef.current * totalSeconds) / 100);
-    await lmsRequest(`/api/lms/lessons/${lessonId}/heartbeat`, {
-      method: "POST",
-      body: {
-        position_seconds: positionSeconds,
-        tab_visible: visibleRef.current,
-        client_ts: new Date().toISOString(),
-      },
-    });
-  }, [apiMode, lmsRequest, lesson?.apiLessonId, totalSeconds]);
+    if (!canTrack) return;
+    await sendHeartbeat();
+  }, [canTrack, sendHeartbeat]);
+
+  const handleLoadedMetadata = useCallback(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const mediaDuration = Number(video.duration || 0);
+    if (!Number.isFinite(mediaDuration) || mediaDuration <= 0) return;
+    const safeDuration = Math.max(60, Math.round(mediaDuration));
+    setTotalSeconds((prev) => (Math.abs(prev - safeDuration) >= 1 ? safeDuration : prev));
+    const resumePosition = Math.max(0, Math.min(mediaDuration, (progressRef.current / 100) * mediaDuration));
+    if (resumePosition > 0 && Math.abs(Number(video.currentTime || 0) - resumePosition) > 1.5) {
+      video.currentTime = resumePosition;
+    }
+    maxAllowedSecondsRef.current = Math.max(maxAllowedSecondsRef.current, Number(video.currentTime || 0));
+  }, []);
+
+  const handleTimeUpdate = useCallback(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const mediaDuration = Number(video.duration || totalSeconds || 0);
+    const currentTime = Math.max(0, Number(video.currentTime || 0));
+    if (!Number.isFinite(mediaDuration) || mediaDuration <= 0) return;
+    const safeDuration = Math.max(60, Math.round(mediaDuration));
+    if (Math.abs(totalSeconds - safeDuration) >= 1) {
+      setTotalSeconds(safeDuration);
+    }
+    maxAllowedSecondsRef.current = Math.max(maxAllowedSecondsRef.current, currentTime);
+    const nextProgress = Math.max(0, Math.min(100, (currentTime / safeDuration) * 100));
+    setProgress(nextProgress);
+    progressRef.current = nextProgress;
+  }, [totalSeconds]);
+
+  const handleSeeking = () => {
+    const video = videoRef.current;
+    if (!video || lesson?.allowFastForward) return;
+    const current = Math.max(0, Number(video.currentTime || 0));
+    const allowed = maxAllowedSecondsRef.current + 2;
+    if (current > allowed) {
+      video.currentTime = Math.max(0, maxAllowedSecondsRef.current);
+      const nowTs = Date.now();
+      if (nowTs - seekToastAtRef.current > 1500) {
+        seekToastAtRef.current = nowTs;
+        emitToast?.("Перемотка вперед недоступна", "error");
+      }
+    }
+  };
+
+  const handleVideoPlay = () => {
+    setPlaying(true);
+  };
+
+  const handleVideoPause = () => {
+    setPlaying(false);
+    void sendHeartbeat().catch(() => {});
+  };
 
   const handleComplete = useCallback(async () => {
     if (completed || completing) return;
@@ -1915,26 +1977,27 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
       )}
 
       <div className="bg-slate-900 rounded-2xl overflow-hidden mb-6 relative aspect-video">
-        <div className="absolute inset-0 flex items-center justify-center">
-          <div className="text-center">
-            <p className="text-slate-500 text-sm mb-6">Видеоурок: {lesson.title}</p>
-            <div className="w-20 h-20 rounded-full bg-white/10 backdrop-blur-sm flex items-center justify-center cursor-pointer hover:bg-white/20 transition-colors" onClick={() => setPlaying((prev) => !prev)}>
-              {playing ? <div className="flex gap-2"><div className="w-3 h-8 bg-white rounded-sm" /><div className="w-3 h-8 bg-white rounded-sm" /></div> : <Play size={28} className="text-white ml-1" />}
-            </div>
+        {videoUrl ? (
+          <video
+            ref={videoRef}
+            src={videoUrl}
+            className="w-full h-full bg-black"
+            controls
+            playsInline
+            preload="metadata"
+            controlsList="nodownload noplaybackrate"
+            onLoadedMetadata={handleLoadedMetadata}
+            onTimeUpdate={handleTimeUpdate}
+            onSeeking={handleSeeking}
+            onPlay={handleVideoPlay}
+            onPause={handleVideoPause}
+          />
+        ) : (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-center px-4">
+            <Video size={24} className="text-white/50" />
+            <p className="text-sm text-white/70">Видео не прикреплено к уроку</p>
           </div>
-        </div>
-        <div className="absolute bottom-0 left-0 right-0 px-4 pb-4">
-          <div className="flex items-center gap-3 mb-2">
-            <span className="text-white/60 text-xs">{Math.floor(currentSeconds / 60)}:{String(currentSeconds % 60).padStart(2, "0")}</span>
-            <div className="flex-1 h-1.5 bg-white/20 rounded-full cursor-not-allowed relative" title="Перемотка вперёд запрещена">
-              <div className="h-full bg-indigo-500 rounded-full transition-all" style={{ width: `${progress}%` }} />
-            </div>
-            <span className="text-white/60 text-xs">{Math.floor(totalSeconds / 60)}:{String(totalSeconds % 60).padStart(2, "0")}</span>
-          </div>
-          {!playing && progress < 100 && (
-            <p className="text-white/40 text-[10px] text-center">Перемотка вперёд недоступна</p>
-          )}
-        </div>
+        )}
       </div>
 
       <div className="flex items-center gap-4 mb-6 p-4 bg-white rounded-xl border border-slate-200">
@@ -2831,6 +2894,40 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
     return first;
   }, [lmsRequest]);
 
+  const readVideoDurationSeconds = useCallback((file) => new Promise((resolve) => {
+    try {
+      if (!(file instanceof File)) {
+        resolve(null);
+        return;
+      }
+      const video = document.createElement("video");
+      const objectUrl = URL.createObjectURL(file);
+      let settled = false;
+      const cleanup = () => {
+        video.onloadedmetadata = null;
+        video.onerror = null;
+        URL.revokeObjectURL(objectUrl);
+      };
+      video.preload = "metadata";
+      video.onloadedmetadata = () => {
+        if (settled) return;
+        settled = true;
+        const duration = Number(video.duration || 0);
+        cleanup();
+        resolve(Number.isFinite(duration) && duration > 0 ? duration : null);
+      };
+      video.onerror = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(null);
+      };
+      video.src = objectUrl;
+    } catch (_) {
+      resolve(null);
+    }
+  }), []);
+
   const handleCoverFileChange = async (event) => {
     const file = event?.target?.files?.[0];
     event.target.value = "";
@@ -2858,12 +2955,17 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
     if (!file || !selectedLessonModel) return;
     setLessonUploading(true);
     try {
+      const detectedDuration = await readVideoDurationSeconds(file);
+      const nextDurationSeconds = detectedDuration != null
+        ? Math.max(30, Math.round(detectedDuration))
+        : Math.max(30, Number(selectedLessonModel?.durationSeconds || 0) || 15 * 60);
       const uploaded = await uploadSingleMaterial(file, "video");
       updateLessonById(selectedLessonModel.id, (prev) => {
         const base = Array.isArray(prev?.materials) ? prev.materials.filter((item) => String(item?.material_type || item?.type || "").toLowerCase() !== "video") : [];
         return {
           ...prev,
           type: "video",
+          durationSeconds: nextDurationSeconds,
           materials: [
             ...base,
             {
@@ -2875,7 +2977,10 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
               mime_type: uploaded.content_type || file.type || "video/mp4",
               bucket: uploaded.bucket || "",
               blob_path: uploaded.blob_path || "",
-              metadata: { uploaded_file_name: uploaded.file_name || file.name || "video" },
+              metadata: {
+                uploaded_file_name: uploaded.file_name || file.name || "video",
+                duration_seconds: nextDurationSeconds,
+              },
             },
           ],
         };
@@ -3202,6 +3307,10 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
 
   const selectedLessonMaterials = Array.isArray(selectedLessonModel?.materials) ? selectedLessonModel.materials : [];
   const selectedLessonVideoMaterial = selectedLessonMaterials.find((item) => String(item?.material_type || item?.type || "").toLowerCase() === "video");
+  const selectedLessonVideoDurationSeconds = Math.max(
+    0,
+    Number(selectedLessonVideoMaterial?.metadata?.duration_seconds || selectedLessonModel?.durationSeconds || 0)
+  );
   const selectedLessonExtraMaterials = selectedLessonMaterials
     .map((item, originalIndex) => ({ ...item, _originalIndex: originalIndex }))
     .filter((item) => {
@@ -3397,14 +3506,22 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                     </div>
                     <div className="grid grid-cols-2 gap-3">
                       <div>
-                        <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Длительность (сек)</label>
-                        <input
-                          type="number"
-                          min={30}
-                          value={Math.max(30, Number(selectedLessonModel.durationSeconds || 0))}
-                          onChange={(e) => updateLessonById(selectedLessonModel.id, { durationSeconds: Math.max(30, Number(e.target.value || 0)) })}
-                          className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 focus:outline-none focus:border-indigo-400 transition-all"
-                        />
+                        <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Длительность</label>
+                        {selectedLessonModel.type === "text" ? (
+                          <input
+                            type="number"
+                            min={30}
+                            value={Math.max(30, Number(selectedLessonModel.durationSeconds || 0))}
+                            onChange={(e) => updateLessonById(selectedLessonModel.id, { durationSeconds: Math.max(30, Number(e.target.value || 0)) })}
+                            className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 focus:outline-none focus:border-indigo-400 transition-all"
+                          />
+                        ) : (
+                          <div className="px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-600">
+                            {selectedLessonVideoDurationSeconds > 0
+                              ? `Определена автоматически: ${formatDurationLabel(selectedLessonVideoDurationSeconds)}`
+                              : "Будет определена автоматически после загрузки видео"}
+                          </div>
+                        )}
                       </div>
                       <div>
                         <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Порог завершения (%)</label>
