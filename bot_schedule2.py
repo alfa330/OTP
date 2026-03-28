@@ -42,6 +42,11 @@ import math
 from urllib.parse import quote, urlparse, parse_qs
 from zoneinfo import ZoneInfo
 from ai_feed_back_service import generate_monthly_feedback_with_ai, generate_birthday_greeting_with_ai
+try:
+    from PIL import Image, ImageOps
+except Exception:
+    Image = None
+    ImageOps = None
 
 os.environ['TZ'] = 'Asia/Almaty'
 time.tzset()
@@ -13391,6 +13396,34 @@ def _lms_signed_url(bucket_name, blob_path, expires_minutes=120):
         return None
 
 
+def _lms_convert_image_to_webp(raw_bytes, max_side=1600, quality=88):
+    if Image is None:
+        return None
+    if not raw_bytes:
+        return None
+    try:
+        with Image.open(BytesIO(raw_bytes)) as img:
+            if ImageOps is not None:
+                img = ImageOps.exif_transpose(img)
+            if img.mode not in ('RGB', 'RGBA'):
+                img = img.convert('RGBA' if 'A' in img.getbands() else 'RGB')
+            width, height = img.size
+            max_dim = max(int(width or 0), int(height or 0))
+            if max_dim > int(max_side):
+                scale = float(max_side) / float(max_dim)
+                resize_to = (
+                    max(1, int(round(width * scale))),
+                    max(1, int(round(height * scale)))
+                )
+                resample = Image.Resampling.LANCZOS if hasattr(Image, 'Resampling') else Image.LANCZOS
+                img = img.resize(resize_to, resample)
+            out = BytesIO()
+            img.save(out, format='WEBP', quality=max(40, min(95, int(quality))), method=6)
+            return out.getvalue()
+    except Exception:
+        return None
+
+
 def _lms_resolve_cover_payload(version_settings):
     settings = version_settings if isinstance(version_settings, dict) else {}
     cover_url = (str(settings.get("cover_url") or "").strip() or None)
@@ -16319,6 +16352,9 @@ def lms_admin_upload_materials():
                 lesson_id = int(lesson_id_raw)
             except Exception:
                 return jsonify({"error": "Invalid lesson_id"}), 400
+        requested_material_type = str(request.form.get('material_type') or 'file').strip().lower()
+        if requested_material_type not in ('video', 'pdf', 'link', 'text', 'file', 'cover'):
+            requested_material_type = 'file'
 
         client = get_gcs_client()
         bucket = client.bucket(bucket_name)
@@ -16334,9 +16370,17 @@ def lms_admin_upload_materials():
                 safe_name = secure_filename(file_storage.filename or f"material_{idx}")
                 content = file_storage.read() or b''
                 content_type = (file_storage.mimetype or '').strip() or 'application/octet-stream'
+                upload_name = safe_name
+                if requested_material_type == 'cover' and content_type.startswith('image/'):
+                    converted = _lms_convert_image_to_webp(content)
+                    if converted:
+                        content = converted
+                        content_type = 'image/webp'
+                        name_root = os.path.splitext(safe_name)[0].strip() or f"cover_{idx}"
+                        upload_name = f"{name_root}.webp"
                 blob_path = (
                     f"lms/materials/{now.strftime('%Y/%m/%d')}/"
-                    f"{uuid.uuid4().hex}_{safe_name}"
+                    f"{uuid.uuid4().hex}_{upload_name}"
                 )
                 blob = bucket.blob(blob_path)
                 blob.upload_from_string(content, content_type=content_type)
@@ -16344,8 +16388,10 @@ def lms_admin_upload_materials():
 
                 material_id = None
                 if lesson_id is not None:
-                    title = str(request.form.get('title') or safe_name).strip() or safe_name
-                    material_type = str(request.form.get('material_type') or 'file').strip().lower()
+                    title = str(request.form.get('title') or upload_name).strip() or upload_name
+                    material_type = requested_material_type
+                    if material_type == 'cover':
+                        material_type = 'file'
                     if material_type not in ('video', 'pdf', 'link', 'text', 'file'):
                         material_type = 'file'
                     position = max(1, _lms_to_int(request.form.get('position'), idx))
@@ -16364,7 +16410,7 @@ def lms_admin_upload_materials():
                         bucket_name,
                         blob_path,
                         content_type,
-                        json.dumps({"uploaded_file_name": safe_name}, ensure_ascii=False),
+                        json.dumps({"uploaded_file_name": upload_name}, ensure_ascii=False),
                         position,
                         requester_id,
                         now
@@ -16373,7 +16419,7 @@ def lms_admin_upload_materials():
 
                 uploaded.append({
                     "material_id": material_id,
-                    "file_name": safe_name,
+                    "file_name": upload_name,
                     "content_type": content_type,
                     "size": len(content),
                     "bucket": bucket_name,
