@@ -14971,15 +14971,24 @@ def lms_lesson_complete(lesson_id):
             current_ratio = float(progress[4] or 0.0)
             last_heartbeat_at = progress[6]
             required_ratio = max(float(context["completion_threshold"]), float(LMS_COMPLETION_THRESHOLD))
+            cursor.execute("""
+                SELECT EXISTS(
+                    SELECT 1
+                    FROM lms_lesson_materials
+                    WHERE lesson_id = %s
+                      AND material_type = 'video'
+                )
+            """, (lesson_id,))
+            has_video_material = bool((cursor.fetchone() or [False])[0])
 
-            if current_ratio < required_ratio:
+            if has_video_material and current_ratio < required_ratio:
                 return jsonify({
                     "error": "Lesson completion threshold is not reached",
                     "required_ratio": required_ratio,
                     "current_ratio": current_ratio
                 }), 409
 
-            if isinstance(last_heartbeat_at, datetime):
+            if has_video_material and isinstance(last_heartbeat_at, datetime):
                 gap = (_lms_now() - last_heartbeat_at).total_seconds()
                 if gap > float(LMS_STALE_GAP_SECONDS):
                     return jsonify({
