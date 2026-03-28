@@ -550,6 +550,10 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
   const [busyCourseId, setBusyCourseId] = useState(null);
   const [homeError, setHomeError] = useState("");
   const [apiMode, setApiMode] = useState(false);
+  const showToastRef = useRef(showToast);
+  const withAccessTokenHeaderRef = useRef(withAccessTokenHeader);
+  const homeLoadPromiseRef = useRef(null);
+  const adminLoadPromiseRef = useRef(null);
 
   useEffect(() => {
     setIsAdmin(canUseManagerApi);
@@ -558,15 +562,24 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
     }
   }, [canUseLearnerApi, canUseManagerApi]);
 
+  useEffect(() => {
+    showToastRef.current = showToast;
+  }, [showToast]);
+
+  useEffect(() => {
+    withAccessTokenHeaderRef.current = withAccessTokenHeader;
+  }, [withAccessTokenHeader]);
+
   const emitToast = useCallback((message, type = "info") => {
     if (!message) return;
-    if (typeof showToast === "function") {
-      showToast(message, type);
+    const toastFn = showToastRef.current;
+    if (typeof toastFn === "function") {
+      toastFn(message, type);
       return;
     }
     if (type === "error") console.error(message);
     else console.log(message);
-  }, [showToast]);
+  }, []);
 
   const lmsRequest = useCallback(async (path, options = {}) => {
     if (!apiRoot) {
@@ -584,8 +597,9 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
       }
     }
 
-    const finalHeaders = typeof withAccessTokenHeader === "function"
-      ? withAccessTokenHeader(headers)
+    const headerFn = withAccessTokenHeaderRef.current;
+    const finalHeaders = typeof headerFn === "function"
+      ? headerFn(headers)
       : headers;
 
     const response = await fetch(url, {
@@ -604,13 +618,18 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
       throw new Error(errorText);
     }
     return payload;
-  }, [apiRoot, withAccessTokenHeader]);
+  }, [apiRoot]);
 
   const loadLearnerDashboard = useCallback(async () => {
     if (!apiRoot || !canUseLearnerApi) return;
-    setLoadingHome(true);
-    setHomeError("");
-    try {
+    if (homeLoadPromiseRef.current) {
+      return homeLoadPromiseRef.current;
+    }
+
+    const loadPromise = (async () => {
+      setLoadingHome(true);
+      setHomeError("");
+      try {
       const [homeRes, certRes, notifRes] = await Promise.all([
         lmsRequest("/api/lms/home"),
         lmsRequest("/api/lms/certificates"),
@@ -663,15 +682,30 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
       setHomeError(String(error?.message || "Не удалось загрузить данные LMS"));
       emitToast(`LMS: ${String(error?.message || "ошибка загрузки")}`, "error");
       setApiMode(false);
+      } finally {
+        setLoadingHome(false);
+      }
+    })();
+
+    homeLoadPromiseRef.current = loadPromise;
+    try {
+      return await loadPromise;
     } finally {
-      setLoadingHome(false);
+      if (homeLoadPromiseRef.current === loadPromise) {
+        homeLoadPromiseRef.current = null;
+      }
     }
   }, [apiRoot, canUseLearnerApi, lmsRequest, user?.name, user?.login, emitToast]);
 
   const loadAdminData = useCallback(async () => {
     if (!apiRoot || !canUseManagerApi) return;
-    setLoadingAdmin(true);
-    try {
+    if (adminLoadPromiseRef.current) {
+      return adminLoadPromiseRef.current;
+    }
+
+    const loadPromise = (async () => {
+      setLoadingAdmin(true);
+      try {
       const [coursesRes, progressRes, attemptsRes, learnersRes] = await Promise.all([
         lmsRequest("/api/lms/admin/courses"),
         lmsRequest("/api/lms/admin/progress"),
@@ -685,8 +719,18 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
       setApiMode(true);
     } catch (error) {
       emitToast(`LMS admin: ${String(error?.message || "ошибка загрузки")}`, "error");
+      } finally {
+        setLoadingAdmin(false);
+      }
+    })();
+
+    adminLoadPromiseRef.current = loadPromise;
+    try {
+      return await loadPromise;
     } finally {
-      setLoadingAdmin(false);
+      if (adminLoadPromiseRef.current === loadPromise) {
+        adminLoadPromiseRef.current = null;
+      }
     }
   }, [apiRoot, canUseManagerApi, lmsRequest, emitToast]);
 
@@ -713,7 +757,8 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
   const downloadCertificate = useCallback(async (certificate) => {
     if (!certificate?.id || !apiRoot || !canUseLearnerApi) return;
     try {
-      const headers = typeof withAccessTokenHeader === "function" ? withAccessTokenHeader({}) : {};
+      const headerFn = withAccessTokenHeaderRef.current;
+      const headers = typeof headerFn === "function" ? headerFn({}) : {};
       const response = await fetch(`${apiRoot}/api/lms/certificates/${certificate.id}/download`, {
         method: "GET",
         headers,
@@ -741,7 +786,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
     } catch (error) {
       emitToast(`Не удалось скачать сертификат: ${String(error?.message || "ошибка")}`, "error");
     }
-  }, [apiRoot, canUseLearnerApi, withAccessTokenHeader, emitToast]);
+  }, [apiRoot, canUseLearnerApi, emitToast]);
 
   const openCourse = useCallback(async (course) => {
     if (!course?.id) return;
