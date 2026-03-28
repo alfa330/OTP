@@ -361,6 +361,11 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
     const attemptsUsed = Math.max(0, Number(testState?.attempts_used || 0));
     const attemptLimit = Math.max(1, Number(test?.attempt_limit || coursePayload?.course_version?.attempt_limit || coursePayload?.default_attempt_limit || 3));
     const passedAny = Boolean(testState?.passed_any);
+    const configuredMinutes = Math.max(0, Number(test?.time_limit_minutes || test?.time_limit || 0));
+    const configuredSeconds = Math.max(0, Number(test?.time_limit_seconds || 0));
+    const timeLimitSeconds = configuredSeconds > 0 ? configuredSeconds : (configuredMinutes > 0 ? configuredMinutes * 60 : 0);
+    const fallbackMinutes = Math.max(10, Math.ceil((Number(test?.question_count || 0) || 1) * 1.5));
+    const displayMinutes = timeLimitSeconds > 0 ? Math.max(1, Math.round(timeLimitSeconds / 60)) : fallbackMinutes;
     let testStatus = "not_started";
     if (passedAny) testStatus = "completed";
     else if (attemptsUsed > 0) testStatus = attemptsUsed >= attemptLimit ? "test_failed" : "in_progress";
@@ -370,7 +375,10 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
       title: String(test?.title || "Тест"),
       description: String(test?.description || ""),
       type: "quiz",
-      duration: `${Math.max(10, Math.ceil((Number(test?.question_count || 0) || 1) * 1.5))} мин`,
+      duration: `${displayMinutes} мин`,
+      durationSeconds: timeLimitSeconds > 0 ? timeLimitSeconds : displayMinutes * 60,
+      timeLimitMinutes: timeLimitSeconds > 0 ? Math.max(1, Math.round(timeLimitSeconds / 60)) : null,
+      timeLimitSeconds: timeLimitSeconds > 0 ? timeLimitSeconds : null,
       status: testStatus,
       locked: isLockedByFlow && testStatus !== "completed",
       requiresTest: true,
@@ -523,23 +531,6 @@ const flattenCourseLessons = (courseLike) => {
     moduleLessons.forEach((lessonItem) => lessons.push(lessonItem));
   });
   return lessons;
-};
-
-const findNextUnlockedLesson = (courseLike, currentLessonId) => {
-  const lessons = flattenCourseLessons(courseLike);
-  const currentIndex = lessons.findIndex((lessonItem) => String(lessonItem?.id) === String(currentLessonId));
-  if (currentIndex < 0) return null;
-
-  for (let idx = currentIndex + 1; idx < lessons.length; idx += 1) {
-    const candidate = lessons[idx];
-    const status = String(candidate?.status || "").toLowerCase();
-    if (candidate && !candidate.locked && status !== "completed") return candidate;
-  }
-  for (let idx = currentIndex + 1; idx < lessons.length; idx += 1) {
-    const candidate = lessons[idx];
-    if (candidate && !candidate.locked) return candidate;
-  }
-  return null;
 };
 
 const mapApiQuestionTypeToView = (apiType) => {
@@ -918,17 +909,13 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
         if (refreshedCurrentLesson) {
           setSelectedLesson(refreshedCurrentLesson);
         }
-        const nextLesson = findNextUnlockedLesson(refreshedCourse, lesson.id);
-        if (nextLesson && String(nextLesson.id) !== String(lesson.id)) {
-          await openLesson(nextLesson);
-        }
       }
       return true;
     } catch (error) {
       emitToast(`Не удалось завершить урок: ${String(error?.message || "ошибка")}`, "error");
       return false;
     }
-  }, [apiRoot, canUseLearnerApi, lmsRequest, emitToast, refreshSelectedCourse, loadLearnerDashboard, openLesson]);
+  }, [apiRoot, canUseLearnerApi, lmsRequest, emitToast, refreshSelectedCourse, loadLearnerDashboard]);
 
   const handleQuizFinished = useCallback(async () => {
     try {
@@ -1750,6 +1737,7 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
   const [completing, setCompleting] = useState(false);
   const [completed, setCompleted] = useState(String(lesson?.status || "").toLowerCase() === "completed");
   const [totalSeconds, setTotalSeconds] = useState(Math.max(1, Number(lesson?.durationSeconds || 18 * 60)));
+  const [displayCurrentSeconds, setDisplayCurrentSeconds] = useState(0);
   const heartbeatRef = useRef(null);
   const videoRef = useRef(null);
   const progressRef = useRef(progress);
@@ -1761,6 +1749,7 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
   const lessonId = Number(lesson?.apiLessonId || 0);
   const canTrack = apiMode && typeof lmsRequest === "function" && lessonId > 0;
   const completionThreshold = Math.max(1, Math.min(100, Number(lesson?.completionThreshold || 95)));
+  const canSeekForward = Boolean(lesson?.allowFastForward) || completed || progress >= completionThreshold;
   const materials = Array.isArray(lesson?.materials) ? lesson.materials : [];
   const videoMaterial = materials.find((item) => {
     const type = String(item?.material_type || item?.type || "").toLowerCase();
@@ -1770,7 +1759,7 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
   const videoDurationMeta = Number(videoMaterial?.metadata?.duration_seconds || 0);
   const videoUrl = videoMaterial?.url || videoMaterial?.signed_url || videoMaterial?.content_url || "";
   const safeTotalSeconds = Math.max(1, Number(totalSeconds || 0));
-  const currentSeconds = Math.floor((progress * safeTotalSeconds) / 100);
+  const currentSeconds = Math.max(0, Math.floor(Number(displayCurrentSeconds || 0)));
   const transcriptMaterial = materials.find((item) => String(item?.material_type || "").toLowerCase() === "text" && item?.content_text);
   const transcriptText = String(transcriptMaterial?.content_text || lesson?.description || "").trim();
   const lessonFiles = materials.filter((item) => {
@@ -1784,6 +1773,7 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
     const fallbackDuration = Math.max(1, Number(videoDurationMeta || lesson?.durationSeconds || 18 * 60));
     setProgress(next);
     setTotalSeconds(fallbackDuration);
+    setDisplayCurrentSeconds(Math.max(0, (next / 100) * fallbackDuration));
     setCompleted(String(lesson?.status || "").toLowerCase() === "completed");
     setPlaying(false);
     maxAllowedSecondsRef.current = Math.max(0, (next / 100) * fallbackDuration);
@@ -1821,6 +1811,9 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
       setProgress(nextProgress);
       progressRef.current = nextProgress;
       maxAllowedSecondsRef.current = Math.max(maxAllowedSecondsRef.current, serverPosition);
+      if (!videoRef.current || videoRef.current.paused) {
+        setDisplayCurrentSeconds(Math.min(safeTotalSeconds, serverPosition));
+      }
     }
     return payload || null;
   }, [canTrack, lmsRequest, lessonId, safeTotalSeconds]);
@@ -1895,6 +1888,7 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
     const normalizedProgress = Math.max(0, Math.min(100, Number(progressRef.current || 0)));
     const restoredAllowed = Math.max(0, (normalizedProgress / 100) * safeDuration);
     maxAllowedSecondsRef.current = Math.max(Number(video.currentTime || 0), restoredAllowed);
+    setDisplayCurrentSeconds(Math.max(0, Number(video.currentTime || resumePosition || 0)));
   }, []);
 
   const handleTimeUpdate = useCallback(() => {
@@ -1908,26 +1902,67 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
       setTotalSeconds(safeDuration);
     }
     maxAllowedSecondsRef.current = Math.max(maxAllowedSecondsRef.current, currentTime);
+    setDisplayCurrentSeconds(currentTime);
     const nextProgress = Math.max(0, Math.min(100, (currentTime / safeDuration) * 100));
     setProgress(nextProgress);
     progressRef.current = nextProgress;
   }, [safeTotalSeconds, totalSeconds]);
 
+  const notifySeekBlocked = () => {
+    const nowTs = Date.now();
+    if (nowTs - seekToastAtRef.current > 1500) {
+      seekToastAtRef.current = nowTs;
+      emitToast?.("Перемотка вперед недоступна", "error");
+    }
+  };
+
+  const seekVideoTo = (targetSeconds) => {
+    const video = videoRef.current;
+    if (!video) return;
+    const duration = Math.max(1, Number(video.duration || safeTotalSeconds || 0));
+    const boundedSeconds = Math.max(0, Math.min(duration, Number(targetSeconds || 0)));
+    if (!canSeekForward && boundedSeconds > maxAllowedSecondsRef.current + 0.75) {
+      const restoredSeconds = Math.max(0, maxAllowedSecondsRef.current);
+      video.currentTime = restoredSeconds;
+      setDisplayCurrentSeconds(restoredSeconds);
+      const correctedProgress = Math.max(0, Math.min(100, (restoredSeconds / duration) * 100));
+      setProgress(correctedProgress);
+      progressRef.current = correctedProgress;
+      notifySeekBlocked();
+      return;
+    }
+    video.currentTime = boundedSeconds;
+    setDisplayCurrentSeconds(boundedSeconds);
+    const nextProgress = Math.max(0, Math.min(100, (boundedSeconds / duration) * 100));
+    setProgress(nextProgress);
+    progressRef.current = nextProgress;
+    if (canSeekForward) {
+      maxAllowedSecondsRef.current = Math.max(maxAllowedSecondsRef.current, boundedSeconds);
+    }
+  };
+
+  const handleSeekSliderChange = (event) => {
+    seekVideoTo(Number(event?.target?.value || 0));
+  };
+
+  const handleRewind10 = () => {
+    const current = Number(videoRef.current?.currentTime || currentSeconds || 0);
+    seekVideoTo(current - 10);
+  };
+
   const handleSeeking = () => {
     const video = videoRef.current;
-    if (!video || lesson?.allowFastForward) return;
+    if (!video || canSeekForward) return;
     const current = Math.max(0, Number(video.currentTime || 0));
     const allowed = maxAllowedSecondsRef.current + 0.75;
     if (current > allowed) {
-      video.currentTime = Math.max(0, maxAllowedSecondsRef.current);
-      const correctedProgress = Math.max(0, Math.min(100, (maxAllowedSecondsRef.current / Math.max(1, Number(video.duration || safeTotalSeconds || 0))) * 100));
+      const restoredSeconds = Math.max(0, maxAllowedSecondsRef.current);
+      video.currentTime = restoredSeconds;
+      setDisplayCurrentSeconds(restoredSeconds);
+      const correctedProgress = Math.max(0, Math.min(100, (restoredSeconds / Math.max(1, Number(video.duration || safeTotalSeconds || 0))) * 100));
       setProgress(correctedProgress);
       progressRef.current = correctedProgress;
-      const nowTs = Date.now();
-      if (nowTs - seekToastAtRef.current > 1500) {
-        seekToastAtRef.current = nowTs;
-        emitToast?.("Перемотка вперед недоступна", "error");
-      }
+      notifySeekBlocked();
     }
   };
 
@@ -1971,11 +2006,12 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
       if (ok) {
         setCompleted(true);
         setProgress(100);
+        setDisplayCurrentSeconds(safeTotalSeconds);
       }
     } finally {
       setCompleting(false);
     }
-  }, [completed, completing, onCompleteLesson, lesson, syncHeartbeatBeforeComplete]);
+  }, [completed, completing, onCompleteLesson, lesson, syncHeartbeatBeforeComplete, safeTotalSeconds]);
 
   useEffect(() => {
     if (completed || completing) return;
@@ -2018,7 +2054,7 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
               onPlay={handleVideoPlay}
               onPause={handleVideoPause}
             />
-            {!playing && !completed && (
+            {!playing && (
               <button
                 type="button"
                 onClick={togglePlayback}
@@ -2028,6 +2064,32 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
                 <Play size={26} className="ml-1" />
               </button>
             )}
+            <div className="absolute left-0 right-0 bottom-0 p-3 bg-gradient-to-t from-black/80 via-black/45 to-transparent" onClick={(event) => event.stopPropagation()}>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleRewind10}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-white/20 hover:bg-white/30 text-white text-[11px] font-semibold transition-colors"
+                >
+                  <ChevronLeft size={12} /> 10с
+                </button>
+                <input
+                  type="range"
+                  min={0}
+                  max={Math.max(1, Math.floor(safeTotalSeconds))}
+                  step={1}
+                  value={Math.max(0, Math.min(Math.floor(safeTotalSeconds), currentSeconds))}
+                  onChange={handleSeekSliderChange}
+                  className="flex-1 accent-indigo-500"
+                />
+                <div className="text-[11px] text-white/90 font-mono tabular-nums min-w-[92px] text-right">
+                  {formatVideoClock(currentSeconds)} / {formatVideoClock(safeTotalSeconds)}
+                </div>
+              </div>
+              {!canSeekForward && (
+                <p className="mt-1 text-[10px] text-white/70">Перемотка вперед станет доступна после завершения просмотра</p>
+              )}
+            </div>
           </>
         ) : (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-center px-4">
@@ -2122,7 +2184,7 @@ function ApiQuizSection({ quizView, setQuizView, answers, setAnswers, course, le
   const [attempt, setAttempt] = useState(null);
   const [questions, setQuestions] = useState([]);
   const [currentQ, setCurrentQ] = useState(0);
-  const [timeLeft, setTimeLeft] = useState(20 * 60);
+  const [timeLeft, setTimeLeft] = useState(Math.max(60, Number(lesson?.timeLimitSeconds || lesson?.durationSeconds || (Number(lesson?.timeLimitMinutes || 0) * 60) || 20 * 60)));
   const [textInput, setTextInput] = useState("");
   const [loadingStart, setLoadingStart] = useState(false);
   const [finishing, setFinishing] = useState(false);
@@ -2136,6 +2198,32 @@ function ApiQuizSection({ quizView, setQuizView, answers, setAnswers, course, le
   );
 
   const passThreshold = Number(result?.pass_threshold || attempt?.pass_threshold || lesson?.passingScore || course?.passingScore || 80);
+
+  const parseMinutesFromLabel = (label) => {
+    const match = String(label || "").match(/(\d+)/);
+    const parsed = Number(match?.[1] || 0);
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+
+  const resolveQuizTimeLimitSeconds = (attemptPayload = null) => {
+    const rawAttempt = attemptPayload || {};
+    const attemptSeconds = Math.max(0, Number(rawAttempt?.time_limit_seconds || 0));
+    if (attemptSeconds > 0) return attemptSeconds;
+
+    const attemptMinutes = Math.max(0, Number(rawAttempt?.time_limit_minutes || rawAttempt?.time_limit || 0));
+    if (attemptMinutes > 0) return attemptMinutes * 60;
+
+    const lessonSeconds = Math.max(0, Number(lesson?.timeLimitSeconds || lesson?.durationSeconds || 0));
+    if (lessonSeconds > 0) return lessonSeconds;
+
+    const lessonMinutes = Math.max(0, Number(lesson?.timeLimitMinutes || 0));
+    if (lessonMinutes > 0) return lessonMinutes * 60;
+
+    const labelMinutes = Math.max(0, parseMinutesFromLabel(lesson?.duration));
+    if (labelMinutes > 0) return labelMinutes * 60;
+
+    return 20 * 60;
+  };
 
   const normalizeQuestions = (items) => {
     if (!Array.isArray(items)) return [];
@@ -2152,10 +2240,11 @@ function ApiQuizSection({ quizView, setQuizView, answers, setAnswers, course, le
     }));
   };
 
-  const resetForRun = () => {
+  const resetForRun = (nextTimeLimitSeconds) => {
+    const resolvedTime = Math.max(60, Number(nextTimeLimitSeconds || resolveQuizTimeLimitSeconds(null)));
     setAnswers({});
     setCurrentQ(0);
-    setTimeLeft(20 * 60);
+    setTimeLeft(resolvedTime);
     setTextInput("");
     setAutoFinished(false);
   };
@@ -2165,10 +2254,12 @@ function ApiQuizSection({ quizView, setQuizView, answers, setAnswers, course, le
     setLoadingStart(true);
     try {
       const payload = await lmsRequest(`/api/lms/tests/${lesson.apiTestId}/start`, { method: "POST" });
-      setAttempt(payload?.attempt || null);
+      const startedAttempt = payload?.attempt || null;
+      const resolvedTimeLimitSeconds = resolveQuizTimeLimitSeconds(startedAttempt);
+      setAttempt(startedAttempt);
       setQuestions(normalizeQuestions(payload?.questions));
       setResult(null);
-      resetForRun();
+      resetForRun(resolvedTimeLimitSeconds);
       setQuizView("active");
     } catch (error) {
       emitToast?.(`Не удалось начать тест: ${String(error?.message || "ошибка")}`, "error");
@@ -2177,22 +2268,35 @@ function ApiQuizSection({ quizView, setQuizView, answers, setAnswers, course, le
     }
   };
 
-  const saveAnswer = useCallback(async (question, value) => {
-    if (!attempt?.id || !question?.id) return;
-    try {
-      await lmsRequest(`/api/lms/tests/attempts/${attempt.id}/answer`, {
-        method: "PATCH",
-        body: { question_id: question.id, answer_payload: buildAnswerPayloadForApi(question, value) },
-      });
-    } catch (_) {
-      // non-blocking autosave
-    }
-  }, [attempt?.id, lmsRequest]);
+  const submitAnswersBeforeFinish = useCallback(async () => {
+    if (!attempt?.id || !Array.isArray(questions) || questions.length === 0) return;
+    const requests = questions
+      .map((question) => {
+        const userAnswer = answers[question.id];
+        const hasAnswer = question.type === "multiple"
+          ? Array.isArray(userAnswer) && userAnswer.length > 0
+          : question.type === "text"
+            ? Boolean(String(userAnswer || "").trim())
+            : userAnswer !== undefined && userAnswer !== null && userAnswer !== "";
+        if (!hasAnswer) return null;
+        return lmsRequest(`/api/lms/tests/attempts/${attempt.id}/answer`, {
+          method: "PATCH",
+          body: {
+            question_id: question.id,
+            answer_payload: buildAnswerPayloadForApi(question, userAnswer),
+          },
+        });
+      })
+      .filter(Boolean);
+    if (requests.length === 0) return;
+    await Promise.all(requests);
+  }, [attempt?.id, questions, answers, lmsRequest]);
 
   const finishApiQuiz = useCallback(async (auto = false) => {
     if (!attempt?.id || finishing) return;
     setFinishing(true);
     try {
+      await submitAnswersBeforeFinish();
       const payload = await lmsRequest(`/api/lms/tests/attempts/${attempt.id}/finish`, { method: "POST" });
       const finish = payload?.result || {};
       const breakdown = Array.isArray(finish?.breakdown) ? finish.breakdown : [];
@@ -2220,7 +2324,7 @@ function ApiQuizSection({ quizView, setQuizView, answers, setAnswers, course, le
     } finally {
       setFinishing(false);
     }
-  }, [attempt?.id, attempt?.pass_threshold, finishing, lmsRequest, questions, answers, setQuizView, onFinished, emitToast]);
+  }, [attempt?.id, attempt?.pass_threshold, finishing, lmsRequest, questions, answers, setQuizView, onFinished, emitToast, submitAnswersBeforeFinish]);
 
   useEffect(() => {
     if (quizView !== "active") return;
@@ -2330,7 +2434,7 @@ function ApiQuizSection({ quizView, setQuizView, answers, setAnswers, course, le
         {(q.type === "single" || q.type === "bool") && (
           <div className="space-y-3">
             {q.options.map((opt) => (
-              <button key={opt.id} onClick={() => { setAnswers((prev) => ({ ...prev, [q.id]: opt.id })); void saveAnswer(q, opt.id); }} className={`w-full text-left flex items-center gap-4 px-5 py-4 rounded-xl border-2 transition-all text-sm ${answers[q.id] === opt.id ? "border-indigo-500 bg-indigo-50 text-indigo-800" : "border-slate-200 hover:border-indigo-200 hover:bg-indigo-50/50 text-slate-700"}`}>
+              <button key={opt.id} onClick={() => { setAnswers((prev) => ({ ...prev, [q.id]: opt.id })); }} className={`w-full text-left flex items-center gap-4 px-5 py-4 rounded-xl border-2 transition-all text-sm ${answers[q.id] === opt.id ? "border-indigo-500 bg-indigo-50 text-indigo-800" : "border-slate-200 hover:border-indigo-200 hover:bg-indigo-50/50 text-slate-700"}`}>
                 <span className="font-medium">{opt.text}</span>
               </button>
             ))}
@@ -2341,7 +2445,7 @@ function ApiQuizSection({ quizView, setQuizView, answers, setAnswers, course, le
             {q.options.map((opt) => {
               const selected = Array.isArray(answers[q.id]) && answers[q.id].includes(opt.id);
               return (
-                <button key={opt.id} onClick={() => { setAnswers((prev) => { const oldValue = Array.isArray(prev[q.id]) ? prev[q.id] : []; const nextValue = oldValue.includes(opt.id) ? oldValue.filter((id) => id !== opt.id) : [...oldValue, opt.id]; void saveAnswer(q, nextValue); return { ...prev, [q.id]: nextValue }; }); }} className={`w-full text-left flex items-center gap-4 px-5 py-4 rounded-xl border-2 transition-all text-sm ${selected ? "border-indigo-500 bg-indigo-50 text-indigo-800" : "border-slate-200 hover:border-indigo-200 hover:bg-indigo-50/50 text-slate-700"}`}>
+                <button key={opt.id} onClick={() => { setAnswers((prev) => { const oldValue = Array.isArray(prev[q.id]) ? prev[q.id] : []; const nextValue = oldValue.includes(opt.id) ? oldValue.filter((id) => id !== opt.id) : [...oldValue, opt.id]; return { ...prev, [q.id]: nextValue }; }); }} className={`w-full text-left flex items-center gap-4 px-5 py-4 rounded-xl border-2 transition-all text-sm ${selected ? "border-indigo-500 bg-indigo-50 text-indigo-800" : "border-slate-200 hover:border-indigo-200 hover:bg-indigo-50/50 text-slate-700"}`}>
                   <span className="font-medium">{opt.text}</span>
                 </button>
               );
@@ -2349,7 +2453,7 @@ function ApiQuizSection({ quizView, setQuizView, answers, setAnswers, course, le
           </div>
         )}
         {q.type === "text" && (
-          <input value={textInput} onChange={(e) => { setTextInput(e.target.value); setAnswers((prev) => ({ ...prev, [q.id]: e.target.value })); void saveAnswer(q, e.target.value); }} placeholder="Ваш ответ..." className="w-full px-4 py-3 bg-slate-50 border-2 border-slate-200 rounded-xl text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:border-indigo-400 transition-all" />
+          <input value={textInput} onChange={(e) => { setTextInput(e.target.value); setAnswers((prev) => ({ ...prev, [q.id]: e.target.value })); }} placeholder="Ваш ответ..." className="w-full px-4 py-3 bg-slate-50 border-2 border-slate-200 rounded-xl text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:border-indigo-400 transition-all" />
         )}
       </div>
 
