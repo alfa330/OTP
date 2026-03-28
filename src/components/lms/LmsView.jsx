@@ -227,7 +227,12 @@ const COURSE_COVERS = ["📘", "🚀", "💬", "📊", "📈", "🛡️", "🎯"
 
 const TEXT_MATERIAL_TYPES = new Set(["text", "pdf", "link"]);
 
-const normalizeLmsRole = (value) => String(value || "").trim().toLowerCase();
+const normalizeLmsRole = (value) => {
+  const role = String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (role === "superadmin") return "super_admin";
+  if (role === "supervisor") return "sv";
+  return role;
+};
 
 const mapAssignmentStatusToUi = (assignmentStatus, deadlineStatus) => {
   const status = String(assignmentStatus || "").trim().toLowerCase();
@@ -258,8 +263,12 @@ const formatDurationLabel = (seconds) => {
 };
 
 const inferLessonType = (lessonLike) => {
+  const explicit = String(lessonLike?.lesson_type || lessonLike?.type || "").trim().toLowerCase();
+  if (explicit === "quiz") return "quiz";
+  if (explicit === "text") return "text";
+  if (explicit === "video") return "video";
   const materials = Array.isArray(lessonLike?.materials) ? lessonLike.materials : [];
-  if (!materials.length) return "video";
+  if (!materials.length) return "text";
   if (materials.some((m) => String(m?.material_type || "").toLowerCase() === "video")) return "video";
   if (materials.every((m) => TEXT_MATERIAL_TYPES.has(String(m?.material_type || "").toLowerCase()))) return "text";
   return "video";
@@ -287,6 +296,10 @@ const mapHomeCourseToView = (course) => {
   const totalLessons = Math.max(0, Number(course?.total_lessons || 0));
   const completedLessons = Math.max(0, Number(course?.completed_lessons || 0));
   const progress = Math.max(0, Math.min(100, Math.round(Number(course?.progress_percent || 0))));
+  const coverUrl = String(course?.cover_url || "").trim();
+  const skills = Array.isArray(course?.skills)
+    ? course.skills.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
   return {
     id: courseId,
     assignmentId: Number(course?.assignment_id || 0) || null,
@@ -294,9 +307,10 @@ const mapHomeCourseToView = (course) => {
     title: String(course?.title || "Без названия"),
     category: String(course?.category || "Без категории"),
     cover: visual.cover,
+    coverUrl,
     color: visual.color,
     description: String(course?.description || ""),
-    skills: [],
+    skills,
     duration: formatDurationLabel(totalLessons * 15 * 60),
     lessons: totalLessons,
     modules: 0,
@@ -325,6 +339,10 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
   const testProgress = assignment?.tests || {};
   const modulesRaw = Array.isArray(coursePayload?.modules) ? coursePayload.modules : [];
   const testsRaw = Array.isArray(coursePayload?.tests) ? coursePayload.tests : [];
+  const versionCoverUrl = String(coursePayload?.course_version?.cover_url || "").trim();
+  const versionSkills = Array.isArray(coursePayload?.course_version?.skills)
+    ? coursePayload.course_version.skills.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
   const testsByModule = new Map();
   testsRaw.forEach((test) => {
     const key = test?.module_id == null ? "__course__" : String(test.module_id);
@@ -475,9 +493,10 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
     title: String(coursePayload?.title || fallbackCourse?.title || "Без названия"),
     category: String(coursePayload?.category || fallbackCourse?.category || "Без категории"),
     cover: visual.cover,
+    coverUrl: versionCoverUrl || String(fallbackCourse?.coverUrl || "").trim(),
     color: visual.color,
     description: String(coursePayload?.description || fallbackCourse?.description || ""),
-    skills: Array.isArray(fallbackCourse?.skills) ? fallbackCourse.skills : [],
+    skills: versionSkills.length ? versionSkills : (Array.isArray(fallbackCourse?.skills) ? fallbackCourse.skills : []),
     duration: formatDurationLabel(durationSeconds),
     lessons: lessonsCountWithTests,
     modules: modulesData.length,
@@ -494,6 +513,33 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
     tests: testsRaw,
     assignment,
   };
+};
+
+const flattenCourseLessons = (courseLike) => {
+  const modules = Array.isArray(courseLike?.modules_data) ? courseLike.modules_data : [];
+  const lessons = [];
+  modules.forEach((moduleItem) => {
+    const moduleLessons = Array.isArray(moduleItem?.lessons) ? moduleItem.lessons : [];
+    moduleLessons.forEach((lessonItem) => lessons.push(lessonItem));
+  });
+  return lessons;
+};
+
+const findNextUnlockedLesson = (courseLike, currentLessonId) => {
+  const lessons = flattenCourseLessons(courseLike);
+  const currentIndex = lessons.findIndex((lessonItem) => String(lessonItem?.id) === String(currentLessonId));
+  if (currentIndex < 0) return null;
+
+  for (let idx = currentIndex + 1; idx < lessons.length; idx += 1) {
+    const candidate = lessons[idx];
+    const status = String(candidate?.status || "").toLowerCase();
+    if (candidate && !candidate.locked && status !== "completed") return candidate;
+  }
+  for (let idx = currentIndex + 1; idx < lessons.length; idx += 1) {
+    const candidate = lessons[idx];
+    if (candidate && !candidate.locked) return candidate;
+  }
+  return null;
 };
 
 const mapApiQuestionTypeToView = (apiType) => {
@@ -865,14 +911,24 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
       await lmsRequest(`/api/lms/lessons/${lesson.apiLessonId}/complete`, { method: "POST" });
       emitToast("Урок отмечен как завершенный", "success");
       setSelectedLesson((prev) => (prev ? { ...prev, status: "completed", completionRatio: 100 } : prev));
-      await refreshSelectedCourse();
+      const refreshedCourse = await refreshSelectedCourse();
       await loadLearnerDashboard();
+      if (refreshedCourse) {
+        const refreshedCurrentLesson = flattenCourseLessons(refreshedCourse).find((item) => String(item?.id) === String(lesson.id));
+        if (refreshedCurrentLesson) {
+          setSelectedLesson(refreshedCurrentLesson);
+        }
+        const nextLesson = findNextUnlockedLesson(refreshedCourse, lesson.id);
+        if (nextLesson && String(nextLesson.id) !== String(lesson.id)) {
+          await openLesson(nextLesson);
+        }
+      }
       return true;
     } catch (error) {
       emitToast(`Не удалось завершить урок: ${String(error?.message || "ошибка")}`, "error");
       return false;
     }
-  }, [apiRoot, canUseLearnerApi, lmsRequest, emitToast, refreshSelectedCourse, loadLearnerDashboard]);
+  }, [apiRoot, canUseLearnerApi, lmsRequest, emitToast, refreshSelectedCourse, loadLearnerDashboard, openLesson]);
 
   const handleQuizFinished = useCallback(async () => {
     try {
@@ -1230,16 +1286,21 @@ function CourseCard({ course, onClick, busy = false }) {
 
   return (
     <div onClick={() => !busy && onClick?.()} className={`bg-white rounded-2xl border border-slate-200 overflow-hidden transition-all group ${busy ? "opacity-70 cursor-wait" : "cursor-pointer hover:shadow-md hover:border-slate-300"}`}>
-      <div className={`h-32 bg-gradient-to-br ${course.color} flex items-center justify-center relative`}>
-        <span className="text-5xl">{course.cover}</span>
+      <div className={`h-32 bg-gradient-to-br ${course.color} flex items-center justify-center relative overflow-hidden`}>
+        {course.coverUrl ? (
+          <img src={course.coverUrl} alt={course.title} className="absolute inset-0 w-full h-full object-cover" />
+        ) : (
+          <span className="text-5xl">{course.cover}</span>
+        )}
+        <div className="absolute inset-0 bg-black/10" />
         {course.mandatory && (
-          <div className="absolute top-3 left-3 bg-white/20 backdrop-blur-sm text-white text-[10px] font-semibold px-2 py-1 rounded-full border border-white/30">Обязательный</div>
+          <div className="absolute top-3 left-3 bg-white/20 backdrop-blur-sm text-white text-[10px] font-semibold px-2 py-1 rounded-full border border-white/30 z-10">Обязательный</div>
         )}
         {course.status === "completed" && (
-          <div className="absolute top-3 right-3 w-8 h-8 bg-white rounded-full flex items-center justify-center shadow-md"><CheckCircle size={16} className="text-emerald-600" /></div>
+          <div className="absolute top-3 right-3 w-8 h-8 bg-white rounded-full flex items-center justify-center shadow-md z-10"><CheckCircle size={16} className="text-emerald-600" /></div>
         )}
         {course.status === "overdue" && (
-          <div className="absolute top-3 right-3 w-8 h-8 bg-red-500 rounded-full flex items-center justify-center shadow-md"><AlertCircle size={16} className="text-white" /></div>
+          <div className="absolute top-3 right-3 w-8 h-8 bg-red-500 rounded-full flex items-center justify-center shadow-md z-10"><AlertCircle size={16} className="text-white" /></div>
         )}
       </div>
       <div className="p-5">
@@ -1288,7 +1349,13 @@ function CourseListItem({ course, onClick, busy = false }) {
   const st = statusConfig[course.status] || statusConfig.not_started;
   return (
     <div onClick={() => !busy && onClick?.()} className={`bg-white rounded-2xl border border-slate-200 p-5 flex items-center gap-5 transition-all group ${busy ? "opacity-70 cursor-wait" : "cursor-pointer hover:shadow-sm hover:border-slate-300"}`}>
-      <div className={`w-14 h-14 rounded-xl bg-gradient-to-br ${course.color} flex items-center justify-center text-2xl flex-shrink-0`}>{course.cover}</div>
+      <div className={`w-14 h-14 rounded-xl bg-gradient-to-br ${course.color} flex items-center justify-center text-2xl flex-shrink-0 overflow-hidden`}>
+        {course.coverUrl ? (
+          <img src={course.coverUrl} alt={course.title} className="w-full h-full object-cover" />
+        ) : (
+          course.cover
+        )}
+      </div>
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 mb-1">
           <span className="text-[10px] font-semibold text-indigo-600 uppercase tracking-wider">{course.category}</span>
@@ -1331,7 +1398,11 @@ function CourseDetail({ course, onStartLesson }) {
   return (
     <div className="max-w-screen-xl mx-auto px-6 py-8">
       <div className={`rounded-3xl bg-gradient-to-br ${course.color} p-8 mb-8 relative overflow-hidden`}>
-        <div className="absolute right-8 top-8 text-8xl opacity-20">{course.cover}</div>
+        {course.coverUrl ? (
+          <img src={course.coverUrl} alt={course.title} className="absolute inset-0 w-full h-full object-cover opacity-30" />
+        ) : (
+          <div className="absolute right-8 top-8 text-8xl opacity-20">{course.cover}</div>
+        )}
         <div className="relative z-10 max-w-2xl">
           <div className="flex items-center gap-2 mb-4">
             <span className="text-xs font-semibold text-white/70 uppercase tracking-wider">{course.category}</span>
@@ -1363,6 +1434,7 @@ function CourseDetail({ course, onStartLesson }) {
             <h2 className="text-base font-semibold text-slate-900 mb-4">Приобретаемые навыки</h2>
             <div className="flex flex-wrap gap-2">
               {course.skills.map(s => <span key={s} className="text-xs font-medium bg-indigo-50 text-indigo-700 border border-indigo-100 px-3 py-1.5 rounded-full">{s}</span>)}
+              {course.skills.length === 0 && <span className="text-xs text-slate-400">Навыки не добавлены</span>}
             </div>
           </div>
 
@@ -1460,6 +1532,7 @@ function LessonView({
   emitToast,
 }) {
   const isQuiz = lesson.type === "quiz";
+  const isTextLesson = lesson.type === "text";
 
   return (
     <div className="flex h-[calc(100vh-64px)]">
@@ -1549,6 +1622,11 @@ function LessonView({
                 course={course}
               />
             )
+          ) : isTextLesson ? (
+            <TextLesson
+              lesson={lesson}
+              onCompleteLesson={onCompleteLesson}
+            />
           ) : (
             <VideoLesson
               lesson={lesson}
@@ -1560,6 +1638,104 @@ function LessonView({
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+function TextLesson({ lesson, onCompleteLesson }) {
+  const [completing, setCompleting] = useState(false);
+  const [completed, setCompleted] = useState(String(lesson?.status || "").toLowerCase() === "completed");
+  const materials = Array.isArray(lesson?.materials) ? lesson.materials : [];
+  const transcriptMaterial = materials.find((item) => String(item?.material_type || "").toLowerCase() === "text" && item?.content_text);
+  const content = String(transcriptMaterial?.content_text || lesson?.description || "").trim();
+  const lessonFiles = materials.filter((item) => {
+    const type = String(item?.material_type || "").toLowerCase();
+    if (type === "text") return false;
+    return Boolean(item?.url || item?.signed_url || item?.content_url);
+  });
+
+  useEffect(() => {
+    setCompleted(String(lesson?.status || "").toLowerCase() === "completed");
+  }, [lesson?.id, lesson?.status]);
+
+  const handleComplete = async () => {
+    if (completed || completing) return;
+    if (typeof onCompleteLesson !== "function") return;
+    setCompleting(true);
+    try {
+      const ok = await onCompleteLesson(lesson);
+      if (ok) setCompleted(true);
+    } finally {
+      setCompleting(false);
+    }
+  };
+
+  const handleOpenMaterial = (material) => {
+    const url = material?.url || material?.signed_url || material?.content_url;
+    if (!url) return;
+    window.open(url, "_blank", "noopener,noreferrer");
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="bg-white rounded-2xl border border-slate-200 p-6">
+        <h3 className="text-sm font-semibold text-slate-900 mb-3">Материал урока</h3>
+        {content ? (
+          <div className="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap">{content}</div>
+        ) : (
+          <div className="text-xs text-slate-400">Текст урока не заполнен</div>
+        )}
+      </div>
+
+      <div className="bg-white rounded-2xl border border-slate-200 p-5">
+        <h3 className="text-sm font-semibold text-slate-900 mb-3">Дополнительные материалы</h3>
+        <div className="space-y-2">
+          {lessonFiles.length === 0 && (
+            <div className="text-xs text-slate-400">Материалы не добавлены</div>
+          )}
+          {lessonFiles.map((material, idx) => {
+            const name = String(material?.title || `Материал ${idx + 1}`);
+            const metaName = String(material?.metadata?.uploaded_file_name || "");
+            const label = metaName || name;
+            const size = material?.mime_type ? String(material.mime_type) : "Файл";
+            return (
+              <button
+                key={`${material?.id || idx}-${label}`}
+                type="button"
+                onClick={() => handleOpenMaterial(material)}
+                className="w-full flex items-center gap-3 p-3 bg-slate-50 rounded-xl hover:bg-slate-100 transition-colors"
+              >
+                <div className="w-9 h-9 bg-indigo-100 rounded-lg flex items-center justify-center">
+                  <FileCheck size={16} className="text-indigo-600" />
+                </div>
+                <div className="flex-1 text-left">
+                  <p className="text-xs font-medium text-slate-800">{label}</p>
+                  <p className="text-[10px] text-slate-400">{size}</p>
+                </div>
+                <Download size={14} className="text-slate-400" />
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {!completed && (
+        <div className="flex justify-end">
+          <button
+            onClick={handleComplete}
+            disabled={completing}
+            className="inline-flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-semibold px-4 py-2.5 rounded-xl transition-colors"
+          >
+            {completing ? <RefreshCw size={14} className="animate-spin" /> : <CheckCircle size={14} />}
+            {completing ? "Сохранение..." : "Отметить как завершенный"}
+          </button>
+        </div>
+      )}
+      {completed && (
+        <div className="flex items-center gap-1.5 text-xs text-emerald-700 bg-emerald-50 px-3 py-2 rounded-xl font-semibold w-fit">
+          <CheckCircle size={12} /> Урок завершён
+        </div>
+      )}
     </div>
   );
 }
@@ -1577,8 +1753,10 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
   const heartbeatRef = useRef(null);
   const progressRef = useRef(progress);
   const visibleRef = useRef(typeof document !== "undefined" ? !document.hidden : true);
+  const autoCompleteTriggeredRef = useRef(false);
 
   const totalSeconds = Math.max(60, Number(lesson?.durationSeconds || 18 * 60));
+  const completionThreshold = Math.max(1, Math.min(100, Number(lesson?.completionThreshold || 95)));
   const currentSeconds = Math.floor((progress * totalSeconds) / 100);
   const materials = Array.isArray(lesson?.materials) ? lesson.materials : [];
   const transcriptMaterial = materials.find((item) => String(item?.material_type || "").toLowerCase() === "text" && item?.content_text);
@@ -1590,6 +1768,7 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
     setProgress(next);
     setCompleted(String(lesson?.status || "").toLowerCase() === "completed");
     setPlaying(false);
+    autoCompleteTriggeredRef.current = false;
   }, [lesson?.id, lesson?.apiLessonId, lesson?.completionRatio, lesson?.status]);
 
   useEffect(() => {
@@ -1678,11 +1857,31 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
     return () => clearInterval(heartbeatRef.current);
   }, [playing, apiMode, lmsRequest, lesson?.apiLessonId, totalSeconds]);
 
-  const handleComplete = async () => {
+  const syncHeartbeatBeforeComplete = useCallback(async () => {
+    const canHeartbeat = apiMode && typeof lmsRequest === "function" && Number(lesson?.apiLessonId) > 0;
+    if (!canHeartbeat) return;
+    const lessonId = Number(lesson?.apiLessonId || 0);
+    const positionSeconds = Math.floor((progressRef.current * totalSeconds) / 100);
+    await lmsRequest(`/api/lms/lessons/${lessonId}/heartbeat`, {
+      method: "POST",
+      body: {
+        position_seconds: positionSeconds,
+        tab_visible: visibleRef.current,
+        client_ts: new Date().toISOString(),
+      },
+    });
+  }, [apiMode, lmsRequest, lesson?.apiLessonId, totalSeconds]);
+
+  const handleComplete = useCallback(async () => {
     if (completed || completing) return;
     if (typeof onCompleteLesson !== "function") return;
     setCompleting(true);
     try {
+      try {
+        await syncHeartbeatBeforeComplete();
+      } catch (_) {
+        // no-op, complete endpoint still performs final validation
+      }
       const ok = await onCompleteLesson(lesson);
       if (ok) {
         setCompleted(true);
@@ -1691,7 +1890,15 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
     } finally {
       setCompleting(false);
     }
-  };
+  }, [completed, completing, onCompleteLesson, lesson, syncHeartbeatBeforeComplete]);
+
+  useEffect(() => {
+    if (completed || completing) return;
+    if (progress < completionThreshold) return;
+    if (autoCompleteTriggeredRef.current) return;
+    autoCompleteTriggeredRef.current = true;
+    handleComplete();
+  }, [progress, completionThreshold, completed, completing, handleComplete]);
 
   const handleOpenMaterial = (material) => {
     const url = material?.url || material?.signed_url || material?.content_url;
@@ -1741,7 +1948,7 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
         <div className="mb-6 flex justify-end">
           <button
             onClick={handleComplete}
-            disabled={completing || progress < 95}
+            disabled={completing || progress < completionThreshold}
             className="inline-flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-semibold px-4 py-2.5 rounded-xl transition-colors"
           >
             {completing ? <RefreshCw size={14} className="animate-spin" /> : <CheckCircle size={14} />}
@@ -2482,18 +2689,52 @@ function NotificationsView({ notifications = [], onRead }) {
 // ─── COURSE BUILDER ───────────────────────────────────────────────────────────
 
 function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], adminCourses = [], emitToast, onAfterSave }) {
+  const buildLesson = useCallback((overrides = {}) => ({
+    id: Date.now() + Math.floor(Math.random() * 1000),
+    title: "Новый урок",
+    type: "video",
+    description: "",
+    durationSeconds: 15 * 60,
+    completionThreshold: 95,
+    contentText: "",
+    materials: [],
+    ...overrides,
+  }), []);
+
   const [tab, setTab] = useState("settings");
   const [modules, setModules] = useState([
-    { id: 1, title: "Модуль 1: Введение", expanded: true, lessons: [
-      { id: 1, title: "Вводный урок", type: "video" },
-      { id: 2, title: "Основные концепции", type: "text" },
-    ]},
+    {
+      id: 1,
+      title: "Модуль 1: Введение",
+      expanded: true,
+      lessons: [
+        buildLesson({ id: 1, title: "Вводный урок", type: "video" }),
+        buildLesson({ id: 2, title: "Основные концепции", type: "text", durationSeconds: 8 * 60 }),
+      ],
+    },
   ]);
   const [questions, setQuestions] = useState([
     { id: 1, text: "Вопрос 1", type: "single", options: ["Ответ A", "Ответ B", "Ответ C", "Ответ D"], correct: 0, explanation: "" },
   ]);
-  const [settings, setSettings] = useState({ title: "", description: "", category: "Безопасность", mandatory: false, passingScore: 80, maxAttempts: 3, deadline: "", questionsPerTest: 5, randomOrder: true, showExplanations: true });
-  const [selectedLesson, setSelectedLesson] = useState(null);
+  const [settings, setSettings] = useState({
+    title: "",
+    description: "",
+    category: "Безопасность",
+    mandatory: false,
+    passingScore: 80,
+    maxAttempts: 3,
+    deadline: "",
+    questionsPerTest: 5,
+    randomOrder: true,
+    showExplanations: true,
+    coverUrl: "",
+    coverBucket: "",
+    coverBlobPath: "",
+    skills: [],
+  });
+  const [newSkill, setNewSkill] = useState("");
+  const [lessonMaterialLink, setLessonMaterialLink] = useState("");
+  const [selectedLessonId, setSelectedLessonId] = useState(null);
   const [saved, setSaved] = useState(false);
   const [saving, setSaving] = useState(false);
   const [createdCourseId, setCreatedCourseId] = useState(null);
@@ -2502,14 +2743,45 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
   const [assignmentSearch, setAssignmentSearch] = useState("");
   const [assignmentDueAt, setAssignmentDueAt] = useState("");
   const [assignmentCourseId, setAssignmentCourseId] = useState(null);
+  const [coverUploading, setCoverUploading] = useState(false);
+  const [lessonUploading, setLessonUploading] = useState(false);
+  const coverInputRef = useRef(null);
+  const lessonVideoInputRef = useRef(null);
+  const lessonMaterialInputRef = useRef(null);
 
-  const addModule = () => setModules(p => [...p, { id: Date.now(), title: `Модуль ${p.length + 1}`, expanded: true, lessons: [] }]);
-  const toggleModule = (id) => setModules(p => p.map(m => m.id === id ? { ...m, expanded: !m.expanded } : m));
-  const addLesson = (modId) => setModules(p => p.map(m => m.id === modId ? { ...m, lessons: [...m.lessons, { id: Date.now(), title: "Новый урок", type: "video" }] } : m));
-  const deleteLesson = (modId, lId) => setModules(p => p.map(m => m.id === modId ? { ...m, lessons: m.lessons.filter(l => l.id !== lId) } : m));
-  const deleteModule = (id) => setModules(p => p.filter(m => m.id !== id));
+  const updateLessonById = useCallback((lessonId, updater) => {
+    setModules((prev) => prev.map((moduleItem) => ({
+      ...moduleItem,
+      lessons: (Array.isArray(moduleItem?.lessons) ? moduleItem.lessons : []).map((lessonItem) => {
+        if (lessonItem.id !== lessonId) return lessonItem;
+        const nextLesson = typeof updater === "function" ? updater(lessonItem) : { ...lessonItem, ...(updater || {}) };
+        return {
+          ...lessonItem,
+          ...nextLesson,
+          materials: Array.isArray(nextLesson?.materials) ? nextLesson.materials : (Array.isArray(lessonItem?.materials) ? lessonItem.materials : []),
+        };
+      }),
+    })));
+  }, []);
 
-  const addQuestion = (type = "single") => setQuestions(p => [...p, {
+  const selectedLessonModel = (() => {
+    for (const moduleItem of modules) {
+      const found = (Array.isArray(moduleItem?.lessons) ? moduleItem.lessons : []).find((lessonItem) => lessonItem.id === selectedLessonId);
+      if (found) return found;
+    }
+    return null;
+  })();
+
+  const addModule = () => setModules((prev) => [...prev, { id: Date.now(), title: `Модуль ${prev.length + 1}`, expanded: true, lessons: [] }]);
+  const toggleModule = (id) => setModules((prev) => prev.map((moduleItem) => moduleItem.id === id ? { ...moduleItem, expanded: !moduleItem.expanded } : moduleItem));
+  const addLesson = (modId) => setModules((prev) => prev.map((moduleItem) => moduleItem.id === modId ? { ...moduleItem, lessons: [...moduleItem.lessons, buildLesson()] } : moduleItem));
+  const deleteLesson = (modId, lessonId) => {
+    setModules((prev) => prev.map((moduleItem) => moduleItem.id === modId ? { ...moduleItem, lessons: moduleItem.lessons.filter((lessonItem) => lessonItem.id !== lessonId) } : moduleItem));
+    setSelectedLessonId((prev) => (prev === lessonId ? null : prev));
+  };
+  const deleteModule = (id) => setModules((prev) => prev.filter((moduleItem) => moduleItem.id !== id));
+
+  const addQuestion = (type = "single") => setQuestions((prev) => [...prev, {
     id: Date.now(), text: "", type,
     options: type === "bool" ? ["Верно", "Неверно"] : type === "text" ? [] : ["", "", "", ""],
     correct: type === "multiple" ? [] : 0,
@@ -2518,12 +2790,166 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
   }]);
 
   const updateQuestionType = (qId, newType) => {
-    setQuestions(p => p.map(q => q.id === qId ? {
-      ...q, type: newType,
-      options: newType === "bool" ? ["Верно", "Неверно"] : newType === "text" ? [] : q.options.length >= 2 ? q.options : ["", "", "", ""],
+    setQuestions((prev) => prev.map((question) => question.id === qId ? {
+      ...question,
+      type: newType,
+      options: newType === "bool" ? ["Верно", "Неверно"] : newType === "text" ? [] : question.options.length >= 2 ? question.options : ["", "", "", ""],
       correct: newType === "multiple" ? [] : 0,
-      correct_text_answers: newType === "text" ? (Array.isArray(q.correct_text_answers) ? q.correct_text_answers : []) : [],
-    } : q));
+      correct_text_answers: newType === "text" ? (Array.isArray(question.correct_text_answers) ? question.correct_text_answers : []) : [],
+    } : question));
+  };
+
+  const removeSkill = (skillToRemove) => {
+    setSettings((prev) => ({ ...prev, skills: (prev.skills || []).filter((skill) => skill !== skillToRemove) }));
+  };
+
+  const addSkill = () => {
+    const nextSkill = String(newSkill || "").trim();
+    if (!nextSkill) return;
+    setSettings((prev) => {
+      const nextSkills = Array.isArray(prev.skills) ? [...prev.skills] : [];
+      if (!nextSkills.includes(nextSkill)) nextSkills.push(nextSkill);
+      return { ...prev, skills: nextSkills.slice(0, 30) };
+    });
+    setNewSkill("");
+  };
+
+  const uploadSingleMaterial = useCallback(async (file, materialType = "file") => {
+    if (typeof lmsRequest !== "function") {
+      throw new Error("LMS API не подключен");
+    }
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("material_type", materialType);
+    formData.append("title", file?.name || "Материал");
+    const payload = await lmsRequest("/api/lms/admin/materials/upload", {
+      method: "POST",
+      body: formData,
+    });
+    const first = Array.isArray(payload?.uploaded) ? payload.uploaded[0] : null;
+    if (!first) throw new Error("Файл не загрузился");
+    return first;
+  }, [lmsRequest]);
+
+  const handleCoverFileChange = async (event) => {
+    const file = event?.target?.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setCoverUploading(true);
+    try {
+      const uploaded = await uploadSingleMaterial(file, "file");
+      setSettings((prev) => ({
+        ...prev,
+        coverUrl: uploaded.signed_url || "",
+        coverBucket: uploaded.bucket || "",
+        coverBlobPath: uploaded.blob_path || "",
+      }));
+      emitToast?.("Обложка загружена", "success");
+    } catch (error) {
+      emitToast?.(`Не удалось загрузить обложку: ${String(error?.message || "ошибка")}`, "error");
+    } finally {
+      setCoverUploading(false);
+    }
+  };
+
+  const handleLessonVideoUpload = async (event) => {
+    const file = event?.target?.files?.[0];
+    event.target.value = "";
+    if (!file || !selectedLessonModel) return;
+    setLessonUploading(true);
+    try {
+      const uploaded = await uploadSingleMaterial(file, "video");
+      updateLessonById(selectedLessonModel.id, (prev) => {
+        const base = Array.isArray(prev?.materials) ? prev.materials.filter((item) => String(item?.material_type || item?.type || "").toLowerCase() !== "video") : [];
+        return {
+          ...prev,
+          type: "video",
+          materials: [
+            ...base,
+            {
+              title: file.name || "Видео",
+              type: "video",
+              material_type: "video",
+              content_url: uploaded.signed_url || "",
+              signed_url: uploaded.signed_url || "",
+              mime_type: uploaded.content_type || file.type || "video/mp4",
+              bucket: uploaded.bucket || "",
+              blob_path: uploaded.blob_path || "",
+              metadata: { uploaded_file_name: uploaded.file_name || file.name || "video" },
+            },
+          ],
+        };
+      });
+      emitToast?.("Видео прикреплено", "success");
+    } catch (error) {
+      emitToast?.(`Не удалось прикрепить видео: ${String(error?.message || "ошибка")}`, "error");
+    } finally {
+      setLessonUploading(false);
+    }
+  };
+
+  const handleLessonMaterialUpload = async (event) => {
+    const files = Array.from(event?.target?.files || []);
+    event.target.value = "";
+    if (!files.length || !selectedLessonModel) return;
+    setLessonUploading(true);
+    try {
+      const uploadedItems = [];
+      for (const file of files) {
+        const materialType = String(file?.type || "").toLowerCase().includes("pdf") ? "pdf" : "file";
+        const uploaded = await uploadSingleMaterial(file, materialType);
+        uploadedItems.push({
+          title: file.name || "Материал",
+          type: materialType,
+          material_type: materialType,
+          content_url: uploaded.signed_url || "",
+          signed_url: uploaded.signed_url || "",
+          mime_type: uploaded.content_type || file.type || "application/octet-stream",
+          bucket: uploaded.bucket || "",
+          blob_path: uploaded.blob_path || "",
+          metadata: { uploaded_file_name: uploaded.file_name || file.name || "file" },
+        });
+      }
+      updateLessonById(selectedLessonModel.id, (prev) => ({
+        ...prev,
+        materials: [...(Array.isArray(prev?.materials) ? prev.materials : []), ...uploadedItems],
+      }));
+      emitToast?.("Материалы прикреплены", "success");
+    } catch (error) {
+      emitToast?.(`Не удалось прикрепить материалы: ${String(error?.message || "ошибка")}`, "error");
+    } finally {
+      setLessonUploading(false);
+    }
+  };
+
+  const handleAddMaterialLink = () => {
+    if (!selectedLessonModel) return;
+    const link = String(lessonMaterialLink || "").trim();
+    if (!link) return;
+    updateLessonById(selectedLessonModel.id, (prev) => ({
+      ...prev,
+      materials: [
+        ...(Array.isArray(prev?.materials) ? prev.materials : []),
+        {
+          title: link,
+          type: "link",
+          material_type: "link",
+          content_url: link,
+          signed_url: link,
+          mime_type: "text/uri-list",
+          metadata: {},
+        },
+      ],
+    }));
+    setLessonMaterialLink("");
+  };
+
+  const handleRemoveLessonMaterial = (materialIndex) => {
+    if (!selectedLessonModel) return;
+    updateLessonById(selectedLessonModel.id, (prev) => ({
+      ...prev,
+      materials: (Array.isArray(prev?.materials) ? prev.materials : []).filter((_, idx) => idx !== materialIndex),
+    }));
   };
 
   const handleSave = async () => {
@@ -2546,20 +2972,72 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
     const attemptLimit = Number.isFinite(attemptLimitRaw) ? Math.max(1, attemptLimitRaw) : 5;
 
     const modulesPayload = modules
-      .map((moduleItem, moduleIndex) => ({
-        title: String(moduleItem?.title || "").trim(),
-        position: moduleIndex + 1,
-        lessons: (Array.isArray(moduleItem?.lessons) ? moduleItem.lessons : [])
-          .map((lessonItem, lessonIndex) => ({
-            title: String(lessonItem?.title || "").trim(),
-            description: "",
-            position: lessonIndex + 1,
-            duration_seconds: lessonItem?.type === "video" ? 15 * 60 : 8 * 60,
-            allow_fast_forward: false,
-            completion_threshold: 95,
-          }))
-          .filter((lessonItem) => lessonItem.title),
-      }))
+      .map((moduleItem, moduleIndex) => {
+        const lessons = (Array.isArray(moduleItem?.lessons) ? moduleItem.lessons : [])
+          .map((lessonItem, lessonIndex) => {
+            const lessonTitle = String(lessonItem?.title || "").trim();
+            if (!lessonTitle) return null;
+            const lessonType = String(lessonItem?.type || "video").toLowerCase() === "text" ? "text" : "video";
+            const description = String(lessonItem?.description || "").trim();
+            const contentText = String(lessonItem?.contentText || "").trim();
+            const rawMaterials = Array.isArray(lessonItem?.materials) ? lessonItem.materials : [];
+            const mappedMaterials = rawMaterials
+              .map((materialItem, materialIndex) => {
+                const materialType = String(materialItem?.material_type || materialItem?.type || "file").toLowerCase();
+                const safeType = ["video", "pdf", "link", "text", "file"].includes(materialType) ? materialType : "file";
+                const contentUrl = String(materialItem?.content_url || materialItem?.signed_url || materialItem?.url || "").trim();
+                const materialText = safeType === "text"
+                  ? String(materialItem?.content_text || contentText || "").trim()
+                  : String(materialItem?.content_text || "").trim();
+                if (!contentUrl && !materialText) return null;
+                return {
+                  title: String(materialItem?.title || (safeType === "video" ? "Видео" : "Материал")).trim(),
+                  material_type: safeType,
+                  content_url: contentUrl || null,
+                  content_text: materialText || null,
+                  mime_type: String(materialItem?.mime_type || "").trim() || null,
+                  bucket: String(materialItem?.bucket || "").trim() || null,
+                  blob_path: String(materialItem?.blob_path || "").trim() || null,
+                  metadata: materialItem?.metadata && typeof materialItem.metadata === "object" ? materialItem.metadata : {},
+                  position: materialIndex + 1,
+                };
+              })
+              .filter(Boolean);
+
+            if (lessonType === "text" && contentText && !mappedMaterials.some((item) => item.material_type === "text")) {
+              mappedMaterials.unshift({
+                title: "Текстовый материал",
+                material_type: "text",
+                content_url: null,
+                content_text: contentText,
+                mime_type: "text/plain",
+                bucket: null,
+                blob_path: null,
+                metadata: {},
+                position: 1,
+              });
+            }
+
+            return {
+              title: lessonTitle,
+              description,
+              lesson_type: lessonType,
+              position: lessonIndex + 1,
+              duration_seconds: Math.max(30, Number(lessonItem?.durationSeconds || (lessonType === "video" ? 15 * 60 : 8 * 60))),
+              allow_fast_forward: false,
+              completion_threshold: Math.max(1, Math.min(100, Number(lessonItem?.completionThreshold || 95))),
+              content_text: contentText || null,
+              materials: mappedMaterials,
+            };
+          })
+          .filter(Boolean);
+
+        return {
+          title: String(moduleItem?.title || "").trim(),
+          position: moduleIndex + 1,
+          lessons,
+        };
+      })
       .filter((moduleItem) => moduleItem.title);
 
     const questionPayload = questions
@@ -2618,6 +3096,10 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
           category: String(settings.category || "").trim(),
           pass_threshold: Number(settings.passingScore || 80),
           attempt_limit: attemptLimit,
+          cover_url: String(settings.coverUrl || "").trim() || null,
+          cover_bucket: String(settings.coverBucket || "").trim() || null,
+          cover_blob_path: String(settings.coverBlobPath || "").trim() || null,
+          skills: Array.isArray(settings.skills) ? settings.skills : [],
           modules: modulesPayload,
           tests: testsPayload,
         },
@@ -2718,6 +3200,16 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
     }
   };
 
+  const selectedLessonMaterials = Array.isArray(selectedLessonModel?.materials) ? selectedLessonModel.materials : [];
+  const selectedLessonVideoMaterial = selectedLessonMaterials.find((item) => String(item?.material_type || item?.type || "").toLowerCase() === "video");
+  const selectedLessonExtraMaterials = selectedLessonMaterials
+    .map((item, originalIndex) => ({ ...item, _originalIndex: originalIndex }))
+    .filter((item) => {
+      const materialType = String(item?.material_type || item?.type || "").toLowerCase();
+      if (selectedLessonModel?.type === "text") return materialType !== "text";
+      return materialType !== "video";
+    });
+
   return (
     <div className="max-w-screen-xl mx-auto px-6 py-8">
       <div className="flex items-center justify-between mb-8">
@@ -2759,18 +3251,56 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                     <option>Безопасность</option><option>Менеджмент</option><option>Soft Skills</option><option>Финансы</option><option>Аналитика</option>
                   </select>
                 </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Обложка курса</label>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => coverInputRef.current?.click()}
+                      disabled={coverUploading}
+                      className="px-3 py-2.5 bg-slate-100 hover:bg-slate-200 disabled:opacity-60 disabled:cursor-not-allowed text-slate-700 rounded-xl text-xs font-semibold transition-colors inline-flex items-center gap-2"
+                    >
+                      {coverUploading ? <RefreshCw size={13} className="animate-spin" /> : <Upload size={13} />}
+                      {coverUploading ? "Загрузка..." : "Загрузить файл"}
+                    </button>
+                    <input
+                      value={settings.coverUrl}
+                      onChange={(e) => setSettings((prev) => ({ ...prev, coverUrl: e.target.value }))}
+                      placeholder="Или вставьте URL обложки"
+                      className="flex-1 px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 placeholder-slate-400 focus:outline-none focus:border-indigo-400 transition-all"
+                    />
+                  </div>
+                  <input ref={coverInputRef} type="file" accept="image/*" onChange={handleCoverFileChange} className="hidden" />
+                  {settings.coverUrl && (
+                    <div className="mt-3 rounded-xl border border-slate-200 overflow-hidden">
+                      <img src={settings.coverUrl} alt="Cover preview" className="w-full h-24 object-cover" />
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
             <div className="bg-white rounded-2xl border border-slate-200 p-6">
               <h3 className="text-sm font-semibold text-slate-900 mb-4">Навыки курса</h3>
               <div className="flex flex-wrap gap-2 mb-3">
-                {["Информационная безопасность", "GDPR", "Управление рисками"].map(s => (
-                  <span key={s} className="flex items-center gap-1.5 text-xs bg-indigo-50 text-indigo-700 border border-indigo-100 px-3 py-1.5 rounded-full font-medium">{s} <button className="hover:text-indigo-900"><X size={10} /></button></span>
+                {(Array.isArray(settings.skills) ? settings.skills : []).map((skill) => (
+                  <span key={skill} className="flex items-center gap-1.5 text-xs bg-indigo-50 text-indigo-700 border border-indigo-100 px-3 py-1.5 rounded-full font-medium">
+                    {skill}
+                    <button type="button" onClick={() => removeSkill(skill)} className="hover:text-indigo-900"><X size={10} /></button>
+                  </span>
                 ))}
+                {(!Array.isArray(settings.skills) || settings.skills.length === 0) && (
+                  <span className="text-xs text-slate-400">Навыки не добавлены</span>
+                )}
               </div>
               <div className="flex gap-2">
-                <input placeholder="Добавить навык..." className="flex-1 px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm placeholder-slate-400 focus:outline-none focus:border-indigo-400 transition-all" />
-                <button className="px-3 py-2.5 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 transition-colors"><Plus size={16} /></button>
+                <input
+                  value={newSkill}
+                  onChange={(e) => setNewSkill(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addSkill(); } }}
+                  placeholder="Добавить навык..."
+                  className="flex-1 px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm placeholder-slate-400 focus:outline-none focus:border-indigo-400 transition-all"
+                />
+                <button type="button" onClick={addSkill} className="px-3 py-2.5 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 transition-colors"><Plus size={16} /></button>
               </div>
             </div>
           </div>
@@ -2827,16 +3357,16 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                   <div className="p-4 space-y-2">
                     {mod.lessons.length === 0 && <div className="text-center py-6 text-slate-300 text-xs">Добавьте уроки в этот модуль</div>}
                     {mod.lessons.map(l => {
-                      const types = [{ id: "video", icon: Video, label: "Видео" }, { id: "text", icon: FileText, label: "Текст" }, { id: "quiz", icon: HelpCircle, label: "Тест" }];
+                      const types = [{ id: "video", icon: Video, label: "Видео" }, { id: "text", icon: FileText, label: "Текст" }];
                       const LIcon = lessonIcons[l.type];
                       return (
-                        <div key={l.id} onClick={() => setSelectedLesson(selectedLesson === l.id ? null : l.id)} className={`flex items-center gap-3 p-3 rounded-xl border-2 cursor-pointer transition-all ${selectedLesson === l.id ? "border-indigo-300 bg-indigo-50" : "border-transparent hover:border-slate-200 hover:bg-slate-50"}`}>
+                        <div key={l.id} onClick={() => setSelectedLessonId(selectedLessonId === l.id ? null : l.id)} className={`flex items-center gap-3 p-3 rounded-xl border-2 cursor-pointer transition-all ${selectedLessonId === l.id ? "border-indigo-300 bg-indigo-50" : "border-transparent hover:border-slate-200 hover:bg-slate-50"}`}>
                           <GripVertical size={13} className="text-slate-300 cursor-grab flex-shrink-0" />
                           <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${l.type === "video" ? "bg-blue-100 text-blue-600" : l.type === "text" ? "bg-emerald-100 text-emerald-600" : "bg-violet-100 text-violet-600"}`}><LIcon size={14} /></div>
                           <input value={l.title} onChange={e => setModules(p => p.map(m => m.id === mod.id ? { ...m, lessons: m.lessons.map(ls => ls.id === l.id ? { ...ls, title: e.target.value } : ls) } : m))} onClick={e => e.stopPropagation()} className="flex-1 text-sm font-medium text-slate-800 bg-transparent focus:outline-none" />
                           <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
                             {types.map(t => (
-                              <button key={t.id} onClick={() => setModules(p => p.map(m => m.id === mod.id ? { ...m, lessons: m.lessons.map(ls => ls.id === l.id ? { ...ls, type: t.id } : ls) } : m))} className={`text-[10px] px-2 py-1 rounded-lg font-semibold transition-colors ${l.type === t.id ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-500 hover:bg-slate-200"}`}>{t.label}</button>
+                              <button key={t.id} onClick={() => updateLessonById(l.id, (prev) => ({ ...prev, type: t.id }))} className={`text-[10px] px-2 py-1 rounded-lg font-semibold transition-colors ${l.type === t.id ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-500 hover:bg-slate-200"}`}>{t.label}</button>
                             ))}
                             <button onClick={() => deleteLesson(mod.id, l.id)} className="p-1.5 text-slate-300 hover:text-red-500 rounded-lg hover:bg-red-50 transition-colors ml-1"><Trash2 size={13} /></button>
                           </div>
@@ -2851,17 +3381,116 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
           </div>
           <div className="col-span-2">
             <div className="bg-white rounded-2xl border border-slate-200 p-5 sticky top-24">
-              {selectedLesson ? (
+              {selectedLessonModel ? (
                 <>
                   <h3 className="text-sm font-semibold text-slate-900 mb-4">Редактор урока</h3>
                   <div className="space-y-4">
-                    <div><label className="text-xs font-semibold text-slate-600 mb-1.5 block">Описание урока</label><textarea rows={3} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:border-indigo-400 transition-all resize-none" placeholder="Что узнает студент в этом уроке..." /></div>
-                    <div><label className="text-xs font-semibold text-slate-600 mb-1.5 block">Видеофайл</label>
-                      <div className="border-2 border-dashed border-slate-200 rounded-xl p-5 text-center hover:border-indigo-300 cursor-pointer transition-colors"><Upload size={20} className="mx-auto text-slate-300 mb-2" /><p className="text-xs text-slate-500">Перетащите видео или нажмите</p><p className="text-[10px] text-slate-400 mt-1">MP4, MOV до 2 ГБ</p></div>
+                    <div>
+                      <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Описание урока</label>
+                      <textarea
+                        rows={3}
+                        value={selectedLessonModel.description || ""}
+                        onChange={(e) => updateLessonById(selectedLessonModel.id, { description: e.target.value })}
+                        className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:border-indigo-400 transition-all resize-none"
+                        placeholder="Что узнает сотрудник в этом уроке..."
+                      />
                     </div>
-                    <div><label className="text-xs font-semibold text-slate-600 mb-1.5 block">Транскрипт</label><textarea rows={4} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:border-indigo-400 transition-all resize-none" placeholder="Текстовая расшифровка видео..." /></div>
-                    <div><label className="text-xs font-semibold text-slate-600 mb-1.5 block">Условия доступа</label><div className="flex items-center gap-2"><input type="checkbox" className="accent-indigo-600" id="prev" /><label htmlFor="prev" className="text-xs text-slate-600">Только после завершения предыдущего</label></div></div>
-                    <div><label className="text-xs font-semibold text-slate-600 mb-1.5 block">Дополнительные материалы</label><button className="w-full border-2 border-dashed border-slate-200 hover:border-indigo-300 rounded-xl py-3 text-xs text-slate-500 hover:text-indigo-600 flex items-center justify-center gap-2 transition-all"><Plus size={14} /> Добавить файл или ссылку</button></div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Длительность (сек)</label>
+                        <input
+                          type="number"
+                          min={30}
+                          value={Math.max(30, Number(selectedLessonModel.durationSeconds || 0))}
+                          onChange={(e) => updateLessonById(selectedLessonModel.id, { durationSeconds: Math.max(30, Number(e.target.value || 0)) })}
+                          className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 focus:outline-none focus:border-indigo-400 transition-all"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Порог завершения (%)</label>
+                        <input
+                          type="number"
+                          min={1}
+                          max={100}
+                          value={Math.max(1, Math.min(100, Number(selectedLessonModel.completionThreshold || 95)))}
+                          onChange={(e) => updateLessonById(selectedLessonModel.id, { completionThreshold: Math.max(1, Math.min(100, Number(e.target.value || 95))) })}
+                          className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 focus:outline-none focus:border-indigo-400 transition-all"
+                        />
+                      </div>
+                    </div>
+
+                    {selectedLessonModel.type === "text" ? (
+                      <div>
+                        <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Текст урока</label>
+                        <textarea
+                          rows={7}
+                          value={selectedLessonModel.contentText || ""}
+                          onChange={(e) => updateLessonById(selectedLessonModel.id, { contentText: e.target.value })}
+                          className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:border-indigo-400 transition-all resize-y"
+                          placeholder="Введите текст урока..."
+                        />
+                      </div>
+                    ) : (
+                      <div>
+                        <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Видеофайл</label>
+                        <button
+                          type="button"
+                          onClick={() => lessonVideoInputRef.current?.click()}
+                          disabled={lessonUploading}
+                          className="w-full border-2 border-dashed border-slate-200 hover:border-indigo-300 rounded-xl py-4 text-xs text-slate-500 hover:text-indigo-600 flex items-center justify-center gap-2 transition-all disabled:opacity-60 disabled:cursor-not-allowed"
+                        >
+                          {lessonUploading ? <RefreshCw size={14} className="animate-spin" /> : <Upload size={14} />}
+                          {lessonUploading ? "Загрузка..." : "Загрузить видео"}
+                        </button>
+                        {selectedLessonVideoMaterial && (
+                          <div className="mt-2 text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2">
+                            Прикреплено: {selectedLessonVideoMaterial?.metadata?.uploaded_file_name || selectedLessonVideoMaterial?.title || "Видео"}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    <div>
+                      <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Дополнительные материалы</label>
+                      <div className="flex gap-2 mb-2">
+                        <button
+                          type="button"
+                          onClick={() => lessonMaterialInputRef.current?.click()}
+                          disabled={lessonUploading}
+                          className="px-3 py-2 bg-slate-100 hover:bg-slate-200 rounded-lg text-xs font-semibold text-slate-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center gap-2"
+                        >
+                          {lessonUploading ? <RefreshCw size={12} className="animate-spin" /> : <Upload size={12} />}
+                          Файл
+                        </button>
+                        <input
+                          value={lessonMaterialLink}
+                          onChange={(e) => setLessonMaterialLink(e.target.value)}
+                          placeholder="https://..."
+                          className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-700 placeholder-slate-400 focus:outline-none focus:border-indigo-400 transition-all"
+                        />
+                        <button type="button" onClick={handleAddMaterialLink} className="px-3 py-2 bg-indigo-600 hover:bg-indigo-700 rounded-lg text-xs font-semibold text-white transition-colors inline-flex items-center gap-1">
+                          <Link2 size={12} /> Добавить
+                        </button>
+                      </div>
+                      <div className="space-y-2">
+                        {selectedLessonExtraMaterials.length === 0 && (
+                          <div className="text-xs text-slate-400">Пока ничего не прикреплено</div>
+                        )}
+                        {selectedLessonExtraMaterials.map((material, index) => (
+                          <div key={`${material?.title || "material"}-${index}`} className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2">
+                            <FileCheck size={13} className="text-indigo-500 flex-shrink-0" />
+                            <div className="flex-1 min-w-0">
+                              <div className="text-xs text-slate-700 truncate">{material?.metadata?.uploaded_file_name || material?.title || `Материал ${index + 1}`}</div>
+                              <div className="text-[10px] text-slate-400 uppercase">{String(material?.material_type || material?.type || "file")}</div>
+                            </div>
+                            <button type="button" onClick={() => handleRemoveLessonMaterial(material._originalIndex)} className="p-1 text-slate-400 hover:text-red-500 transition-colors"><Trash2 size={12} /></button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <input ref={lessonVideoInputRef} type="file" accept="video/*" onChange={handleLessonVideoUpload} className="hidden" />
+                    <input ref={lessonMaterialInputRef} type="file" multiple onChange={handleLessonMaterialUpload} className="hidden" />
                   </div>
                 </>
               ) : (
