@@ -1288,7 +1288,7 @@ function CourseCard({ course, onClick, busy = false }) {
     <div onClick={() => !busy && onClick?.()} className={`bg-white rounded-2xl border border-slate-200 overflow-hidden transition-all group ${busy ? "opacity-70 cursor-wait" : "cursor-pointer hover:shadow-md hover:border-slate-300"}`}>
       <div className={`h-32 bg-gradient-to-br ${course.color} flex items-center justify-center relative overflow-hidden`}>
         {course.coverUrl ? (
-          <img src={course.coverUrl} alt={course.title} className="absolute inset-0 w-full h-full object-cover" />
+          <img src={course.coverUrl} alt={course.title} className="absolute inset-0 w-full h-full object-cover object-center" />
         ) : (
           <span className="text-5xl">{course.cover}</span>
         )}
@@ -1351,7 +1351,7 @@ function CourseListItem({ course, onClick, busy = false }) {
     <div onClick={() => !busy && onClick?.()} className={`bg-white rounded-2xl border border-slate-200 p-5 flex items-center gap-5 transition-all group ${busy ? "opacity-70 cursor-wait" : "cursor-pointer hover:shadow-sm hover:border-slate-300"}`}>
       <div className={`w-14 h-14 rounded-xl bg-gradient-to-br ${course.color} flex items-center justify-center text-2xl flex-shrink-0 overflow-hidden`}>
         {course.coverUrl ? (
-          <img src={course.coverUrl} alt={course.title} className="w-full h-full object-cover" />
+          <img src={course.coverUrl} alt={course.title} className="w-full h-full object-cover object-center" />
         ) : (
           course.cover
         )}
@@ -1399,7 +1399,7 @@ function CourseDetail({ course, onStartLesson }) {
     <div className="max-w-screen-xl mx-auto px-6 py-8">
       <div className={`rounded-3xl bg-gradient-to-br ${course.color} p-8 mb-8 relative overflow-hidden`}>
         {course.coverUrl ? (
-          <img src={course.coverUrl} alt={course.title} className="absolute inset-0 w-full h-full object-cover opacity-30" />
+          <img src={course.coverUrl} alt={course.title} className="absolute inset-0 w-full h-full object-cover object-center opacity-30" />
         ) : (
           <div className="absolute right-8 top-8 text-8xl opacity-20">{course.cover}</div>
         )}
@@ -2928,13 +2928,82 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
     }
   }), []);
 
+  const convertCoverToWebp = useCallback((file) => new Promise((resolve) => {
+    try {
+      if (!(file instanceof File) || !String(file.type || "").toLowerCase().startsWith("image/")) {
+        resolve(file);
+        return;
+      }
+      const objectUrl = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const sourceWidth = Math.max(1, Number(img.naturalWidth || 0));
+          const sourceHeight = Math.max(1, Number(img.naturalHeight || 0));
+          const targetRatio = 16 / 9;
+          let sx = 0;
+          let sy = 0;
+          let sw = sourceWidth;
+          let sh = sourceHeight;
+
+          if (sourceWidth / sourceHeight > targetRatio) {
+            sw = Math.max(1, Math.round(sourceHeight * targetRatio));
+            sx = Math.max(0, Math.round((sourceWidth - sw) / 2));
+          } else {
+            sh = Math.max(1, Math.round(sourceWidth / targetRatio));
+            sy = Math.max(0, Math.round((sourceHeight - sh) / 2));
+          }
+
+          const outputWidth = Math.max(320, Math.min(1600, sw));
+          const outputHeight = Math.max(180, Math.round(outputWidth / targetRatio));
+          const canvas = document.createElement("canvas");
+          canvas.width = outputWidth;
+          canvas.height = outputHeight;
+          const ctx = canvas.getContext("2d");
+          if (!ctx) {
+            URL.revokeObjectURL(objectUrl);
+            resolve(file);
+            return;
+          }
+          ctx.fillStyle = "#ffffff";
+          ctx.fillRect(0, 0, outputWidth, outputHeight);
+          ctx.drawImage(img, sx, sy, sw, sh, 0, 0, outputWidth, outputHeight);
+          canvas.toBlob((blob) => {
+            URL.revokeObjectURL(objectUrl);
+            if (!blob) {
+              resolve(file);
+              return;
+            }
+            const base = String(file.name || "cover").replace(/\.[^.]+$/, "") || "cover";
+            const converted = new File([blob], `${base}.webp`, {
+              type: "image/webp",
+              lastModified: Date.now(),
+            });
+            resolve(converted);
+          }, "image/webp", 0.9);
+        } catch (_) {
+          URL.revokeObjectURL(objectUrl);
+          resolve(file);
+        }
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(objectUrl);
+        resolve(file);
+      };
+      img.src = objectUrl;
+    } catch (_) {
+      resolve(file);
+    }
+  }), []);
+
   const handleCoverFileChange = async (event) => {
     const file = event?.target?.files?.[0];
     event.target.value = "";
     if (!file) return;
     setCoverUploading(true);
     try {
-      const uploaded = await uploadSingleMaterial(file, "file");
+      const preparedCover = await convertCoverToWebp(file);
+      const uploaded = await uploadSingleMaterial(preparedCover, "cover");
       setSettings((prev) => ({
         ...prev,
         coverUrl: uploaded.signed_url || "",
@@ -3381,8 +3450,8 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                   </div>
                   <input ref={coverInputRef} type="file" accept="image/*" onChange={handleCoverFileChange} className="hidden" />
                   {settings.coverUrl && (
-                    <div className="mt-3 rounded-xl border border-slate-200 overflow-hidden">
-                      <img src={settings.coverUrl} alt="Cover preview" className="w-full h-24 object-cover" />
+                    <div className="mt-3 rounded-xl border border-slate-200 overflow-hidden bg-slate-100 aspect-video">
+                      <img src={settings.coverUrl} alt="Cover preview" className="w-full h-full object-cover object-center" />
                     </div>
                   )}
                 </div>
