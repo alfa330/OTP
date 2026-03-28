@@ -1,2824 +1,3353 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import axios from 'axios';
+import { useState, useEffect, useRef, useCallback } from "react";
 import {
-    AlertTriangle,
-    Award,
-    Ban,
-    Bell,
-    BookOpen,
-    CalendarDays,
-    Check,
-    CheckCheck,
-    CheckCircle2,
-    ClipboardList,
-    Clock3,
-    Download,
-    FileText,
-    FolderOpen,
-    Gauge,
-    GraduationCap,
-    Link2,
-    Loader2,
-    Pause,
-    Play,
-    RefreshCw,
-    Search,
-    ShieldCheck,
-    Target,
-    Timer,
-    TimerReset,
-    Upload,
-    Users,
-    Video,
-    X
-} from 'lucide-react';
+  BookOpen, Play, CheckCircle, Clock, Award, Bell, Search, ChevronRight,
+  ChevronDown, BarChart2, Plus, Trash2, Edit, Settings, Lock, Star, Download,
+  X, Check, AlertCircle, ArrowLeft, Video, FileText, HelpCircle, Upload,
+  Users, TrendingUp, Shield, Target, GripVertical, Filter, Calendar,
+  PlayCircle, AlignLeft, Layers, ChevronLeft, Eye, MoreVertical,
+  BookMarked, Zap, ToggleLeft, ToggleRight, LayoutGrid, List, Percent,
+  UserCheck, RefreshCw, ClipboardList, PlusCircle, LogOut, ChevronUp,
+  Save, Image, Link2, FileCheck, Pause, Volume2, Maximize, AlertTriangle,
+  XCircle, CheckSquare, Square, Type, ToggleRight as RadioIcon
+} from "lucide-react";
 
-const LEARNER_ROLES = new Set(['operator', 'trainee']);
-const MANAGER_ROLES = new Set(['sv', 'trainer', 'admin', 'super_admin']);
-const FULL_ADMIN_ROLES = new Set(['admin', 'super_admin']);
+// ─── MOCK DATA ────────────────────────────────────────────────────────────────
 
-const HEARTBEAT_FALLBACK_SECONDS = 15;
-const STALE_GAP_FALLBACK_SECONDS = 45;
-const COMPLETION_THRESHOLD_FALLBACK = 95;
+const COURSES = [
+  {
+    id: 1, title: "Корпоративная безопасность и защита данных",
+    category: "Безопасность", cover: "🔐", color: "from-blue-600 to-indigo-700",
+    description: "Обучение сотрудников основам защиты корпоративных данных, работе с конфиденциальной информацией и предотвращением утечек.",
+    skills: ["Защита данных", "GDPR", "Управление рисками", "Кибербезопасность"],
+    duration: "8 ч", lessons: 12, modules: 3, progress: 65,
+    deadline: "2025-04-15", mandatory: true, status: "in_progress",
+    rating: 4.8, reviews: 142, passingScore: 80, maxAttempts: 3, attemptsUsed: 1,
+    modules_data: [
+      { id: 1, title: "Основы информационной безопасности", lessons: [
+        { id: 1, title: "Введение в ИБ", type: "video", duration: "18 мин", status: "completed", locked: false },
+        { id: 2, title: "Классификация данных", type: "video", duration: "22 мин", status: "completed", locked: false },
+        { id: 3, title: "Угрозы и уязвимости", type: "video", duration: "31 мин", status: "in_progress", locked: false },
+        { id: 4, title: "Тест по модулю 1", type: "quiz", duration: "20 мин", status: "locked", locked: true, requiresTest: true },
+      ]},
+      { id: 2, title: "Практика защиты данных", lessons: [
+        { id: 5, title: "Шифрование данных", type: "video", duration: "25 мин", status: "locked", locked: true },
+        { id: 6, title: "Парольная политика", type: "text", duration: "15 мин", status: "locked", locked: true },
+        { id: 7, title: "Тест по модулю 2", type: "quiz", duration: "15 мин", status: "locked", locked: true, requiresTest: true },
+      ]},
+      { id: 3, title: "Регуляторные требования", lessons: [
+        { id: 8, title: "Основы GDPR", type: "video", duration: "40 мин", status: "locked", locked: true },
+        { id: 9, title: "Внутренние политики", type: "text", duration: "20 мин", status: "locked", locked: true },
+        { id: 10, title: "Итоговый тест", type: "quiz", duration: "30 мин", status: "locked", locked: true, requiresTest: true },
+      ]},
+    ],
+  },
+  {
+    id: 2, title: "Управление проектами по методологии Agile",
+    category: "Менеджмент", cover: "🚀", color: "from-emerald-500 to-teal-600",
+    description: "Освоение гибких методологий управления проектами: Scrum, Kanban и гибридных подходов.",
+    skills: ["Scrum", "Kanban", "Agile", "Ретроспективы", "Планирование спринтов"],
+    duration: "12 ч", lessons: 18, modules: 4, progress: 100,
+    deadline: "2025-03-01", mandatory: false, status: "completed",
+    rating: 4.9, reviews: 267, passingScore: 80, maxAttempts: 2, attemptsUsed: 1,
+    modules_data: [],
+  },
+  {
+    id: 3, title: "Эффективные коммуникации в команде",
+    category: "Soft Skills", cover: "💬", color: "from-violet-500 to-purple-700",
+    description: "Развитие навыков деловой коммуникации, проведения встреч и работы с обратной связью.",
+    skills: ["Переговоры", "Деловая переписка", "Публичные выступления"],
+    duration: "6 ч", lessons: 9, modules: 2, progress: 0,
+    deadline: "2025-05-01", mandatory: false, status: "not_started",
+    rating: 4.7, reviews: 89, passingScore: 75, maxAttempts: 3, attemptsUsed: 0,
+    modules_data: [],
+  },
+  {
+    id: 4, title: "Финансовая грамотность для менеджеров",
+    category: "Финансы", cover: "📊", color: "from-amber-500 to-orange-600",
+    description: "Базовые финансовые инструменты: P&L, EBITDA, бюджетирование, анализ отчётности.",
+    skills: ["Финансовый анализ", "Бюджетирование", "KPI", "ROI"],
+    duration: "10 ч", lessons: 15, modules: 3, progress: 30,
+    deadline: "2025-03-28", mandatory: true, status: "overdue",
+    rating: 4.6, reviews: 54, passingScore: 80, maxAttempts: 2, attemptsUsed: 2,
+    modules_data: [],
+  },
+  {
+    id: 5, title: "Введение в Data Driven решения",
+    category: "Аналитика", cover: "📈", color: "from-cyan-500 to-blue-600",
+    description: "Как принимать управленческие решения на основе данных, работа с дашбордами и метриками.",
+    skills: ["Аналитика данных", "BI-инструменты", "A/B тесты"],
+    duration: "9 ч", lessons: 14, modules: 3, progress: 0,
+    deadline: "2025-06-01", mandatory: false, status: "not_started",
+    rating: 4.8, reviews: 38, passingScore: 80, maxAttempts: 3, attemptsUsed: 0,
+    modules_data: [],
+  },
+  {
+    id: 6, title: "Охрана труда и промышленная безопасность",
+    category: "Обязательное", cover: "⛑️", color: "from-rose-500 to-red-700",
+    description: "Обязательный курс по технике безопасности, пожарной охране и охране труда.",
+    skills: ["Охрана труда", "Пожарная безопасность", "Первая помощь"],
+    duration: "4 ч", lessons: 7, modules: 2, progress: 100,
+    deadline: "2024-12-31", mandatory: true, status: "completed",
+    rating: 4.5, reviews: 312, passingScore: 90, maxAttempts: 5, attemptsUsed: 1,
+    modules_data: [],
+  },
+];
 
-const STATUS_LABELS = {
-    assigned: 'Назначен',
-    in_progress: 'В процессе',
-    completed: 'Завершен',
-    draft: 'Черновик',
-    published: 'Опубликован',
-    archived: 'Архив',
-    overdue: 'Просрочен'
+// Расширенный банк вопросов с 4 типами
+const QUIZ_QUESTIONS = [
+  {
+    id: 1, type: "single",
+    text: "Какое из следующих действий является нарушением политики информационной безопасности?",
+    options: [
+      "Использование корпоративного VPN при работе из дома",
+      "Передача рабочего ноутбука коллеге без уведомления ИТ-отдела",
+      "Использование двухфакторной аутентификации",
+      "Регулярная смена пароля согласно политике",
+    ], correct: 1, explanation: "Передача оборудования без уведомления ИТ нарушает политику учёта активов и цепочку ответственности.",
+  },
+  {
+    id: 2, type: "single",
+    text: "Согласно GDPR, в течение какого срока организация обязана уведомить регулятора об утечке персональных данных?",
+    options: ["24 часов", "48 часов", "72 часов", "7 рабочих дней"],
+    correct: 2, explanation: "Статья 33 GDPR обязывает уведомить надзорный орган не позднее 72 часов после обнаружения нарушения.",
+  },
+  {
+    id: 3, type: "multiple",
+    text: "Какие из перечисленных мер относятся к базовым требованиям парольной политики? (выберите все верные)",
+    options: [
+      "Минимальная длина пароля 8 символов",
+      "Использование имени пользователя в пароле",
+      "Наличие спецсимволов и цифр",
+      "Смена пароля не реже раза в 90 дней",
+    ], correct: [0, 2, 3], explanation: "Имя пользователя в пароле снижает его стойкость — это нарушение парольной политики.",
+  },
+  {
+    id: 4, type: "bool",
+    text: "Открытые Wi-Fi сети в кафе и аэропортах безопасны для передачи корпоративных данных при использовании HTTPS.",
+    options: ["Верно", "Неверно"], correct: 1,
+    explanation: "Даже HTTPS не защищает от атак типа SSL Strip или поддельных точек доступа (Evil Twin). Требуется корпоративный VPN.",
+  },
+  {
+    id: 5, type: "single",
+    text: "Какой класс конфиденциальности присваивается данным, предназначенным исключительно для внутреннего использования?",
+    options: ["Публичный", "Внутренний", "Конфиденциальный", "Строго секретный"],
+    correct: 1, explanation: "Класс «Внутренний» означает данные, доступные только сотрудникам, но не требующие специальной защиты.",
+  },
+  {
+    id: 6, type: "text",
+    text: "Как называется принцип, при котором пользователю предоставляются только те права, которые необходимы для выполнения его обязанностей?",
+    options: [], correct: "least privilege",
+    keywords: ["least privilege", "минимальных привилегий", "наименьших привилегий", "минимальные привилегии"],
+    explanation: "Принцип минимальных привилегий (Least Privilege) — фундаментальный принцип информационной безопасности.",
+  },
+];
+
+const EMPLOYEES = [
+  { id: 1, name: "Иванова Анна С.", dept: "HR", courses: 5, completed: 4, avgScore: 91, overdue: 0, lastActive: "Сегодня", testTime: "1ч 12м", attempts: 6 },
+  { id: 2, name: "Петров Дмитрий К.", dept: "Разработка", courses: 6, completed: 3, avgScore: 84, overdue: 1, lastActive: "Вчера", testTime: "2ч 45м", attempts: 9 },
+  { id: 3, name: "Сидорова Мария О.", dept: "Финансы", courses: 4, completed: 4, avgScore: 95, overdue: 0, lastActive: "Сегодня", testTime: "0ч 58м", attempts: 4 },
+  { id: 4, name: "Козлов Антон В.", dept: "Продажи", courses: 5, completed: 2, avgScore: 72, overdue: 2, lastActive: "3 дня назад", testTime: "3ч 20м", attempts: 14 },
+  { id: 5, name: "Новиков Сергей Ю.", dept: "Маркетинг", courses: 4, completed: 3, avgScore: 88, overdue: 0, lastActive: "Вчера", testTime: "1ч 35м", attempts: 7 },
+  { id: 6, name: "Соколова Елена Р.", dept: "Юридический", courses: 6, completed: 5, avgScore: 97, overdue: 0, lastActive: "Сегодня", testTime: "1ч 05м", attempts: 5 },
+  { id: 7, name: "Лебедев Игорь А.", dept: "Операции", courses: 5, completed: 1, avgScore: 68, overdue: 3, lastActive: "7 дней назад", testTime: "4ч 10м", attempts: 18 },
+];
+
+// Статистика ошибок по вопросам для аналитики
+const QUESTION_FAIL_STATS = [
+  { questionId: 4, text: "Открытые Wi-Fi и HTTPS...", failRate: 68, course: "Корп. безопасность" },
+  { questionId: 3, text: "Требования парольной политики...", failRate: 52, course: "Корп. безопасность" },
+  { questionId: 6, text: "Принцип минимальных привилегий...", failRate: 47, course: "Корп. безопасность" },
+  { questionId: 2, text: "Срок уведомления по GDPR...", failRate: 41, course: "Корп. безопасность" },
+];
+
+const NOTIFICATIONS = [
+  { id: 1, type: "deadline", title: "Приближается дедлайн", message: "Курс «Финансовая грамотность» необходимо завершить до 28 марта", time: "2 ч назад", read: false },
+  { id: 2, type: "completed", title: "Курс завершён", message: "Вы успешно прошли курс «Управление проектами по методологии Agile»", time: "3 дня назад", read: false },
+  { id: 3, type: "assigned", title: "Назначен новый курс", message: "Вам назначен обязательный курс «Охрана труда»", time: "1 нед назад", read: true },
+  { id: 4, type: "certificate", title: "Сертификат доступен", message: "Сертификат по курсу «Agile» готов к скачиванию", time: "3 дня назад", read: true },
+];
+
+const CERTIFICATES = [
+  { id: 1, course: "Управление проектами по методологии Agile", hours: 12, date: "01.03.2025", number: "LMS-2025-00142", color: "from-emerald-500 to-teal-600", employee: "Иванов Алексей Иванович" },
+  { id: 2, course: "Охрана труда и промышленная безопасность", hours: 4, date: "31.12.2024", number: "LMS-2024-00891", color: "from-rose-500 to-red-600", employee: "Иванов Алексей Иванович" },
+];
+
+// ─── HELPERS ──────────────────────────────────────────────────────────────────
+
+const statusConfig = {
+  completed: { label: "Завершён", bg: "bg-emerald-50", text: "text-emerald-700", border: "border-emerald-200", dot: "bg-emerald-500" },
+  completed_late: { label: "Завершён с опозданием", bg: "bg-orange-50", text: "text-orange-700", border: "border-orange-200", dot: "bg-orange-500" },
+  in_progress: { label: "В процессе", bg: "bg-blue-50", text: "text-blue-700", border: "border-blue-200", dot: "bg-blue-500" },
+  not_started: { label: "Не начат", bg: "bg-slate-50", text: "text-slate-600", border: "border-slate-200", dot: "bg-slate-400" },
+  overdue: { label: "Просрочен", bg: "bg-red-50", text: "text-red-700", border: "border-red-200", dot: "bg-red-500" },
+  waiting_test: { label: "Ожидает тест", bg: "bg-violet-50", text: "text-violet-700", border: "border-violet-200", dot: "bg-violet-500" },
+  test_failed: { label: "Тест не пройден", bg: "bg-red-50", text: "text-red-700", border: "border-red-200", dot: "bg-red-500" },
 };
 
-const DEADLINE_META = {
-    on_time: {
-        label: 'В срок',
-        badge: 'bg-emerald-100 text-emerald-700 border border-emerald-200'
-    },
-    late_completed: {
-        label: 'Сдано с опозданием',
-        badge: 'bg-amber-100 text-amber-700 border border-amber-200'
-    },
-    overdue: {
-        label: 'Просрочено',
-        badge: 'bg-rose-100 text-rose-700 border border-rose-200'
-    },
-    unknown: {
-        label: 'Без срока',
-        badge: 'bg-slate-100 text-slate-700 border border-slate-200'
+const lessonIcons = { video: Video, text: FileText, quiz: HelpCircle };
+
+const formatDeadline = (date) => {
+  if (!date) return null;
+  const d = new Date(date);
+  const now = new Date();
+  const diff = Math.ceil((d - now) / (1000 * 60 * 60 * 24));
+  if (diff < 0) return { label: `Просрочен на ${Math.abs(diff)} дн`, urgent: true, overdue: true };
+  if (diff <= 7) return { label: `${diff} дней`, urgent: true, overdue: false };
+  return { label: d.toLocaleDateString("ru-RU", { day: "numeric", month: "short" }), urgent: false, overdue: false };
+};
+
+// Проверка правильности ответа
+function isAnswerCorrect(question, userAnswer) {
+  if (question.type === "single" || question.type === "bool") {
+    return userAnswer === question.correct;
+  }
+  if (question.type === "multiple") {
+    if (!Array.isArray(userAnswer)) return false;
+    const sortedUser = [...userAnswer].sort();
+    const sortedCorrect = [...question.correct].sort();
+    return sortedUser.length === sortedCorrect.length && sortedUser.every((v, i) => v === sortedCorrect[i]);
+  }
+  if (question.type === "text") {
+    if (!userAnswer) return false;
+    return question.keywords.some(k => userAnswer.toLowerCase().includes(k.toLowerCase()));
+  }
+  return false;
+}
+
+const COURSE_COLORS = [
+  "from-blue-600 to-indigo-700",
+  "from-emerald-500 to-teal-600",
+  "from-violet-500 to-purple-700",
+  "from-amber-500 to-orange-600",
+  "from-cyan-500 to-blue-600",
+  "from-rose-500 to-red-700",
+];
+
+const COURSE_COVERS = ["📘", "🚀", "💬", "📊", "📈", "🛡️", "🎯", "🧠"];
+
+const TEXT_MATERIAL_TYPES = new Set(["text", "pdf", "link"]);
+
+const normalizeLmsRole = (value) => String(value || "").trim().toLowerCase();
+
+const mapAssignmentStatusToUi = (assignmentStatus, deadlineStatus) => {
+  const status = String(assignmentStatus || "").trim().toLowerCase();
+  const deadline = String(deadlineStatus || "").trim().toLowerCase();
+  if (status === "completed") {
+    return deadline === "orange" ? "completed_late" : "completed";
+  }
+  if (deadline === "red") return "overdue";
+  if (status === "in_progress") return "in_progress";
+  return "not_started";
+};
+
+const pickCourseVisual = (courseId, category = "") => {
+  const base = Number(courseId) || Math.abs(String(category || "").length);
+  const color = COURSE_COLORS[Math.abs(base) % COURSE_COLORS.length];
+  const cover = COURSE_COVERS[Math.abs(base) % COURSE_COVERS.length];
+  return { color, cover };
+};
+
+const formatDurationLabel = (seconds) => {
+  const safe = Math.max(0, Number(seconds) || 0);
+  if (!safe) return "—";
+  const totalMinutes = Math.ceil(safe / 60);
+  if (totalMinutes < 60) return `${totalMinutes} мин`;
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return minutes > 0 ? `${hours} ч ${minutes} мин` : `${hours} ч`;
+};
+
+const inferLessonType = (lessonLike) => {
+  const materials = Array.isArray(lessonLike?.materials) ? lessonLike.materials : [];
+  if (!materials.length) return "video";
+  if (materials.some((m) => String(m?.material_type || "").toLowerCase() === "video")) return "video";
+  if (materials.every((m) => TEXT_MATERIAL_TYPES.has(String(m?.material_type || "").toLowerCase()))) return "text";
+  return "video";
+};
+
+const toRelativeTime = (isoDate) => {
+  if (!isoDate) return "";
+  const dt = new Date(isoDate);
+  if (Number.isNaN(dt.getTime())) return "";
+  const diffMs = Date.now() - dt.getTime();
+  const diffSec = Math.max(0, Math.floor(diffMs / 1000));
+  if (diffSec < 60) return "только что";
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin} мин назад`;
+  const diffHours = Math.floor(diffMin / 60);
+  if (diffHours < 24) return `${diffHours} ч назад`;
+  const diffDays = Math.floor(diffHours / 24);
+  if (diffDays < 7) return `${diffDays} дн назад`;
+  return dt.toLocaleDateString("ru-RU");
+};
+
+const mapHomeCourseToView = (course) => {
+  const courseId = Number(course?.course_id || 0);
+  const visual = pickCourseVisual(courseId, course?.category);
+  const totalLessons = Math.max(0, Number(course?.total_lessons || 0));
+  const completedLessons = Math.max(0, Number(course?.completed_lessons || 0));
+  const progress = Math.max(0, Math.min(100, Math.round(Number(course?.progress_percent || 0))));
+  return {
+    id: courseId,
+    assignmentId: Number(course?.assignment_id || 0) || null,
+    courseVersionId: Number(course?.course_version_id || 0) || null,
+    title: String(course?.title || "Без названия"),
+    category: String(course?.category || "Без категории"),
+    cover: visual.cover,
+    color: visual.color,
+    description: String(course?.description || ""),
+    skills: [],
+    duration: formatDurationLabel(totalLessons * 15 * 60),
+    lessons: totalLessons,
+    modules: 0,
+    progress,
+    completedLessons,
+    deadline: course?.due_at || null,
+    mandatory: false,
+    status: mapAssignmentStatusToUi(course?.status, course?.deadline_status),
+    rating: course?.best_score ? Math.max(1, Math.min(5, Number(course.best_score) / 20)) : 0,
+    reviews: 0,
+    passingScore: 80,
+    maxAttempts: 3,
+    attemptsUsed: 0,
+    modules_data: [],
+  };
+};
+
+const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
+  const courseId = Number(coursePayload?.id || fallbackCourse?.id || 0);
+  const visual = {
+    color: fallbackCourse?.color || pickCourseVisual(courseId, coursePayload?.category).color,
+    cover: fallbackCourse?.cover || pickCourseVisual(courseId, coursePayload?.category).cover,
+  };
+  const assignment = coursePayload?.assignment || {};
+  const lessonProgress = assignment?.lesson_progress || {};
+  const testProgress = assignment?.tests || {};
+  const modulesRaw = Array.isArray(coursePayload?.modules) ? coursePayload.modules : [];
+  const testsRaw = Array.isArray(coursePayload?.tests) ? coursePayload.tests : [];
+  const testsByModule = new Map();
+  testsRaw.forEach((test) => {
+    const key = test?.module_id == null ? "__course__" : String(test.module_id);
+    const prev = testsByModule.get(key) || [];
+    prev.push(test);
+    testsByModule.set(key, prev);
+  });
+
+  let progressionLocked = false;
+  let regularLessonsTotal = 0;
+  let regularLessonsCompleted = 0;
+  let durationSeconds = 0;
+
+  const mapTestLesson = (test, isLockedByFlow = false) => {
+    const testState = testProgress?.[test.id] || testProgress?.[String(test.id)] || {};
+    const attemptsUsed = Math.max(0, Number(testState?.attempts_used || 0));
+    const attemptLimit = Math.max(1, Number(test?.attempt_limit || coursePayload?.course_version?.attempt_limit || coursePayload?.default_attempt_limit || 3));
+    const passedAny = Boolean(testState?.passed_any);
+    let testStatus = "not_started";
+    if (passedAny) testStatus = "completed";
+    else if (attemptsUsed > 0) testStatus = attemptsUsed >= attemptLimit ? "test_failed" : "in_progress";
+    return {
+      id: `test-${test.id}`,
+      apiTestId: Number(test.id),
+      title: String(test?.title || "Тест"),
+      description: String(test?.description || ""),
+      type: "quiz",
+      duration: `${Math.max(10, Math.ceil((Number(test?.question_count || 0) || 1) * 1.5))} мин`,
+      status: testStatus,
+      locked: isLockedByFlow && testStatus !== "completed",
+      requiresTest: true,
+      maxAttempts: attemptLimit,
+      attemptsUsed,
+      passingScore: Number(test?.pass_threshold || coursePayload?.course_version?.pass_threshold || coursePayload?.default_pass_threshold || 80),
+      questionCount: Math.max(0, Number(test?.question_count || 0)),
+      moduleId: test?.module_id == null ? null : Number(test.module_id),
+      _position: Number(test?.id || 0),
+    };
+  };
+
+  const modulesData = modulesRaw
+    .slice()
+    .sort((a, b) => Number(a?.position || 0) - Number(b?.position || 0))
+    .map((moduleItem, moduleIndex) => {
+      const moduleId = Number(moduleItem?.id || moduleIndex + 1);
+      const lessonsRaw = Array.isArray(moduleItem?.lessons) ? moduleItem.lessons.slice() : [];
+      lessonsRaw.sort((a, b) => Number(a?.position || 0) - Number(b?.position || 0));
+      const lessons = [];
+
+      lessonsRaw.forEach((lessonItem, lessonIndex) => {
+        const lessonId = Number(lessonItem?.id || lessonIndex + 1);
+        const progressRow = lessonProgress?.[lessonId] || lessonProgress?.[String(lessonId)] || {};
+        const completionRatio = Math.max(0, Math.min(100, Number(progressRow?.completion_ratio || 0)));
+        let status = "not_started";
+        if (String(progressRow?.status || "").toLowerCase() === "completed" || completionRatio >= 99) status = "completed";
+        else if (String(progressRow?.status || "").toLowerCase() === "in_progress" || completionRatio > 0) status = "in_progress";
+        const isLocked = progressionLocked && status !== "completed";
+        const lessonType = inferLessonType(lessonItem);
+        const duration = formatDurationLabel(Number(lessonItem?.duration_seconds || 0));
+
+        lessons.push({
+          id: lessonId,
+          apiLessonId: lessonId,
+          title: String(lessonItem?.title || `Урок ${lessonIndex + 1}`),
+          description: String(lessonItem?.description || ""),
+          type: lessonType,
+          duration,
+          durationSeconds: Number(lessonItem?.duration_seconds || 0),
+          status,
+          locked: isLocked,
+          completionRatio,
+          allowFastForward: Boolean(lessonItem?.allow_fast_forward),
+          completionThreshold: Number(lessonItem?.completion_threshold || 0),
+          materials: Array.isArray(lessonItem?.materials) ? lessonItem.materials : [],
+          moduleId,
+          _position: Number(lessonItem?.position || lessonIndex + 1),
+        });
+
+        regularLessonsTotal += 1;
+        durationSeconds += Math.max(0, Number(lessonItem?.duration_seconds || 0));
+        if (status === "completed") regularLessonsCompleted += 1;
+        if (status !== "completed") progressionLocked = true;
+      });
+
+      const moduleTests = (testsByModule.get(String(moduleId)) || []).slice();
+      moduleTests.forEach((test) => {
+        const moduleHasIncompleteLesson = lessons.some((item) => item.type !== "quiz" && item.status !== "completed");
+        const mappedTest = mapTestLesson(test, progressionLocked || moduleHasIncompleteLesson);
+        lessons.push(mappedTest);
+        if (mappedTest.status !== "completed") progressionLocked = true;
+      });
+
+      lessons.sort((a, b) => Number(a?._position || 0) - Number(b?._position || 0));
+
+      return {
+        id: moduleId,
+        title: String(moduleItem?.title || `Модуль ${moduleIndex + 1}`),
+        description: String(moduleItem?.description || ""),
+        lessons,
+      };
+    });
+
+  const unboundTests = (testsByModule.get("__course__") || []).slice();
+  if (unboundTests.length > 0) {
+    if (modulesData.length === 0) {
+      modulesData.push({
+        id: 1,
+        title: "Модуль",
+        description: "",
+        lessons: [],
+      });
     }
+    const targetModule = modulesData[modulesData.length - 1];
+    unboundTests.forEach((test) => {
+      const mappedTest = mapTestLesson(test, progressionLocked);
+      targetModule.lessons.push(mappedTest);
+      if (mappedTest.status !== "completed") progressionLocked = true;
+    });
+  }
+
+  const progressPercent = regularLessonsTotal > 0
+    ? Math.round((regularLessonsCompleted / regularLessonsTotal) * 100)
+    : (String(assignment?.status || "").toLowerCase() === "completed" ? 100 : 0);
+
+  let status = mapAssignmentStatusToUi(assignment?.status, assignment?.deadline_status);
+  if (status !== "completed" && testsRaw.length > 0 && regularLessonsTotal > 0 && regularLessonsCompleted >= regularLessonsTotal) {
+    const hasFailedRequiredTest = testsRaw.some((test) => {
+      const testState = testProgress?.[test.id] || testProgress?.[String(test.id)] || {};
+      const passedAny = Boolean(testState?.passed_any);
+      const attemptsUsed = Math.max(0, Number(testState?.attempts_used || 0));
+      const attemptLimit = Math.max(1, Number(test?.attempt_limit || coursePayload?.course_version?.attempt_limit || coursePayload?.default_attempt_limit || 3));
+      return !passedAny && attemptsUsed >= attemptLimit;
+    });
+    status = hasFailedRequiredTest ? "test_failed" : "waiting_test";
+  }
+
+  const attemptsUsedTotal = Object.values(testProgress || {}).reduce((sum, row) => sum + Math.max(0, Number(row?.attempts_used || 0)), 0);
+  const maxAttempts = testsRaw.length > 0
+    ? Math.max(...testsRaw.map((test) => Math.max(1, Number(test?.attempt_limit || coursePayload?.course_version?.attempt_limit || coursePayload?.default_attempt_limit || 3))))
+    : Math.max(1, Number(coursePayload?.course_version?.attempt_limit || coursePayload?.default_attempt_limit || fallbackCourse?.maxAttempts || 3));
+
+  const lessonsCountWithTests = modulesData.reduce((sum, mod) => sum + (Array.isArray(mod?.lessons) ? mod.lessons.length : 0), 0);
+
+  return {
+    id: courseId,
+    assignmentId: Number(assignment?.id || fallbackCourse?.assignmentId || 0) || null,
+    courseVersionId: Number(coursePayload?.course_version?.id || fallbackCourse?.courseVersionId || 0) || null,
+    title: String(coursePayload?.title || fallbackCourse?.title || "Без названия"),
+    category: String(coursePayload?.category || fallbackCourse?.category || "Без категории"),
+    cover: visual.cover,
+    color: visual.color,
+    description: String(coursePayload?.description || fallbackCourse?.description || ""),
+    skills: Array.isArray(fallbackCourse?.skills) ? fallbackCourse.skills : [],
+    duration: formatDurationLabel(durationSeconds),
+    lessons: lessonsCountWithTests,
+    modules: modulesData.length,
+    progress: Math.max(0, Math.min(100, progressPercent)),
+    deadline: assignment?.due_at || fallbackCourse?.deadline || null,
+    mandatory: Boolean(fallbackCourse?.mandatory),
+    status,
+    rating: Number(fallbackCourse?.rating || 0),
+    reviews: Number(fallbackCourse?.reviews || 0),
+    passingScore: Number(coursePayload?.course_version?.pass_threshold || coursePayload?.default_pass_threshold || fallbackCourse?.passingScore || 80),
+    maxAttempts,
+    attemptsUsed: attemptsUsedTotal,
+    modules_data: modulesData,
+    tests: testsRaw,
+    assignment,
+  };
 };
 
-const safeJson = (value) => {
+const mapApiQuestionTypeToView = (apiType) => {
+  const normalized = String(apiType || "").toLowerCase();
+  if (normalized === "true_false") return "bool";
+  return normalized || "single";
+};
+
+const buildAnswerPayloadForApi = (question, answerValue) => {
+  const qType = mapApiQuestionTypeToView(question?.type);
+  if (qType === "multiple") {
+    const optionIds = Array.isArray(answerValue) ? answerValue : [];
+    return { option_ids: optionIds };
+  }
+  if (qType === "text") {
+    return { text: String(answerValue || "") };
+  }
+  if (qType === "bool" || qType === "single") {
+    if (answerValue == null || answerValue === "") return {};
+    return { option_id: answerValue };
+  }
+  return { value: answerValue };
+};
+
+// ─── MAIN APP ─────────────────────────────────────────────────────────────────
+
+export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showToast }) {
+  const role = normalizeLmsRole(user?.role);
+  const canUseLearnerApi = role === "operator" || role === "trainee";
+  const canUseManagerApi = role === "sv" || role === "trainer" || role === "admin" || role === "super_admin";
+  const canGoCatalog = canUseLearnerApi;
+  const apiRoot = String(apiBaseUrl || "").trim().replace(/\/+$/, "");
+
+  const [view, setView] = useState(canUseLearnerApi ? "catalog" : "admin");
+  const [selectedCourse, setSelectedCourse] = useState(null);
+  const [selectedLesson, setSelectedLesson] = useState(null);
+  const [catalogTab, setCatalogTab] = useState("available");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [isAdmin, setIsAdmin] = useState(canUseManagerApi);
+  const [adminTab, setAdminTab] = useState("analytics");
+  const [quizView, setQuizView] = useState("intro");
+  const [quizAnswers, setQuizAnswers] = useState({});
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+
+  const [courses, setCourses] = useState(COURSES);
+  const [certificates, setCertificates] = useState(CERTIFICATES);
+  const [notifications, setNotifications] = useState(NOTIFICATIONS);
+  const [adminCourses, setAdminCourses] = useState([]);
+  const [adminProgressRows, setAdminProgressRows] = useState([]);
+  const [adminAttempts, setAdminAttempts] = useState([]);
+  const [learners, setLearners] = useState([]);
+  const [loadingHome, setLoadingHome] = useState(false);
+  const [loadingAdmin, setLoadingAdmin] = useState(false);
+  const [busyCourseId, setBusyCourseId] = useState(null);
+  const [homeError, setHomeError] = useState("");
+  const [apiMode, setApiMode] = useState(false);
+
+  useEffect(() => {
+    setIsAdmin(canUseManagerApi);
+    if (!canUseLearnerApi) {
+      setView("admin");
+    }
+  }, [canUseLearnerApi, canUseManagerApi]);
+
+  const emitToast = useCallback((message, type = "info") => {
+    if (!message) return;
+    if (typeof showToast === "function") {
+      showToast(message, type);
+      return;
+    }
+    if (type === "error") console.error(message);
+    else console.log(message);
+  }, [showToast]);
+
+  const lmsRequest = useCallback(async (path, options = {}) => {
+    if (!apiRoot) {
+      throw new Error("LMS API base URL is not configured");
+    }
+    const url = `${apiRoot}${path.startsWith("/") ? path : `/${path}`}`;
+    const method = String(options?.method || "GET").toUpperCase();
+    const headers = { ...(options?.headers || {}) };
+    let body = options?.body;
+
+    if (body && !(body instanceof FormData) && typeof body !== "string") {
+      body = JSON.stringify(body);
+      if (!headers["Content-Type"]) {
+        headers["Content-Type"] = "application/json";
+      }
+    }
+
+    const finalHeaders = typeof withAccessTokenHeader === "function"
+      ? withAccessTokenHeader(headers)
+      : headers;
+
+    const response = await fetch(url, {
+      method,
+      headers: finalHeaders,
+      body,
+      credentials: "include",
+    });
+
+    const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+    const isJson = contentType.includes("application/json");
+    const payload = isJson ? await response.json() : null;
+
+    if (!response.ok) {
+      const errorText = payload?.error || `HTTP ${response.status}`;
+      throw new Error(errorText);
+    }
+    return payload;
+  }, [apiRoot, withAccessTokenHeader]);
+
+  const loadLearnerDashboard = useCallback(async () => {
+    if (!apiRoot || !canUseLearnerApi) return;
+    setLoadingHome(true);
+    setHomeError("");
     try {
-        return JSON.stringify(value ?? null);
-    } catch {
-        return '';
+      const [homeRes, certRes, notifRes] = await Promise.all([
+        lmsRequest("/api/lms/home"),
+        lmsRequest("/api/lms/certificates"),
+        lmsRequest("/api/lms/notifications?limit=100"),
+      ]);
+
+      const mappedCourses = (Array.isArray(homeRes?.courses) ? homeRes.courses : []).map(mapHomeCourseToView);
+      const courseTitleById = new Map(
+        mappedCourses.map((item) => [Number(item.id), item.title])
+      );
+
+      const mappedCertificates = (Array.isArray(certRes?.certificates) ? certRes.certificates : []).map((item, index) => {
+        const visual = pickCourseVisual(item?.course_id || index, item?.course_id || "");
+        return {
+          id: Number(item?.id || index + 1),
+          course: courseTitleById.get(Number(item?.course_id || 0)) || `Курс #${item?.course_id || "-"}`,
+          hours: "—",
+          date: item?.issued_at ? new Date(item.issued_at).toLocaleDateString("ru-RU") : "—",
+          number: String(item?.certificate_number || `LMS-${item?.id || index + 1}`),
+          color: visual.color,
+          employee: String(user?.name || user?.login || "Сотрудник"),
+          status: String(item?.status || "active"),
+          scorePercent: item?.score_percent != null ? Number(item.score_percent) : null,
+          verifyUrl: item?.verify_url || "",
+        };
+      });
+
+      const mappedNotifications = (Array.isArray(notifRes?.notifications) ? notifRes.notifications : []).map((item) => {
+        const rawType = String(item?.type || "").toLowerCase();
+        let type = "assigned";
+        if (rawType.includes("deadline")) type = "deadline";
+        else if (rawType.includes("complete")) type = "completed";
+        else if (rawType.includes("cert")) type = "certificate";
+        return {
+          id: Number(item?.id || 0),
+          type,
+          title: String(item?.title || "Уведомление LMS"),
+          message: String(item?.message || ""),
+          time: toRelativeTime(item?.created_at),
+          read: Boolean(item?.is_read),
+          createdAt: item?.created_at || null,
+        };
+      });
+
+      setCourses(mappedCourses.length ? mappedCourses : []);
+      setCertificates(mappedCertificates);
+      setNotifications(mappedNotifications);
+      setApiMode(true);
+    } catch (error) {
+      setHomeError(String(error?.message || "Не удалось загрузить данные LMS"));
+      emitToast(`LMS: ${String(error?.message || "ошибка загрузки")}`, "error");
+      setApiMode(false);
+    } finally {
+      setLoadingHome(false);
     }
-};
+  }, [apiRoot, canUseLearnerApi, lmsRequest, user?.name, user?.login, emitToast]);
 
-const toNumber = (value, fallback = 0) => {
-    const n = Number(value);
-    return Number.isFinite(n) ? n : fallback;
-};
-
-const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
-
-const formatPercent = (value) => `${toNumber(value, 0).toFixed(0)}%`;
-
-const formatDateTime = (isoValue) => {
-    if (!isoValue) return '—';
-    const date = new Date(isoValue);
-    if (Number.isNaN(date.getTime())) return '—';
-    return date.toLocaleString('ru-RU', {
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit'
-    });
-};
-
-const formatDuration = (value) => {
-    const total = Math.max(0, Math.floor(toNumber(value, 0)));
-    const h = Math.floor(total / 3600);
-    const m = Math.floor((total % 3600) / 60);
-    const s = total % 60;
-    if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-    return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-};
-
-const deadlineMetaFor = (status) => DEADLINE_META[status] || DEADLINE_META.unknown;
-
-const statusLabel = (status) => STATUS_LABELS[status] || status || '—';
-
-const isAbortError = (error) => {
-    if (!error) return false;
-    if (error.code === 'ERR_CANCELED') return true;
-    if (error.name === 'CanceledError') return true;
-    if (typeof axios.isCancel === 'function' && axios.isCancel(error)) return true;
-    return false;
-};
-
-const materialIcon = (type) => {
-    switch (String(type || '').toLowerCase()) {
-    case 'video':
-        return Video;
-    case 'pdf':
-    case 'text':
-        return FileText;
-    case 'link':
-        return Link2;
-    default:
-        return FolderOpen;
+  const loadAdminData = useCallback(async () => {
+    if (!apiRoot || !canUseManagerApi) return;
+    setLoadingAdmin(true);
+    try {
+      const [coursesRes, progressRes, attemptsRes, learnersRes] = await Promise.all([
+        lmsRequest("/api/lms/admin/courses"),
+        lmsRequest("/api/lms/admin/progress"),
+        lmsRequest("/api/lms/admin/attempts?limit=400"),
+        lmsRequest("/api/lms/admin/learners"),
+      ]);
+      setAdminCourses(Array.isArray(coursesRes?.courses) ? coursesRes.courses : []);
+      setAdminProgressRows(Array.isArray(progressRes?.rows) ? progressRes.rows : []);
+      setAdminAttempts(Array.isArray(attemptsRes?.attempts) ? attemptsRes.attempts : []);
+      setLearners(Array.isArray(learnersRes?.learners) ? learnersRes.learners : []);
+      setApiMode(true);
+    } catch (error) {
+      emitToast(`LMS admin: ${String(error?.message || "ошибка загрузки")}`, "error");
+    } finally {
+      setLoadingAdmin(false);
     }
-};
+  }, [apiRoot, canUseManagerApi, lmsRequest, emitToast]);
 
-const parseSelectedIds = (payload) => {
-    if (!payload || typeof payload !== 'object') return [];
-    if (Array.isArray(payload.option_ids)) return payload.option_ids.map((x) => toNumber(x, 0)).filter(Boolean);
-    if (payload.option_id !== undefined && payload.option_id !== null) {
-        const id = toNumber(payload.option_id, 0);
-        return id ? [id] : [];
-    }
-    if (Array.isArray(payload.value)) return payload.value.map((x) => toNumber(x, 0)).filter(Boolean);
-    if (payload.value !== undefined && payload.value !== null) {
-        const id = toNumber(payload.value, 0);
-        return id ? [id] : [];
-    }
-    return [];
-};
+  useEffect(() => {
+    loadLearnerDashboard();
+  }, [loadLearnerDashboard]);
 
-const extractMatchingPairs = (payload) => {
-    if (!payload || typeof payload !== 'object') return {};
-    if (payload.pairs && typeof payload.pairs === 'object' && !Array.isArray(payload.pairs)) {
-        return Object.entries(payload.pairs).reduce((acc, [left, right]) => {
-            if (!left) return acc;
-            acc[String(left)] = String(right ?? '');
-            return acc;
-        }, {});
+  useEffect(() => {
+    if (view === "admin" || view === "builder") {
+      loadAdminData();
     }
-    if (Array.isArray(payload.pairs)) {
-        return payload.pairs.reduce((acc, pair) => {
-            if (!pair || typeof pair !== 'object') return acc;
-            if (!pair.left) return acc;
-            acc[String(pair.left)] = String(pair.right ?? '');
-            return acc;
-        }, {});
+  }, [view, loadAdminData]);
+
+  const markNotificationRead = useCallback(async (notificationId) => {
+    setNotifications((prev) => prev.map((item) => (item.id === notificationId ? { ...item, read: true } : item)));
+    if (!apiRoot || !canUseLearnerApi) return;
+    try {
+      await lmsRequest(`/api/lms/notifications/${notificationId}/read`, { method: "POST" });
+    } catch (error) {
+      emitToast(String(error?.message || "Не удалось отметить уведомление"), "error");
     }
-    return {};
-};
+  }, [apiRoot, canUseLearnerApi, lmsRequest, emitToast]);
 
-const buildMatchingRightChoices = (question) => {
-    const metadata = question?.metadata && typeof question.metadata === 'object' ? question.metadata : {};
-    if (Array.isArray(metadata.right_options) && metadata.right_options.length > 0) {
-        return metadata.right_options
-            .map((item) => {
-                if (item && typeof item === 'object') {
-                    const value = String(item.value ?? item.key ?? item.id ?? '').trim();
-                    const label = String(item.label ?? item.text ?? item.value ?? '').trim();
-                    if (!value) return null;
-                    return { value, label: label || value };
-                }
-                const text = String(item ?? '').trim();
-                if (!text) return null;
-                return { value: text, label: text };
-            })
-            .filter(Boolean);
-    }
-
-    const options = Array.isArray(question?.options) ? question.options : [];
-    const derived = options
-        .map((opt) => {
-            const value = String(opt?.metadata?.right_key ?? opt?.metadata?.right ?? opt?.key ?? '').trim();
-            const label = String(opt?.metadata?.right_label ?? opt?.metadata?.right_text ?? opt?.text ?? value).trim();
-            if (!value) return null;
-            return { value, label: label || value };
-        })
-        .filter(Boolean);
-
-    const unique = [];
-    const seen = new Set();
-    derived.forEach((item) => {
-        if (!seen.has(item.value)) {
-            seen.add(item.value);
-            unique.push(item);
+  const downloadCertificate = useCallback(async (certificate) => {
+    if (!certificate?.id || !apiRoot || !canUseLearnerApi) return;
+    try {
+      const headers = typeof withAccessTokenHeader === "function" ? withAccessTokenHeader({}) : {};
+      const response = await fetch(`${apiRoot}/api/lms/certificates/${certificate.id}/download`, {
+        method: "GET",
+        headers,
+        credentials: "include",
+      });
+      if (!response.ok) {
+        let errorText = `HTTP ${response.status}`;
+        try {
+          const payload = await response.json();
+          errorText = payload?.error || errorText;
+        } catch (_) {
+          // ignore JSON parse errors
         }
-    });
-    return unique;
-};
+        throw new Error(errorText);
+      }
+      const blob = await response.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = `${certificate.number || `certificate-${certificate.id}`}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(objectUrl);
+    } catch (error) {
+      emitToast(`Не удалось скачать сертификат: ${String(error?.message || "ошибка")}`, "error");
+    }
+  }, [apiRoot, canUseLearnerApi, withAccessTokenHeader, emitToast]);
 
-const SectionCard = ({ title, subtitle, actions, children }) => (
-    <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-        <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
-            <div>
-                <h3 className="text-base font-semibold text-slate-900">{title}</h3>
-                {subtitle ? <p className="mt-1 text-sm text-slate-500">{subtitle}</p> : null}
+  const openCourse = useCallback(async (course) => {
+    if (!course?.id) return;
+    setBusyCourseId(course.id);
+    try {
+      let nextCourse = course;
+      if (apiRoot && canUseLearnerApi) {
+        try {
+          await lmsRequest(`/api/lms/courses/${course.id}/start`, { method: "POST" });
+        } catch (_) {
+          // already started or not required
+        }
+        const detail = await lmsRequest(`/api/lms/courses/${course.id}`);
+        if (detail?.course) {
+          nextCourse = mapCourseDetailToView(detail.course, course);
+          setCourses((prev) => prev.map((item) => (item.id === nextCourse.id ? { ...item, ...nextCourse } : item)));
+        }
+      }
+      setSelectedCourse(nextCourse);
+      setView("course");
+    } catch (error) {
+      emitToast(`Не удалось открыть курс: ${String(error?.message || "ошибка")}`, "error");
+    } finally {
+      setBusyCourseId(null);
+    }
+  }, [apiRoot, canUseLearnerApi, lmsRequest, emitToast]);
+
+  const refreshSelectedCourse = useCallback(async () => {
+    if (!apiRoot || !canUseLearnerApi || !selectedCourse?.id) return null;
+    const detail = await lmsRequest(`/api/lms/courses/${selectedCourse.id}`);
+    if (detail?.course) {
+      const mapped = mapCourseDetailToView(detail.course, selectedCourse);
+      setSelectedCourse(mapped);
+      setCourses((prev) => prev.map((item) => (item.id === mapped.id ? { ...item, ...mapped } : item)));
+      return mapped;
+    }
+    return null;
+  }, [apiRoot, canUseLearnerApi, selectedCourse, lmsRequest]);
+
+  const openLesson = useCallback(async (lesson) => {
+    if (!lesson) return;
+    setSelectedLesson(lesson);
+    setView("lesson");
+    setQuizView("intro");
+    setQuizAnswers({});
+
+    if (!apiRoot || !canUseLearnerApi || !lesson?.apiLessonId || lesson?.type === "quiz") return;
+    try {
+      const detail = await lmsRequest(`/api/lms/lessons/${lesson.apiLessonId}`);
+      const lessonPayload = detail?.lesson || {};
+      const progressPayload = detail?.progress || {};
+      setSelectedLesson((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          title: lessonPayload?.title || prev.title,
+          description: lessonPayload?.description || prev.description,
+          duration: formatDurationLabel(lessonPayload?.duration_seconds || prev.durationSeconds || 0),
+          durationSeconds: Number(lessonPayload?.duration_seconds || prev.durationSeconds || 0),
+          materials: Array.isArray(detail?.materials) ? detail.materials : (prev.materials || []),
+          completionRatio: Number(progressPayload?.completion_ratio || prev.completionRatio || 0),
+          status: String(progressPayload?.status || prev.status || "not_started"),
+          apiProgress: progressPayload,
+          apiSession: detail?.session || null,
+          antiCheat: detail?.anti_cheat || null,
+        };
+      });
+    } catch (error) {
+      emitToast(`Не удалось загрузить урок: ${String(error?.message || "ошибка")}`, "error");
+    }
+  }, [apiRoot, canUseLearnerApi, lmsRequest, emitToast]);
+
+  const handleCompleteLesson = useCallback(async (lesson) => {
+    if (!apiRoot || !canUseLearnerApi || !lesson?.apiLessonId) return false;
+    try {
+      await lmsRequest(`/api/lms/lessons/${lesson.apiLessonId}/complete`, { method: "POST" });
+      emitToast("Урок отмечен как завершенный", "success");
+      setSelectedLesson((prev) => (prev ? { ...prev, status: "completed", completionRatio: 100 } : prev));
+      await refreshSelectedCourse();
+      await loadLearnerDashboard();
+      return true;
+    } catch (error) {
+      emitToast(`Не удалось завершить урок: ${String(error?.message || "ошибка")}`, "error");
+      return false;
+    }
+  }, [apiRoot, canUseLearnerApi, lmsRequest, emitToast, refreshSelectedCourse, loadLearnerDashboard]);
+
+  const handleQuizFinished = useCallback(async () => {
+    try {
+      await refreshSelectedCourse();
+      await loadLearnerDashboard();
+    } catch (_) {
+      // ignore refresh errors here
+    }
+  }, [refreshSelectedCourse, loadLearnerDashboard]);
+
+  const goBack = () => {
+    if (view === "lesson") {
+      setView("course");
+      setSelectedLesson(null);
+    } else if (view === "course") {
+      setView(canGoCatalog ? "catalog" : "admin");
+      setSelectedCourse(null);
+    } else if (view === "builder") {
+      setView(canGoCatalog ? "catalog" : "admin");
+    } else if (view === "admin") {
+      setView(canGoCatalog ? "catalog" : "admin");
+    }
+  };
+
+  const navToAdmin = () => {
+    if (!canUseManagerApi) return;
+    setView("admin");
+    setAdminTab("analytics");
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-50 font-sans" style={{ fontFamily: "'DM Sans', system-ui, sans-serif" }}>
+      <TopNav
+        view={view}
+        goBack={goBack}
+        isAdmin={isAdmin}
+        setIsAdmin={setIsAdmin}
+        navToAdmin={navToAdmin}
+        canToggleAdmin={canUseManagerApi}
+        canGoCatalog={canGoCatalog}
+      />
+      <main className="pt-16">
+        {homeError && canUseLearnerApi && (
+          <div className="max-w-screen-xl mx-auto px-6 py-4">
+            <div className="rounded-xl border border-amber-200 bg-amber-50 text-amber-800 text-sm px-4 py-3">
+              {homeError}
             </div>
-            {actions ? <div className="flex items-center gap-2">{actions}</div> : null}
-        </div>
-        {children}
-    </section>
-);
+          </div>
+        )}
 
-const MetricCard = ({ icon: Icon, label, value, helper }) => (
-    <div className="rounded-2xl border border-slate-200 bg-white/95 p-4 shadow-sm">
-        <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
-            <Icon className="h-4 w-4 text-slate-500" />
-            <span>{label}</span>
-        </div>
-        <div className="mt-2 text-2xl font-semibold text-slate-900">{value}</div>
-        {helper ? <div className="mt-1 text-xs text-slate-500">{helper}</div> : null}
+        {view === "catalog" && (
+          <CatalogView
+            tab={catalogTab}
+            setTab={setCatalogTab}
+            searchQuery={searchQuery}
+            setSearchQuery={setSearchQuery}
+            onOpenCourse={openCourse}
+            isAdmin={isAdmin}
+            onOpenBuilder={() => setView("builder")}
+            courses={courses}
+            certificates={certificates}
+            notifications={notifications}
+            loading={loadingHome}
+            busyCourseId={busyCourseId}
+            onNotificationRead={markNotificationRead}
+            onCertificateDownload={downloadCertificate}
+            onRefresh={loadLearnerDashboard}
+          />
+        )}
+        {view === "course" && selectedCourse && (
+          <CourseDetail course={selectedCourse} onStartLesson={openLesson} />
+        )}
+        {view === "lesson" && selectedLesson && selectedCourse && (
+          <LessonView
+            lesson={selectedLesson}
+            course={selectedCourse}
+            onBack={goBack}
+            quizView={quizView}
+            setQuizView={setQuizView}
+            quizAnswers={quizAnswers}
+            setQuizAnswers={setQuizAnswers}
+            sidebarOpen={sidebarOpen}
+            setSidebarOpen={setSidebarOpen}
+            onSelectLesson={openLesson}
+            lmsRequest={lmsRequest}
+            apiMode={apiMode && canUseLearnerApi}
+            onCompleteLesson={handleCompleteLesson}
+            onQuizFinished={handleQuizFinished}
+            emitToast={emitToast}
+          />
+        )}
+        {view === "builder" && (
+          <CourseBuilder
+            onBack={goBack}
+            lmsRequest={lmsRequest}
+            canUseManagerApi={canUseManagerApi}
+            learners={learners}
+            adminCourses={adminCourses}
+            emitToast={emitToast}
+            onAfterSave={loadAdminData}
+          />
+        )}
+        {view === "admin" && (
+          <AdminView
+            tab={adminTab}
+            setTab={setAdminTab}
+            courses={courses}
+            adminCourses={adminCourses}
+            progressRows={adminProgressRows}
+            attempts={adminAttempts}
+            loading={loadingAdmin}
+          />
+        )}
+      </main>
     </div>
-);
+  );
+}
 
-const TabButton = ({ icon: Icon, label, active, onClick }) => (
-    <button
-        type="button"
-        onClick={onClick}
-        className={`inline-flex items-center gap-2 rounded-xl border px-4 py-2 text-sm font-medium transition ${
-            active
-                ? 'border-blue-700 bg-blue-700 text-white shadow'
-                : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50'
-        }`}
-    >
-        <Icon className="h-4 w-4" />
-        <span>{label}</span>
-    </button>
-);
+// ─── TOP NAVIGATION ───────────────────────────────────────────────────────────
 
-const QuestionEditor = ({ question, value, savingState, onChange }) => {
-    const qType = String(question?.type || '').toLowerCase();
-    const options = Array.isArray(question?.options) ? question.options : [];
-
-    if (qType === 'single') {
-        const selectedId = parseSelectedIds(value)[0] || 0;
-        return (
-            <div className="space-y-2">
-                {options.map((option) => {
-                    const selected = selectedId === toNumber(option.id, 0);
-                    return (
-                        <button
-                            key={option.id}
-                            type="button"
-                            onClick={() => onChange({ option_id: option.id }, true)}
-                            className={`flex w-full items-start gap-3 rounded-xl border px-3 py-2 text-left text-sm transition ${
-                                selected
-                                    ? 'border-blue-400 bg-blue-50 text-blue-900'
-                                    : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
-                            }`}
-                        >
-                            <span className={`mt-0.5 inline-flex h-4 w-4 rounded-full border ${selected ? 'border-blue-600 bg-blue-600' : 'border-slate-400 bg-white'}`} />
-                            <span>{option.text}</span>
-                        </button>
-                    );
-                })}
+function TopNav({ view, goBack, isAdmin, setIsAdmin, navToAdmin, canToggleAdmin = true, canGoCatalog = true }) {
+  const showBack = ["course", "lesson", "builder"].includes(view) || (view === "admin" && canGoCatalog);
+  const backLabels = { course: "Все курсы", lesson: "Курс", builder: "Все курсы", admin: "Все курсы" };
+  return (
+    <header className="fixed top-0 left-0 right-0 z-40 bg-white border-b border-slate-200 h-16">
+      <div className="max-w-screen-xl mx-auto px-6 h-full flex items-center justify-between gap-4">
+        <div className="flex items-center gap-4">
+          {showBack ? (
+            <button onClick={goBack} className="flex items-center gap-2 text-sm text-slate-500 hover:text-slate-800 transition-colors">
+              <ChevronLeft size={18} /> {backLabels[view]}
+            </button>
+          ) : (
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center"><BookOpen size={16} className="text-white" /></div>
+              <span className="text-[15px] font-semibold text-slate-900 tracking-tight">CorpLearn</span>
             </div>
-        );
-    }
-
-    if (qType === 'multiple') {
-        const selected = new Set(parseSelectedIds(value));
-        return (
-            <div className="space-y-2">
-                {options.map((option) => {
-                    const optionId = toNumber(option.id, 0);
-                    const active = selected.has(optionId);
-                    return (
-                        <button
-                            key={option.id}
-                            type="button"
-                            onClick={() => {
-                                const next = new Set(selected);
-                                if (active) next.delete(optionId);
-                                else next.add(optionId);
-                                onChange({ option_ids: Array.from(next) }, true);
-                            }}
-                            className={`flex w-full items-start gap-3 rounded-xl border px-3 py-2 text-left text-sm transition ${
-                                active
-                                    ? 'border-cyan-400 bg-cyan-50 text-cyan-900'
-                                    : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
-                            }`}
-                        >
-                            <span className={`mt-0.5 inline-flex h-4 w-4 items-center justify-center rounded border ${active ? 'border-cyan-600 bg-cyan-600 text-white' : 'border-slate-400 bg-white'}`}>
-                                {active ? <Check className="h-3 w-3" /> : null}
-                            </span>
-                            <span>{option.text}</span>
-                        </button>
-                    );
-                })}
-            </div>
-        );
-    }
-
-    if (qType === 'true_false') {
-        const selectedId = parseSelectedIds(value)[0] || 0;
-        const fallbackOptions = [
-            { id: 'true', text: 'Верно', boolValue: true },
-            { id: 'false', text: 'Неверно', boolValue: false }
-        ];
-        const source = options.length > 0 ? options : fallbackOptions;
-        return (
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                {source.map((option) => {
-                    const optionId = String(option.id);
-                    const active = selectedId ? selectedId === toNumber(option.id, 0) : String(value?.value) === String(option.boolValue);
-                    return (
-                        <button
-                            key={optionId}
-                            type="button"
-                            onClick={() => {
-                                if (options.length > 0) {
-                                    onChange({ option_id: option.id }, true);
-                                } else {
-                                    onChange({ value: !!option.boolValue }, true);
-                                }
-                            }}
-                            className={`rounded-xl border px-3 py-2 text-sm font-medium transition ${
-                                active
-                                    ? 'border-blue-500 bg-blue-600 text-white'
-                                    : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
-                            }`}
-                        >
-                            {option.text}
-                        </button>
-                    );
-                })}
-            </div>
-        );
-    }
-
-    if (qType === 'matching') {
-        const pairs = extractMatchingPairs(value);
-        const leftItems = options.filter((option) => String(option?.key || '').trim());
-        const rightChoices = buildMatchingRightChoices(question);
-
-        return (
-            <div className="space-y-3">
-                {leftItems.length === 0 ? (
-                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-500">
-                        Для этого вопроса не настроены пары.
-                    </div>
-                ) : (
-                    leftItems.map((left) => {
-                        const leftKey = String(left.key || '');
-                        return (
-                            <label key={left.id} className="grid grid-cols-1 items-center gap-2 sm:grid-cols-[1fr_180px]">
-                                <span className="text-sm text-slate-700">{left.text}</span>
-                                <select
-                                    className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-700 focus:border-blue-500 focus:outline-none"
-                                    value={pairs[leftKey] || ''}
-                                    onChange={(event) => {
-                                        const next = { ...pairs, [leftKey]: event.target.value };
-                                        onChange({ pairs: next }, false);
-                                    }}
-                                >
-                                    <option value="">Выберите соответствие</option>
-                                    {rightChoices.map((item) => (
-                                        <option key={`${left.id}-${item.value}`} value={item.value}>
-                                            {item.label}
-                                        </option>
-                                    ))}
-                                </select>
-                            </label>
-                        );
-                    })
-                )}
-            </div>
-        );
-    }
-
-    const textValue = typeof value?.text === 'string'
-        ? value.text
-        : (typeof value?.value === 'string' ? value.value : '');
-    return (
-        <textarea
-            value={textValue}
-            onChange={(event) => onChange({ text: event.target.value }, false)}
-            placeholder="Введите ответ"
-            rows={4}
-            className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
-        />
-    );
-};
-
-const LmsView = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
-    const role = String(user?.role || '').trim().toLowerCase();
-    const isLearner = LEARNER_ROLES.has(role);
-    const isManager = MANAGER_ROLES.has(role);
-    const isFullAdmin = FULL_ADMIN_ROLES.has(role);
-
-    const learnerTabs = useMemo(() => ([
-        { id: 'dashboard', label: 'Обзор', icon: Gauge },
-        { id: 'courses', label: 'Курсы', icon: BookOpen },
-        { id: 'certificates', label: 'Сертификаты', icon: Award },
-        { id: 'notifications', label: 'Уведомления', icon: Bell }
-    ]), []);
-
-    const managerTabs = useMemo(() => {
-        const items = [
-            { id: 'admin_courses', label: 'Курсы', icon: GraduationCap },
-            { id: 'admin_assignments', label: 'Назначения', icon: Users },
-            { id: 'admin_progress', label: 'Прогресс', icon: ClipboardList },
-            { id: 'admin_attempts', label: 'Попытки', icon: Target },
-            { id: 'admin_deadlines', label: 'Дедлайны', icon: CalendarDays },
-            { id: 'admin_materials', label: 'Материалы', icon: Upload }
-        ];
-        if (isFullAdmin) {
-            items.push({ id: 'admin_revoke', label: 'Отзыв сертификата', icon: Ban });
-        }
-        return items;
-    }, [isFullAdmin]);
-
-    const availableTabs = useMemo(() => {
-        const tabs = [];
-        if (isLearner) tabs.push(...learnerTabs);
-        if (isManager) tabs.push(...managerTabs);
-        return tabs;
-    }, [isLearner, isManager, learnerTabs, managerTabs]);
-
-    const [activeTab, setActiveTab] = useState(() => (isLearner ? 'dashboard' : 'admin_courses'));
-
-    useEffect(() => {
-        if (!availableTabs.some((tab) => tab.id === activeTab)) {
-            setActiveTab(availableTabs[0]?.id || 'dashboard');
-        }
-    }, [availableTabs, activeTab]);
-
-    const headers = useMemo(
-        () => withAccessTokenHeader({
-            'X-API-Key': user?.apiKey,
-            'X-User-Id': user?.id
-        }),
-        [withAccessTokenHeader, user?.apiKey, user?.id]
-    );
-
-    const mountedRef = useRef(true);
-    const inflightRef = useRef(new Map());
-    const cacheRef = useRef(new Map());
-    const exclusiveControllersRef = useRef(new Map());
-    const heartbeatBusyRef = useRef(false);
-    const answerTimersRef = useRef(new Map());
-    const answerLastSavedRef = useRef(new Map());
-    const answerDirtyRef = useRef(new Set());
-    const lastErrorToastAtRef = useRef(0);
-
-    useEffect(() => {
-        return () => {
-            mountedRef.current = false;
-            answerTimersRef.current.forEach((timerId) => window.clearTimeout(timerId));
-            answerTimersRef.current.clear();
-            exclusiveControllersRef.current.forEach((controller) => controller.abort());
-            exclusiveControllersRef.current.clear();
-        };
-    }, []);
-
-    const request = useCallback(
-        async (method, path, options = {}) => {
-            const upperMethod = String(method || 'GET').toUpperCase();
-            const {
-                data = null,
-                params = undefined,
-                signal = undefined,
-                useCache = false,
-                dedupe = true,
-                cacheTtlMs = 15000,
-                responseType = undefined
-            } = options;
-
-            const key = `${upperMethod}|${path}|${safeJson(params)}|${safeJson(data)}|${responseType || ''}`;
-            const now = Date.now();
-            if (upperMethod === 'GET' && useCache) {
-                const cached = cacheRef.current.get(key);
-                if (cached && cached.expiresAt > now) {
-                    return cached.payload;
-                }
-            }
-
-            const canDedupe = dedupe && !signal;
-            if (canDedupe && inflightRef.current.has(key)) {
-                return inflightRef.current.get(key);
-            }
-
-            const config = {
-                method: upperMethod,
-                url: `${apiBaseUrl}${path}`,
-                headers,
-                withCredentials: true,
-                params,
-                signal,
-                responseType
-            };
-            if (data !== null) {
-                config.data = data;
-            }
-
-            const promise = axios(config)
-                .then((response) => {
-                    const payload = responseType ? response : response.data;
-                    if (upperMethod === 'GET' && useCache) {
-                        cacheRef.current.set(key, {
-                            payload,
-                            expiresAt: Date.now() + cacheTtlMs
-                        });
-                    }
-                    return payload;
-                })
-                .finally(() => {
-                    inflightRef.current.delete(key);
-                });
-
-            if (canDedupe) {
-                inflightRef.current.set(key, promise);
-            }
-            return promise;
-        },
-        [apiBaseUrl, headers]
-    );
-
-    const invalidateLmsCache = useCallback(() => {
-        for (const key of Array.from(cacheRef.current.keys())) {
-            if (key.includes('/api/lms/')) {
-                cacheRef.current.delete(key);
-            }
-        }
-    }, []);
-
-    const runExclusive = useCallback(async (slot, task) => {
-        const existing = exclusiveControllersRef.current.get(slot);
-        if (existing) existing.abort();
-        const controller = new AbortController();
-        exclusiveControllersRef.current.set(slot, controller);
-        try {
-            return await task(controller.signal);
-        } finally {
-            if (exclusiveControllersRef.current.get(slot) === controller) {
-                exclusiveControllersRef.current.delete(slot);
-            }
-        }
-    }, []);
-
-    const showErrorToast = useCallback((message) => {
-        const now = Date.now();
-        if (now - lastErrorToastAtRef.current < 1000) return;
-        lastErrorToastAtRef.current = now;
-        showToast?.(message, 'error');
-    }, [showToast]);
-
-    const [homeData, setHomeData] = useState(null);
-    const [homeLoaded, setHomeLoaded] = useState(false);
-    const [homeLoading, setHomeLoading] = useState(false);
-
-    const [courses, setCourses] = useState([]);
-    const [coursesLoaded, setCoursesLoaded] = useState(false);
-    const [coursesLoading, setCoursesLoading] = useState(false);
-
-    const [selectedCourseId, setSelectedCourseId] = useState(null);
-    const [courseDetail, setCourseDetail] = useState(null);
-    const [courseDetailLoading, setCourseDetailLoading] = useState(false);
-
-    const [lessonData, setLessonData] = useState(null);
-    const [lessonLoading, setLessonLoading] = useState(false);
-    const [selectedLessonId, setSelectedLessonId] = useState(null);
-    const [player, setPlayer] = useState({
-        isPlaying: false,
-        positionSeconds: 0,
-        maxObservedSeconds: 0,
-        seekDraft: null
-    });
-
-    const [testAttemptData, setTestAttemptData] = useState(null);
-    const [testResult, setTestResult] = useState(null);
-    const [testLoading, setTestLoading] = useState(false);
-    const [finishingTest, setFinishingTest] = useState(false);
-    const [answers, setAnswers] = useState({});
-    const [answerSavingState, setAnswerSavingState] = useState({});
-
-    const [certificates, setCertificates] = useState([]);
-    const [certificatesLoaded, setCertificatesLoaded] = useState(false);
-    const [certificatesLoading, setCertificatesLoading] = useState(false);
-    const [downloadingCertificateId, setDownloadingCertificateId] = useState(0);
-
-    const [notifications, setNotifications] = useState([]);
-    const [notificationsLoaded, setNotificationsLoaded] = useState(false);
-    const [notificationsLoading, setNotificationsLoading] = useState(false);
-
-    const [adminCourses, setAdminCourses] = useState([]);
-    const [adminCoursesLoaded, setAdminCoursesLoaded] = useState(false);
-    const [adminCoursesLoading, setAdminCoursesLoading] = useState(false);
-
-    const [adminProgress, setAdminProgress] = useState([]);
-    const [adminProgressLoaded, setAdminProgressLoaded] = useState(false);
-    const [adminProgressLoading, setAdminProgressLoading] = useState(false);
-
-    const [adminAttempts, setAdminAttempts] = useState([]);
-    const [adminAttemptsLoaded, setAdminAttemptsLoaded] = useState(false);
-    const [adminAttemptsLoading, setAdminAttemptsLoading] = useState(false);
-
-    const [assignableUsers, setAssignableUsers] = useState([]);
-    const [assignableUsersLoaded, setAssignableUsersLoaded] = useState(false);
-    const [assignableUsersLoading, setAssignableUsersLoading] = useState(false);
-
-    const [courseSearch, setCourseSearch] = useState('');
-    const [userSearch, setUserSearch] = useState('');
-
-    const [newCourseForm, setNewCourseForm] = useState({
-        title: '',
-        description: '',
-        category: '',
-        pass_threshold: 80,
-        attempt_limit: 3,
-        blueprint_json: ''
-    });
-    const [createCourseLoading, setCreateCourseLoading] = useState(false);
-
-    const [assignmentForm, setAssignmentForm] = useState({
-        course_id: '',
-        due_at: '',
-        user_ids: []
-    });
-    const [assigning, setAssigning] = useState(false);
-
-    const [uploadForm, setUploadForm] = useState({
-        lesson_id: '',
-        title: '',
-        material_type: 'file',
-        position: '',
-        files: []
-    });
-    const [uploadingMaterials, setUploadingMaterials] = useState(false);
-
-    const [revokeForm, setRevokeForm] = useState({
-        certificate_id: '',
-        reason: 'Revoked by administrator'
-    });
-    const [revoking, setRevoking] = useState(false);
-
-    const tabVisibleRef = useRef(true);
-    const playerPositionRef = useRef(0);
-    const playerMaxObservedRef = useRef(0);
-    const selectedLessonIdRef = useRef(null);
-    const lessonMetaRef = useRef({
-        durationSeconds: 0,
-        allowFastForward: true,
-        completionThreshold: COMPLETION_THRESHOLD_FALLBACK,
-        heartbeatSeconds: HEARTBEAT_FALLBACK_SECONDS
-    });
-    const answersRef = useRef({});
-    const testAttemptIdRef = useRef(null);
-
-    useEffect(() => {
-        tabVisibleRef.current = typeof document === 'undefined' ? true : document.visibilityState === 'visible';
-    }, []);
-
-    useEffect(() => {
-        playerPositionRef.current = toNumber(player.positionSeconds, 0);
-        playerMaxObservedRef.current = toNumber(player.maxObservedSeconds, 0);
-    }, [player.positionSeconds, player.maxObservedSeconds]);
-
-    useEffect(() => {
-        selectedLessonIdRef.current = selectedLessonId;
-    }, [selectedLessonId]);
-
-    useEffect(() => {
-        answersRef.current = answers;
-    }, [answers]);
-
-    useEffect(() => {
-        testAttemptIdRef.current = testAttemptData?.attempt?.id || null;
-    }, [testAttemptData]);
-
-    useEffect(() => {
-        if (!lessonData?.lesson) return;
-        lessonMetaRef.current = {
-            durationSeconds: toNumber(lessonData.lesson.duration_seconds, 0),
-            allowFastForward: !!lessonData.lesson.allow_fast_forward,
-            completionThreshold: toNumber(lessonData.lesson.completion_threshold, COMPLETION_THRESHOLD_FALLBACK),
-            heartbeatSeconds: toNumber(
-                lessonData?.anti_cheat?.heartbeat_seconds,
-                toNumber(homeData?.heartbeat_seconds, HEARTBEAT_FALLBACK_SECONDS)
-            )
-        };
-    }, [lessonData, homeData?.heartbeat_seconds]);
-
-    const loadHome = useCallback(async (force = false) => {
-        if (!isLearner) return;
-        setHomeLoading(true);
-        try {
-            const payload = await request('GET', '/api/lms/home', { useCache: !force, cacheTtlMs: 10000 });
-            if (!mountedRef.current) return;
-            setHomeData(payload || null);
-            setHomeLoaded(true);
-        } catch (error) {
-            if (!isAbortError(error)) {
-                showErrorToast(error?.response?.data?.error || 'Не удалось загрузить LMS dashboard');
-            }
-        } finally {
-            if (mountedRef.current) setHomeLoading(false);
-        }
-    }, [isLearner, request, showErrorToast]);
-
-    const loadCourses = useCallback(async (force = false) => {
-        if (!isLearner) return;
-        setCoursesLoading(true);
-        try {
-            const payload = await request('GET', '/api/lms/courses', { useCache: !force, cacheTtlMs: 10000 });
-            if (!mountedRef.current) return;
-            setCourses(Array.isArray(payload?.courses) ? payload.courses : []);
-            setCoursesLoaded(true);
-        } catch (error) {
-            if (!isAbortError(error)) {
-                showErrorToast(error?.response?.data?.error || 'Не удалось загрузить курсы');
-            }
-        } finally {
-            if (mountedRef.current) setCoursesLoading(false);
-        }
-    }, [isLearner, request, showErrorToast]);
-
-    const loadCertificates = useCallback(async (force = false) => {
-        if (!isLearner) return;
-        setCertificatesLoading(true);
-        try {
-            const payload = await request('GET', '/api/lms/certificates', { useCache: !force, cacheTtlMs: 15000 });
-            if (!mountedRef.current) return;
-            setCertificates(Array.isArray(payload?.certificates) ? payload.certificates : []);
-            setCertificatesLoaded(true);
-        } catch (error) {
-            if (!isAbortError(error)) {
-                showErrorToast(error?.response?.data?.error || 'Не удалось загрузить сертификаты');
-            }
-        } finally {
-            if (mountedRef.current) setCertificatesLoading(false);
-        }
-    }, [isLearner, request, showErrorToast]);
-
-    const loadNotifications = useCallback(async (force = false) => {
-        if (!isLearner) return;
-        setNotificationsLoading(true);
-        try {
-            const payload = await request('GET', '/api/lms/notifications', {
-                params: { limit: 200 },
-                useCache: !force,
-                cacheTtlMs: 8000
-            });
-            if (!mountedRef.current) return;
-            setNotifications(Array.isArray(payload?.notifications) ? payload.notifications : []);
-            setNotificationsLoaded(true);
-        } catch (error) {
-            if (!isAbortError(error)) {
-                showErrorToast(error?.response?.data?.error || 'Не удалось загрузить уведомления');
-            }
-        } finally {
-            if (mountedRef.current) setNotificationsLoading(false);
-        }
-    }, [isLearner, request, showErrorToast]);
-
-    const loadAdminCourses = useCallback(async (force = false) => {
-        if (!isManager) return;
-        setAdminCoursesLoading(true);
-        try {
-            const payload = await request('GET', '/api/lms/admin/courses', { useCache: !force, cacheTtlMs: 12000 });
-            if (!mountedRef.current) return;
-            setAdminCourses(Array.isArray(payload?.courses) ? payload.courses : []);
-            setAdminCoursesLoaded(true);
-        } catch (error) {
-            if (!isAbortError(error)) {
-                showErrorToast(error?.response?.data?.error || 'Не удалось загрузить админ-курсы');
-            }
-        } finally {
-            if (mountedRef.current) setAdminCoursesLoading(false);
-        }
-    }, [isManager, request, showErrorToast]);
-
-    const loadAdminProgress = useCallback(async (force = false) => {
-        if (!isManager) return;
-        setAdminProgressLoading(true);
-        try {
-            const payload = await request('GET', '/api/lms/admin/progress', { useCache: !force, cacheTtlMs: 12000 });
-            if (!mountedRef.current) return;
-            setAdminProgress(Array.isArray(payload?.rows) ? payload.rows : []);
-            setAdminProgressLoaded(true);
-        } catch (error) {
-            if (!isAbortError(error)) {
-                showErrorToast(error?.response?.data?.error || 'Не удалось загрузить прогресс');
-            }
-        } finally {
-            if (mountedRef.current) setAdminProgressLoading(false);
-        }
-    }, [isManager, request, showErrorToast]);
-
-    const loadAdminAttempts = useCallback(async (force = false) => {
-        if (!isManager) return;
-        setAdminAttemptsLoading(true);
-        try {
-            const payload = await request('GET', '/api/lms/admin/attempts', { useCache: !force, cacheTtlMs: 10000 });
-            if (!mountedRef.current) return;
-            setAdminAttempts(Array.isArray(payload?.attempts) ? payload.attempts : []);
-            setAdminAttemptsLoaded(true);
-        } catch (error) {
-            if (!isAbortError(error)) {
-                showErrorToast(error?.response?.data?.error || 'Не удалось загрузить попытки');
-            }
-        } finally {
-            if (mountedRef.current) setAdminAttemptsLoading(false);
-        }
-    }, [isManager, request, showErrorToast]);
-
-    const loadAssignableUsers = useCallback(async (force = false) => {
-        if (!isManager) return;
-        setAssignableUsersLoading(true);
-        try {
-            const payload = await request('GET', '/api/admin/users', { useCache: !force, cacheTtlMs: 60000 });
-            if (!mountedRef.current) return;
-            const usersList = Array.isArray(payload?.users) ? payload.users : [];
-            setAssignableUsers(usersList.filter((item) => LEARNER_ROLES.has(String(item?.role || '').toLowerCase())));
-            setAssignableUsersLoaded(true);
-        } catch (error) {
-            if (!isAbortError(error)) {
-                showErrorToast(error?.response?.data?.error || 'Не удалось загрузить список сотрудников');
-            }
-        } finally {
-            if (mountedRef.current) setAssignableUsersLoading(false);
-        }
-    }, [isManager, request, showErrorToast]);
-
-    const openCourse = useCallback(async (courseId, options = {}) => {
-        if (!courseId) return;
-        const { silentError = false } = options;
-        setCourseDetailLoading(true);
-        setCourseDetail(null);
-        setLessonData(null);
-        setSelectedLessonId(null);
-        setPlayer((prev) => ({ ...prev, isPlaying: false, positionSeconds: 0, maxObservedSeconds: 0, seekDraft: null }));
-        setTestAttemptData(null);
-        setTestResult(null);
-        setAnswers({});
-        setAnswerSavingState({});
-        answerDirtyRef.current.clear();
-        answerLastSavedRef.current.clear();
-        answerTimersRef.current.forEach((timerId) => window.clearTimeout(timerId));
-        answerTimersRef.current.clear();
-
-        try {
-            const payload = await runExclusive('course-detail', (signal) => request('GET', `/api/lms/courses/${courseId}`, {
-                signal,
-                useCache: false,
-                dedupe: false
-            }));
-            if (!mountedRef.current) return;
-            setCourseDetail(payload?.course || null);
-        } catch (error) {
-            if (!isAbortError(error) && !silentError) {
-                showErrorToast(error?.response?.data?.error || 'Не удалось открыть курс');
-            }
-        } finally {
-            if (mountedRef.current) setCourseDetailLoading(false);
-        }
-    }, [request, runExclusive, showErrorToast]);
-
-    const sendLessonEvent = useCallback(async (eventType, payload = {}) => {
-        const lessonId = selectedLessonIdRef.current;
-        if (!lessonId) return { status: 'skipped' };
-        try {
-            return await request('POST', `/api/lms/lessons/${lessonId}/event`, {
-                data: {
-                    event_type: eventType,
-                    payload,
-                    client_ts: new Date().toISOString()
-                },
-                dedupe: false
-            });
-        } catch (error) {
-            if (error?.response?.status === 409 && error?.response?.data?.reason === 'FORWARD_SEEK_NOT_ALLOWED') {
-                const allowed = toNumber(error?.response?.data?.allowed_position, 0);
-                setPlayer((prev) => ({
-                    ...prev,
-                    isPlaying: false,
-                    positionSeconds: clamp(allowed, 0, Math.max(allowed, lessonMetaRef.current.durationSeconds))
-                }));
-                showToast?.('Перемотка вперед заблокирована сервером anti-cheat.', 'info');
-                return error.response.data;
-            }
-            if (!isAbortError(error)) {
-                showErrorToast(error?.response?.data?.error || 'Не удалось отправить событие урока');
-            }
-            throw error;
-        }
-    }, [request, showErrorToast, showToast]);
-
-    const openLesson = useCallback(async (lessonId) => {
-        if (!lessonId) return;
-        setLessonLoading(true);
-        setSelectedLessonId(lessonId);
-        setPlayer((prev) => ({ ...prev, isPlaying: false, seekDraft: null }));
-        setTestAttemptData(null);
-        setTestResult(null);
-        try {
-            const payload = await runExclusive('lesson-detail', (signal) => request('GET', `/api/lms/lessons/${lessonId}`, {
-                signal,
-                useCache: false,
-                dedupe: false
-            }));
-            if (!mountedRef.current) return;
-            setLessonData(payload || null);
-            const initialPosition = toNumber(payload?.progress?.max_position_seconds, 0);
-            const confirmed = toNumber(payload?.progress?.confirmed_seconds, initialPosition);
-            setPlayer((prev) => ({
-                ...prev,
-                isPlaying: false,
-                positionSeconds: initialPosition,
-                maxObservedSeconds: Math.max(initialPosition, confirmed),
-                seekDraft: null
-            }));
-            await sendLessonEvent('open', { lesson_id: lessonId });
-        } catch (error) {
-            if (!isAbortError(error)) {
-                showErrorToast(error?.response?.data?.error || 'Не удалось открыть урок');
-            }
-        } finally {
-            if (mountedRef.current) setLessonLoading(false);
-        }
-    }, [request, runExclusive, sendLessonEvent, showErrorToast]);
-
-    const syncHeartbeat = useCallback(async () => {
-        const lessonId = selectedLessonIdRef.current;
-        if (!lessonId || heartbeatBusyRef.current) return;
-        heartbeatBusyRef.current = true;
-        try {
-            const payload = await request('POST', `/api/lms/lessons/${lessonId}/heartbeat`, {
-                data: {
-                    position_seconds: playerPositionRef.current,
-                    tab_visible: tabVisibleRef.current,
-                    client_ts: new Date().toISOString()
-                },
-                dedupe: false
-            });
-            if (!mountedRef.current) return;
-
-            const serverPosition = toNumber(payload?.position_seconds, playerPositionRef.current);
-            const completionRatio = toNumber(payload?.completion_ratio, toNumber(lessonData?.progress?.completion_ratio, 0));
-            setPlayer((prev) => ({
-                ...prev,
-                positionSeconds: serverPosition,
-                maxObservedSeconds: Math.max(prev.maxObservedSeconds, serverPosition)
-            }));
-            setLessonData((prev) => {
-                if (!prev) return prev;
-                const nextProgress = {
-                    ...(prev.progress || {}),
-                    max_position_seconds: serverPosition,
-                    confirmed_seconds: Math.max(
-                        toNumber(prev.progress?.confirmed_seconds, 0),
-                        serverPosition
-                    ),
-                    completion_ratio: completionRatio,
-                    active_seconds: toNumber(payload?.active_seconds, prev.progress?.active_seconds || 0),
-                    stale_gap_count: toNumber(prev.progress?.stale_gap_count, 0) + (payload?.stale_gap ? 1 : 0),
-                    can_complete: completionRatio >= toNumber(prev.lesson?.completion_threshold, COMPLETION_THRESHOLD_FALLBACK)
-                };
-                return { ...prev, progress: nextProgress };
-            });
-
-            if (payload?.blocked_forward_seek && payload?.allowed_position !== undefined && payload?.allowed_position !== null) {
-                const allowed = toNumber(payload.allowed_position, serverPosition);
-                setPlayer((prev) => ({
-                    ...prev,
-                    isPlaying: false,
-                    positionSeconds: allowed,
-                    maxObservedSeconds: Math.max(prev.maxObservedSeconds, allowed)
-                }));
-                showToast?.('Прогресс скорректирован сервером anti-cheat.', 'info');
-            }
-        } catch (error) {
-            if (!isAbortError(error)) {
-                showErrorToast(error?.response?.data?.error || 'Heartbeat не отправлен');
-            }
-        } finally {
-            heartbeatBusyRef.current = false;
-        }
-    }, [lessonData?.progress?.completion_ratio, request, showErrorToast, showToast]);
-
-    const seekTo = useCallback(async (nextPosition, force = false) => {
-        const duration = lessonMetaRef.current.durationSeconds;
-        const bounded = clamp(
-            toNumber(nextPosition, 0),
-            0,
-            duration > 0 ? duration : toNumber(nextPosition, 0)
-        );
-        const current = playerPositionRef.current;
-        if (!force && Math.abs(current - bounded) < 0.2) return;
-
-        try {
-            await sendLessonEvent('seek', {
-                from_seconds: current,
-                to_seconds: bounded
-            });
-            if (!mountedRef.current) return;
-            setPlayer((prev) => ({
-                ...prev,
-                positionSeconds: bounded,
-                maxObservedSeconds: Math.max(prev.maxObservedSeconds, bounded),
-                seekDraft: null
-            }));
-        } catch (error) {
-            if (!isAbortError(error)) {
-                // toast is already shown in sendLessonEvent
-            }
-        }
-    }, [sendLessonEvent]);
-
-    const completeLesson = useCallback(async () => {
-        const lessonId = selectedLessonIdRef.current;
-        if (!lessonId) return;
-        try {
-            await syncHeartbeat();
-            await request('POST', `/api/lms/lessons/${lessonId}/complete`, {
-                data: {},
-                dedupe: false
-            });
-            showToast?.('Урок успешно завершен.', 'success');
-            invalidateLmsCache();
-            await Promise.all([
-                loadHome(true),
-                loadCourses(true),
-                selectedCourseId ? openCourse(selectedCourseId, { silentError: true }) : Promise.resolve()
-            ]);
-            await openLesson(lessonId);
-        } catch (error) {
-            if (!isAbortError(error)) {
-                showErrorToast(error?.response?.data?.error || 'Не удалось завершить урок');
-            }
-        }
-    }, [invalidateLmsCache, loadCourses, loadHome, openCourse, openLesson, request, selectedCourseId, showErrorToast, showToast, syncHeartbeat]);
-
-    const saveAnswerNow = useCallback(async (questionId, payload) => {
-        const attemptId = testAttemptIdRef.current;
-        if (!attemptId) return;
-        const normalizedQuestionId = toNumber(questionId, 0);
-        if (!normalizedQuestionId) return;
-        const serialized = safeJson(payload);
-        if (answerLastSavedRef.current.get(normalizedQuestionId) === serialized) {
-            answerDirtyRef.current.delete(normalizedQuestionId);
-            return;
-        }
-
-        setAnswerSavingState((prev) => ({ ...prev, [normalizedQuestionId]: 'saving' }));
-        try {
-            await request('PATCH', `/api/lms/tests/attempts/${attemptId}/answer`, {
-                data: {
-                    question_id: normalizedQuestionId,
-                    answer_payload: payload
-                },
-                dedupe: false
-            });
-            answerLastSavedRef.current.set(normalizedQuestionId, serialized);
-            answerDirtyRef.current.delete(normalizedQuestionId);
-            setAnswerSavingState((prev) => ({ ...prev, [normalizedQuestionId]: 'saved' }));
-        } catch (error) {
-            if (!isAbortError(error)) {
-                setAnswerSavingState((prev) => ({ ...prev, [normalizedQuestionId]: 'error' }));
-                showErrorToast(error?.response?.data?.error || 'Не удалось сохранить ответ');
-            }
-        }
-    }, [request, showErrorToast]);
-
-    const queueAnswerSave = useCallback((questionId, payload, immediate = false) => {
-        const normalizedQuestionId = toNumber(questionId, 0);
-        if (!normalizedQuestionId) return;
-        setAnswers((prev) => ({ ...prev, [normalizedQuestionId]: payload }));
-        answerDirtyRef.current.add(normalizedQuestionId);
-
-        const existing = answerTimersRef.current.get(normalizedQuestionId);
-        if (existing) {
-            window.clearTimeout(existing);
-            answerTimersRef.current.delete(normalizedQuestionId);
-        }
-
-        if (immediate) {
-            void saveAnswerNow(normalizedQuestionId, payload);
-            return;
-        }
-
-        const timerId = window.setTimeout(() => {
-            answerTimersRef.current.delete(normalizedQuestionId);
-            const latestPayload = answersRef.current[normalizedQuestionId] ?? payload;
-            void saveAnswerNow(normalizedQuestionId, latestPayload);
-        }, 650);
-        answerTimersRef.current.set(normalizedQuestionId, timerId);
-    }, [saveAnswerNow]);
-
-    const flushAnswerQueue = useCallback(async () => {
-        const pendingPromises = [];
-
-        for (const [questionId, timerId] of answerTimersRef.current.entries()) {
-            window.clearTimeout(timerId);
-            answerTimersRef.current.delete(questionId);
-            const latestPayload = answersRef.current[questionId];
-            pendingPromises.push(saveAnswerNow(questionId, latestPayload ?? {}));
-        }
-
-        for (const questionId of Array.from(answerDirtyRef.current)) {
-            if (!answerTimersRef.current.has(questionId)) {
-                const latestPayload = answersRef.current[questionId];
-                pendingPromises.push(saveAnswerNow(questionId, latestPayload ?? {}));
-            }
-        }
-
-        if (pendingPromises.length > 0) {
-            await Promise.allSettled(pendingPromises);
-        }
-    }, [saveAnswerNow]);
-
-    const startCourse = useCallback(async (courseId) => {
-        const id = toNumber(courseId, 0);
-        if (!id) return;
-        try {
-            await request('POST', `/api/lms/courses/${id}/start`, {
-                data: {},
-                dedupe: false
-            });
-            invalidateLmsCache();
-            await Promise.all([loadHome(true), loadCourses(true)]);
-            showToast?.('Курс запущен.', 'success');
-        } catch (error) {
-            if (!isAbortError(error)) {
-                showErrorToast(error?.response?.data?.error || 'Не удалось запустить курс');
-            }
-        }
-    }, [invalidateLmsCache, loadCourses, loadHome, request, showErrorToast, showToast]);
-
-    const startTest = useCallback(async (testId) => {
-        const id = toNumber(testId, 0);
-        if (!id) return;
-        setTestLoading(true);
-        setTestResult(null);
-        setLessonData((prev) => (prev ? { ...prev } : prev));
-        setPlayer((prev) => ({ ...prev, isPlaying: false }));
-        answerTimersRef.current.forEach((timerId) => window.clearTimeout(timerId));
-        answerTimersRef.current.clear();
-        answerDirtyRef.current.clear();
-        answerLastSavedRef.current.clear();
-        setAnswers({});
-        setAnswerSavingState({});
-
-        try {
-            const payload = await runExclusive('test-start', (signal) => request('POST', `/api/lms/tests/${id}/start`, {
-                signal,
-                data: {},
-                dedupe: false
-            }));
-            if (!mountedRef.current) return;
-            setTestAttemptData(payload || null);
-            setTestResult(null);
-        } catch (error) {
-            if (!isAbortError(error)) {
-                showErrorToast(error?.response?.data?.error || 'Не удалось начать тест');
-            }
-        } finally {
-            if (mountedRef.current) setTestLoading(false);
-        }
-    }, [request, runExclusive, showErrorToast]);
-
-    const finishTest = useCallback(async () => {
-        const attemptId = testAttemptIdRef.current;
-        if (!attemptId) return;
-        setFinishingTest(true);
-        try {
-            await flushAnswerQueue();
-            const finishPayload = await request('POST', `/api/lms/tests/attempts/${attemptId}/finish`, {
-                data: {},
-                dedupe: false
-            });
-            const resultPayload = await request('GET', `/api/lms/tests/attempts/${attemptId}/result`, {
-                useCache: false,
-                dedupe: false
-            });
-            if (!mountedRef.current) return;
-            setTestResult({
-                summary: finishPayload?.result || null,
-                detail: resultPayload || null
-            });
-            invalidateLmsCache();
-            await Promise.all([
-                loadHome(true),
-                loadCourses(true),
-                loadCertificates(true),
-                selectedCourseId ? openCourse(selectedCourseId, { silentError: true }) : Promise.resolve()
-            ]);
-            showToast?.('Тест завершен.', 'success');
-        } catch (error) {
-            if (!isAbortError(error)) {
-                showErrorToast(error?.response?.data?.error || 'Не удалось завершить тест');
-            }
-        } finally {
-            if (mountedRef.current) setFinishingTest(false);
-        }
-    }, [flushAnswerQueue, invalidateLmsCache, loadCertificates, loadCourses, loadHome, openCourse, request, selectedCourseId, showErrorToast, showToast]);
-
-    const markNotificationRead = useCallback(async (notificationId) => {
-        const id = toNumber(notificationId, 0);
-        if (!id) return;
-        setNotifications((prev) => prev.map((item) => (
-            item.id === id ? { ...item, is_read: true, read_at: item.read_at || new Date().toISOString() } : item
-        )));
-        try {
-            await request('POST', `/api/lms/notifications/${id}/read`, {
-                data: {},
-                dedupe: false
-            });
-            invalidateLmsCache();
-            await loadHome(true);
-        } catch (error) {
-            if (!isAbortError(error)) {
-                showErrorToast(error?.response?.data?.error || 'Не удалось отметить уведомление как прочитанное');
-                await loadNotifications(true);
-            }
-        }
-    }, [invalidateLmsCache, loadHome, loadNotifications, request, showErrorToast]);
-
-    const downloadCertificate = useCallback(async (certificateId, certificateNumber) => {
-        const id = toNumber(certificateId, 0);
-        if (!id) return;
-        setDownloadingCertificateId(id);
-        try {
-            const response = await request('GET', `/api/lms/certificates/${id}/download`, {
-                responseType: 'blob',
-                dedupe: false
-            });
-            const blob = response?.data instanceof Blob
-                ? response.data
-                : new Blob([response?.data], { type: 'application/pdf' });
-            const objectUrl = window.URL.createObjectURL(blob);
-            const anchor = document.createElement('a');
-            anchor.href = objectUrl;
-            anchor.download = `${certificateNumber || `certificate-${id}`}.pdf`;
-            document.body.appendChild(anchor);
-            anchor.click();
-            anchor.remove();
-            window.URL.revokeObjectURL(objectUrl);
-        } catch (error) {
-            if (!isAbortError(error)) {
-                showErrorToast(error?.response?.data?.error || 'Не удалось скачать сертификат');
-            }
-        } finally {
-            if (mountedRef.current) setDownloadingCertificateId(0);
-        }
-    }, [request, showErrorToast]);
-
-    const createCourse = useCallback(async () => {
-        const title = String(newCourseForm.title || '').trim();
-        if (!title) {
-            showToast?.('Введите название курса.', 'info');
-            return;
-        }
-        let modules = [];
-        let tests = [];
-        if (String(newCourseForm.blueprint_json || '').trim()) {
-            try {
-                const parsed = JSON.parse(newCourseForm.blueprint_json);
-                modules = Array.isArray(parsed?.modules) ? parsed.modules : [];
-                tests = Array.isArray(parsed?.tests) ? parsed.tests : [];
-            } catch {
-                showToast?.('Blueprint JSON содержит ошибку.', 'error');
-                return;
-            }
-        }
-
-        setCreateCourseLoading(true);
-        try {
-            await request('POST', '/api/lms/admin/courses', {
-                data: {
-                    title,
-                    description: newCourseForm.description || '',
-                    category: newCourseForm.category || '',
-                    pass_threshold: toNumber(newCourseForm.pass_threshold, 80),
-                    attempt_limit: toNumber(newCourseForm.attempt_limit, 3),
-                    modules,
-                    tests
-                },
-                dedupe: false
-            });
-            invalidateLmsCache();
-            setNewCourseForm({
-                title: '',
-                description: '',
-                category: '',
-                pass_threshold: 80,
-                attempt_limit: 3,
-                blueprint_json: ''
-            });
-            await loadAdminCourses(true);
-            showToast?.('Курс создан.', 'success');
-        } catch (error) {
-            if (!isAbortError(error)) {
-                showErrorToast(error?.response?.data?.error || 'Не удалось создать курс');
-            }
-        } finally {
-            if (mountedRef.current) setCreateCourseLoading(false);
-        }
-    }, [invalidateLmsCache, loadAdminCourses, newCourseForm, request, showErrorToast, showToast]);
-
-    const publishCourse = useCallback(async (courseId, versionId) => {
-        const id = toNumber(courseId, 0);
-        if (!id) return;
-        try {
-            await request('POST', `/api/lms/admin/courses/${id}/publish`, {
-                data: versionId ? { course_version_id: versionId } : {},
-                dedupe: false
-            });
-            invalidateLmsCache();
-            await loadAdminCourses(true);
-            showToast?.('Версия курса опубликована.', 'success');
-        } catch (error) {
-            if (!isAbortError(error)) {
-                showErrorToast(error?.response?.data?.error || 'Не удалось опубликовать курс');
-            }
-        }
-    }, [invalidateLmsCache, loadAdminCourses, request, showErrorToast, showToast]);
-
-    const assignCourse = useCallback(async () => {
-        const courseId = toNumber(assignmentForm.course_id, 0);
-        if (!courseId) {
-            showToast?.('Выберите курс для назначения.', 'info');
-            return;
-        }
-        if (!Array.isArray(assignmentForm.user_ids) || assignmentForm.user_ids.length === 0) {
-            showToast?.('Выберите хотя бы одного сотрудника.', 'info');
-            return;
-        }
-        setAssigning(true);
-        try {
-            await request('POST', `/api/lms/admin/courses/${courseId}/assignments`, {
-                data: {
-                    user_ids: assignmentForm.user_ids,
-                    due_at: assignmentForm.due_at || undefined
-                },
-                dedupe: false
-            });
-            invalidateLmsCache();
-            await Promise.all([loadAdminProgress(true), loadAdminCourses(true)]);
-            showToast?.('Курс назначен сотрудникам.', 'success');
-        } catch (error) {
-            if (!isAbortError(error)) {
-                showErrorToast(error?.response?.data?.error || 'Не удалось назначить курс');
-            }
-        } finally {
-            if (mountedRef.current) setAssigning(false);
-        }
-    }, [assignmentForm, invalidateLmsCache, loadAdminCourses, loadAdminProgress, request, showErrorToast, showToast]);
-
-    const uploadMaterials = useCallback(async () => {
-        if (!uploadForm.files || uploadForm.files.length === 0) {
-            showToast?.('Добавьте файлы для загрузки.', 'info');
-            return;
-        }
-        const formData = new FormData();
-        uploadForm.files.forEach((file) => formData.append('files', file));
-        if (uploadForm.lesson_id) formData.append('lesson_id', uploadForm.lesson_id);
-        if (uploadForm.title) formData.append('title', uploadForm.title);
-        if (uploadForm.material_type) formData.append('material_type', uploadForm.material_type);
-        if (uploadForm.position) formData.append('position', uploadForm.position);
-
-        setUploadingMaterials(true);
-        try {
-            await request('POST', '/api/lms/admin/materials/upload', {
-                data: formData,
-                dedupe: false
-            });
-            invalidateLmsCache();
-            setUploadForm({
-                lesson_id: '',
-                title: '',
-                material_type: 'file',
-                position: '',
-                files: []
-            });
-            showToast?.('Материалы успешно загружены.', 'success');
-        } catch (error) {
-            if (!isAbortError(error)) {
-                showErrorToast(error?.response?.data?.error || 'Не удалось загрузить материалы');
-            }
-        } finally {
-            if (mountedRef.current) setUploadingMaterials(false);
-        }
-    }, [invalidateLmsCache, request, showErrorToast, showToast, uploadForm]);
-
-    const revokeCertificate = useCallback(async () => {
-        const certificateId = toNumber(revokeForm.certificate_id, 0);
-        if (!certificateId) {
-            showToast?.('Введите ID сертификата.', 'info');
-            return;
-        }
-        setRevoking(true);
-        try {
-            await request('POST', `/api/lms/admin/certificates/${certificateId}/revoke`, {
-                data: { reason: revokeForm.reason || 'Revoked by administrator' },
-                dedupe: false
-            });
-            setRevokeForm({ certificate_id: '', reason: 'Revoked by administrator' });
-            showToast?.('Сертификат отозван.', 'success');
-        } catch (error) {
-            if (!isAbortError(error)) {
-                showErrorToast(error?.response?.data?.error || 'Не удалось отозвать сертификат');
-            }
-        } finally {
-            if (mountedRef.current) setRevoking(false);
-        }
-    }, [request, revokeForm, showErrorToast, showToast]);
-
-    useEffect(() => {
-        if (!isLearner) return;
-        void loadHome(false);
-        void loadCourses(false);
-    }, [isLearner, loadHome, loadCourses]);
-
-    useEffect(() => {
-        if (!isManager) return;
-        void loadAdminCourses(false);
-    }, [isManager, loadAdminCourses]);
-
-    useEffect(() => {
-        if (!isLearner) return;
-        if (activeTab === 'certificates' && !certificatesLoaded && !certificatesLoading) {
-            void loadCertificates(false);
-        }
-        if (activeTab === 'notifications' && !notificationsLoaded && !notificationsLoading) {
-            void loadNotifications(false);
-        }
-    }, [
-        activeTab,
-        certificatesLoaded,
-        certificatesLoading,
-        isLearner,
-        loadCertificates,
-        loadNotifications,
-        notificationsLoaded,
-        notificationsLoading
-    ]);
-
-    useEffect(() => {
-        if (!isManager) return;
-        if (activeTab === 'admin_progress' && !adminProgressLoaded && !adminProgressLoading) {
-            void loadAdminProgress(false);
-        }
-        if (activeTab === 'admin_attempts' && !adminAttemptsLoaded && !adminAttemptsLoading) {
-            void loadAdminAttempts(false);
-        }
-        if (activeTab === 'admin_deadlines' && !adminProgressLoaded && !adminProgressLoading) {
-            void loadAdminProgress(false);
-        }
-        if (activeTab === 'admin_assignments' && !assignableUsersLoaded && !assignableUsersLoading) {
-            void loadAssignableUsers(false);
-        }
-    }, [
-        activeTab,
-        adminAttemptsLoaded,
-        adminAttemptsLoading,
-        adminProgressLoaded,
-        adminProgressLoading,
-        assignableUsersLoaded,
-        assignableUsersLoading,
-        isManager,
-        loadAdminAttempts,
-        loadAdminProgress,
-        loadAssignableUsers
-    ]);
-
-    useEffect(() => {
-        if (!isLearner) return;
-        if (selectedCourseId) return;
-        if (!courses.length) return;
-        const firstId = toNumber(courses[0]?.course_id, 0);
-        if (!firstId) return;
-        setSelectedCourseId(firstId);
-        void openCourse(firstId, { silentError: true });
-    }, [courses, isLearner, openCourse, selectedCourseId]);
-
-    useEffect(() => {
-        if (!selectedLessonId || !lessonData?.lesson?.id) return undefined;
-        const intervalSeconds = Math.max(5, toNumber(lessonMetaRef.current.heartbeatSeconds, HEARTBEAT_FALLBACK_SECONDS));
-        const timerId = window.setInterval(() => {
-            void syncHeartbeat();
-        }, intervalSeconds * 1000);
-        return () => window.clearInterval(timerId);
-    }, [lessonData?.lesson?.id, selectedLessonId, syncHeartbeat]);
-
-    useEffect(() => {
-        if (!lessonData?.lesson?.id || !player.isPlaying) return undefined;
-        const tick = window.setInterval(() => {
-            setPlayer((prev) => {
-                const duration = lessonMetaRef.current.durationSeconds;
-                if (duration > 0 && prev.positionSeconds >= duration) {
-                    return { ...prev, isPlaying: false, positionSeconds: duration, seekDraft: null };
-                }
-                const next = prev.positionSeconds + 1;
-                const bounded = duration > 0 ? Math.min(next, duration) : next;
-                return {
-                    ...prev,
-                    positionSeconds: bounded,
-                    maxObservedSeconds: Math.max(prev.maxObservedSeconds, bounded),
-                    seekDraft: null
-                };
-            });
-        }, 1000);
-        return () => window.clearInterval(tick);
-    }, [lessonData?.lesson?.id, player.isPlaying]);
-
-    useEffect(() => {
-        if (!selectedLessonId) return undefined;
-        const handler = () => {
-            const visible = document.visibilityState === 'visible';
-            tabVisibleRef.current = visible;
-            if (!visible) {
-                setPlayer((prev) => ({ ...prev, isPlaying: false }));
-            }
-            void sendLessonEvent('visibility', { is_visible: visible });
-        };
-        document.addEventListener('visibilitychange', handler);
-        return () => {
-            document.removeEventListener('visibilitychange', handler);
-        };
-    }, [selectedLessonId, sendLessonEvent]);
-
-    const refreshActiveTab = useCallback(async () => {
-        switch (activeTab) {
-        case 'dashboard':
-            await Promise.all([loadHome(true), loadCourses(true)]);
-            break;
-        case 'courses':
-            await Promise.all([
-                loadHome(true),
-                loadCourses(true),
-                selectedCourseId ? openCourse(selectedCourseId, { silentError: true }) : Promise.resolve()
-            ]);
-            break;
-        case 'certificates':
-            await loadCertificates(true);
-            break;
-        case 'notifications':
-            await loadNotifications(true);
-            break;
-        case 'admin_courses':
-            await loadAdminCourses(true);
-            break;
-        case 'admin_assignments':
-            await Promise.all([loadAdminCourses(true), loadAssignableUsers(true)]);
-            break;
-        case 'admin_progress':
-        case 'admin_deadlines':
-            await loadAdminProgress(true);
-            break;
-        case 'admin_attempts':
-            await loadAdminAttempts(true);
-            break;
-        case 'admin_materials':
-            await loadAdminCourses(true);
-            break;
-        default:
-            break;
-        }
-    }, [
-        activeTab,
-        loadAdminAttempts,
-        loadAdminCourses,
-        loadAdminProgress,
-        loadAssignableUsers,
-        loadCertificates,
-        loadCourses,
-        loadHome,
-        loadNotifications,
-        openCourse,
-        selectedCourseId
-    ]);
-
-    const homeCourses = useMemo(() => Array.isArray(homeData?.courses) ? homeData.courses : [], [homeData?.courses]);
-    const homeByCourseId = useMemo(() => {
-        const map = new Map();
-        homeCourses.forEach((item) => {
-            map.set(toNumber(item?.course_id, 0), item);
-        });
-        return map;
-    }, [homeCourses]);
-
-    const mergedCourses = useMemo(() => (
-        courses.map((item) => {
-            const courseId = toNumber(item?.course_id, 0);
-            const homeItem = homeByCourseId.get(courseId) || {};
-            return {
-                ...item,
-                progress_percent: toNumber(homeItem.progress_percent, 0),
-                completed_lessons: toNumber(homeItem.completed_lessons, 0),
-                total_lessons: toNumber(homeItem.total_lessons, 0),
-                best_score: homeItem.best_score ?? null,
-                deadline_status: homeItem.deadline_status || item.deadline_status || 'unknown',
-                assignment_status: homeItem.status || item.status
-            };
-        })
-    ), [courses, homeByCourseId]);
-
-    const filteredCourses = useMemo(() => {
-        const query = String(courseSearch || '').trim().toLowerCase();
-        if (!query) return mergedCourses;
-        return mergedCourses.filter((item) => {
-            const haystack = `${item?.title || ''} ${item?.description || ''} ${item?.category || ''}`.toLowerCase();
-            return haystack.includes(query);
-        });
-    }, [courseSearch, mergedCourses]);
-
-    const visibleUsers = useMemo(() => {
-        const query = String(userSearch || '').trim().toLowerCase();
-        if (!query) return assignableUsers;
-        return assignableUsers.filter((item) => {
-            const haystack = `${item?.name || ''} ${item?.login || ''} ${item?.role || ''}`.toLowerCase();
-            return haystack.includes(query);
-        });
-    }, [assignableUsers, userSearch]);
-
-    const unreadNotifications = useMemo(
-        () => notifications.filter((item) => !item?.is_read).length,
-        [notifications]
-    );
-
-    const learnerMetrics = useMemo(() => {
-        const assigned = homeCourses.length;
-        const completed = homeCourses.filter((item) => item.status === 'completed').length;
-        const inProgress = homeCourses.filter((item) => item.status === 'in_progress').length;
-        const overdue = homeCourses.filter((item) => item.deadline_status === 'overdue').length;
-        return { assigned, completed, inProgress, overdue };
-    }, [homeCourses]);
-
-    const lessonProgress = lessonData?.progress || null;
-    const lessonCompletionRatio = toNumber(lessonProgress?.completion_ratio, 0);
-    const lessonThreshold = toNumber(lessonData?.lesson?.completion_threshold, COMPLETION_THRESHOLD_FALLBACK);
-    const lessonCanComplete = lessonCompletionRatio >= lessonThreshold || !!lessonProgress?.can_complete;
-    const heartbeatSeconds = toNumber(lessonData?.anti_cheat?.heartbeat_seconds, toNumber(homeData?.heartbeat_seconds, HEARTBEAT_FALLBACK_SECONDS));
-    const staleGapSeconds = toNumber(lessonData?.anti_cheat?.stale_gap_seconds, STALE_GAP_FALLBACK_SECONDS);
-
-    const selectedCourseTests = useMemo(() => (
-        Array.isArray(courseDetail?.tests) ? courseDetail.tests : []
-    ), [courseDetail?.tests]);
-
-    const selectedCourseModules = useMemo(() => (
-        Array.isArray(courseDetail?.modules) ? courseDetail.modules : []
-    ), [courseDetail?.modules]);
-
-    const selectedCourseAssignment = courseDetail?.assignment || {};
-
-    const progressRowsSorted = useMemo(() => (
-        [...adminProgress].sort((a, b) => {
-            const da = a?.due_at ? new Date(a.due_at).getTime() : Number.MAX_SAFE_INTEGER;
-            const db = b?.due_at ? new Date(b.due_at).getTime() : Number.MAX_SAFE_INTEGER;
-            return da - db;
-        })
-    ), [adminProgress]);
-
-    const deadlinesRows = useMemo(() => (
-        progressRowsSorted.filter((row) => ['on_time', 'late_completed', 'overdue'].includes(row?.deadline_status))
-    ), [progressRowsSorted]);
-
-    const currentAttemptId = testAttemptData?.attempt?.id || null;
-    const currentAttemptQuestions = Array.isArray(testAttemptData?.questions) ? testAttemptData.questions : [];
-
-    return (
-        <div className="space-y-5" style={{ fontFamily: '"Manrope", "Segoe UI", sans-serif' }}>
-            <section className="relative overflow-hidden rounded-3xl border border-slate-200 bg-gradient-to-br from-slate-950 via-slate-900 to-blue-900 p-6 text-white shadow-xl">
-                <div
-                    className="pointer-events-none absolute inset-0 opacity-60"
-                    style={{
-                        backgroundImage:
-                            'radial-gradient(circle at 18% 18%, rgba(56, 189, 248, 0.35), transparent 42%), radial-gradient(circle at 85% 70%, rgba(34, 211, 238, 0.22), transparent 45%), radial-gradient(circle at 60% 5%, rgba(59, 130, 246, 0.2), transparent 35%)'
-                    }}
-                />
-                <div className="relative z-10 flex flex-wrap items-start justify-between gap-4">
-                    <div className="space-y-2">
-                        <div className="inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.15em] text-cyan-200">
-                            <ShieldCheck className="h-4 w-4" />
-                            LMS OTP
-                        </div>
-                        <h2 className="text-2xl font-semibold">Раздел обучения</h2>
-                        <p className="max-w-2xl text-sm text-slate-200">
-                            Корпоративный LMS с серверным anti-cheat: heartbeat, контроль вкладки, блокировка перемотки и
-                            серверная валидация прохождения.
-                        </p>
-                    </div>
-                    <button
-                        type="button"
-                        onClick={() => { void refreshActiveTab(); }}
-                        className="inline-flex items-center gap-2 rounded-xl border border-white/20 bg-white/10 px-4 py-2 text-sm font-medium text-white transition hover:bg-white/20"
-                    >
-                        <RefreshCw className="h-4 w-4" />
-                        Обновить
-                    </button>
-                </div>
-                {isLearner && (
-                    <div className="relative z-10 mt-5 grid grid-cols-1 gap-3 md:grid-cols-4">
-                        <MetricCard icon={BookOpen} label="Назначено" value={learnerMetrics.assigned} helper="Активные назначения" />
-                        <MetricCard icon={CheckCircle2} label="Завершено" value={learnerMetrics.completed} helper="Курсы завершены" />
-                        <MetricCard icon={Clock3} label="В процессе" value={learnerMetrics.inProgress} helper="Текущая нагрузка" />
-                        <MetricCard icon={AlertTriangle} label="Просрочка" value={learnerMetrics.overdue} helper="Требует внимания" />
-                    </div>
-                )}
-            </section>
-
-            <div className="rounded-2xl border border-slate-200 bg-white p-2 shadow-sm">
-                <div className="flex flex-wrap gap-2">
-                    {availableTabs.map((tab) => (
-                        <TabButton
-                            key={tab.id}
-                            icon={tab.icon}
-                            label={tab.label}
-                            active={tab.id === activeTab}
-                            onClick={() => setActiveTab(tab.id)}
-                        />
-                    ))}
-                </div>
-            </div>
-
-            {isLearner && activeTab === 'dashboard' && (
-                <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.2fr_0.8fr]">
-                    <SectionCard
-                        title="Курсы с ближайшими дедлайнами"
-                        subtitle="Зелёный: в срок, оранжевый: с опозданием, красный: просрочено"
-                    >
-                        {homeLoading && !homeLoaded ? (
-                            <div className="flex items-center gap-2 text-sm text-slate-500">
-                                <Loader2 className="h-4 w-4 animate-spin" />
-                                Загрузка...
-                            </div>
-                        ) : homeCourses.length === 0 ? (
-                            <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-500">
-                                Пока нет назначенных курсов.
-                            </div>
-                        ) : (
-                            <div className="space-y-3">
-                                {homeCourses.map((item) => {
-                                    const meta = deadlineMetaFor(item.deadline_status);
-                                    return (
-                                        <div key={item.assignment_id} className="rounded-xl border border-slate-200 p-3">
-                                            <div className="flex flex-wrap items-center justify-between gap-2">
-                                                <div>
-                                                    <div className="text-sm font-semibold text-slate-900">{item.title}</div>
-                                                    <div className="mt-1 text-xs text-slate-500">
-                                                        Статус: {statusLabel(item.status)} · Дедлайн: {formatDateTime(item.due_at)}
-                                                    </div>
-                                                </div>
-                                                <span className={`inline-flex items-center rounded-full px-2 py-1 text-xs font-medium ${meta.badge}`}>
-                                                    {meta.label}
-                                                </span>
-                                            </div>
-                                            <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-slate-100">
-                                                <div
-                                                    className="h-full rounded-full bg-gradient-to-r from-cyan-500 to-blue-600"
-                                                    style={{ width: `${clamp(toNumber(item.progress_percent, 0), 0, 100)}%` }}
-                                                />
-                                            </div>
-                                            <div className="mt-2 text-xs text-slate-500">
-                                                Прогресс: {formatPercent(item.progress_percent)} · {toNumber(item.completed_lessons, 0)} / {toNumber(item.total_lessons, 0)} уроков
-                                            </div>
-                                        </div>
-                                    );
-                                })}
-                            </div>
-                        )}
-                    </SectionCard>
-
-                    <SectionCard title="Сводка anti-cheat" subtitle="Параметры применяются сервером">
-                        <div className="space-y-3">
-                            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                                <div className="flex items-center gap-2 text-sm font-medium text-slate-700">
-                                    <Timer className="h-4 w-4 text-slate-500" />
-                                    Heartbeat
-                                </div>
-                                <div className="mt-1 text-xs text-slate-500">{toNumber(homeData?.heartbeat_seconds, HEARTBEAT_FALLBACK_SECONDS)} секунд</div>
-                            </div>
-                            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                                <div className="flex items-center gap-2 text-sm font-medium text-slate-700">
-                                    <TimerReset className="h-4 w-4 text-slate-500" />
-                                    Stale gap
-                                </div>
-                                <div className="mt-1 text-xs text-slate-500">{toNumber(homeData?.stale_gap_seconds, STALE_GAP_FALLBACK_SECONDS)} секунд</div>
-                            </div>
-                            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                                <div className="flex items-center gap-2 text-sm font-medium text-slate-700">
-                                    <CheckCheck className="h-4 w-4 text-slate-500" />
-                                    Порог завершения урока
-                                </div>
-                                <div className="mt-1 text-xs text-slate-500">{toNumber(homeData?.completion_threshold_percent, COMPLETION_THRESHOLD_FALLBACK)}%</div>
-                            </div>
-                            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                                <div className="flex items-center gap-2 text-sm font-medium text-slate-700">
-                                    <Bell className="h-4 w-4 text-slate-500" />
-                                    Непрочитанные уведомления
-                                </div>
-                                <div className="mt-1 text-xs text-slate-500">{toNumber(homeData?.unread_notifications, unreadNotifications)} шт.</div>
-                            </div>
-                        </div>
-                    </SectionCard>
-                </div>
-            )}
-
-            {isLearner && activeTab === 'courses' && (
-                <div className="grid grid-cols-1 gap-4 xl:grid-cols-[340px_1fr]">
-                    <SectionCard
-                        title="Витрина курсов"
-                        subtitle="Открывайте курс, изучайте модули и проходите тесты"
-                    >
-                        <label className="mb-3 block">
-                            <span className="mb-1 inline-flex items-center gap-1 text-xs font-medium text-slate-500">
-                                <Search className="h-3 w-3" /> Поиск
-                            </span>
-                            <input
-                                value={courseSearch}
-                                onChange={(event) => setCourseSearch(event.target.value)}
-                                className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
-                                placeholder="Название, категория..."
-                            />
-                        </label>
-                        {coursesLoading && !coursesLoaded ? (
-                            <div className="flex items-center gap-2 text-sm text-slate-500">
-                                <Loader2 className="h-4 w-4 animate-spin" />
-                                Загрузка курсов...
-                            </div>
-                        ) : filteredCourses.length === 0 ? (
-                            <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-500">
-                                Курсы не найдены.
-                            </div>
-                        ) : (
-                            <div className="space-y-2">
-                                {filteredCourses.map((item) => {
-                                    const courseId = toNumber(item.course_id, 0);
-                                    const selected = selectedCourseId === courseId;
-                                    const deadlineMeta = deadlineMetaFor(item.deadline_status);
-                                    return (
-                                        <button
-                                            key={item.assignment_id || item.course_id}
-                                            type="button"
-                                            onClick={() => {
-                                                setSelectedCourseId(courseId);
-                                                void openCourse(courseId);
-                                            }}
-                                            className={`w-full rounded-xl border p-3 text-left transition ${
-                                                selected
-                                                    ? 'border-blue-500 bg-blue-50/80'
-                                                    : 'border-slate-200 bg-white hover:border-slate-300'
-                                            }`}
-                                        >
-                                            <div className="text-sm font-semibold text-slate-900">{item.title}</div>
-                                            <div className="mt-1 text-xs text-slate-500 line-clamp-2">{item.description || 'Без описания'}</div>
-                                            <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
-                                                <span className={`rounded-full px-2 py-1 ${deadlineMeta.badge}`}>{deadlineMeta.label}</span>
-                                                <span className="rounded-full bg-slate-100 px-2 py-1 text-slate-600">
-                                                    {statusLabel(item.assignment_status)}
-                                                </span>
-                                            </div>
-                                            <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-200">
-                                                <div
-                                                    className="h-full rounded-full bg-gradient-to-r from-cyan-500 to-blue-600"
-                                                    style={{ width: `${clamp(toNumber(item.progress_percent, 0), 0, 100)}%` }}
-                                                />
-                                            </div>
-                                        </button>
-                                    );
-                                })}
-                            </div>
-                        )}
-                    </SectionCard>
-
-                    <div className="space-y-4">
-                        <SectionCard
-                            title={courseDetail?.title || 'Курс не выбран'}
-                            subtitle={courseDetail?.description || 'Выберите курс слева'}
-                            actions={selectedCourseId ? (
-                                <button
-                                    type="button"
-                                    onClick={() => { void startCourse(selectedCourseId); }}
-                                    className="rounded-xl bg-blue-700 px-3 py-1.5 text-sm font-medium text-white transition hover:bg-blue-800"
-                                >
-                                    Старт курса
-                                </button>
-                            ) : null}
-                        >
-                            {courseDetailLoading ? (
-                                <div className="flex items-center gap-2 text-sm text-slate-500">
-                                    <Loader2 className="h-4 w-4 animate-spin" />
-                                    Загрузка структуры курса...
-                                </div>
-                            ) : !courseDetail ? (
-                                <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-500">
-                                    Откройте курс, чтобы увидеть уроки и тесты.
-                                </div>
-                            ) : (
-                                <div className="space-y-4">
-                                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-                                        <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                                            <div className="text-xs text-slate-500">Статус</div>
-                                            <div className="mt-1 text-sm font-semibold text-slate-800">
-                                                {statusLabel(selectedCourseAssignment?.status)}
-                                            </div>
-                                        </div>
-                                        <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                                            <div className="text-xs text-slate-500">Дедлайн</div>
-                                            <div className="mt-1 text-sm font-semibold text-slate-800">
-                                                {formatDateTime(selectedCourseAssignment?.due_at)}
-                                            </div>
-                                        </div>
-                                        <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                                            <div className="text-xs text-slate-500">Цвет дедлайна</div>
-                                            <div className="mt-1">
-                                                <span className={`inline-flex rounded-full px-2 py-1 text-xs font-medium ${deadlineMetaFor(selectedCourseAssignment?.deadline_status).badge}`}>
-                                                    {deadlineMetaFor(selectedCourseAssignment?.deadline_status).label}
-                                                </span>
-                                            </div>
-                                        </div>
-                                    </div>
-
-                                    <div className="space-y-3">
-                                        {selectedCourseModules.map((module) => (
-                                            <div key={module.id} className="rounded-xl border border-slate-200 p-3">
-                                                <div className="mb-2 text-sm font-semibold text-slate-800">{module.title}</div>
-                                                <div className="space-y-2">
-                                                    {(module.lessons || []).map((lesson) => {
-                                                        const progress = selectedCourseAssignment?.lesson_progress?.[lesson.id] || {};
-                                                        const isCompleted = progress?.status === 'completed';
-                                                        return (
-                                                            <div key={lesson.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                                                                <div>
-                                                                    <div className="text-sm font-medium text-slate-800">{lesson.title}</div>
-                                                                    <div className="text-xs text-slate-500">
-                                                                        {formatDuration(lesson.duration_seconds)} · {formatPercent(progress?.completion_ratio || 0)}
-                                                                    </div>
-                                                                </div>
-                                                                <div className="flex items-center gap-2">
-                                                                    <span className={`inline-flex items-center rounded-full px-2 py-1 text-xs font-medium ${
-                                                                        isCompleted ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'
-                                                                    }`}>
-                                                                        {isCompleted ? 'Завершен' : 'Не завершен'}
-                                                                    </span>
-                                                                    <button
-                                                                        type="button"
-                                                                        onClick={() => { void openLesson(lesson.id); }}
-                                                                        className="rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-slate-800"
-                                                                    >
-                                                                        Открыть урок
-                                                                    </button>
-                                                                </div>
-                                                            </div>
-                                                        );
-                                                    })}
-                                                </div>
-                                            </div>
-                                        ))}
-                                    </div>
-
-                                    <div className="rounded-xl border border-slate-200 p-3">
-                                        <div className="mb-2 text-sm font-semibold text-slate-800">Тесты</div>
-                                        {selectedCourseTests.length === 0 ? (
-                                            <div className="text-sm text-slate-500">Для курса пока нет тестов.</div>
-                                        ) : (
-                                            <div className="space-y-2">
-                                                {selectedCourseTests.map((test) => {
-                                                    const attempts = selectedCourseAssignment?.tests?.[test.id] || {};
-                                                    return (
-                                                        <div key={test.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                                                            <div>
-                                                                <div className="text-sm font-medium text-slate-800">{test.title}</div>
-                                                                <div className="text-xs text-slate-500">
-                                                                    Порог: {formatPercent(test.pass_threshold)} · Попытки: {toNumber(attempts.attempts_used, 0)} / {toNumber(test.attempt_limit, 3)}
-                                                                </div>
-                                                            </div>
-                                                            <button
-                                                                type="button"
-                                                                onClick={() => { void startTest(test.id); }}
-                                                                className="rounded-lg bg-cyan-700 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-cyan-800"
-                                                            >
-                                                                Начать тест
-                                                            </button>
-                                                        </div>
-                                                    );
-                                                })}
-                                            </div>
-                                        )}
-                                    </div>
-                                </div>
-                            )}
-                        </SectionCard>
-
-                        {selectedLessonId && (
-                            <SectionCard
-                                title={lessonData?.lesson?.title || 'Урок'}
-                                subtitle={lessonData?.lesson?.module_title || ''}
-                                actions={lessonData?.lesson ? (
-                                    <div className="flex flex-wrap items-center gap-2">
-                                        <button
-                                            type="button"
-                                            onClick={() => setPlayer((prev) => ({ ...prev, isPlaying: !prev.isPlaying }))}
-                                            className="inline-flex items-center gap-2 rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-slate-700 transition hover:bg-slate-100"
-                                        >
-                                            {player.isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
-                                            {player.isPlaying ? 'Пауза' : 'Играть'}
-                                        </button>
-                                        <button
-                                            type="button"
-                                            onClick={() => { void completeLesson(); }}
-                                            disabled={!lessonCanComplete}
-                                            className={`inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm font-medium ${
-                                                lessonCanComplete
-                                                    ? 'bg-emerald-600 text-white hover:bg-emerald-700'
-                                                    : 'cursor-not-allowed bg-slate-200 text-slate-500'
-                                            }`}
-                                        >
-                                            <CheckCircle2 className="h-4 w-4" />
-                                            Завершить урок
-                                        </button>
-                                    </div>
-                                ) : null}
-                            >
-                                {lessonLoading ? (
-                                    <div className="flex items-center gap-2 text-sm text-slate-500">
-                                        <Loader2 className="h-4 w-4 animate-spin" />
-                                        Загрузка урока...
-                                    </div>
-                                ) : !lessonData?.lesson ? (
-                                    <div className="text-sm text-slate-500">Выберите урок из структуры курса.</div>
-                                ) : (
-                                    <div className="space-y-4">
-                                        <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
-                                            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                                                <div className="flex items-center gap-2 text-xs text-slate-500">
-                                                    <Clock3 className="h-4 w-4" /> Длительность
-                                                </div>
-                                                <div className="mt-1 text-sm font-semibold text-slate-800">
-                                                    {formatDuration(lessonData.lesson.duration_seconds)}
-                                                </div>
-                                            </div>
-                                            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                                                <div className="flex items-center gap-2 text-xs text-slate-500">
-                                                    <Gauge className="h-4 w-4" /> Подтвержденный просмотр
-                                                </div>
-                                                <div className="mt-1 text-sm font-semibold text-slate-800">
-                                                    {formatPercent(lessonCompletionRatio)}
-                                                </div>
-                                            </div>
-                                            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                                                <div className="flex items-center gap-2 text-xs text-slate-500">
-                                                    <Timer className="h-4 w-4" /> Heartbeat
-                                                </div>
-                                                <div className="mt-1 text-sm font-semibold text-slate-800">{heartbeatSeconds} сек</div>
-                                            </div>
-                                            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                                                <div className="flex items-center gap-2 text-xs text-slate-500">
-                                                    <ShieldCheck className="h-4 w-4" /> Stale gap
-                                                </div>
-                                                <div className="mt-1 text-sm font-semibold text-slate-800">{staleGapSeconds} сек</div>
-                                            </div>
-                                        </div>
-
-                                        <div className="rounded-xl border border-slate-200 p-3">
-                                            <div className="mb-2 flex items-center justify-between gap-2 text-sm font-medium text-slate-700">
-                                                <span>Позиция просмотра</span>
-                                                <span>{formatDuration(player.positionSeconds)} / {formatDuration(lessonData.lesson.duration_seconds)}</span>
-                                            </div>
-                                            <input
-                                                type="range"
-                                                min={0}
-                                                max={Math.max(1, toNumber(lessonData.lesson.duration_seconds, 0))}
-                                                value={player.seekDraft ?? player.positionSeconds}
-                                                onChange={(event) => {
-                                                    const value = toNumber(event.target.value, 0);
-                                                    setPlayer((prev) => ({ ...prev, seekDraft: value }));
-                                                }}
-                                                onMouseUp={(event) => {
-                                                    const value = toNumber(event.currentTarget.value, 0);
-                                                    void seekTo(value);
-                                                }}
-                                                onTouchEnd={(event) => {
-                                                    const value = toNumber(event.currentTarget.value, 0);
-                                                    void seekTo(value);
-                                                }}
-                                                className="w-full accent-blue-700"
-                                            />
-                                            <div className="mt-3 flex flex-wrap gap-2">
-                                                <button
-                                                    type="button"
-                                                    onClick={() => { void seekTo(player.positionSeconds - 10); }}
-                                                    className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100"
-                                                >
-                                                    -10 сек
-                                                </button>
-                                                <button
-                                                    type="button"
-                                                    onClick={() => { void seekTo(player.positionSeconds + 10); }}
-                                                    className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100"
-                                                >
-                                                    +10 сек
-                                                </button>
-                                                <button
-                                                    type="button"
-                                                    onClick={() => { void syncHeartbeat(); }}
-                                                    className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100"
-                                                >
-                                                    Синхронизировать сейчас
-                                                </button>
-                                            </div>
-                                            <div className="mt-2 text-xs text-slate-500">
-                                                Если вкладка становится неактивной, плеер автоматически ставится на паузу.
-                                            </div>
-                                        </div>
-
-                                        <div className="rounded-xl border border-slate-200 p-3">
-                                            <div className="mb-2 text-sm font-semibold text-slate-800">Материалы урока</div>
-                                            {Array.isArray(lessonData.materials) && lessonData.materials.length > 0 ? (
-                                                <div className="space-y-2">
-                                                    {lessonData.materials.map((material) => {
-                                                        const Icon = materialIcon(material.material_type);
-                                                        return (
-                                                            <div key={material.id} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                                                                <div className="flex flex-wrap items-center justify-between gap-2">
-                                                                    <div className="inline-flex items-center gap-2 text-sm font-medium text-slate-800">
-                                                                        <Icon className="h-4 w-4 text-slate-600" />
-                                                                        {material.title || `Материал #${material.id}`}
-                                                                    </div>
-                                                                    {material.url ? (
-                                                                        <a
-                                                                            href={material.url}
-                                                                            target="_blank"
-                                                                            rel="noreferrer"
-                                                                            className="inline-flex items-center gap-1 rounded-lg bg-slate-900 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-slate-800"
-                                                                        >
-                                                                            <Link2 className="h-3.5 w-3.5" />
-                                                                            Открыть
-                                                                        </a>
-                                                                    ) : null}
-                                                                </div>
-                                                                {material.content_text ? (
-                                                                    <div className="mt-2 rounded-lg border border-slate-200 bg-white p-2 text-sm text-slate-600">
-                                                                        {material.content_text}
-                                                                    </div>
-                                                                ) : null}
-                                                            </div>
-                                                        );
-                                                    })}
-                                                </div>
-                                            ) : (
-                                                <div className="text-sm text-slate-500">Материалы отсутствуют.</div>
-                                            )}
-                                        </div>
-                                    </div>
-                                )}
-                            </SectionCard>
-                        )}
-
-                        {currentAttemptId ? (
-                            <SectionCard
-                                title={`Тест: попытка #${toNumber(testAttemptData?.attempt?.attempt_no, 1)}`}
-                                subtitle={`Порог прохождения: ${formatPercent(testAttemptData?.attempt?.pass_threshold)}`}
-                                actions={(
-                                    <button
-                                        type="button"
-                                        onClick={() => { void finishTest(); }}
-                                        disabled={finishingTest}
-                                        className={`inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm font-medium ${
-                                            finishingTest
-                                                ? 'cursor-not-allowed bg-slate-200 text-slate-500'
-                                                : 'bg-emerald-600 text-white hover:bg-emerald-700'
-                                        }`}
-                                    >
-                                        {finishingTest ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCheck className="h-4 w-4" />}
-                                        Завершить тест
-                                    </button>
-                                )}
-                            >
-                                {testLoading ? (
-                                    <div className="flex items-center gap-2 text-sm text-slate-500">
-                                        <Loader2 className="h-4 w-4 animate-spin" />
-                                        Подготовка теста...
-                                    </div>
-                                ) : (
-                                    <div className="space-y-3">
-                                        {currentAttemptQuestions.map((question, index) => (
-                                            <div key={question.id} className="rounded-xl border border-slate-200 p-3">
-                                                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                                                    <div className="text-sm font-semibold text-slate-900">
-                                                        Вопрос {index + 1}. {question.prompt}
-                                                    </div>
-                                                    <div className="inline-flex items-center gap-2">
-                                                        <span className="rounded-full bg-slate-100 px-2 py-1 text-xs text-slate-600">
-                                                            {String(question.type || '').toUpperCase()}
-                                                        </span>
-                                                        <span className="rounded-full bg-slate-100 px-2 py-1 text-xs text-slate-600">
-                                                            {toNumber(question.points, 1)} балл.
-                                                        </span>
-                                                    </div>
-                                                </div>
-                                                <QuestionEditor
-                                                    question={question}
-                                                    value={answers[question.id] || {}}
-                                                    savingState={answerSavingState[question.id]}
-                                                    onChange={(payload, immediate) => queueAnswerSave(question.id, payload, immediate)}
-                                                />
-                                                <div className="mt-2 text-xs">
-                                                    {answerSavingState[question.id] === 'saving' ? (
-                                                        <span className="text-blue-600">Сохраняем...</span>
-                                                    ) : null}
-                                                    {answerSavingState[question.id] === 'saved' ? (
-                                                        <span className="text-emerald-600">Сохранено</span>
-                                                    ) : null}
-                                                    {answerSavingState[question.id] === 'error' ? (
-                                                        <span className="text-rose-600">Ошибка сохранения</span>
-                                                    ) : null}
-                                                </div>
-                                            </div>
-                                        ))}
-                                    </div>
-                                )}
-                            </SectionCard>
-                        ) : null}
-
-                        {testResult ? (
-                            <SectionCard title="Результат теста" subtitle="Серверная оценка попытки">
-                                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                                        <div className="text-xs text-slate-500">Оценка</div>
-                                        <div className="mt-1 text-xl font-semibold text-slate-900">
-                                            {formatPercent(testResult?.summary?.score_percent)}
-                                        </div>
-                                    </div>
-                                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                                        <div className="text-xs text-slate-500">Порог</div>
-                                        <div className="mt-1 text-xl font-semibold text-slate-900">
-                                            {formatPercent(testResult?.summary?.pass_threshold)}
-                                        </div>
-                                    </div>
-                                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                                        <div className="text-xs text-slate-500">Статус</div>
-                                        <div className={`mt-1 text-xl font-semibold ${testResult?.summary?.passed ? 'text-emerald-600' : 'text-rose-600'}`}>
-                                            {testResult?.summary?.passed ? 'Пройден' : 'Не пройден'}
-                                        </div>
-                                    </div>
-                                </div>
-                                <div className="mt-3 text-sm text-slate-500">
-                                    Время: {formatDuration(testResult?.summary?.duration_seconds)} · Завершено: {formatDateTime(testResult?.summary?.finished_at)}
-                                </div>
-                                {testResult?.detail?.certificate ? (
-                                    <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-3">
-                                        <div className="text-sm font-semibold text-emerald-800">
-                                            Сертификат #{testResult.detail.certificate.certificate_number}
-                                        </div>
-                                        <div className="mt-1 text-xs text-emerald-700">
-                                            Статус: {testResult.detail.certificate.status} · Проверка: {testResult.detail.certificate.verify_url}
-                                        </div>
-                                    </div>
-                                ) : null}
-                            </SectionCard>
-                        ) : null}
-                    </div>
-                </div>
-            )}
-
-            {isLearner && activeTab === 'certificates' && (
-                <SectionCard title="Сертификаты" subtitle="PDF сертификаты с QR verify токеном">
-                    {certificatesLoading && !certificatesLoaded ? (
-                        <div className="flex items-center gap-2 text-sm text-slate-500">
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                            Загрузка сертификатов...
-                        </div>
-                    ) : certificates.length === 0 ? (
-                        <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-500">
-                            Сертификаты пока не выпущены.
-                        </div>
-                    ) : (
-                        <div className="space-y-2">
-                            {certificates.map((cert) => (
-                                <div key={cert.id} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 p-3">
-                                    <div>
-                                        <div className="text-sm font-semibold text-slate-900">{cert.certificate_number}</div>
-                                        <div className="mt-1 text-xs text-slate-500">
-                                            Статус: {cert.status} · Выдан: {formatDateTime(cert.issued_at)} · Score: {cert.score_percent !== null ? `${cert.score_percent}%` : '—'}
-                                        </div>
-                                        <a
-                                            href={cert.verify_url}
-                                            target="_blank"
-                                            rel="noreferrer"
-                                            className="mt-1 inline-flex items-center gap-1 text-xs text-blue-700 hover:text-blue-800"
-                                        >
-                                            <Link2 className="h-3.5 w-3.5" />
-                                            Verify
-                                        </a>
-                                    </div>
-                                    <button
-                                        type="button"
-                                        onClick={() => { void downloadCertificate(cert.id, cert.certificate_number); }}
-                                        disabled={downloadingCertificateId === cert.id}
-                                        className={`inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm font-medium ${
-                                            downloadingCertificateId === cert.id
-                                                ? 'cursor-not-allowed bg-slate-200 text-slate-500'
-                                                : 'bg-slate-900 text-white hover:bg-slate-800'
-                                        }`}
-                                    >
-                                        {downloadingCertificateId === cert.id ? (
-                                            <Loader2 className="h-4 w-4 animate-spin" />
-                                        ) : (
-                                            <Download className="h-4 w-4" />
-                                        )}
-                                        Скачать PDF
-                                    </button>
-                                </div>
-                            ))}
-                        </div>
-                    )}
-                </SectionCard>
-            )}
-
-            {isLearner && activeTab === 'notifications' && (
-                <SectionCard title="Уведомления" subtitle="Системные события по обучению">
-                    {notificationsLoading && !notificationsLoaded ? (
-                        <div className="flex items-center gap-2 text-sm text-slate-500">
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                            Загрузка уведомлений...
-                        </div>
-                    ) : notifications.length === 0 ? (
-                        <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-500">
-                            Уведомлений нет.
-                        </div>
-                    ) : (
-                        <div className="space-y-2">
-                            {notifications.map((item) => (
-                                <div key={item.id} className={`rounded-xl border p-3 ${item.is_read ? 'border-slate-200 bg-white' : 'border-cyan-200 bg-cyan-50/60'}`}>
-                                    <div className="flex flex-wrap items-start justify-between gap-2">
-                                        <div>
-                                            <div className="text-sm font-semibold text-slate-900">{item.title}</div>
-                                            <div className="mt-1 text-xs text-slate-500">{item.message || 'Без дополнительного текста'}</div>
-                                            <div className="mt-1 text-[11px] text-slate-400">{formatDateTime(item.created_at)}</div>
-                                        </div>
-                                        {!item.is_read ? (
-                                            <button
-                                                type="button"
-                                                onClick={() => { void markNotificationRead(item.id); }}
-                                                className="rounded-lg bg-slate-900 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-slate-800"
-                                            >
-                                                Прочитано
-                                            </button>
-                                        ) : (
-                                            <span className="inline-flex items-center rounded-full bg-slate-100 px-2 py-1 text-xs text-slate-600">
-                                                <Check className="mr-1 h-3.5 w-3.5" />
-                                                Прочитано
-                                            </span>
-                                        )}
-                                    </div>
-                                </div>
-                            ))}
-                        </div>
-                    )}
-                </SectionCard>
-            )}
-
-            {isManager && activeTab === 'admin_courses' && (
-                <div className="grid grid-cols-1 gap-4 xl:grid-cols-[0.9fr_1.1fr]">
-                    <SectionCard title="Создание курса" subtitle="Быстрый MVP-конструктор">
-                        <div className="space-y-3">
-                            <input
-                                value={newCourseForm.title}
-                                onChange={(event) => setNewCourseForm((prev) => ({ ...prev, title: event.target.value }))}
-                                placeholder="Название курса"
-                                className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
-                            />
-                            <textarea
-                                value={newCourseForm.description}
-                                onChange={(event) => setNewCourseForm((prev) => ({ ...prev, description: event.target.value }))}
-                                placeholder="Описание"
-                                rows={3}
-                                className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
-                            />
-                            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-                                <input
-                                    value={newCourseForm.category}
-                                    onChange={(event) => setNewCourseForm((prev) => ({ ...prev, category: event.target.value }))}
-                                    placeholder="Категория"
-                                    className="rounded-xl border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
-                                />
-                                <input
-                                    type="number"
-                                    value={newCourseForm.pass_threshold}
-                                    onChange={(event) => setNewCourseForm((prev) => ({ ...prev, pass_threshold: event.target.value }))}
-                                    placeholder="Порог %"
-                                    className="rounded-xl border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
-                                />
-                                <input
-                                    type="number"
-                                    value={newCourseForm.attempt_limit}
-                                    onChange={(event) => setNewCourseForm((prev) => ({ ...prev, attempt_limit: event.target.value }))}
-                                    placeholder="Лимит попыток"
-                                    className="rounded-xl border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
-                                />
-                            </div>
-                            <textarea
-                                value={newCourseForm.blueprint_json}
-                                onChange={(event) => setNewCourseForm((prev) => ({ ...prev, blueprint_json: event.target.value }))}
-                                placeholder='Опционально: {"modules":[...],"tests":[...]}'
-                                rows={6}
-                                className="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-mono focus:border-blue-500 focus:outline-none"
-                            />
-                            <button
-                                type="button"
-                                onClick={() => { void createCourse(); }}
-                                disabled={createCourseLoading}
-                                className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-medium ${
-                                    createCourseLoading
-                                        ? 'cursor-not-allowed bg-slate-200 text-slate-500'
-                                        : 'bg-blue-700 text-white hover:bg-blue-800'
-                                }`}
-                            >
-                                {createCourseLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <GraduationCap className="h-4 w-4" />}
-                                Создать курс
-                            </button>
-                        </div>
-                    </SectionCard>
-
-                    <SectionCard title="Каталог курсов" subtitle="Управление публикацией">
-                        {adminCoursesLoading && !adminCoursesLoaded ? (
-                            <div className="flex items-center gap-2 text-sm text-slate-500">
-                                <Loader2 className="h-4 w-4 animate-spin" />
-                                Загрузка курсов...
-                            </div>
-                        ) : adminCourses.length === 0 ? (
-                            <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-500">
-                                Курсов нет.
-                            </div>
-                        ) : (
-                            <div className="space-y-2">
-                                {adminCourses.map((course) => (
-                                    <div key={course.id} className="rounded-xl border border-slate-200 p-3">
-                                        <div className="flex flex-wrap items-start justify-between gap-2">
-                                            <div>
-                                                <div className="text-sm font-semibold text-slate-900">{course.title}</div>
-                                                <div className="mt-1 text-xs text-slate-500">
-                                                    Статус: {statusLabel(course.status)} · Версия: {course.current_version?.version_number || '—'}
-                                                </div>
-                                            </div>
-                                            <button
-                                                type="button"
-                                                onClick={() => { void publishCourse(course.id, course.current_version_id); }}
-                                                className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700"
-                                            >
-                                                Publish
-                                            </button>
-                                        </div>
-                                    </div>
-                                ))}
-                            </div>
-                        )}
-                    </SectionCard>
-                </div>
-            )}
-
-            {isManager && activeTab === 'admin_assignments' && (
-                <SectionCard title="Назначение курсов" subtitle="Назначайте курс операторам и trainee">
-                    <div className="grid grid-cols-1 gap-3 lg:grid-cols-[280px_1fr]">
-                        <div className="space-y-3">
-                            <select
-                                value={assignmentForm.course_id}
-                                onChange={(event) => setAssignmentForm((prev) => ({ ...prev, course_id: event.target.value }))}
-                                className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
-                            >
-                                <option value="">Выберите курс</option>
-                                {adminCourses.map((course) => (
-                                    <option key={course.id} value={course.id}>
-                                        {course.title}
-                                    </option>
-                                ))}
-                            </select>
-                            <input
-                                type="datetime-local"
-                                value={assignmentForm.due_at}
-                                onChange={(event) => setAssignmentForm((prev) => ({ ...prev, due_at: event.target.value }))}
-                                className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
-                            />
-                            <button
-                                type="button"
-                                onClick={() => { void assignCourse(); }}
-                                disabled={assigning}
-                                className={`inline-flex w-full items-center justify-center gap-2 rounded-xl px-4 py-2 text-sm font-medium ${
-                                    assigning
-                                        ? 'cursor-not-allowed bg-slate-200 text-slate-500'
-                                        : 'bg-blue-700 text-white hover:bg-blue-800'
-                                }`}
-                            >
-                                {assigning ? <Loader2 className="h-4 w-4 animate-spin" /> : <Users className="h-4 w-4" />}
-                                Назначить
-                            </button>
-                            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
-                                Выбрано пользователей: {assignmentForm.user_ids.length}
-                            </div>
-                        </div>
-
-                        <div className="rounded-xl border border-slate-200 p-3">
-                            <label className="mb-2 block">
-                                <span className="mb-1 inline-flex items-center gap-1 text-xs font-medium text-slate-500">
-                                    <Search className="h-3 w-3" /> Поиск сотрудника
-                                </span>
-                                <input
-                                    value={userSearch}
-                                    onChange={(event) => setUserSearch(event.target.value)}
-                                    className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
-                                    placeholder="Имя, логин..."
-                                />
-                            </label>
-                            {assignableUsersLoading && !assignableUsersLoaded ? (
-                                <div className="flex items-center gap-2 text-sm text-slate-500">
-                                    <Loader2 className="h-4 w-4 animate-spin" />
-                                    Загрузка сотрудников...
-                                </div>
-                            ) : (
-                                <div className="max-h-80 space-y-2 overflow-auto pr-1">
-                                    {visibleUsers.map((employee) => {
-                                        const checked = assignmentForm.user_ids.includes(employee.id);
-                                        return (
-                                            <label key={employee.id} className="flex items-center gap-3 rounded-lg border border-slate-200 px-3 py-2 text-sm hover:bg-slate-50">
-                                                <input
-                                                    type="checkbox"
-                                                    checked={checked}
-                                                    onChange={(event) => {
-                                                        setAssignmentForm((prev) => {
-                                                            const existing = new Set(prev.user_ids);
-                                                            if (event.target.checked) existing.add(employee.id);
-                                                            else existing.delete(employee.id);
-                                                            return { ...prev, user_ids: Array.from(existing) };
-                                                        });
-                                                    }}
-                                                />
-                                                <span className="font-medium text-slate-800">{employee.name}</span>
-                                                <span className="text-xs text-slate-500">{employee.role}</span>
-                                            </label>
-                                        );
-                                    })}
-                                </div>
-                            )}
-                        </div>
-                    </div>
-                </SectionCard>
-            )}
-
-            {isManager && activeTab === 'admin_progress' && (
-                <SectionCard title="Прогресс обучения" subtitle="По назначенным курсам и сотрудникам">
-                    {adminProgressLoading && !adminProgressLoaded ? (
-                        <div className="flex items-center gap-2 text-sm text-slate-500">
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                            Загрузка прогресса...
-                        </div>
-                    ) : adminProgress.length === 0 ? (
-                        <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-500">
-                            Нет данных по прогрессу.
-                        </div>
-                    ) : (
-                        <div className="overflow-x-auto">
-                            <table className="min-w-full border-separate border-spacing-0 text-sm">
-                                <thead>
-                                    <tr className="text-left text-xs uppercase tracking-wide text-slate-500">
-                                        <th className="border-b border-slate-200 px-3 py-2">Сотрудник</th>
-                                        <th className="border-b border-slate-200 px-3 py-2">Курс</th>
-                                        <th className="border-b border-slate-200 px-3 py-2">Прогресс</th>
-                                        <th className="border-b border-slate-200 px-3 py-2">Тесты</th>
-                                        <th className="border-b border-slate-200 px-3 py-2">Дедлайн</th>
-                                        <th className="border-b border-slate-200 px-3 py-2">Статус</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {adminProgress.map((row) => {
-                                        const deadlineMeta = deadlineMetaFor(row.deadline_status);
-                                        return (
-                                            <tr key={row.assignment_id} className="text-slate-700">
-                                                <td className="border-b border-slate-100 px-3 py-2">
-                                                    <div className="font-medium">{row.user_name}</div>
-                                                    <div className="text-xs text-slate-500">{row.user_role}</div>
-                                                </td>
-                                                <td className="border-b border-slate-100 px-3 py-2">{row.course_title}</td>
-                                                <td className="border-b border-slate-100 px-3 py-2">
-                                                    <div className="h-1.5 w-40 overflow-hidden rounded-full bg-slate-200">
-                                                        <div
-                                                            className="h-full rounded-full bg-gradient-to-r from-cyan-500 to-blue-600"
-                                                            style={{ width: `${clamp(toNumber(row.progress_percent, 0), 0, 100)}%` }}
-                                                        />
-                                                    </div>
-                                                    <div className="mt-1 text-xs text-slate-500">
-                                                        {formatPercent(row.progress_percent)} · {toNumber(row.completed_lessons, 0)} / {toNumber(row.total_lessons, 0)}
-                                                    </div>
-                                                </td>
-                                                <td className="border-b border-slate-100 px-3 py-2 text-xs text-slate-600">
-                                                    {toNumber(row.passed_tests, 0)} / {toNumber(row.total_tests, 0)}
-                                                </td>
-                                                <td className="border-b border-slate-100 px-3 py-2 text-xs text-slate-600">
-                                                    {formatDateTime(row.due_at)}
-                                                </td>
-                                                <td className="border-b border-slate-100 px-3 py-2">
-                                                    <span className={`inline-flex rounded-full px-2 py-1 text-xs font-medium ${deadlineMeta.badge}`}>
-                                                        {deadlineMeta.label}
-                                                    </span>
-                                                </td>
-                                            </tr>
-                                        );
-                                    })}
-                                </tbody>
-                            </table>
-                        </div>
-                    )}
-                </SectionCard>
-            )}
-
-            {isManager && activeTab === 'admin_attempts' && (
-                <SectionCard title="Попытки тестов" subtitle="История прохождений по последним попыткам">
-                    {adminAttemptsLoading && !adminAttemptsLoaded ? (
-                        <div className="flex items-center gap-2 text-sm text-slate-500">
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                            Загрузка попыток...
-                        </div>
-                    ) : adminAttempts.length === 0 ? (
-                        <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-500">
-                            Попытки отсутствуют.
-                        </div>
-                    ) : (
-                        <div className="overflow-x-auto">
-                            <table className="min-w-full border-separate border-spacing-0 text-sm">
-                                <thead>
-                                    <tr className="text-left text-xs uppercase tracking-wide text-slate-500">
-                                        <th className="border-b border-slate-200 px-3 py-2">Сотрудник</th>
-                                        <th className="border-b border-slate-200 px-3 py-2">Курс / Тест</th>
-                                        <th className="border-b border-slate-200 px-3 py-2">Попытка</th>
-                                        <th className="border-b border-slate-200 px-3 py-2">Score</th>
-                                        <th className="border-b border-slate-200 px-3 py-2">Время</th>
-                                        <th className="border-b border-slate-200 px-3 py-2">Статус</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {adminAttempts.map((attempt) => (
-                                        <tr key={attempt.attempt_id} className="text-slate-700">
-                                            <td className="border-b border-slate-100 px-3 py-2">
-                                                <div className="font-medium">{attempt.user_name}</div>
-                                                <div className="text-xs text-slate-500">{attempt.user_role}</div>
-                                            </td>
-                                            <td className="border-b border-slate-100 px-3 py-2">
-                                                <div className="font-medium">{attempt.course_title}</div>
-                                                <div className="text-xs text-slate-500">{attempt.test_title}</div>
-                                            </td>
-                                            <td className="border-b border-slate-100 px-3 py-2">#{toNumber(attempt.attempt_no, 1)}</td>
-                                            <td className="border-b border-slate-100 px-3 py-2">
-                                                {attempt.score_percent !== null ? `${attempt.score_percent}%` : '—'}
-                                            </td>
-                                            <td className="border-b border-slate-100 px-3 py-2 text-xs text-slate-600">
-                                                {formatDuration(attempt.duration_seconds)} · {formatDateTime(attempt.finished_at || attempt.started_at)}
-                                            </td>
-                                            <td className="border-b border-slate-100 px-3 py-2">
-                                                {attempt.passed === null ? (
-                                                    <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-1 text-xs text-slate-600">
-                                                        <Clock3 className="h-3.5 w-3.5" />
-                                                        {statusLabel(attempt.status)}
-                                                    </span>
-                                                ) : attempt.passed ? (
-                                                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-1 text-xs text-emerald-700">
-                                                        <Check className="h-3.5 w-3.5" />
-                                                        Passed
-                                                    </span>
-                                                ) : (
-                                                    <span className="inline-flex items-center gap-1 rounded-full bg-rose-100 px-2 py-1 text-xs text-rose-700">
-                                                        <X className="h-3.5 w-3.5" />
-                                                        Failed
-                                                    </span>
-                                                )}
-                                            </td>
-                                        </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                        </div>
-                    )}
-                </SectionCard>
-            )}
-
-            {isManager && activeTab === 'admin_deadlines' && (
-                <SectionCard title="Дедлайны" subtitle="Контроль сроков и цветовых статусов">
-                    {adminProgressLoading && !adminProgressLoaded ? (
-                        <div className="flex items-center gap-2 text-sm text-slate-500">
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                            Загрузка дедлайнов...
-                        </div>
-                    ) : deadlinesRows.length === 0 ? (
-                        <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-500">
-                            Дедлайны пока не установлены.
-                        </div>
-                    ) : (
-                        <div className="space-y-2">
-                            {deadlinesRows.map((row) => {
-                                const meta = deadlineMetaFor(row.deadline_status);
-                                return (
-                                    <div key={`deadline-${row.assignment_id}`} className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200 p-3">
-                                        <div>
-                                            <div className="text-sm font-semibold text-slate-900">{row.user_name} · {row.course_title}</div>
-                                            <div className="mt-1 text-xs text-slate-500">
-                                                Дедлайн: {formatDateTime(row.due_at)} · Завершено: {formatDateTime(row.completed_at)}
-                                            </div>
-                                        </div>
-                                        <span className={`inline-flex rounded-full px-2 py-1 text-xs font-medium ${meta.badge}`}>
-                                            {meta.label}
-                                        </span>
-                                    </div>
-                                );
-                            })}
-                        </div>
-                    )}
-                </SectionCard>
-            )}
-
-            {isManager && activeTab === 'admin_materials' && (
-                <SectionCard title="Загрузка материалов" subtitle="GCS upload и привязка к уроку">
-                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                        <input
-                            value={uploadForm.lesson_id}
-                            onChange={(event) => setUploadForm((prev) => ({ ...prev, lesson_id: event.target.value }))}
-                            placeholder="lesson_id (опционально)"
-                            className="rounded-xl border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
-                        />
-                        <input
-                            value={uploadForm.title}
-                            onChange={(event) => setUploadForm((prev) => ({ ...prev, title: event.target.value }))}
-                            placeholder="Название материала"
-                            className="rounded-xl border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
-                        />
-                        <select
-                            value={uploadForm.material_type}
-                            onChange={(event) => setUploadForm((prev) => ({ ...prev, material_type: event.target.value }))}
-                            className="rounded-xl border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
-                        >
-                            <option value="file">File</option>
-                            <option value="video">Video</option>
-                            <option value="pdf">PDF</option>
-                            <option value="link">Link</option>
-                            <option value="text">Text</option>
-                        </select>
-                        <input
-                            value={uploadForm.position}
-                            onChange={(event) => setUploadForm((prev) => ({ ...prev, position: event.target.value }))}
-                            placeholder="Position"
-                            className="rounded-xl border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
-                        />
-                        <input
-                            type="file"
-                            multiple
-                            onChange={(event) => setUploadForm((prev) => ({ ...prev, files: Array.from(event.target.files || []) }))}
-                            className="md:col-span-2 rounded-xl border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
-                        />
-                    </div>
-                    <div className="mt-3 flex items-center justify-between gap-3">
-                        <div className="text-xs text-slate-500">Файлов к загрузке: {uploadForm.files.length}</div>
-                        <button
-                            type="button"
-                            onClick={() => { void uploadMaterials(); }}
-                            disabled={uploadingMaterials}
-                            className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-medium ${
-                                uploadingMaterials
-                                    ? 'cursor-not-allowed bg-slate-200 text-slate-500'
-                                    : 'bg-blue-700 text-white hover:bg-blue-800'
-                            }`}
-                        >
-                            {uploadingMaterials ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
-                            Upload
-                        </button>
-                    </div>
-                </SectionCard>
-            )}
-
-            {isManager && isFullAdmin && activeTab === 'admin_revoke' && (
-                <SectionCard title="Отзыв сертификата" subtitle="Доступно только admin / super_admin">
-                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                        <input
-                            value={revokeForm.certificate_id}
-                            onChange={(event) => setRevokeForm((prev) => ({ ...prev, certificate_id: event.target.value }))}
-                            placeholder="certificate_id"
-                            className="rounded-xl border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
-                        />
-                        <input
-                            value={revokeForm.reason}
-                            onChange={(event) => setRevokeForm((prev) => ({ ...prev, reason: event.target.value }))}
-                            placeholder="Причина отзыва"
-                            className="rounded-xl border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
-                        />
-                    </div>
-                    <button
-                        type="button"
-                        onClick={() => { void revokeCertificate(); }}
-                        disabled={revoking}
-                        className={`mt-3 inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-medium ${
-                            revoking
-                                ? 'cursor-not-allowed bg-slate-200 text-slate-500'
-                                : 'bg-rose-600 text-white hover:bg-rose-700'
-                        }`}
-                    >
-                        {revoking ? <Loader2 className="h-4 w-4 animate-spin" /> : <Ban className="h-4 w-4" />}
-                        Отозвать
-                    </button>
-                </SectionCard>
-            )}
+          )}
         </div>
-    );
-};
+        <div className="flex items-center gap-3">
+          {!showBack && canToggleAdmin && (
+            <button onClick={navToAdmin} className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-800 transition-colors px-3 py-1.5 rounded-lg hover:bg-slate-100">
+              <BarChart2 size={15} /> Аналитика
+            </button>
+          )}
+          <button
+            onClick={() => {
+              if (canToggleAdmin) setIsAdmin(!isAdmin);
+            }}
+            disabled={!canToggleAdmin}
+            className={`flex items-center gap-2 text-xs px-3 py-1.5 rounded-full border transition-all ${isAdmin ? "bg-indigo-50 border-indigo-200 text-indigo-700" : "bg-slate-50 border-slate-200 text-slate-600 hover:border-slate-300"} ${!canToggleAdmin ? "opacity-70 cursor-default" : ""}`}
+          >
+            <Shield size={12} /> {canToggleAdmin ? (isAdmin ? "Режим админа" : "Сотрудник") : "LMS"}
+          </button>
+          <div className="relative">
+            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center text-white text-xs font-semibold">АИ</div>
+            <div className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 bg-emerald-500 rounded-full border-2 border-white" />
+          </div>
+        </div>
+      </div>
+    </header>
+  );
+}
 
-export default LmsView;
+// ─── CATALOG VIEW ─────────────────────────────────────────────────────────────
+
+function CatalogView({
+  tab,
+  setTab,
+  searchQuery,
+  setSearchQuery,
+  onOpenCourse,
+  isAdmin,
+  onOpenBuilder,
+  courses = [],
+  certificates = [],
+  notifications = [],
+  loading = false,
+  busyCourseId = null,
+  onNotificationRead,
+  onCertificateDownload,
+  onRefresh,
+}) {
+  const [filter, setFilter] = useState("all");
+  const [gridView, setGridView] = useState(true);
+  const [sortBy, setSortBy] = useState("default");
+
+  const safeCourses = Array.isArray(courses) ? courses : [];
+  const safeCertificates = Array.isArray(certificates) ? certificates : [];
+  const safeNotifications = Array.isArray(notifications) ? notifications : [];
+
+  const tabs = [
+    { id: "available", label: "Доступные", icon: BookOpen, count: safeCourses.filter((c) => c.status !== "completed" && c.status !== "completed_late").length },
+    { id: "completed", label: "Пройденные", icon: CheckCircle, count: safeCourses.filter((c) => c.status === "completed" || c.status === "completed_late").length },
+    { id: "certificates", label: "Сертификаты", icon: Award, count: safeCertificates.length },
+    { id: "notifications", label: "Уведомления", icon: Bell, count: safeNotifications.filter((n) => !n.read).length },
+  ];
+
+  const filters = [
+    { id: "all", label: "Все" }, { id: "mandatory", label: "Обязательные" },
+    { id: "in_progress", label: "В процессе" }, { id: "overdue", label: "Просроченные" },
+  ];
+
+  const filteredCourses = safeCourses.filter(c => {
+    const isCompleted = c.status === "completed" || c.status === "completed_late";
+    const matchesTab = tab === "available" ? !isCompleted : isCompleted;
+    const matchesSearch = c.title.toLowerCase().includes(searchQuery.toLowerCase()) || c.category.toLowerCase().includes(searchQuery.toLowerCase());
+    const matchesFilter = filter === "all" || (filter === "mandatory" && c.mandatory) || c.status === filter;
+    return matchesTab && matchesSearch && matchesFilter;
+  }).sort((a, b) => {
+    if (sortBy === "deadline") {
+      const da = a.deadline ? new Date(a.deadline) : new Date("9999");
+      const db = b.deadline ? new Date(b.deadline) : new Date("9999");
+      return da - db;
+    }
+    return 0;
+  });
+
+  const stats = {
+    assigned: safeCourses.length,
+    inProgress: safeCourses.filter((c) => ["in_progress", "waiting_test", "test_failed"].includes(c.status)).length,
+    completed: safeCourses.filter((c) => c.status === "completed" || c.status === "completed_late").length,
+    overdue: safeCourses.filter((c) => c.status === "overdue").length,
+  };
+
+  return (
+    <div className="max-w-screen-xl mx-auto px-6 py-8">
+      <div className="flex items-start justify-between mb-6">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Обучение</h1>
+          <p className="text-sm text-slate-500 mt-0.5">Корпоративная платформа развития сотрудников</p>
+          {loading && <p className="text-xs text-indigo-600 mt-1">Синхронизация с LMS API...</p>}
+        </div>
+        <div className="flex items-center gap-2">
+          {typeof onRefresh === "function" && (
+            <button
+              onClick={onRefresh}
+              className="flex items-center gap-2 bg-white border border-slate-200 hover:border-indigo-300 text-slate-600 text-sm px-3 py-2.5 rounded-xl font-medium transition-colors"
+            >
+              <RefreshCw size={14} /> Обновить
+            </button>
+          )}
+          {isAdmin && (
+            <button onClick={onOpenBuilder} className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm px-4 py-2.5 rounded-xl font-medium transition-colors shadow-sm shadow-indigo-200">
+              <Plus size={16} /> Создать курс
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-4 gap-4 mb-8">
+        {[
+          { label: "Назначено курсов", value: String(stats.assigned), icon: BookOpen, color: "text-indigo-600", bg: "bg-indigo-50" },
+          { label: "В процессе", value: String(stats.inProgress), icon: PlayCircle, color: "text-blue-600", bg: "bg-blue-50" },
+          { label: "Завершено", value: String(stats.completed), icon: CheckCircle, color: "text-emerald-600", bg: "bg-emerald-50" },
+          { label: "Просрочено", value: String(stats.overdue), icon: AlertCircle, color: "text-red-600", bg: "bg-red-50" },
+        ].map(s => (
+          <div key={s.label} className="bg-white rounded-2xl border border-slate-200 p-4 flex items-center gap-3">
+            <div className={`w-10 h-10 ${s.bg} rounded-xl flex items-center justify-center flex-shrink-0`}>
+              <s.icon size={18} className={s.color} />
+            </div>
+            <div>
+              <div className="text-xl font-bold text-slate-900">{s.value}</div>
+              <div className="text-xs text-slate-500">{s.label}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="flex items-center gap-1 mb-6 bg-slate-100 p-1 rounded-xl w-fit">
+        {tabs.map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)} className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${tab === t.id ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>
+            <t.icon size={14} />
+            {t.label}
+            {t.count > 0 && (
+              <span className={`text-xs px-1.5 py-0.5 rounded-full ${tab === t.id ? "bg-indigo-100 text-indigo-700" : "bg-slate-200 text-slate-600"}`}>{t.count}</span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      {tab === "certificates" && (
+        <CertificatesView
+          certificates={safeCertificates}
+          onDownload={onCertificateDownload}
+        />
+      )}
+      {tab === "notifications" && (
+        <NotificationsView
+          notifications={safeNotifications}
+          onRead={onNotificationRead}
+        />
+      )}
+
+      {(tab === "available" || tab === "completed") && (
+        <>
+          <div className="flex items-center gap-3 mb-6">
+            <div className="relative flex-1 max-w-md">
+              <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input value={searchQuery} onChange={e => setSearchQuery(e.target.value)} placeholder="Поиск курсов..." className="w-full pl-9 pr-4 py-2.5 bg-white border border-slate-200 rounded-xl text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition-all" />
+            </div>
+            <div className="flex items-center gap-2">
+              {filters.map(f => (
+                <button key={f.id} onClick={() => setFilter(f.id)} className={`px-3 py-2 text-xs rounded-xl border font-medium transition-all ${filter === f.id ? "bg-indigo-600 text-white border-indigo-600" : "bg-white text-slate-600 border-slate-200 hover:border-slate-300"}`}>
+                  {f.label}
+                </button>
+              ))}
+            </div>
+            <select value={sortBy} onChange={e => setSortBy(e.target.value)} className="text-xs bg-white border border-slate-200 rounded-xl px-3 py-2 text-slate-600 focus:outline-none focus:border-indigo-400">
+              <option value="default">По умолчанию</option>
+              <option value="deadline">По дедлайну</option>
+            </select>
+            <div className="flex items-center gap-1 bg-white border border-slate-200 rounded-xl p-1">
+              <button onClick={() => setGridView(true)} className={`p-1.5 rounded-lg transition-colors ${gridView ? "bg-slate-100 text-slate-800" : "text-slate-400 hover:text-slate-600"}`}><LayoutGrid size={14} /></button>
+              <button onClick={() => setGridView(false)} className={`p-1.5 rounded-lg transition-colors ${!gridView ? "bg-slate-100 text-slate-800" : "text-slate-400 hover:text-slate-600"}`}><List size={14} /></button>
+            </div>
+          </div>
+
+          {filteredCourses.length === 0 ? (
+            <div className="text-center py-20 text-slate-400"><BookOpen size={40} className="mx-auto mb-3 opacity-30" /><p className="text-sm">Курсы не найдены</p></div>
+          ) : gridView ? (
+            <div className="grid grid-cols-3 gap-5">
+              {filteredCourses.map(c => (
+                <CourseCard
+                  key={c.id}
+                  course={c}
+                  busy={busyCourseId === c.id}
+                  onClick={() => onOpenCourse(c)}
+                />
+              ))}
+            </div>
+          ) : (
+            <div className="flex flex-col gap-3">
+              {filteredCourses.map(c => (
+                <CourseListItem
+                  key={c.id}
+                  course={c}
+                  busy={busyCourseId === c.id}
+                  onClick={() => onOpenCourse(c)}
+                />
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ─── COURSE CARD ──────────────────────────────────────────────────────────────
+
+function CourseCard({ course, onClick, busy = false }) {
+  const st = statusConfig[course.status] || statusConfig.not_started;
+  const dl = course.deadline ? formatDeadline(course.deadline) : null;
+  const attemptsLeft = Math.max(0, Number(course.maxAttempts || 0) - Number(course.attemptsUsed || 0));
+
+  return (
+    <div onClick={() => !busy && onClick?.()} className={`bg-white rounded-2xl border border-slate-200 overflow-hidden transition-all group ${busy ? "opacity-70 cursor-wait" : "cursor-pointer hover:shadow-md hover:border-slate-300"}`}>
+      <div className={`h-32 bg-gradient-to-br ${course.color} flex items-center justify-center relative`}>
+        <span className="text-5xl">{course.cover}</span>
+        {course.mandatory && (
+          <div className="absolute top-3 left-3 bg-white/20 backdrop-blur-sm text-white text-[10px] font-semibold px-2 py-1 rounded-full border border-white/30">Обязательный</div>
+        )}
+        {course.status === "completed" && (
+          <div className="absolute top-3 right-3 w-8 h-8 bg-white rounded-full flex items-center justify-center shadow-md"><CheckCircle size={16} className="text-emerald-600" /></div>
+        )}
+        {course.status === "overdue" && (
+          <div className="absolute top-3 right-3 w-8 h-8 bg-red-500 rounded-full flex items-center justify-center shadow-md"><AlertCircle size={16} className="text-white" /></div>
+        )}
+      </div>
+      <div className="p-5">
+        <div className="flex items-start justify-between gap-2 mb-2">
+          <span className="text-[10px] font-semibold text-indigo-600 uppercase tracking-wider">{course.category}</span>
+          <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${st.bg} ${st.text}`}>{st.label}</span>
+        </div>
+        <h3 className="text-sm font-semibold text-slate-900 leading-snug mb-3 group-hover:text-indigo-700 transition-colors line-clamp-2">{course.title}</h3>
+        <div className="flex items-center gap-3 text-xs text-slate-500 mb-4">
+          <span className="flex items-center gap-1"><Clock size={11} /> {course.duration}</span>
+          <span className="flex items-center gap-1"><BookOpen size={11} /> {course.lessons} уроков</span>
+          <span className="flex items-center gap-1"><Star size={11} className="text-amber-400 fill-amber-400" /> {course.rating}</span>
+        </div>
+        {course.status !== "completed" && course.status !== "not_started" && (
+          <div className="mb-3">
+            <div className="flex justify-between text-xs text-slate-500 mb-1.5"><span>Прогресс</span><span className="font-semibold text-slate-700">{course.progress}%</span></div>
+            <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
+              <div className={`h-full rounded-full transition-all ${course.status === "overdue" ? "bg-red-500" : "bg-indigo-500"}`} style={{ width: `${course.progress}%` }} />
+            </div>
+          </div>
+        )}
+        {/* Попытки */}
+        {Number(course.maxAttempts || 0) > 0 && course.status !== "completed" && course.status !== "completed_late" && (
+          <div className={`flex items-center gap-1 text-[10px] mb-3 ${attemptsLeft <= 1 ? "text-red-600" : "text-slate-500"}`}>
+            <RefreshCw size={10} />
+            <span>Попыток осталось: <strong>{attemptsLeft <= 0 ? "нет" : attemptsLeft}</strong> из {course.maxAttempts}</span>
+          </div>
+        )}
+        <div className="flex items-center justify-between">
+          {dl && (
+            <div className={`flex items-center gap-1 text-xs ${dl.overdue ? "text-red-600" : dl.urgent ? "text-amber-600" : "text-slate-500"}`}>
+              <Calendar size={11} />
+              {dl.overdue ? `Просрочен ${Math.abs(Math.ceil((new Date(course.deadline) - new Date()) / 86400000))} дн` : `До ${dl.label}`}
+            </div>
+          )}
+          <button className={`ml-auto text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors ${course.status === "completed" || course.status === "completed_late" ? "bg-emerald-50 text-emerald-700 hover:bg-emerald-100" : "bg-indigo-600 text-white hover:bg-indigo-700"}`}>
+            {busy ? "Загрузка..." : (course.status === "completed" || course.status === "completed_late") ? "Просмотр" : course.status === "not_started" ? "Начать" : "Продолжить"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CourseListItem({ course, onClick, busy = false }) {
+  const st = statusConfig[course.status] || statusConfig.not_started;
+  return (
+    <div onClick={() => !busy && onClick?.()} className={`bg-white rounded-2xl border border-slate-200 p-5 flex items-center gap-5 transition-all group ${busy ? "opacity-70 cursor-wait" : "cursor-pointer hover:shadow-sm hover:border-slate-300"}`}>
+      <div className={`w-14 h-14 rounded-xl bg-gradient-to-br ${course.color} flex items-center justify-center text-2xl flex-shrink-0`}>{course.cover}</div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2 mb-1">
+          <span className="text-[10px] font-semibold text-indigo-600 uppercase tracking-wider">{course.category}</span>
+          {course.mandatory && <span className="text-[10px] font-semibold text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full">Обязательный</span>}
+        </div>
+        <h3 className="text-sm font-semibold text-slate-900 group-hover:text-indigo-700 transition-colors truncate">{course.title}</h3>
+        <div className="flex items-center gap-3 text-xs text-slate-500 mt-1">
+          <span className="flex items-center gap-1"><Clock size={11} /> {course.duration}</span>
+          <span className="flex items-center gap-1"><BookOpen size={11} /> {course.lessons} уроков</span>
+          <span className="flex items-center gap-1"><RefreshCw size={11} /> {Math.max(0, Number(course.maxAttempts || 0) - Number(course.attemptsUsed || 0))} поп.</span>
+        </div>
+      </div>
+      {course.status !== "completed" && course.status !== "not_started" && (
+        <div className="w-32">
+          <div className="flex justify-between text-xs text-slate-500 mb-1"><span>Прогресс</span><span>{course.progress}%</span></div>
+          <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
+            <div className="h-full bg-indigo-500 rounded-full" style={{ width: `${course.progress}%` }} />
+          </div>
+        </div>
+      )}
+      <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${st.bg} ${st.text}`}>{st.label}</span>
+      <ChevronRight size={16} className="text-slate-400 flex-shrink-0" />
+    </div>
+  );
+}
+
+// ─── COURSE DETAIL ────────────────────────────────────────────────────────────
+
+function CourseDetail({ course, onStartLesson }) {
+  const [openModules, setOpenModules] = useState([course?.modules_data?.[0]?.id || 1]);
+  const toggleModule = (id) => setOpenModules(p => p.includes(id) ? p.filter(x => x !== id) : [...p, id]);
+  const dl = course.deadline ? formatDeadline(course.deadline) : null;
+  const firstLesson = course.modules_data[0]?.lessons[0];
+  const attemptsLeft = Math.max(0, Number(course.maxAttempts || 0) - Number(course.attemptsUsed || 0));
+
+  useEffect(() => {
+    setOpenModules(course?.modules_data?.[0]?.id ? [course.modules_data[0].id] : []);
+  }, [course?.id]);
+
+  return (
+    <div className="max-w-screen-xl mx-auto px-6 py-8">
+      <div className={`rounded-3xl bg-gradient-to-br ${course.color} p-8 mb-8 relative overflow-hidden`}>
+        <div className="absolute right-8 top-8 text-8xl opacity-20">{course.cover}</div>
+        <div className="relative z-10 max-w-2xl">
+          <div className="flex items-center gap-2 mb-4">
+            <span className="text-xs font-semibold text-white/70 uppercase tracking-wider">{course.category}</span>
+            {course.mandatory && <span className="text-xs font-semibold bg-white/20 text-white px-2.5 py-1 rounded-full">Обязательный</span>}
+          </div>
+          <h1 className="text-3xl font-bold text-white mb-4 leading-tight tracking-tight">{course.title}</h1>
+          <p className="text-white/80 text-sm leading-relaxed mb-6">{course.description}</p>
+          <div className="flex items-center gap-5 text-white/70 text-sm mb-6">
+            <span className="flex items-center gap-2"><Clock size={15} /> {course.duration}</span>
+            <span className="flex items-center gap-2"><BookOpen size={15} /> {course.lessons} уроков</span>
+            <span className="flex items-center gap-2"><Layers size={15} /> {course.modules} модулей</span>
+            <span className="flex items-center gap-2"><Star size={15} className="text-amber-300 fill-amber-300" /> {course.rating} ({course.reviews})</span>
+          </div>
+          {course.progress > 0 && course.status !== "completed" && (
+            <div className="mb-6">
+              <div className="flex justify-between text-white/70 text-xs mb-2"><span>Прогресс курса</span><span className="font-semibold text-white">{course.progress}%</span></div>
+              <div className="h-2 bg-white/20 rounded-full overflow-hidden"><div className="h-full bg-white rounded-full" style={{ width: `${course.progress}%` }} /></div>
+            </div>
+          )}
+          <button onClick={() => firstLesson && onStartLesson(firstLesson)} className="bg-white text-slate-900 font-semibold px-6 py-3 rounded-xl hover:bg-white/90 transition-colors text-sm shadow-lg">
+            {course.status === "not_started" ? "Начать курс" : course.status === "completed" ? "Повторить" : "Продолжить обучение"}
+          </button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-3 gap-8">
+        <div className="col-span-2 space-y-6">
+          <div className="bg-white rounded-2xl border border-slate-200 p-6">
+            <h2 className="text-base font-semibold text-slate-900 mb-4">Приобретаемые навыки</h2>
+            <div className="flex flex-wrap gap-2">
+              {course.skills.map(s => <span key={s} className="text-xs font-medium bg-indigo-50 text-indigo-700 border border-indigo-100 px-3 py-1.5 rounded-full">{s}</span>)}
+            </div>
+          </div>
+
+          {course.modules_data.length > 0 && (
+            <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+              <div className="px-6 py-5 border-b border-slate-100">
+                <h2 className="text-base font-semibold text-slate-900">Программа курса</h2>
+                <p className="text-xs text-slate-500 mt-1">{course.modules} модуля · {course.lessons} уроков</p>
+              </div>
+              {course.modules_data.map(mod => (
+                <div key={mod.id} className="border-b border-slate-100 last:border-0">
+                  <button onClick={() => toggleModule(mod.id)} className="w-full flex items-center justify-between px-6 py-4 hover:bg-slate-50 transition-colors">
+                    <div className="flex items-center gap-3">
+                      <div className="w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center text-xs font-bold">{mod.id}</div>
+                      <span className="text-sm font-semibold text-slate-800">{mod.title}</span>
+                      <span className="text-xs text-slate-400">{mod.lessons.length} уроков</span>
+                    </div>
+                    {openModules.includes(mod.id) ? <ChevronUp size={16} className="text-slate-400" /> : <ChevronDown size={16} className="text-slate-400" />}
+                  </button>
+                  {openModules.includes(mod.id) && (
+                    <div className="px-6 pb-4 space-y-1">
+                      {mod.lessons.map(l => {
+                        const Icon = lessonIcons[l.type];
+                        return (
+                          <div key={l.id} onClick={() => !l.locked && onStartLesson(l)} className={`flex items-center gap-3 p-3 rounded-xl transition-all ${l.locked ? "opacity-50 cursor-not-allowed" : "cursor-pointer hover:bg-indigo-50 group"}`}>
+                            <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${l.status === "completed" ? "bg-emerald-50" : l.locked ? "bg-slate-100" : "bg-indigo-50"}`}>
+                              {l.status === "completed" ? <CheckCircle size={14} className="text-emerald-600" /> : l.locked ? <Lock size={14} className="text-slate-400" /> : <Icon size={14} className="text-indigo-600" />}
+                            </div>
+                            <div className="flex-1">
+                              <p className={`text-xs font-medium ${l.locked ? "text-slate-400" : "text-slate-800 group-hover:text-indigo-700"}`}>{l.title}</p>
+                              <p className="text-[10px] text-slate-400 mt-0.5">{l.type === "video" ? "Видеоурок" : l.type === "text" ? "Текстовый материал" : "Тест"} · {l.duration}</p>
+                            </div>
+                            {l.requiresTest && !l.locked && <span className="text-[10px] bg-violet-50 text-violet-600 px-1.5 py-0.5 rounded-full font-medium">Тест</span>}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="space-y-4">
+          <div className="bg-white rounded-2xl border border-slate-200 p-5">
+            <h3 className="text-sm font-semibold text-slate-900 mb-4">Параметры курса</h3>
+            <div className="space-y-3">
+              {[
+                { label: "Дедлайн", value: dl ? (dl.overdue ? <span className="text-red-600 font-semibold">Просрочен</span> : <span className={dl.urgent ? "text-amber-600 font-semibold" : "text-slate-700"}>{dl.label}</span>) : "Не задан", icon: Calendar },
+                { label: "Проходной балл", value: `${course.passingScore}%`, icon: Target },
+                { label: "Попыток доступно", value: <span className={attemptsLeft <= 0 ? "text-red-600 font-semibold" : attemptsLeft <= 1 ? "text-amber-600 font-semibold" : ""}>{attemptsLeft <= 0 ? "Исчерпаны" : `${attemptsLeft} из ${course.maxAttempts}`}</span>, icon: RefreshCw },
+                { label: "Модулей", value: course.modules, icon: Layers },
+              ].map(r => (
+                <div key={r.label} className="flex items-center justify-between py-2 border-b border-slate-50 last:border-0">
+                  <div className="flex items-center gap-2 text-xs text-slate-500"><r.icon size={13} /> {r.label}</div>
+                  <span className="text-xs font-semibold text-slate-800">{r.value}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="bg-white rounded-2xl border border-slate-200 p-5">
+            <h3 className="text-sm font-semibold text-slate-900 mb-3">Отзывы</h3>
+            <div className="text-center mb-4">
+              <div className="text-3xl font-bold text-slate-900">{course.rating}</div>
+              <div className="flex items-center justify-center gap-0.5 my-1">
+                {[1,2,3,4,5].map(i => <Star key={i} size={14} className={i <= Math.round(course.rating) ? "text-amber-400 fill-amber-400" : "text-slate-200 fill-slate-200"} />)}
+              </div>
+              <div className="text-xs text-slate-400">{course.reviews} оценок</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── LESSON VIEW ──────────────────────────────────────────────────────────────
+
+function LessonView({
+  lesson,
+  course,
+  onBack,
+  quizView,
+  setQuizView,
+  quizAnswers,
+  setQuizAnswers,
+  sidebarOpen,
+  setSidebarOpen,
+  onSelectLesson,
+  lmsRequest,
+  apiMode,
+  onCompleteLesson,
+  onQuizFinished,
+  emitToast,
+}) {
+  const isQuiz = lesson.type === "quiz";
+
+  return (
+    <div className="flex h-[calc(100vh-64px)]">
+      {/* Sidebar */}
+      <div className={`${sidebarOpen ? "w-80" : "w-0"} flex-shrink-0 transition-all duration-300 overflow-hidden bg-white border-r border-slate-200`}>
+        <div className="p-4 border-b border-slate-100">
+          <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Программа курса</p>
+          <p className="text-sm font-semibold text-slate-900 leading-tight">{course.title}</p>
+          <div className="mt-3">
+            <div className="flex justify-between text-xs text-slate-400 mb-1"><span>Прогресс</span><span>{course.progress}%</span></div>
+            <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden"><div className="h-full bg-indigo-500 rounded-full" style={{ width: `${course.progress}%` }} /></div>
+          </div>
+        </div>
+        <div className="overflow-y-auto h-full pb-20">
+          {course.modules_data.map(mod => (
+            <div key={mod.id}>
+              <div className="px-4 py-3 bg-slate-50 border-b border-slate-100">
+                <p className="text-xs font-semibold text-slate-600">{mod.id}. {mod.title}</p>
+              </div>
+              {mod.lessons.map(l => {
+                const Icon = lessonIcons[l.type];
+                const isActive = l.id === lesson.id;
+                const dl = course.deadline ? formatDeadline(course.deadline) : null;
+                return (
+                  <button key={l.id} onClick={() => !l.locked && onSelectLesson(l)} className={`w-full flex items-start gap-3 px-4 py-3 border-b border-slate-50 transition-colors text-left ${isActive ? "bg-indigo-50 border-l-2 border-l-indigo-500" : l.locked ? "opacity-50 cursor-not-allowed" : "hover:bg-slate-50"}`}>
+                    <div className={`w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5 ${isActive ? "bg-indigo-600" : l.status === "completed" ? "bg-emerald-50" : l.locked ? "bg-slate-100" : "bg-slate-100"}`}>
+                      {isActive ? <Play size={11} className="text-white ml-0.5" /> : l.status === "completed" ? <CheckCircle size={13} className="text-emerald-600" /> : l.locked ? <Lock size={11} className="text-slate-400" /> : <Icon size={12} className="text-slate-500" />}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className={`text-xs font-medium leading-snug ${isActive ? "text-indigo-700" : "text-slate-700"}`}>{l.title}</p>
+                      <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                        <span className="text-[10px] text-slate-400">{l.duration}</span>
+                        {l.type === "quiz" && <span className="text-[10px] bg-violet-50 text-violet-600 px-1.5 py-0.5 rounded-full font-medium">Тест</span>}
+                        {l.status === "in_progress" && <span className="text-[10px] bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded-full font-medium">В процессе</span>}
+                        {l.requiresTest && l.status !== "completed" && !l.locked && <span className="text-[10px] bg-violet-50 text-violet-600 px-1.5 py-0.5 rounded-full font-medium flex items-center gap-0.5"><HelpCircle size={8} /> Тест</span>}
+                        {dl?.overdue && l.status !== "completed" && <span className="text-[10px] bg-red-50 text-red-600 px-1.5 py-0.5 rounded-full font-medium">Просрочен</span>}
+                        {l.status === "completed" && <span className="text-[10px] bg-emerald-50 text-emerald-600 px-1.5 py-0.5 rounded-full font-medium">✓ Завершён</span>}
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Main content */}
+      <div className="flex-1 overflow-y-auto bg-slate-50">
+        <div className="sticky top-0 z-10 bg-white border-b border-slate-200 px-6 py-3 flex items-center gap-3">
+          <button onClick={() => setSidebarOpen(!sidebarOpen)} className="p-2 rounded-lg hover:bg-slate-100 text-slate-500 transition-colors"><AlignLeft size={16} /></button>
+          <div className="flex-1">
+            <p className="text-xs text-slate-400">Модуль 1 · Урок {lesson.id}</p>
+            <p className="text-sm font-semibold text-slate-900">{lesson.title}</p>
+          </div>
+          <div className="flex items-center gap-3">
+            {lesson.type === "quiz" && course.maxAttempts && (
+              <div className="flex items-center gap-1.5 text-xs text-slate-500 bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-lg">
+                <RefreshCw size={12} />
+                <span>Попыток: <strong className={Math.max(0, Number(course.maxAttempts || 0) - Number(course.attemptsUsed || 0)) <= 1 ? "text-red-600" : "text-slate-700"}>{Math.max(0, Number(course.maxAttempts || 0) - Number(course.attemptsUsed || 0))}</strong> / {course.maxAttempts}</span>
+              </div>
+            )}
+            <div className="flex items-center gap-2 text-xs text-slate-500"><Clock size={13} /> {lesson.duration}</div>
+          </div>
+        </div>
+
+        <div className="max-w-4xl mx-auto px-8 py-8">
+          {isQuiz ? (
+            apiMode && Number(lesson?.apiTestId) > 0 ? (
+              <ApiQuizSection
+                quizView={quizView}
+                setQuizView={setQuizView}
+                answers={quizAnswers}
+                setAnswers={setQuizAnswers}
+                course={course}
+                lesson={lesson}
+                lmsRequest={lmsRequest}
+                onFinished={onQuizFinished}
+                emitToast={emitToast}
+              />
+            ) : (
+              <QuizSection
+                quizView={quizView}
+                setQuizView={setQuizView}
+                answers={quizAnswers}
+                setAnswers={setQuizAnswers}
+                course={course}
+              />
+            )
+          ) : (
+            <VideoLesson
+              lesson={lesson}
+              apiMode={apiMode}
+              lmsRequest={lmsRequest}
+              onCompleteLesson={onCompleteLesson}
+              emitToast={emitToast}
+            />
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── VIDEO LESSON ─────────────────────────────────────────────────────────────
+
+function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast }) {
+  const [playing, setPlaying] = useState(false);
+  const [progress, setProgress] = useState(Math.max(0, Math.min(100, Number(lesson?.completionRatio || 22))));
+  const [activeTab, setActiveTab] = useState("transcript");
+  const [tabHidden, setTabHidden] = useState(false);
+  const [completing, setCompleting] = useState(false);
+  const [completed, setCompleted] = useState(String(lesson?.status || "").toLowerCase() === "completed");
+  const intervalRef = useRef(null);
+  const heartbeatRef = useRef(null);
+  const progressRef = useRef(progress);
+  const visibleRef = useRef(typeof document !== "undefined" ? !document.hidden : true);
+
+  const totalSeconds = Math.max(60, Number(lesson?.durationSeconds || 18 * 60));
+  const currentSeconds = Math.floor((progress * totalSeconds) / 100);
+  const materials = Array.isArray(lesson?.materials) ? lesson.materials : [];
+  const transcriptMaterial = materials.find((item) => String(item?.material_type || "").toLowerCase() === "text" && item?.content_text);
+  const transcriptText = String(transcriptMaterial?.content_text || lesson?.description || "").trim();
+  const lessonFiles = materials.filter((item) => item?.url || item?.signed_url || item?.content_url);
+
+  useEffect(() => {
+    const next = Math.max(0, Math.min(100, Number(lesson?.completionRatio || (String(lesson?.status || "").toLowerCase() === "completed" ? 100 : 22))));
+    setProgress(next);
+    setCompleted(String(lesson?.status || "").toLowerCase() === "completed");
+    setPlaying(false);
+  }, [lesson?.id, lesson?.apiLessonId, lesson?.completionRatio, lesson?.status]);
+
+  useEffect(() => {
+    progressRef.current = progress;
+  }, [progress]);
+
+  useEffect(() => {
+    const canTrack = apiMode && typeof lmsRequest === "function" && Number(lesson?.apiLessonId) > 0;
+    const lessonId = Number(lesson?.apiLessonId || 0);
+    const sendVisibilityEvent = async (isVisible) => {
+      if (!canTrack || !lessonId) return;
+      try {
+        await lmsRequest(`/api/lms/lessons/${lessonId}/event`, {
+          method: "POST",
+          body: {
+            event_type: "visibility",
+            payload: { is_visible: Boolean(isVisible) },
+            client_ts: new Date().toISOString(),
+          },
+        });
+      } catch (_) {
+        // silent: non-blocking anti-cheat event
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      const isVisible = !document.hidden;
+      visibleRef.current = isVisible;
+      if (!isVisible && playing) {
+        setPlaying(false);
+        setTabHidden(true);
+        setTimeout(() => setTabHidden(false), 3000);
+      }
+      sendVisibilityEvent(isVisible);
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+  }, [apiMode, lmsRequest, lesson?.apiLessonId, playing]);
+
+  useEffect(() => {
+    if (playing) {
+      intervalRef.current = setInterval(() => {
+        setProgress((prev) => {
+          if (prev >= 100) {
+            clearInterval(intervalRef.current);
+            setPlaying(false);
+            return 100;
+          }
+          return Math.min(100, prev + 0.3);
+        });
+      }, 200);
+    } else {
+      clearInterval(intervalRef.current);
+    }
+    return () => clearInterval(intervalRef.current);
+  }, [playing]);
+
+  useEffect(() => {
+    const canHeartbeat = apiMode && typeof lmsRequest === "function" && Number(lesson?.apiLessonId) > 0;
+    const lessonId = Number(lesson?.apiLessonId || 0);
+    if (!playing || !canHeartbeat || !lessonId) {
+      clearInterval(heartbeatRef.current);
+      return undefined;
+    }
+
+    heartbeatRef.current = setInterval(async () => {
+      try {
+        const positionSeconds = Math.floor((progressRef.current * totalSeconds) / 100);
+        const payload = await lmsRequest(`/api/lms/lessons/${lessonId}/heartbeat`, {
+          method: "POST",
+          body: {
+            position_seconds: positionSeconds,
+            tab_visible: visibleRef.current,
+            client_ts: new Date().toISOString(),
+          },
+        });
+        if (payload?.position_seconds != null && Number.isFinite(Number(payload.position_seconds))) {
+          const nextProgress = Math.max(0, Math.min(100, (Number(payload.position_seconds) / totalSeconds) * 100));
+          setProgress(nextProgress);
+        }
+      } catch (_) {
+        // heartbeat errors are non-fatal for local playback
+      }
+    }, 5000);
+
+    return () => clearInterval(heartbeatRef.current);
+  }, [playing, apiMode, lmsRequest, lesson?.apiLessonId, totalSeconds]);
+
+  const handleComplete = async () => {
+    if (completed || completing) return;
+    if (typeof onCompleteLesson !== "function") return;
+    setCompleting(true);
+    try {
+      const ok = await onCompleteLesson(lesson);
+      if (ok) {
+        setCompleted(true);
+        setProgress(100);
+      }
+    } finally {
+      setCompleting(false);
+    }
+  };
+
+  const handleOpenMaterial = (material) => {
+    const url = material?.url || material?.signed_url || material?.content_url;
+    if (!url) return;
+    window.open(url, "_blank", "noopener,noreferrer");
+  };
+
+  return (
+    <div>
+      {tabHidden && (
+        <div className="mb-4 bg-amber-50 border border-amber-200 rounded-xl p-3 flex items-center gap-2 text-xs text-amber-700">
+          <AlertTriangle size={14} /> Видео поставлено на паузу — вы переключили вкладку браузера
+        </div>
+      )}
+
+      <div className="bg-slate-900 rounded-2xl overflow-hidden mb-6 relative aspect-video">
+        <div className="absolute inset-0 flex items-center justify-center">
+          <div className="text-center">
+            <p className="text-slate-500 text-sm mb-6">Видеоурок: {lesson.title}</p>
+            <div className="w-20 h-20 rounded-full bg-white/10 backdrop-blur-sm flex items-center justify-center cursor-pointer hover:bg-white/20 transition-colors" onClick={() => setPlaying((prev) => !prev)}>
+              {playing ? <div className="flex gap-2"><div className="w-3 h-8 bg-white rounded-sm" /><div className="w-3 h-8 bg-white rounded-sm" /></div> : <Play size={28} className="text-white ml-1" />}
+            </div>
+          </div>
+        </div>
+        <div className="absolute bottom-0 left-0 right-0 px-4 pb-4">
+          <div className="flex items-center gap-3 mb-2">
+            <span className="text-white/60 text-xs">{Math.floor(currentSeconds / 60)}:{String(currentSeconds % 60).padStart(2, "0")}</span>
+            <div className="flex-1 h-1.5 bg-white/20 rounded-full cursor-not-allowed relative" title="Перемотка вперёд запрещена">
+              <div className="h-full bg-indigo-500 rounded-full transition-all" style={{ width: `${progress}%` }} />
+            </div>
+            <span className="text-white/60 text-xs">{Math.floor(totalSeconds / 60)}:{String(totalSeconds % 60).padStart(2, "0")}</span>
+          </div>
+          {!playing && progress < 100 && (
+            <p className="text-white/40 text-[10px] text-center">Перемотка вперёд недоступна</p>
+          )}
+        </div>
+      </div>
+
+      <div className="flex items-center gap-4 mb-6 p-4 bg-white rounded-xl border border-slate-200">
+        <div className="flex items-center gap-2 text-xs text-slate-500"><Eye size={13} /> Просмотрено: {Math.round(progress)}%</div>
+        <div className="flex items-center gap-2 text-xs text-emerald-600 font-medium"><CheckCircle size={13} /> Засчитывается только реальное время</div>
+        <div className="ml-auto text-xs text-slate-500 flex items-center gap-2"><Clock size={13} /> {Math.floor(currentSeconds / 60)} мин просмотрено</div>
+        {completed && <div className="flex items-center gap-1.5 text-xs text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-full font-semibold"><CheckCircle size={12} /> Урок завершён</div>}
+      </div>
+
+      {!completed && (
+        <div className="mb-6 flex justify-end">
+          <button
+            onClick={handleComplete}
+            disabled={completing || progress < 95}
+            className="inline-flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-semibold px-4 py-2.5 rounded-xl transition-colors"
+          >
+            {completing ? <RefreshCw size={14} className="animate-spin" /> : <CheckCircle size={14} />}
+            {completing ? "Сохранение..." : "Отметить как завершенный"}
+          </button>
+        </div>
+      )}
+
+      <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+        <div className="flex border-b border-slate-100">
+          {[{ id: "transcript", label: "Транскрипт", icon: AlignLeft }, { id: "notes", label: "Конспект", icon: FileText }, { id: "materials", label: "Материалы", icon: BookMarked }].map((t) => (
+            <button key={t.id} onClick={() => setActiveTab(t.id)} className={`flex items-center gap-2 px-5 py-3.5 text-xs font-medium transition-colors border-b-2 ${activeTab === t.id ? "border-indigo-500 text-indigo-600" : "border-transparent text-slate-500 hover:text-slate-700"}`}>
+              <t.icon size={13} /> {t.label}
+            </button>
+          ))}
+        </div>
+        <div className="p-5">
+          {activeTab === "transcript" && (
+            <div className="text-sm text-slate-600 leading-relaxed space-y-3">
+              {transcriptText ? (
+                <p>{transcriptText}</p>
+              ) : (
+                <>
+                  <p>В этом уроке мы рассмотрим <strong className="text-slate-800">основные принципы информационной безопасности</strong> и их практическое применение в корпоративной среде.</p>
+                  <p>Информационная безопасность — это практика предотвращения несанкционированного доступа, использования, раскрытия, нарушения, изменения, проверки, записи или уничтожения информации.</p>
+                </>
+              )}
+            </div>
+          )}
+          {activeTab === "notes" && (
+            <textarea className="w-full h-40 text-sm text-slate-700 resize-none focus:outline-none placeholder-slate-300" placeholder="Добавьте заметки к уроку..." />
+          )}
+          {activeTab === "materials" && (
+            <div className="space-y-2">
+              {lessonFiles.length === 0 && (
+                <div className="text-xs text-slate-400">Материалы не добавлены</div>
+              )}
+              {lessonFiles.map((material, idx) => {
+                const name = String(material?.title || `Материал ${idx + 1}`);
+                const metaName = String(material?.metadata?.uploaded_file_name || "");
+                const label = metaName || name;
+                const size = material?.mime_type ? String(material.mime_type) : "Файл";
+                return (
+                  <div key={`${material?.id || idx}-${label}`} onClick={() => handleOpenMaterial(material)} className="flex items-center gap-3 p-3 bg-slate-50 rounded-xl hover:bg-slate-100 transition-colors cursor-pointer">
+                    <div className="w-9 h-9 bg-indigo-100 rounded-lg flex items-center justify-center"><FileCheck size={16} className="text-indigo-600" /></div>
+                    <div className="flex-1"><p className="text-xs font-medium text-slate-800">{label}</p><p className="text-[10px] text-slate-400">{size}</p></div>
+                    <Download size={14} className="text-slate-400" />
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── QUIZ SECTION (полная переработка по ТЗ) ──────────────────────────────────
+
+function ApiQuizSection({ quizView, setQuizView, answers, setAnswers, course, lesson, lmsRequest, onFinished, emitToast }) {
+  const [attempt, setAttempt] = useState(null);
+  const [questions, setQuestions] = useState([]);
+  const [currentQ, setCurrentQ] = useState(0);
+  const [timeLeft, setTimeLeft] = useState(20 * 60);
+  const [textInput, setTextInput] = useState("");
+  const [loadingStart, setLoadingStart] = useState(false);
+  const [finishing, setFinishing] = useState(false);
+  const [result, setResult] = useState(null);
+  const [autoFinished, setAutoFinished] = useState(false);
+  const timerRef = useRef(null);
+
+  const attemptsLeft = Math.max(
+    0,
+    Number(lesson?.maxAttempts ?? course?.maxAttempts ?? 3) - Number(lesson?.attemptsUsed ?? course?.attemptsUsed ?? 0)
+  );
+
+  const passThreshold = Number(result?.pass_threshold || attempt?.pass_threshold || lesson?.passingScore || course?.passingScore || 80);
+
+  const normalizeQuestions = (items) => {
+    if (!Array.isArray(items)) return [];
+    return items.map((item) => ({
+      id: Number(item?.id || 0),
+      type: mapApiQuestionTypeToView(item?.type),
+      text: String(item?.prompt || "Вопрос"),
+      options: Array.isArray(item?.options)
+        ? item.options.map((opt, idx) => ({ id: Number(opt?.id || idx), text: String(opt?.text || `Вариант ${idx + 1}`) }))
+        : [],
+      points: Number(item?.points || 1),
+      required: Boolean(item?.required),
+      isApiQuestion: true,
+    }));
+  };
+
+  const resetForRun = () => {
+    setAnswers({});
+    setCurrentQ(0);
+    setTimeLeft(20 * 60);
+    setTextInput("");
+    setAutoFinished(false);
+  };
+
+  const startApiQuiz = async () => {
+    if (attemptsLeft <= 0 || loadingStart) return;
+    setLoadingStart(true);
+    try {
+      const payload = await lmsRequest(`/api/lms/tests/${lesson.apiTestId}/start`, { method: "POST" });
+      setAttempt(payload?.attempt || null);
+      setQuestions(normalizeQuestions(payload?.questions));
+      setResult(null);
+      resetForRun();
+      setQuizView("active");
+    } catch (error) {
+      emitToast?.(`Не удалось начать тест: ${String(error?.message || "ошибка")}`, "error");
+    } finally {
+      setLoadingStart(false);
+    }
+  };
+
+  const saveAnswer = useCallback(async (question, value) => {
+    if (!attempt?.id || !question?.id) return;
+    try {
+      await lmsRequest(`/api/lms/tests/attempts/${attempt.id}/answer`, {
+        method: "PATCH",
+        body: { question_id: question.id, answer_payload: buildAnswerPayloadForApi(question, value) },
+      });
+    } catch (_) {
+      // non-blocking autosave
+    }
+  }, [attempt?.id, lmsRequest]);
+
+  const finishApiQuiz = useCallback(async (auto = false) => {
+    if (!attempt?.id || finishing) return;
+    setFinishing(true);
+    try {
+      const payload = await lmsRequest(`/api/lms/tests/attempts/${attempt.id}/finish`, { method: "POST" });
+      const finish = payload?.result || {};
+      const breakdown = Array.isArray(finish?.breakdown) ? finish.breakdown : [];
+      const rows = questions.map((question) => {
+        const userAnswer = answers[question.id];
+        const b = breakdown.find((item) => Number(item?.question_id) === Number(question.id));
+        return {
+          question,
+          userAnswer,
+          correct: Boolean(b?.is_correct),
+          points_awarded: Number(b?.points_awarded || 0),
+          points_total: Number(b?.points_total || question.points || 1),
+        };
+      });
+      setResult({
+        score_percent: Number(finish?.score_percent || 0),
+        pass_threshold: Number(finish?.pass_threshold || attempt?.pass_threshold || 80),
+        rows,
+      });
+      if (auto) setAutoFinished(true);
+      setQuizView("result");
+      if (typeof onFinished === "function") await onFinished();
+    } catch (error) {
+      emitToast?.(`Не удалось завершить тест: ${String(error?.message || "ошибка")}`, "error");
+    } finally {
+      setFinishing(false);
+    }
+  }, [attempt?.id, attempt?.pass_threshold, finishing, lmsRequest, questions, answers, setQuizView, onFinished, emitToast]);
+
+  useEffect(() => {
+    if (quizView !== "active") return;
+    timerRef.current = setInterval(() => setTimeLeft((t) => Math.max(0, t - 1)), 1000);
+    return () => clearInterval(timerRef.current);
+  }, [quizView]);
+
+  useEffect(() => {
+    if (quizView === "active" && timeLeft <= 0) {
+      clearInterval(timerRef.current);
+      void finishApiQuiz(true);
+    }
+  }, [quizView, timeLeft, finishApiQuiz]);
+
+  const q = questions[currentQ];
+  useEffect(() => {
+    if (!q) return;
+    if (q.type === "text") {
+      const value = answers[q.id];
+      setTextInput(typeof value === "string" ? value : "");
+    } else {
+      setTextInput("");
+    }
+  }, [q?.id, q?.type, currentQ, answers]);
+
+  const allAnswered = questions.length > 0 && questions.every((question) => {
+    const answer = answers[question.id];
+    if (question.type === "multiple") return Array.isArray(answer) && answer.length > 0;
+    if (question.type === "text") return Boolean(String(answer || "").trim());
+    return answer !== undefined && answer !== null && answer !== "";
+  });
+
+  const formatAnswer = (question, answerValue) => {
+    if (question.type === "multiple") {
+      const ids = Array.isArray(answerValue) ? answerValue : [];
+      return question.options.filter((opt) => ids.includes(opt.id)).map((opt) => opt.text).join(", ") || "(не выбран)";
+    }
+    if (question.type === "single" || question.type === "bool") {
+      const selected = question.options.find((opt) => opt.id === answerValue);
+      return selected?.text || "(не выбран)";
+    }
+    return String(answerValue || "(не введён)");
+  };
+
+  if (quizView === "intro") {
+    return (
+      <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center max-w-xl mx-auto">
+        <div className="w-16 h-16 bg-violet-100 rounded-2xl flex items-center justify-center mx-auto mb-5"><HelpCircle size={28} className="text-violet-600" /></div>
+        <h2 className="text-xl font-bold text-slate-900 mb-2">{lesson?.title || "Тест"}</h2>
+        <p className="text-sm text-slate-500 mb-6">Тест будет загружен из LMS API</p>
+        <div className={`flex items-center justify-center gap-2 text-sm mb-6 p-3 rounded-xl ${attemptsLeft <= 1 ? "bg-red-50 text-red-700" : "bg-slate-50 text-slate-600"}`}>
+          <RefreshCw size={14} />
+          <span>Доступно попыток: <strong>{attemptsLeft}</strong> из {lesson?.maxAttempts ?? course?.maxAttempts ?? 3}</span>
+        </div>
+        <button onClick={startApiQuiz} disabled={attemptsLeft <= 0 || loadingStart} className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold py-3 rounded-xl text-sm transition-colors">
+          {loadingStart ? "Подготовка..." : attemptsLeft <= 0 ? "Попытки исчерпаны" : "Начать тест"}
+        </button>
+      </div>
+    );
+  }
+
+  if (quizView === "result" && result) {
+    const scorePercent = Number(result?.score_percent || 0);
+    const passed = scorePercent >= passThreshold;
+    return (
+      <div className="space-y-5 max-w-2xl mx-auto">
+        <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center">
+          {autoFinished && <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 mb-5 text-xs text-amber-700">Тест завершён автоматически по времени</div>}
+          <h2 className="text-3xl font-bold text-slate-900 mb-1">{Math.round(scorePercent)}%</h2>
+          <p className={`text-sm font-semibold mb-1 ${passed ? "text-emerald-600" : "text-red-600"}`}>{passed ? "Тест пройден" : "Тест не пройден"}</p>
+          <p className="text-sm text-slate-500">Порог: {Math.round(passThreshold)}%</p>
+        </div>
+        <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+          <div className="px-6 py-4 border-b border-slate-100 text-sm font-semibold text-slate-900">Разбор ответов</div>
+          <div className="divide-y divide-slate-100">
+            {result.rows.map((row, idx) => (
+              <div key={`${row.question.id}-${idx}`} className="p-5">
+                <p className="text-sm font-medium text-slate-900">{idx + 1}. {row.question.text}</p>
+                <p className="text-xs text-slate-500 mt-1">Ваш ответ: <span className="font-medium text-slate-700">{formatAnswer(row.question, row.userAnswer)}</span></p>
+                <p className={`text-xs mt-1 ${row.correct ? "text-emerald-600" : "text-red-600"}`}>{row.correct ? "Верно" : "Неверно"} · {row.points_awarded}/{row.points_total} б.</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!q) {
+    return <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center text-slate-500">Вопросы не загружены.</div>;
+  }
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-6 bg-white rounded-2xl border border-slate-200 px-5 py-4">
+        <div className="flex items-center gap-2 flex-wrap">
+          {questions.map((question, idx) => {
+            const hasAnswer = Array.isArray(answers[question.id]) ? answers[question.id].length > 0 : answers[question.id] !== undefined && answers[question.id] !== "";
+            return <button key={question.id} onClick={() => setCurrentQ(idx)} className={`w-8 h-8 rounded-lg text-xs font-semibold transition-all ${idx === currentQ ? "bg-indigo-600 text-white" : hasAnswer ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500 hover:bg-slate-200"}`}>{idx + 1}</button>;
+          })}
+        </div>
+        <div className="flex items-center gap-2 px-4 py-2 rounded-xl font-mono font-bold text-sm bg-slate-100 text-slate-700"><Clock size={14} /> {Math.floor(timeLeft / 60)}:{String(timeLeft % 60).padStart(2, "0")}</div>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-slate-200 p-8 mb-5">
+        <p className="text-base font-semibold text-slate-900 leading-relaxed mb-6">{q.text}</p>
+        {(q.type === "single" || q.type === "bool") && (
+          <div className="space-y-3">
+            {q.options.map((opt) => (
+              <button key={opt.id} onClick={() => { setAnswers((prev) => ({ ...prev, [q.id]: opt.id })); void saveAnswer(q, opt.id); }} className={`w-full text-left flex items-center gap-4 px-5 py-4 rounded-xl border-2 transition-all text-sm ${answers[q.id] === opt.id ? "border-indigo-500 bg-indigo-50 text-indigo-800" : "border-slate-200 hover:border-indigo-200 hover:bg-indigo-50/50 text-slate-700"}`}>
+                <span className="font-medium">{opt.text}</span>
+              </button>
+            ))}
+          </div>
+        )}
+        {q.type === "multiple" && (
+          <div className="space-y-3">
+            {q.options.map((opt) => {
+              const selected = Array.isArray(answers[q.id]) && answers[q.id].includes(opt.id);
+              return (
+                <button key={opt.id} onClick={() => { setAnswers((prev) => { const oldValue = Array.isArray(prev[q.id]) ? prev[q.id] : []; const nextValue = oldValue.includes(opt.id) ? oldValue.filter((id) => id !== opt.id) : [...oldValue, opt.id]; void saveAnswer(q, nextValue); return { ...prev, [q.id]: nextValue }; }); }} className={`w-full text-left flex items-center gap-4 px-5 py-4 rounded-xl border-2 transition-all text-sm ${selected ? "border-indigo-500 bg-indigo-50 text-indigo-800" : "border-slate-200 hover:border-indigo-200 hover:bg-indigo-50/50 text-slate-700"}`}>
+                  <span className="font-medium">{opt.text}</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+        {q.type === "text" && (
+          <input value={textInput} onChange={(e) => { setTextInput(e.target.value); setAnswers((prev) => ({ ...prev, [q.id]: e.target.value })); void saveAnswer(q, e.target.value); }} placeholder="Ваш ответ..." className="w-full px-4 py-3 bg-slate-50 border-2 border-slate-200 rounded-xl text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:border-indigo-400 transition-all" />
+        )}
+      </div>
+
+      <div className="flex items-center justify-between">
+        <button disabled={currentQ === 0} onClick={() => setCurrentQ((prev) => prev - 1)} className="flex items-center gap-2 px-4 py-2.5 bg-white border border-slate-200 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"><ChevronLeft size={16} /> Назад</button>
+        {currentQ < questions.length - 1 ? (
+          <button onClick={() => setCurrentQ((prev) => prev + 1)} className="flex items-center gap-2 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 rounded-xl text-sm font-medium text-white transition-colors">Далее <ChevronRight size={16} /></button>
+        ) : (
+          <button onClick={() => void finishApiQuiz(false)} disabled={!allAnswered || finishing} className="flex items-center gap-2 px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 rounded-xl text-sm font-semibold text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+            {finishing ? <RefreshCw size={16} className="animate-spin" /> : <FileCheck size={16} />} {finishing ? "Отправка..." : "Завершить тест"}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function QuizSection({ quizView, setQuizView, answers, setAnswers, course }) {
+  const [currentQ, setCurrentQ] = useState(0);
+  const [timeLeft, setTimeLeft] = useState(20 * 60);
+  const [score, setScore] = useState(null);
+  const [results, setResults] = useState([]);
+  const [autoFinished, setAutoFinished] = useState(false);
+  const [textInput, setTextInput] = useState("");
+  const timerRef = useRef(null);
+
+  const attemptsLeft = course ? Math.max(0, Number(course.maxAttempts || 0) - Number(course.attemptsUsed || 0)) : 3;
+
+  const handleFinish = useCallback((auto = false) => {
+    const res = QUIZ_QUESTIONS.map(q => {
+      const userAns = answers[q.id];
+      const correct = isAnswerCorrect(q, userAns);
+      return { question: q, userAnswer: userAns, correct };
+    });
+    const correctCount = res.filter(r => r.correct).length;
+    setScore(Math.round(correctCount / QUIZ_QUESTIONS.length * 100));
+    setResults(res);
+    if (auto) setAutoFinished(true);
+    setQuizView("result");
+  }, [answers, setQuizView]);
+
+  useEffect(() => {
+    if (quizView !== "active") return;
+    timerRef.current = setInterval(() => {
+      setTimeLeft(t => {
+        if (t <= 1) {
+          clearInterval(timerRef.current);
+          handleFinish(true);
+          return 0;
+        }
+        return t - 1;
+      });
+    }, 1000);
+    return () => clearInterval(timerRef.current);
+  }, [quizView, handleFinish]);
+
+  // Автосохранение текстового ответа
+  useEffect(() => {
+    if (QUIZ_QUESTIONS[currentQ]?.type === "text" && textInput) {
+      setAnswers(p => ({ ...p, [QUIZ_QUESTIONS[currentQ].id]: textInput }));
+    }
+  }, [textInput, currentQ]);
+
+  const formatTime = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  const isUrgent = timeLeft < 5 * 60;
+  const q = QUIZ_QUESTIONS[currentQ];
+
+  const handleSingleAnswer = (qId, optIdx) => setAnswers(p => ({ ...p, [qId]: optIdx }));
+
+  const handleMultiAnswer = (qId, optIdx) => {
+    setAnswers(p => {
+      const prev = Array.isArray(p[qId]) ? p[qId] : [];
+      return { ...p, [qId]: prev.includes(optIdx) ? prev.filter(x => x !== optIdx) : [...prev, optIdx] };
+    });
+  };
+
+  const allAnswered = QUIZ_QUESTIONS.every(q => {
+    const a = answers[q.id];
+    if (q.type === "multiple") return Array.isArray(a) && a.length > 0;
+    if (q.type === "text") return a && a.toString().trim().length > 0;
+    return a !== undefined;
+  });
+
+  // ── INTRO ──
+  if (quizView === "intro") {
+    return (
+      <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center max-w-xl mx-auto">
+        <div className="w-16 h-16 bg-violet-100 rounded-2xl flex items-center justify-center mx-auto mb-5">
+          <HelpCircle size={28} className="text-violet-600" />
+        </div>
+        <h2 className="text-xl font-bold text-slate-900 mb-2">Тест по модулю 1</h2>
+        <p className="text-sm text-slate-500 mb-6">Проверьте свои знания по основам информационной безопасности</p>
+        <div className="grid grid-cols-3 gap-4 mb-6">
+          {[{ label: "Вопросов", value: QUIZ_QUESTIONS.length }, { label: "Время", value: "20 мин" }, { label: "Порог", value: "80%" }].map(s => (
+            <div key={s.label} className="bg-slate-50 rounded-xl p-4">
+              <div className="text-xl font-bold text-slate-900">{s.value}</div>
+              <div className="text-xs text-slate-500 mt-1">{s.label}</div>
+            </div>
+          ))}
+        </div>
+        {/* Попытки */}
+        <div className={`flex items-center justify-center gap-2 text-sm mb-6 p-3 rounded-xl ${attemptsLeft <= 1 ? "bg-red-50 text-red-700" : "bg-slate-50 text-slate-600"}`}>
+          <RefreshCw size={14} />
+          <span>Доступно попыток: <strong>{attemptsLeft}</strong> из {course?.maxAttempts}</span>
+        </div>
+        {/* Типы вопросов */}
+        <div className="text-left bg-slate-50 rounded-xl p-4 mb-6">
+          <p className="text-xs font-semibold text-slate-700 mb-2">Типы вопросов в тесте:</p>
+          <div className="grid grid-cols-2 gap-2">
+            {[{ icon: RadioIcon, label: "Один правильный ответ" }, { icon: CheckSquare, label: "Несколько ответов" }, { icon: Check, label: "Верно / Неверно" }, { icon: Type, label: "Текстовый ввод" }].map(t => (
+              <div key={t.label} className="flex items-center gap-2 text-xs text-slate-600"><t.icon size={12} className="text-indigo-500" />{t.label}</div>
+            ))}
+          </div>
+        </div>
+        <button onClick={() => setQuizView("active")} disabled={attemptsLeft <= 0} className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold py-3 rounded-xl text-sm transition-colors">
+          {attemptsLeft <= 0 ? "Попытки исчерпаны" : "Начать тест"}
+        </button>
+      </div>
+    );
+  }
+
+  // ── RESULT ──
+  if (quizView === "result") {
+    const passed = score >= 80;
+    return (
+      <div className="space-y-5 max-w-2xl mx-auto">
+        {/* Summary card */}
+        <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center">
+          {autoFinished && (
+            <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 mb-5 text-xs text-amber-700 flex items-center justify-center gap-2">
+              <Clock size={13} /> Тест завершён автоматически по истечении времени
+            </div>
+          )}
+          <div className={`w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-5 ${passed ? "bg-emerald-100" : "bg-red-100"}`}>
+            {passed ? <CheckCircle size={36} className="text-emerald-600" /> : <XCircle size={36} className="text-red-500" />}
+          </div>
+          <h2 className="text-3xl font-bold text-slate-900 mb-1">{score}%</h2>
+          <p className={`text-sm font-semibold mb-1 ${passed ? "text-emerald-600" : "text-red-600"}`}>{passed ? "Тест пройден!" : "Тест не пройден"}</p>
+          <p className="text-sm text-slate-500 mb-6">{passed ? "Отличный результат. Вы можете продолжить курс." : `Для прохождения необходимо набрать 80%. Ваш результат: ${score}%.`}</p>
+          <div className="grid grid-cols-3 gap-3 mb-6">
+            {[
+              { label: "Правильных", value: results.filter(r => r.correct).length, color: "text-emerald-600 bg-emerald-50" },
+              { label: "Неправильных", value: results.filter(r => !r.correct).length, color: "text-red-600 bg-red-50" },
+              { label: "Всего вопросов", value: QUIZ_QUESTIONS.length, color: "text-slate-700 bg-slate-50" },
+            ].map(s => (
+              <div key={s.label} className={`rounded-xl p-3 ${s.color.split(" ")[1]}`}>
+                <div className={`text-2xl font-bold ${s.color.split(" ")[0]}`}>{s.value}</div>
+                <div className="text-xs text-slate-500 mt-0.5">{s.label}</div>
+              </div>
+            ))}
+          </div>
+          <div className="flex gap-3">
+            {!passed && attemptsLeft > 1 && (
+              <button onClick={() => { setAnswers({}); setCurrentQ(0); setTimeLeft(20*60); setAutoFinished(false); setTextInput(""); setQuizView("active"); }} className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold py-3 rounded-xl text-sm transition-colors flex items-center justify-center gap-2">
+                <RefreshCw size={14} /> Пересдать
+              </button>
+            )}
+            {!passed && attemptsLeft <= 1 && (
+              <div className="flex-1 bg-red-50 text-red-700 font-semibold py-3 rounded-xl text-sm flex items-center justify-center gap-2">
+                <XCircle size={14} /> Попытки исчерпаны
+              </div>
+            )}
+            <button className={`flex-1 font-semibold py-3 rounded-xl text-sm transition-colors ${passed ? "bg-indigo-600 hover:bg-indigo-700 text-white" : "bg-indigo-50 text-indigo-700 hover:bg-indigo-100"}`}>
+              {passed ? "Следующий урок →" : "Просмотр ошибок"}
+            </button>
+          </div>
+        </div>
+
+        {/* Detailed review — показ правильных/неправильных ответов (ТЗ 4.4, 5.8) */}
+        <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+          <div className="px-6 py-4 border-b border-slate-100 flex items-center gap-2">
+            <ClipboardList size={16} className="text-slate-600" />
+            <h3 className="text-sm font-semibold text-slate-900">Разбор ответов</h3>
+          </div>
+          <div className="divide-y divide-slate-100">
+            {results.map((r, i) => {
+              const q = r.question;
+              const ua = r.userAnswer;
+              return (
+                <div key={q.id} className="p-5">
+                  <div className="flex items-start gap-3 mb-3">
+                    <div className={`w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 text-xs font-bold ${r.correct ? "bg-emerald-100 text-emerald-700" : "bg-red-100 text-red-700"}`}>
+                      {r.correct ? <Check size={13} /> : <X size={13} />}
+                    </div>
+                    <div className="flex-1">
+                      <p className="text-sm font-medium text-slate-900 leading-snug">{i + 1}. {q.text}</p>
+                      {/* Тип вопроса */}
+                      <span className="text-[10px] text-slate-400 mt-0.5 inline-block">
+                        {q.type === "single" ? "Один ответ" : q.type === "multiple" ? "Несколько ответов" : q.type === "bool" ? "Верно/Неверно" : "Текстовый ввод"}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Варианты для single/bool */}
+                  {(q.type === "single" || q.type === "bool") && (
+                    <div className="ml-10 space-y-1.5">
+                      {q.options.map((opt, oi) => {
+                        const isCorrectOpt = oi === q.correct;
+                        const isUserOpt = ua === oi;
+                        return (
+                          <div key={oi} className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs border ${isCorrectOpt ? "bg-emerald-50 border-emerald-200 text-emerald-800" : isUserOpt && !isCorrectOpt ? "bg-red-50 border-red-200 text-red-800" : "border-slate-100 text-slate-600"}`}>
+                            <div className={`w-4 h-4 rounded-full border flex items-center justify-center flex-shrink-0 ${isCorrectOpt ? "border-emerald-500 bg-emerald-500" : isUserOpt && !isCorrectOpt ? "border-red-400 bg-red-400" : "border-slate-300"}`}>
+                              {isCorrectOpt && <Check size={9} className="text-white" />}
+                              {isUserOpt && !isCorrectOpt && <X size={9} className="text-white" />}
+                            </div>
+                            {opt}
+                            {isCorrectOpt && <span className="ml-auto text-emerald-600 font-semibold text-[10px]">Верно</span>}
+                            {isUserOpt && !isCorrectOpt && <span className="ml-auto text-red-600 font-semibold text-[10px]">Ваш ответ</span>}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* Варианты для multiple */}
+                  {q.type === "multiple" && (
+                    <div className="ml-10 space-y-1.5">
+                      {q.options.map((opt, oi) => {
+                        const isCorrectOpt = q.correct.includes(oi);
+                        const isUserOpt = Array.isArray(ua) && ua.includes(oi);
+                        return (
+                          <div key={oi} className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs border ${isCorrectOpt ? "bg-emerald-50 border-emerald-200 text-emerald-800" : isUserOpt && !isCorrectOpt ? "bg-red-50 border-red-200 text-red-800" : "border-slate-100 text-slate-600"}`}>
+                            <div className={`w-4 h-4 rounded border flex items-center justify-center flex-shrink-0 ${isCorrectOpt ? "border-emerald-500 bg-emerald-500" : isUserOpt && !isCorrectOpt ? "border-red-400 bg-red-400" : "border-slate-300"}`}>
+                              {(isCorrectOpt || isUserOpt) && <Check size={9} className="text-white" />}
+                            </div>
+                            {opt}
+                            {isCorrectOpt && !isUserOpt && <span className="ml-auto text-emerald-600 font-semibold text-[10px]">Нужно выбрать</span>}
+                            {isUserOpt && !isCorrectOpt && <span className="ml-auto text-red-600 font-semibold text-[10px]">Лишний ответ</span>}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* Text answer */}
+                  {q.type === "text" && (
+                    <div className="ml-10 space-y-1.5">
+                      <div className={`px-3 py-2 rounded-lg text-xs border ${r.correct ? "bg-emerald-50 border-emerald-200 text-emerald-800" : "bg-red-50 border-red-200 text-red-800"}`}>
+                        Ваш ответ: <strong>{ua || "(не введён)"}</strong>
+                      </div>
+                      {!r.correct && (
+                        <div className="px-3 py-2 rounded-lg text-xs bg-emerald-50 border border-emerald-200 text-emerald-800">
+                          Ожидаемый ответ: <strong>Принцип наименьших привилегий (Least Privilege)</strong>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Объяснение */}
+                  {q.explanation && (
+                    <div className="ml-10 mt-2 flex gap-2 text-xs text-slate-500 bg-slate-50 rounded-lg px-3 py-2">
+                      <AlertCircle size={12} className="flex-shrink-0 mt-0.5 text-indigo-400" />
+                      {q.explanation}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── ACTIVE QUIZ ──
+  return (
+    <div>
+      {/* Quiz header */}
+      <div className="flex items-center justify-between mb-6 bg-white rounded-2xl border border-slate-200 px-5 py-4">
+        <div className="flex items-center gap-2 flex-wrap">
+          {QUIZ_QUESTIONS.map((_, i) => {
+            const qi = QUIZ_QUESTIONS[i];
+            const hasAns = Array.isArray(answers[qi.id]) ? answers[qi.id].length > 0 : answers[qi.id] !== undefined;
+            return (
+              <button key={i} onClick={() => { setCurrentQ(i); if (qi.type === "text") setTextInput(answers[qi.id] || ""); }} className={`w-8 h-8 rounded-lg text-xs font-semibold transition-all ${i === currentQ ? "bg-indigo-600 text-white" : hasAns ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500 hover:bg-slate-200"}`}>
+                {i + 1}
+              </button>
+            );
+          })}
+        </div>
+        <div className={`flex items-center gap-2 px-4 py-2 rounded-xl font-mono font-bold text-sm ${isUrgent ? "bg-red-50 text-red-600 animate-pulse" : "bg-slate-100 text-slate-700"}`}>
+          <Clock size={14} /> {formatTime(timeLeft)}
+          {isUrgent && <span className="text-[10px] font-normal">осталось!</span>}
+        </div>
+      </div>
+
+      {/* Question */}
+      <div className="bg-white rounded-2xl border border-slate-200 p-8 mb-5">
+        <div className="flex items-center gap-2 mb-5">
+          <span className="text-xs font-semibold text-indigo-600 bg-indigo-50 px-2.5 py-1 rounded-full">Вопрос {currentQ + 1} из {QUIZ_QUESTIONS.length}</span>
+          <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+            q.type === "multiple" ? "bg-violet-50 text-violet-600" :
+            q.type === "bool" ? "bg-amber-50 text-amber-600" :
+            q.type === "text" ? "bg-cyan-50 text-cyan-600" :
+            "bg-slate-100 text-slate-500"
+          }`}>
+            {q.type === "multiple" ? "Несколько правильных ответов" : q.type === "bool" ? "Верно / Неверно" : q.type === "text" ? "Текстовый ввод" : "Один правильный ответ"}
+          </span>
+        </div>
+        <p className="text-base font-semibold text-slate-900 leading-relaxed mb-6">{q.text}</p>
+
+        {/* Single / Bool */}
+        {(q.type === "single" || q.type === "bool") && (
+          <div className="space-y-3">
+            {q.options.map((opt, i) => (
+              <button key={i} onClick={() => handleSingleAnswer(q.id, i)} className={`w-full text-left flex items-center gap-4 px-5 py-4 rounded-xl border-2 transition-all text-sm ${answers[q.id] === i ? "border-indigo-500 bg-indigo-50 text-indigo-800" : "border-slate-200 hover:border-indigo-200 hover:bg-indigo-50/50 text-slate-700"}`}>
+                <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center flex-shrink-0 ${answers[q.id] === i ? "border-indigo-600 bg-indigo-600" : "border-slate-300"}`}>
+                  {answers[q.id] === i && <Check size={12} className="text-white" />}
+                </div>
+                <span className="font-medium">{opt}</span>
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* Multiple */}
+        {q.type === "multiple" && (
+          <div className="space-y-3">
+            <p className="text-xs text-slate-400 mb-2">Выберите все правильные ответы</p>
+            {q.options.map((opt, i) => {
+              const isSelected = Array.isArray(answers[q.id]) && answers[q.id].includes(i);
+              return (
+                <button key={i} onClick={() => handleMultiAnswer(q.id, i)} className={`w-full text-left flex items-center gap-4 px-5 py-4 rounded-xl border-2 transition-all text-sm ${isSelected ? "border-indigo-500 bg-indigo-50 text-indigo-800" : "border-slate-200 hover:border-indigo-200 hover:bg-indigo-50/50 text-slate-700"}`}>
+                  <div className={`w-6 h-6 rounded border-2 flex items-center justify-center flex-shrink-0 ${isSelected ? "border-indigo-600 bg-indigo-600" : "border-slate-300"}`}>
+                    {isSelected && <Check size={12} className="text-white" />}
+                  </div>
+                  <span className="font-medium">{opt}</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Text */}
+        {q.type === "text" && (
+          <div>
+            <p className="text-xs text-slate-400 mb-2">Введите ответ в свободной форме</p>
+            <input
+              value={textInput}
+              onChange={e => { setTextInput(e.target.value); setAnswers(p => ({ ...p, [q.id]: e.target.value })); }}
+              placeholder="Ваш ответ..."
+              className="w-full px-4 py-3 bg-slate-50 border-2 border-slate-200 rounded-xl text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:border-indigo-400 transition-all"
+            />
+          </div>
+        )}
+      </div>
+
+      {/* Navigation */}
+      <div className="flex items-center justify-between">
+        <button disabled={currentQ === 0} onClick={() => setCurrentQ(p => p - 1)} className="flex items-center gap-2 px-4 py-2.5 bg-white border border-slate-200 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+          <ChevronLeft size={16} /> Назад
+        </button>
+        <span className="text-xs text-slate-400">
+          Отвечено: {QUIZ_QUESTIONS.filter(q => { const a = answers[q.id]; return Array.isArray(a) ? a.length > 0 : a !== undefined; }).length} / {QUIZ_QUESTIONS.length}
+        </span>
+        {currentQ < QUIZ_QUESTIONS.length - 1 ? (
+          <button onClick={() => { setCurrentQ(p => p + 1); const nextQ = QUIZ_QUESTIONS[currentQ + 1]; if (nextQ?.type === "text") setTextInput(answers[nextQ.id] || ""); }} className="flex items-center gap-2 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 rounded-xl text-sm font-medium text-white transition-colors">
+            Далее <ChevronRight size={16} />
+          </button>
+        ) : (
+          <button onClick={() => handleFinish(false)} disabled={!allAnswered} className="flex items-center gap-2 px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 rounded-xl text-sm font-semibold text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+            <FileCheck size={16} /> Завершить тест
+          </button>
+        )}
+      </div>
+      {!allAnswered && currentQ === QUIZ_QUESTIONS.length - 1 && (
+        <p className="text-center text-xs text-slate-400 mt-3">Ответьте на все вопросы, чтобы завершить тест</p>
+      )}
+    </div>
+  );
+}
+
+// ─── CERTIFICATES ─────────────────────────────────────────────────────────────
+
+function CertificatesView({ certificates = [], onDownload }) {
+  const safeCertificates = Array.isArray(certificates) ? certificates : [];
+  return (
+    <div>
+      {safeCertificates.length === 0 ? (
+        <div className="text-center py-20 text-slate-400"><Award size={40} className="mx-auto mb-3 opacity-30" /><p className="text-sm">Сертификатов пока нет</p></div>
+      ) : (
+        <div className="grid grid-cols-2 gap-5">
+          {safeCertificates.map((cert, index) => (
+            <div key={cert.id} className="bg-white rounded-2xl border border-slate-200 overflow-hidden hover:shadow-md transition-all">
+              {/* Certificate preview */}
+              <div className={`h-36 bg-gradient-to-br ${cert.color || pickCourseVisual(cert?.id || index).color} flex items-center justify-center relative px-6`}>
+                <div className="absolute inset-0 opacity-10">
+                  <div className="absolute top-2 left-2 w-16 h-16 border-2 border-white rounded-full" />
+                  <div className="absolute bottom-2 right-2 w-10 h-10 border border-white rounded-full" />
+                </div>
+                <div className="text-center relative z-10">
+                  <Award size={24} className="text-white/60 mx-auto mb-1" />
+                  <p className="text-white/60 text-[9px] uppercase tracking-widest mb-1">Сертификат о прохождении</p>
+                  <p className="text-white font-bold text-sm leading-tight text-center px-2 line-clamp-2">{cert.course}</p>
+                  <p className="text-white/70 text-[10px] mt-1">{cert.employee}</p>
+                </div>
+              </div>
+              <div className="p-5">
+                <div className="flex items-center justify-between mb-3">
+                  <div><p className="text-xs text-slate-500 mb-0.5">Дата выдачи</p><p className="text-sm font-semibold text-slate-800">{cert.date}</p></div>
+                  <div className="text-right"><p className="text-xs text-slate-500 mb-0.5">Объём</p><p className="text-sm font-semibold text-slate-800">{cert.hours} ч</p></div>
+                </div>
+                <p className="text-[10px] text-slate-400 mb-4 font-mono">№ {cert.number}</p>
+                <div className="flex gap-2">
+                  <button onClick={() => onDownload?.(cert)} className="flex-1 flex items-center justify-center gap-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-semibold py-2.5 rounded-xl transition-colors"><Download size={13} /> Скачать PDF</button>
+                  <button onClick={() => cert?.verifyUrl && window.open(cert.verifyUrl, "_blank", "noopener,noreferrer")} className="flex items-center justify-center gap-2 bg-slate-50 hover:bg-slate-100 text-slate-600 text-xs font-semibold px-3 py-2.5 rounded-xl transition-colors disabled:opacity-50" disabled={!cert?.verifyUrl}><Link2 size={13} /></button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── NOTIFICATIONS ────────────────────────────────────────────────────────────
+
+function NotificationsView({ notifications = [], onRead }) {
+  const iconMap = { deadline: AlertCircle, completed: CheckCircle, assigned: BookOpen, certificate: Award };
+  const colorMap = { deadline: "text-amber-600 bg-amber-50", completed: "text-emerald-600 bg-emerald-50", assigned: "text-indigo-600 bg-indigo-50", certificate: "text-violet-600 bg-violet-50" };
+  const safeNotifications = Array.isArray(notifications) ? notifications : [];
+  return (
+    <div className="space-y-3 max-w-2xl">
+      {safeNotifications.map(n => {
+        const Icon = iconMap[n.type] || Bell;
+        const cls = colorMap[n.type] || "text-slate-600 bg-slate-100";
+        return (
+          <div key={n.id} onClick={() => !n.read && onRead?.(n.id)} className={`bg-white rounded-2xl border p-5 flex items-start gap-4 transition-all ${n.read ? "border-slate-200 opacity-75" : "border-slate-200 shadow-sm cursor-pointer hover:border-indigo-200"}`}>
+            <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${cls}`}><Icon size={18} /></div>
+            <div className="flex-1">
+              <div className="flex items-start justify-between gap-2">
+                <p className="text-sm font-semibold text-slate-900">{n.title}</p>
+                {!n.read && <div className="w-2 h-2 bg-indigo-500 rounded-full flex-shrink-0 mt-1.5" />}
+              </div>
+              <p className="text-xs text-slate-600 mt-1 leading-relaxed">{n.message}</p>
+              <p className="text-[10px] text-slate-400 mt-2">{n.time}</p>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── COURSE BUILDER ───────────────────────────────────────────────────────────
+
+function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], adminCourses = [], emitToast, onAfterSave }) {
+  const [tab, setTab] = useState("settings");
+  const [modules, setModules] = useState([
+    { id: 1, title: "Модуль 1: Введение", expanded: true, lessons: [
+      { id: 1, title: "Вводный урок", type: "video" },
+      { id: 2, title: "Основные концепции", type: "text" },
+    ]},
+  ]);
+  const [questions, setQuestions] = useState([
+    { id: 1, text: "Вопрос 1", type: "single", options: ["Ответ A", "Ответ B", "Ответ C", "Ответ D"], correct: 0, explanation: "" },
+  ]);
+  const [settings, setSettings] = useState({ title: "", description: "", category: "Безопасность", mandatory: false, passingScore: 80, maxAttempts: 3, deadline: "", questionsPerTest: 5, randomOrder: true, showExplanations: true });
+  const [selectedLesson, setSelectedLesson] = useState(null);
+  const [saved, setSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [createdCourseId, setCreatedCourseId] = useState(null);
+  const [selectedLearnerIds, setSelectedLearnerIds] = useState([]);
+  const [assigning, setAssigning] = useState(false);
+  const [assignmentSearch, setAssignmentSearch] = useState("");
+  const [assignmentDueAt, setAssignmentDueAt] = useState("");
+  const [assignmentCourseId, setAssignmentCourseId] = useState(null);
+
+  const addModule = () => setModules(p => [...p, { id: Date.now(), title: `Модуль ${p.length + 1}`, expanded: true, lessons: [] }]);
+  const toggleModule = (id) => setModules(p => p.map(m => m.id === id ? { ...m, expanded: !m.expanded } : m));
+  const addLesson = (modId) => setModules(p => p.map(m => m.id === modId ? { ...m, lessons: [...m.lessons, { id: Date.now(), title: "Новый урок", type: "video" }] } : m));
+  const deleteLesson = (modId, lId) => setModules(p => p.map(m => m.id === modId ? { ...m, lessons: m.lessons.filter(l => l.id !== lId) } : m));
+  const deleteModule = (id) => setModules(p => p.filter(m => m.id !== id));
+
+  const addQuestion = (type = "single") => setQuestions(p => [...p, {
+    id: Date.now(), text: "", type,
+    options: type === "bool" ? ["Верно", "Неверно"] : type === "text" ? [] : ["", "", "", ""],
+    correct: type === "multiple" ? [] : 0,
+    explanation: "",
+    correct_text_answers: [],
+  }]);
+
+  const updateQuestionType = (qId, newType) => {
+    setQuestions(p => p.map(q => q.id === qId ? {
+      ...q, type: newType,
+      options: newType === "bool" ? ["Верно", "Неверно"] : newType === "text" ? [] : q.options.length >= 2 ? q.options : ["", "", "", ""],
+      correct: newType === "multiple" ? [] : 0,
+      correct_text_answers: newType === "text" ? (Array.isArray(q.correct_text_answers) ? q.correct_text_answers : []) : [],
+    } : q));
+  };
+
+  const handleSave = async () => {
+    if (!canUseManagerApi) {
+      emitToast?.("Недостаточно прав для создания LMS-курса", "error");
+      return;
+    }
+    if (typeof lmsRequest !== "function") {
+      emitToast?.("LMS API не подключен", "error");
+      return;
+    }
+
+    const title = String(settings.title || "").trim();
+    if (!title) {
+      emitToast?.("Укажите название курса", "error");
+      return;
+    }
+
+    const attemptLimitRaw = settings.maxAttempts === "∞" ? 999 : Number(settings.maxAttempts);
+    const attemptLimit = Number.isFinite(attemptLimitRaw) ? Math.max(1, attemptLimitRaw) : 5;
+
+    const modulesPayload = modules
+      .map((moduleItem, moduleIndex) => ({
+        title: String(moduleItem?.title || "").trim(),
+        position: moduleIndex + 1,
+        lessons: (Array.isArray(moduleItem?.lessons) ? moduleItem.lessons : [])
+          .map((lessonItem, lessonIndex) => ({
+            title: String(lessonItem?.title || "").trim(),
+            description: "",
+            position: lessonIndex + 1,
+            duration_seconds: lessonItem?.type === "video" ? 15 * 60 : 8 * 60,
+            allow_fast_forward: false,
+            completion_threshold: 95,
+          }))
+          .filter((lessonItem) => lessonItem.title),
+      }))
+      .filter((moduleItem) => moduleItem.title);
+
+    const questionPayload = questions
+      .map((question, questionIndex) => {
+        const typeRaw = String(question?.type || "single").toLowerCase();
+        const type = typeRaw === "bool" ? "true_false" : typeRaw;
+        const options = Array.isArray(question?.options) ? question.options : [];
+        const mappedOptions = options
+          .map((optionText, optionIndex) => {
+            let isCorrect = false;
+            if (type === "multiple") {
+              const correctList = Array.isArray(question?.correct) ? question.correct : [];
+              isCorrect = correctList.includes(optionIndex);
+            } else if (type === "single" || type === "true_false") {
+              isCorrect = Number(question?.correct) === optionIndex;
+            }
+            return {
+              text: String(optionText || "").trim(),
+              is_correct: isCorrect,
+              position: optionIndex + 1,
+            };
+          })
+          .filter((optionItem) => optionItem.text);
+
+        return {
+          type,
+          prompt: String(question?.text || "").trim(),
+          position: questionIndex + 1,
+          points: 1,
+          required: true,
+          options: type === "text" ? [] : mappedOptions,
+          correct_text_answers: type === "text"
+            ? (Array.isArray(question?.correct_text_answers) ? question.correct_text_answers.filter((item) => String(item || "").trim()) : [])
+            : [],
+          metadata: String(question?.explanation || "").trim() ? { explanation: String(question.explanation).trim() } : {},
+        };
+      })
+      .filter((questionItem) => questionItem.prompt);
+
+    const testsPayload = questionPayload.length > 0 ? [{
+      title: "Итоговый тест",
+      description: "Сгенерировано из конструктора LMS",
+      pass_threshold: Number(settings.passingScore || 80),
+      attempt_limit: attemptLimit,
+      is_final: true,
+      questions: questionPayload,
+    }] : [];
+
+    setSaving(true);
+    try {
+      const payload = await lmsRequest("/api/lms/admin/courses", {
+        method: "POST",
+        body: {
+          title,
+          description: String(settings.description || "").trim(),
+          category: String(settings.category || "").trim(),
+          pass_threshold: Number(settings.passingScore || 80),
+          attempt_limit: attemptLimit,
+          modules: modulesPayload,
+          tests: testsPayload,
+        },
+      });
+      const nextCourseId = Number(payload?.course_id || 0) || null;
+      setCreatedCourseId(nextCourseId);
+      setAssignmentCourseId(nextCourseId);
+      setSaved(true);
+      emitToast?.("Курс сохранен в LMS", "success");
+      if (typeof onAfterSave === "function") {
+        await onAfterSave();
+      }
+      setTimeout(() => setSaved(false), 2000);
+    } catch (error) {
+      emitToast?.(`Не удалось сохранить курс: ${String(error?.message || "ошибка")}`, "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const tabs = [
+    { id: "settings", label: "Настройки", icon: Settings },
+    { id: "structure", label: "Структура", icon: Layers },
+    { id: "quiz", label: "Банк вопросов", icon: HelpCircle },
+    { id: "assignment", label: "Назначение", icon: Users },
+  ];
+
+  const questionTypes = [
+    { id: "single", label: "Один ответ", icon: RadioIcon, color: "text-indigo-600 bg-indigo-50" },
+    { id: "multiple", label: "Несколько", icon: CheckSquare, color: "text-violet-600 bg-violet-50" },
+    { id: "bool", label: "Верно/Нет", icon: Check, color: "text-amber-600 bg-amber-50" },
+    { id: "text", label: "Текст", icon: Type, color: "text-cyan-600 bg-cyan-50" },
+  ];
+
+  const safeLearners = Array.isArray(learners) ? learners : [];
+  const filteredLearners = safeLearners.filter((item) => {
+    const query = assignmentSearch.trim().toLowerCase();
+    if (!query) return true;
+    const name = String(item?.name || "").toLowerCase();
+    const role = String(item?.role || "").toLowerCase();
+    return name.includes(query) || role.includes(query);
+  });
+
+  const toggleLearner = (userId) => {
+    setSelectedLearnerIds((prev) => (
+      prev.includes(userId) ? prev.filter((id) => id !== userId) : [...prev, userId]
+    ));
+  };
+
+  const toggleSelectAllLearners = (checked) => {
+    if (checked) {
+      setSelectedLearnerIds(filteredLearners.map((item) => Number(item.id)).filter((id) => Number.isFinite(id)));
+    } else {
+      setSelectedLearnerIds([]);
+    }
+  };
+
+  const effectiveAssignmentCourseId = Number(assignmentCourseId || createdCourseId || adminCourses?.[0]?.id || 0) || null;
+
+  const handleAssignSelected = async () => {
+    if (!canUseManagerApi) {
+      emitToast?.("Недостаточно прав для назначения курса", "error");
+      return;
+    }
+    if (!effectiveAssignmentCourseId) {
+      emitToast?.("Сначала сохраните курс или выберите курс из списка", "error");
+      return;
+    }
+    if (!selectedLearnerIds.length) {
+      emitToast?.("Выберите хотя бы одного сотрудника", "error");
+      return;
+    }
+    if (typeof lmsRequest !== "function") {
+      emitToast?.("LMS API не подключен", "error");
+      return;
+    }
+
+    setAssigning(true);
+    try {
+      const payload = await lmsRequest(`/api/lms/admin/courses/${effectiveAssignmentCourseId}/assignments`, {
+        method: "POST",
+        body: {
+          user_ids: selectedLearnerIds,
+          due_at: assignmentDueAt ? `${assignmentDueAt} 23:59:59` : null,
+        },
+      });
+      const assignedCount = Array.isArray(payload?.assigned) ? payload.assigned.length : 0;
+      const skippedCount = Array.isArray(payload?.skipped) ? payload.skipped.length : 0;
+      emitToast?.(`Назначение выполнено: ${assignedCount} назначено, ${skippedCount} пропущено`, "success");
+      setSelectedLearnerIds([]);
+      if (typeof onAfterSave === "function") {
+        await onAfterSave();
+      }
+    } catch (error) {
+      emitToast?.(`Не удалось назначить курс: ${String(error?.message || "ошибка")}`, "error");
+    } finally {
+      setAssigning(false);
+    }
+  };
+
+  return (
+    <div className="max-w-screen-xl mx-auto px-6 py-8">
+      <div className="flex items-center justify-between mb-8">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Конструктор курса</h1>
+          <p className="text-sm text-slate-500 mt-0.5">Создание и редактирование учебных материалов</p>
+        </div>
+        <button onClick={handleSave} disabled={saving} className={`flex items-center gap-2 px-5 py-2.5 rounded-xl font-semibold text-sm transition-all disabled:opacity-60 disabled:cursor-not-allowed ${saved ? "bg-emerald-600 text-white" : "bg-indigo-600 hover:bg-indigo-700 text-white shadow-sm shadow-indigo-200"}`}>
+          {saving ? <><RefreshCw size={15} className="animate-spin" /> Сохранение...</> : saved ? <><CheckCircle size={15} /> Сохранено</> : <><Save size={15} /> Сохранить</>}
+        </button>
+      </div>
+
+      <div className="flex items-center gap-1 mb-8 bg-slate-100 p-1 rounded-xl w-fit">
+        {tabs.map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)} className={`flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium transition-all ${tab === t.id ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>
+            <t.icon size={14} /> {t.label}
+          </button>
+        ))}
+      </div>
+
+      {/* SETTINGS TAB */}
+      {tab === "settings" && (
+        <div className="grid grid-cols-2 gap-6">
+          <div className="space-y-5">
+            <div className="bg-white rounded-2xl border border-slate-200 p-6">
+              <h3 className="text-sm font-semibold text-slate-900 mb-5">Основная информация</h3>
+              <div className="space-y-4">
+                <div>
+                  <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Название курса</label>
+                  <input value={settings.title} onChange={e => setSettings(p => ({ ...p, title: e.target.value }))} placeholder="Введите название..." className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition-all" />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Описание</label>
+                  <textarea rows={4} value={settings.description} onChange={e => setSettings(p => ({ ...p, description: e.target.value }))} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:border-indigo-400 transition-all resize-none" placeholder="Краткое описание курса..." />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Категория</label>
+                  <select value={settings.category} onChange={e => setSettings(p => ({ ...p, category: e.target.value }))} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 focus:outline-none focus:border-indigo-400 transition-all">
+                    <option>Безопасность</option><option>Менеджмент</option><option>Soft Skills</option><option>Финансы</option><option>Аналитика</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+            <div className="bg-white rounded-2xl border border-slate-200 p-6">
+              <h3 className="text-sm font-semibold text-slate-900 mb-4">Навыки курса</h3>
+              <div className="flex flex-wrap gap-2 mb-3">
+                {["Информационная безопасность", "GDPR", "Управление рисками"].map(s => (
+                  <span key={s} className="flex items-center gap-1.5 text-xs bg-indigo-50 text-indigo-700 border border-indigo-100 px-3 py-1.5 rounded-full font-medium">{s} <button className="hover:text-indigo-900"><X size={10} /></button></span>
+                ))}
+              </div>
+              <div className="flex gap-2">
+                <input placeholder="Добавить навык..." className="flex-1 px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm placeholder-slate-400 focus:outline-none focus:border-indigo-400 transition-all" />
+                <button className="px-3 py-2.5 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 transition-colors"><Plus size={16} /></button>
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-5">
+            <div className="bg-white rounded-2xl border border-slate-200 p-6">
+              <h3 className="text-sm font-semibold text-slate-900 mb-5">Параметры прохождения</h3>
+              <div className="space-y-5">
+                <div className="flex items-center justify-between">
+                  <div><p className="text-sm font-medium text-slate-800">Обязательный курс</p><p className="text-xs text-slate-400 mt-0.5">Обязателен для всех назначенных</p></div>
+                  <button onClick={() => setSettings(p => ({ ...p, mandatory: !p.mandatory }))} className={`w-12 h-6 rounded-full transition-all ${settings.mandatory ? "bg-indigo-600" : "bg-slate-200"} relative`}>
+                    <div className={`w-4 h-4 bg-white rounded-full absolute top-1 transition-all ${settings.mandatory ? "left-7" : "left-1"} shadow-sm`} />
+                  </button>
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Дедлайн</label>
+                  <input type="date" value={settings.deadline} onChange={e => setSettings(p => ({ ...p, deadline: e.target.value }))} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 focus:outline-none focus:border-indigo-400 transition-all" />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-600 mb-3 block">Проходной балл: <span className="text-indigo-600">{settings.passingScore}%</span></label>
+                  <input type="range" min={50} max={100} value={settings.passingScore} onChange={e => setSettings(p => ({ ...p, passingScore: +e.target.value }))} className="w-full accent-indigo-600" />
+                  <div className="flex justify-between text-xs text-slate-400 mt-1"><span>50%</span><span>100%</span></div>
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Максимум попыток</label>
+                  <div className="flex gap-2">
+                    {[1, 2, 3, 5, "∞"].map(v => (
+                      <button key={v} onClick={() => setSettings(p => ({ ...p, maxAttempts: v }))} className={`flex-1 py-2.5 rounded-xl text-sm font-semibold border-2 transition-all ${settings.maxAttempts === v ? "border-indigo-500 bg-indigo-50 text-indigo-700" : "border-slate-200 text-slate-600 hover:border-slate-300"}`}>{v}</button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* STRUCTURE TAB */}
+      {tab === "structure" && (
+        <div className="grid grid-cols-5 gap-6">
+          <div className="col-span-3 space-y-4">
+            {modules.map(mod => (
+              <div key={mod.id} className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+                <div className="flex items-center gap-3 px-5 py-4 bg-slate-50 border-b border-slate-100">
+                  <GripVertical size={16} className="text-slate-300 cursor-grab" />
+                  <input value={mod.title} onChange={e => setModules(p => p.map(m => m.id === mod.id ? { ...m, title: e.target.value } : m))} className="text-sm font-semibold text-slate-800 bg-transparent focus:outline-none flex-1" />
+                  <div className="flex items-center gap-1">
+                    <button onClick={() => addLesson(mod.id)} className="text-xs flex items-center gap-1 text-indigo-600 hover:text-indigo-800 px-2 py-1 rounded-lg hover:bg-indigo-50 transition-colors font-medium"><Plus size={12} /> Урок</button>
+                    <button onClick={() => toggleModule(mod.id)} className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition-colors">{mod.expanded ? <ChevronUp size={15} /> : <ChevronDown size={15} />}</button>
+                    <button onClick={() => deleteModule(mod.id)} className="p-1.5 text-slate-300 hover:text-red-500 rounded-lg hover:bg-red-50 transition-colors"><Trash2 size={14} /></button>
+                  </div>
+                </div>
+                {mod.expanded && (
+                  <div className="p-4 space-y-2">
+                    {mod.lessons.length === 0 && <div className="text-center py-6 text-slate-300 text-xs">Добавьте уроки в этот модуль</div>}
+                    {mod.lessons.map(l => {
+                      const types = [{ id: "video", icon: Video, label: "Видео" }, { id: "text", icon: FileText, label: "Текст" }, { id: "quiz", icon: HelpCircle, label: "Тест" }];
+                      const LIcon = lessonIcons[l.type];
+                      return (
+                        <div key={l.id} onClick={() => setSelectedLesson(selectedLesson === l.id ? null : l.id)} className={`flex items-center gap-3 p-3 rounded-xl border-2 cursor-pointer transition-all ${selectedLesson === l.id ? "border-indigo-300 bg-indigo-50" : "border-transparent hover:border-slate-200 hover:bg-slate-50"}`}>
+                          <GripVertical size={13} className="text-slate-300 cursor-grab flex-shrink-0" />
+                          <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${l.type === "video" ? "bg-blue-100 text-blue-600" : l.type === "text" ? "bg-emerald-100 text-emerald-600" : "bg-violet-100 text-violet-600"}`}><LIcon size={14} /></div>
+                          <input value={l.title} onChange={e => setModules(p => p.map(m => m.id === mod.id ? { ...m, lessons: m.lessons.map(ls => ls.id === l.id ? { ...ls, title: e.target.value } : ls) } : m))} onClick={e => e.stopPropagation()} className="flex-1 text-sm font-medium text-slate-800 bg-transparent focus:outline-none" />
+                          <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
+                            {types.map(t => (
+                              <button key={t.id} onClick={() => setModules(p => p.map(m => m.id === mod.id ? { ...m, lessons: m.lessons.map(ls => ls.id === l.id ? { ...ls, type: t.id } : ls) } : m))} className={`text-[10px] px-2 py-1 rounded-lg font-semibold transition-colors ${l.type === t.id ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-500 hover:bg-slate-200"}`}>{t.label}</button>
+                            ))}
+                            <button onClick={() => deleteLesson(mod.id, l.id)} className="p-1.5 text-slate-300 hover:text-red-500 rounded-lg hover:bg-red-50 transition-colors ml-1"><Trash2 size={13} /></button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            ))}
+            <button onClick={addModule} className="w-full border-2 border-dashed border-slate-200 hover:border-indigo-300 rounded-2xl py-4 text-sm text-slate-500 hover:text-indigo-600 flex items-center justify-center gap-2 transition-all font-medium"><Plus size={16} /> Добавить модуль</button>
+          </div>
+          <div className="col-span-2">
+            <div className="bg-white rounded-2xl border border-slate-200 p-5 sticky top-24">
+              {selectedLesson ? (
+                <>
+                  <h3 className="text-sm font-semibold text-slate-900 mb-4">Редактор урока</h3>
+                  <div className="space-y-4">
+                    <div><label className="text-xs font-semibold text-slate-600 mb-1.5 block">Описание урока</label><textarea rows={3} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:border-indigo-400 transition-all resize-none" placeholder="Что узнает студент в этом уроке..." /></div>
+                    <div><label className="text-xs font-semibold text-slate-600 mb-1.5 block">Видеофайл</label>
+                      <div className="border-2 border-dashed border-slate-200 rounded-xl p-5 text-center hover:border-indigo-300 cursor-pointer transition-colors"><Upload size={20} className="mx-auto text-slate-300 mb-2" /><p className="text-xs text-slate-500">Перетащите видео или нажмите</p><p className="text-[10px] text-slate-400 mt-1">MP4, MOV до 2 ГБ</p></div>
+                    </div>
+                    <div><label className="text-xs font-semibold text-slate-600 mb-1.5 block">Транскрипт</label><textarea rows={4} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:border-indigo-400 transition-all resize-none" placeholder="Текстовая расшифровка видео..." /></div>
+                    <div><label className="text-xs font-semibold text-slate-600 mb-1.5 block">Условия доступа</label><div className="flex items-center gap-2"><input type="checkbox" className="accent-indigo-600" id="prev" /><label htmlFor="prev" className="text-xs text-slate-600">Только после завершения предыдущего</label></div></div>
+                    <div><label className="text-xs font-semibold text-slate-600 mb-1.5 block">Дополнительные материалы</label><button className="w-full border-2 border-dashed border-slate-200 hover:border-indigo-300 rounded-xl py-3 text-xs text-slate-500 hover:text-indigo-600 flex items-center justify-center gap-2 transition-all"><Plus size={14} /> Добавить файл или ссылку</button></div>
+                  </div>
+                </>
+              ) : (
+                <div className="text-center py-10 text-slate-300"><Edit size={28} className="mx-auto mb-3" /><p className="text-sm">Выберите урок для редактирования</p></div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* QUIZ TAB — улучшенный по ТЗ */}
+      {tab === "quiz" && (
+        <div className="space-y-4 max-w-3xl">
+          {/* Настройки теста */}
+          <div className="bg-white rounded-2xl border border-slate-200 p-5">
+            <h3 className="text-sm font-semibold text-slate-900 mb-4">Настройки теста</h3>
+            <div className="grid grid-cols-3 gap-4">
+              <div>
+                <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Вопросов в тесте</label>
+                <input type="number" value={settings.questionsPerTest} onChange={e => setSettings(p => ({ ...p, questionsPerTest: +e.target.value }))} min={1} max={questions.length} className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-center focus:outline-none focus:border-indigo-400 transition-all" />
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Лимит времени (мин)</label>
+                <input type="number" defaultValue={20} className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-center focus:outline-none focus:border-indigo-400 transition-all" />
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Проходной балл</label>
+                <input type="number" value={settings.passingScore} onChange={e => setSettings(p => ({ ...p, passingScore: +e.target.value }))} className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-center focus:outline-none focus:border-indigo-400 transition-all" />
+              </div>
+            </div>
+            <div className="flex items-center gap-6 mt-4">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" className="accent-indigo-600 w-4 h-4" checked={settings.randomOrder} onChange={e => setSettings(p => ({ ...p, randomOrder: e.target.checked }))} />
+                <span className="text-xs text-slate-700">Случайный порядок вопросов</span>
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" className="accent-indigo-600 w-4 h-4" checked={settings.showExplanations} onChange={e => setSettings(p => ({ ...p, showExplanations: e.target.checked }))} />
+                <span className="text-xs text-slate-700">Показывать пояснения к ответам</span>
+              </label>
+            </div>
+          </div>
+
+          {/* Добавить вопрос — кнопки по типам */}
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-base font-semibold text-slate-900">Банк вопросов</h3>
+              <p className="text-xs text-slate-500 mt-0.5">{questions.length} вопросов · в тест войдёт {Math.min(settings.questionsPerTest, questions.length)}</p>
+            </div>
+            <div className="flex items-center gap-2">
+              {questionTypes.map(t => (
+                <button key={t.id} onClick={() => addQuestion(t.id)} className={`flex items-center gap-1.5 text-xs px-3 py-2 rounded-xl border font-medium transition-colors ${t.color} border-current/20 hover:opacity-80`}>
+                  <t.icon size={12} /> {t.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {questions.map((q, qi) => (
+            <div key={q.id} className="bg-white rounded-2xl border border-slate-200 p-5">
+              <div className="flex items-start gap-3 mb-4">
+                <span className="text-xs font-bold text-indigo-600 bg-indigo-50 w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0">{qi + 1}</span>
+                <input value={q.text} onChange={e => setQuestions(p => p.map(x => x.id === q.id ? { ...x, text: e.target.value } : x))} placeholder="Текст вопроса..." className="flex-1 text-sm font-medium text-slate-900 bg-transparent focus:outline-none border-b border-transparent focus:border-slate-300 transition-all pb-1" />
+                <div className="flex items-center gap-2 ml-auto flex-shrink-0">
+                  {/* Тип вопроса */}
+                  <div className="flex items-center gap-1">
+                    {questionTypes.map(t => (
+                      <button key={t.id} onClick={() => updateQuestionType(q.id, t.id)} title={t.label} className={`p-1.5 rounded-lg border transition-all ${q.type === t.id ? `${t.color} border-current/30` : "text-slate-400 border-slate-200 hover:bg-slate-50"}`}>
+                        <t.icon size={13} />
+                      </button>
+                    ))}
+                  </div>
+                  <button onClick={() => setQuestions(p => p.filter(x => x.id !== q.id))} className="p-1.5 text-slate-300 hover:text-red-500 rounded-lg hover:bg-red-50 transition-colors"><Trash2 size={14} /></button>
+                </div>
+              </div>
+
+              {/* Опции для single/bool/multiple */}
+              {q.type !== "text" && (
+                <div className="space-y-2 ml-10 mb-4">
+                  {q.options.map((opt, oi) => {
+                    const isCorrect = q.type === "multiple" ? (Array.isArray(q.correct) && q.correct.includes(oi)) : q.correct === oi;
+                    return (
+                      <div key={oi} className="flex items-center gap-2">
+                        <button
+                          onClick={() => {
+                            if (q.type === "multiple") {
+                              const prev = Array.isArray(q.correct) ? q.correct : [];
+                              setQuestions(p => p.map(x => x.id === q.id ? { ...x, correct: isCorrect ? prev.filter(v => v !== oi) : [...prev, oi] } : x));
+                            } else {
+                              setQuestions(p => p.map(x => x.id === q.id ? { ...x, correct: oi } : x));
+                            }
+                          }}
+                          className={`flex-shrink-0 transition-all ${q.type === "multiple" ? `w-5 h-5 rounded border-2 flex items-center justify-center ${isCorrect ? "border-emerald-500 bg-emerald-500" : "border-slate-300 hover:border-emerald-400"}` : `w-5 h-5 rounded-full border-2 flex items-center justify-center ${isCorrect ? "border-emerald-500 bg-emerald-500" : "border-slate-300 hover:border-emerald-400"}`}`}
+                        >
+                          {isCorrect && <Check size={10} className="text-white" />}
+                        </button>
+                        <input
+                          value={opt}
+                          onChange={e => setQuestions(p => p.map(x => x.id === q.id ? { ...x, options: x.options.map((o, i) => i === oi ? e.target.value : o) } : x))}
+                          readOnly={q.type === "bool"}
+                          placeholder={`Вариант ${oi + 1}`}
+                          className={`flex-1 px-3 py-2 text-sm rounded-xl border transition-all focus:outline-none ${isCorrect ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-slate-200 bg-slate-50 text-slate-700 focus:border-indigo-300"} ${q.type === "bool" ? "cursor-default" : ""}`}
+                        />
+                        {q.type !== "bool" && q.options.length > 2 && (
+                          <button onClick={() => setQuestions(p => p.map(x => x.id === q.id ? { ...x, options: x.options.filter((_, i) => i !== oi) } : x))} className="p-1 text-slate-300 hover:text-red-400 transition-colors"><X size={12} /></button>
+                        )}
+                      </div>
+                    );
+                  })}
+                  {q.type !== "bool" && q.options.length < 6 && (
+                    <button onClick={() => setQuestions(p => p.map(x => x.id === q.id ? { ...x, options: [...x.options, ""] } : x))} className="flex items-center gap-1.5 text-xs text-indigo-600 hover:text-indigo-800 transition-colors mt-1">
+                      <Plus size={12} /> Добавить вариант
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {/* Text type placeholder */}
+              {q.type === "text" && (
+                <div className="ml-10 mb-4">
+                  <p className="text-xs text-slate-400 mb-2">Ключевые слова для проверки ответа (через запятую):</p>
+                  <input
+                    value={Array.isArray(q.correct_text_answers) ? q.correct_text_answers.join(", ") : ""}
+                    onChange={e => setQuestions(p => p.map(x => x.id === q.id ? { ...x, correct_text_answers: e.target.value.split(",").map(item => item.trim()).filter(Boolean) } : x))}
+                    placeholder="least privilege, минимальных привилегий, наименьших привилегий..."
+                    className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 focus:outline-none focus:border-indigo-400 transition-all"
+                  />
+                </div>
+              )}
+
+              {/* Пояснение */}
+              <div className="ml-10">
+                <input value={q.explanation} onChange={e => setQuestions(p => p.map(x => x.id === q.id ? { ...x, explanation: e.target.value } : x))} placeholder="Пояснение к правильному ответу (опционально)..." className="w-full px-3 py-2 text-xs rounded-xl border border-slate-200 bg-slate-50 text-slate-600 focus:outline-none focus:border-indigo-400 transition-all" />
+              </div>
+            </div>
+          ))}
+
+          <button onClick={() => addQuestion("single")} className="w-full border-2 border-dashed border-slate-200 hover:border-indigo-300 rounded-2xl py-4 text-sm text-slate-500 hover:text-indigo-600 flex items-center justify-center gap-2 transition-all font-medium"><Plus size={16} /> Добавить вопрос</button>
+        </div>
+      )}
+
+      {/* ASSIGNMENT TAB */}
+      {tab === "assignment" && (
+        <div className="grid grid-cols-2 gap-6">
+          <div className="bg-white rounded-2xl border border-slate-200 p-6">
+            <h3 className="text-sm font-semibold text-slate-900 mb-4">Назначение сотрудникам</h3>
+            <div className="flex items-center gap-2 mb-4">
+              <input
+                type="checkbox"
+                id="all"
+                className="accent-indigo-600 w-4 h-4"
+                checked={filteredLearners.length > 0 && selectedLearnerIds.length === filteredLearners.length}
+                onChange={(e) => toggleSelectAllLearners(e.target.checked)}
+              />
+              <label htmlFor="all" className="text-sm font-medium text-slate-800">Назначить всем сотрудникам</label>
+            </div>
+            <div className="mb-4">
+              <div className="relative">
+                <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input value={assignmentSearch} onChange={(e) => setAssignmentSearch(e.target.value)} placeholder="Поиск по имени или роли..." className="w-full pl-9 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm placeholder-slate-400 focus:outline-none focus:border-indigo-400 transition-all" />
+              </div>
+            </div>
+            <div className="space-y-2 max-h-80 overflow-y-auto">
+              {filteredLearners.length === 0 && (
+                <div className="text-xs text-slate-400 py-6 text-center">Сотрудники не найдены</div>
+              )}
+              {filteredLearners.map(e => (
+                <label key={e.id} className="flex items-center gap-3 p-3 rounded-xl hover:bg-slate-50 cursor-pointer transition-colors">
+                  <input type="checkbox" className="accent-indigo-600 w-4 h-4" checked={selectedLearnerIds.includes(Number(e.id))} onChange={() => toggleLearner(Number(e.id))} />
+                  <div className="w-8 h-8 rounded-full bg-gradient-to-br from-slate-400 to-slate-600 flex items-center justify-center text-white text-xs font-semibold flex-shrink-0">{String(e.name || "").split(" ").map(w => w[0]).join("").slice(0, 2) || "U"}</div>
+                  <div><p className="text-sm font-medium text-slate-800">{e.name}</p><p className="text-xs text-slate-400">{e.role}</p></div>
+                </label>
+              ))}
+            </div>
+          </div>
+          <div className="space-y-4">
+            <div className="bg-white rounded-2xl border border-slate-200 p-6">
+              <h3 className="text-sm font-semibold text-slate-900 mb-4">Параметры назначения</h3>
+              <div className="space-y-4">
+                <div>
+                  <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Курс для назначения</label>
+                  <select value={effectiveAssignmentCourseId || ""} onChange={(e) => setAssignmentCourseId(Number(e.target.value) || null)} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 focus:outline-none focus:border-indigo-400 transition-all">
+                    <option value="">Выберите курс</option>
+                    {(Array.isArray(adminCourses) ? adminCourses : []).map((courseItem) => (
+                      <option key={courseItem.id} value={courseItem.id}>{courseItem.title}</option>
+                    ))}
+                  </select>
+                </div>
+                <div><label className="text-xs font-semibold text-slate-600 mb-1.5 block">Дедлайн для группы</label><input type="date" value={assignmentDueAt} onChange={(e) => setAssignmentDueAt(e.target.value)} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 focus:outline-none focus:border-indigo-400 transition-all" /></div>
+                {[{ label: "Уведомить сотрудников", sub: "Email при назначении" }, { label: "Напоминания о дедлайне", sub: "За 7 и 3 дня до" }].map(item => (
+                  <div key={item.label} className="flex items-center justify-between py-3 border-b border-slate-100 last:border-0">
+                    <div><p className="text-sm font-medium text-slate-800">{item.label}</p><p className="text-xs text-slate-400 mt-0.5">{item.sub}</p></div>
+                    <button className="w-10 h-5 rounded-full bg-indigo-600 relative flex-shrink-0"><div className="w-3.5 h-3.5 bg-white rounded-full absolute top-0.5 right-0.5 shadow-sm" /></button>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <button onClick={handleAssignSelected} disabled={assigning || !selectedLearnerIds.length || !effectiveAssignmentCourseId} className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold py-3 rounded-xl text-sm transition-colors flex items-center justify-center gap-2"><UserCheck size={16} /> {assigning ? "Назначаем..." : "Назначить выбранным"}</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── ADMIN VIEW ───────────────────────────────────────────────────────────────
+
+function AdminView({ tab, setTab, courses = [], adminCourses = [], progressRows = [], attempts = [], loading = false }) {
+  const tabs = [
+    { id: "analytics", label: "Аналитика", icon: BarChart2 },
+    { id: "employees", label: "Сотрудники", icon: Users },
+    { id: "courses", label: "Курсы", icon: BookOpen },
+  ];
+
+  const safeProgressRows = Array.isArray(progressRows) ? progressRows : [];
+  const safeAttempts = Array.isArray(attempts) ? attempts : [];
+  const safeAdminCourses = Array.isArray(adminCourses) ? adminCourses : [];
+
+  const attemptAggByUser = new Map();
+  safeAttempts.forEach((item) => {
+    const userId = Number(item?.user_id || 0);
+    if (!userId) return;
+    const prev = attemptAggByUser.get(userId) || { count: 0, scoreSum: 0, scoreCount: 0, duration: 0, lastAt: null };
+    prev.count += 1;
+    if (item?.score_percent != null) {
+      prev.scoreSum += Number(item.score_percent) || 0;
+      prev.scoreCount += 1;
+    }
+    prev.duration += Math.max(0, Number(item?.duration_seconds || 0));
+    const startedAt = item?.started_at ? new Date(item.started_at) : null;
+    if (startedAt && !Number.isNaN(startedAt.getTime()) && (!prev.lastAt || startedAt > prev.lastAt)) {
+      prev.lastAt = startedAt;
+    }
+    attemptAggByUser.set(userId, prev);
+  });
+
+  const employeeMap = new Map();
+  safeProgressRows.forEach((row) => {
+    const userId = Number(row?.user_id || 0);
+    if (!userId) return;
+    const prev = employeeMap.get(userId) || {
+      id: userId,
+      name: row?.user_name || `User #${userId}`,
+      dept: row?.user_role || "—",
+      courses: 0,
+      completed: 0,
+      avgScore: 0,
+      overdue: 0,
+      lastActive: "—",
+      testTime: "0ч 00м",
+      attempts: 0,
+    };
+    prev.courses += 1;
+    if (String(row?.status || "").toLowerCase() === "completed") prev.completed += 1;
+    if (String(row?.deadline_status || "").toLowerCase() === "red" && String(row?.status || "").toLowerCase() !== "completed") prev.overdue += 1;
+    employeeMap.set(userId, prev);
+  });
+
+  let employeeRows = Array.from(employeeMap.values()).map((row) => {
+    const agg = attemptAggByUser.get(Number(row.id));
+    const avgScore = agg && agg.scoreCount > 0 ? Math.round(agg.scoreSum / agg.scoreCount) : row.avgScore;
+    const totalDuration = agg ? agg.duration : 0;
+    const hours = Math.floor(totalDuration / 3600);
+    const minutes = Math.floor((totalDuration % 3600) / 60);
+    return {
+      ...row,
+      avgScore,
+      attempts: agg ? agg.count : row.attempts,
+      testTime: `${hours}ч ${String(minutes).padStart(2, "0")}м`,
+      lastActive: agg?.lastAt ? toRelativeTime(agg.lastAt.toISOString()) : row.lastActive,
+    };
+  });
+  if (!employeeRows.length) {
+    employeeRows = EMPLOYEES;
+  }
+
+  const courseStatMap = new Map();
+  safeProgressRows.forEach((row) => {
+    const courseId = Number(row?.course_id || 0);
+    if (!courseId) return;
+    const prev = courseStatMap.get(courseId) || { total: 0, completed: 0, lessons: 0 };
+    prev.total += 1;
+    if (String(row?.status || "").toLowerCase() === "completed") prev.completed += 1;
+    prev.lessons = Math.max(prev.lessons, Number(row?.total_lessons || 0));
+    courseStatMap.set(courseId, prev);
+  });
+
+  let courseRows = safeAdminCourses.map((item, index) => {
+    const visual = pickCourseVisual(item?.id || index, item?.category || "");
+    const stat = courseStatMap.get(Number(item?.id || 0)) || { total: 0, completed: 0, lessons: 0 };
+    const progressPercent = stat.total > 0 ? Math.round((stat.completed / stat.total) * 100) : 0;
+    return {
+      id: Number(item?.id || index + 1),
+      title: item?.title || `Курс #${item?.id || index + 1}`,
+      category: item?.category || "Без категории",
+      cover: visual.cover,
+      color: visual.color,
+      mandatory: false,
+      duration: stat.lessons > 0 ? `${stat.lessons} уроков` : "—",
+      lessons: stat.lessons || 0,
+      maxAttempts: Number(item?.default_attempt_limit || 3),
+      attemptsUsed: 0,
+      rating: 0,
+      status: progressPercent >= 100 ? "completed" : (progressPercent > 0 ? "in_progress" : "not_started"),
+      progress: progressPercent,
+    };
+  });
+  if (!courseRows.length) {
+    courseRows = Array.isArray(courses) && courses.length ? courses : COURSES;
+  }
+
+  const failRows = safeAttempts
+    .filter((item) => item?.score_percent != null)
+    .sort((a, b) => Number(a?.score_percent || 0) - Number(b?.score_percent || 0))
+    .slice(0, 4)
+    .map((item, index) => ({
+      questionId: index + 1,
+      text: item?.test_title || "Тест",
+      failRate: Math.max(0, 100 - Math.round(Number(item?.score_percent || 0))),
+      course: item?.course_title || "Курс",
+    }));
+  const failStatsRows = failRows.length ? failRows : QUESTION_FAIL_STATS;
+
+  const overallComplete = employeeRows.length ? Math.round(employeeRows.reduce((a, e) => a + (e.courses ? (e.completed / e.courses) : 0), 0) / employeeRows.length * 100) : 0;
+  const avgScore = employeeRows.length ? Math.round(employeeRows.reduce((a, e) => a + Number(e.avgScore || 0), 0) / employeeRows.length) : 0;
+  const overdueCount = employeeRows.reduce((a, e) => a + Number(e.overdue || 0), 0);
+  const completedCoursesCount = courseRows.filter((item) => item.status === "completed" || item.status === "completed_late").length;
+  const inProgressCoursesCount = courseRows.filter((item) => ["in_progress", "waiting_test", "test_failed"].includes(item.status)).length;
+  const notStartedCoursesCount = courseRows.filter((item) => item.status === "not_started").length;
+  const overdueCoursesCount = courseRows.filter((item) => item.status === "overdue").length;
+  const courseStatusTotal = Math.max(
+    1,
+    completedCoursesCount + inProgressCoursesCount + notStartedCoursesCount + overdueCoursesCount
+  );
+  const courseStatusRows = [
+    { label: "Завершены в срок", count: completedCoursesCount, color: "bg-emerald-500" },
+    { label: "В процессе", count: inProgressCoursesCount, color: "bg-blue-500" },
+    { label: "Не начаты", count: notStartedCoursesCount, color: "bg-slate-300" },
+    { label: "Просрочены", count: overdueCoursesCount, color: "bg-red-500" },
+  ].map((item) => ({
+    ...item,
+    pct: Math.round((item.count / courseStatusTotal) * 100),
+  }));
+
+  return (
+    <div className="max-w-screen-xl mx-auto px-6 py-8">
+      <div className="flex items-center justify-between mb-8">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Панель администратора</h1>
+          <p className="text-sm text-slate-500 mt-0.5">Управление курсами и прогрессом сотрудников</p>
+          {loading && <p className="text-xs text-indigo-600 mt-1">Обновление данных...</p>}
+        </div>
+        <button className="flex items-center gap-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm px-4 py-2.5 rounded-xl font-medium transition-colors"><Download size={15} /> Экспорт отчёта</button>
+      </div>
+
+      <div className="flex items-center gap-1 mb-8 bg-slate-100 p-1 rounded-xl w-fit">
+        {tabs.map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)} className={`flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium transition-all ${tab === t.id ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>
+            <t.icon size={14} /> {t.label}
+          </button>
+        ))}
+      </div>
+
+      {tab === "analytics" && (
+        <div>
+          <div className="grid grid-cols-4 gap-4 mb-8">
+            {[
+              { label: "Сотрудников обучается", value: employeeRows.length, sub: "активных пользователей", icon: Users, color: "text-indigo-600 bg-indigo-50" },
+              { label: "Средний прогресс", value: `${overallComplete}%`, sub: "завершения назначенных", icon: TrendingUp, color: "text-emerald-600 bg-emerald-50" },
+              { label: "Средний балл", value: `${avgScore}%`, sub: "по всем тестам", icon: Target, color: "text-violet-600 bg-violet-50" },
+              { label: "Просроченных", value: overdueCount, sub: "требуют внимания", icon: AlertCircle, color: "text-red-600 bg-red-50" },
+            ].map(k => (
+              <div key={k.label} className="bg-white rounded-2xl border border-slate-200 p-5">
+                <div className="flex items-center justify-between mb-3"><p className="text-xs text-slate-500 font-medium">{k.label}</p><div className={`w-9 h-9 rounded-xl flex items-center justify-center ${k.color}`}><k.icon size={17} /></div></div>
+                <p className="text-2xl font-bold text-slate-900">{k.value}</p>
+                <p className="text-xs text-slate-400 mt-1">{k.sub}</p>
+              </div>
+            ))}
+          </div>
+
+          <div className="grid grid-cols-3 gap-6 mb-6">
+            {/* Прогресс по курсам */}
+            <div className="col-span-2 bg-white rounded-2xl border border-slate-200 p-6">
+              <h3 className="text-sm font-semibold text-slate-900 mb-5">Прогресс по курсам</h3>
+              <div className="space-y-4">
+                {courseRows.slice(0, 5).map(c => (
+                  <div key={c.id}>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <p className="text-xs font-medium text-slate-700 truncate max-w-xs">{c.title}</p>
+                      <span className="text-xs font-semibold text-slate-700 ml-2 flex-shrink-0">{c.progress}%</span>
+                    </div>
+                    <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
+                      <div className={`h-full rounded-full ${c.status === "completed" ? "bg-emerald-500" : c.status === "overdue" ? "bg-red-500" : "bg-indigo-500"}`} style={{ width: `${c.progress}%` }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Статусы */}
+            <div className="bg-white rounded-2xl border border-slate-200 p-6">
+              <h3 className="text-sm font-semibold text-slate-900 mb-5">Статусы курсов</h3>
+              <div className="space-y-3">
+                {courseStatusRows.map(s => (
+                  <div key={s.label} className="flex items-center gap-3">
+                    <div className={`w-2.5 h-2.5 rounded-full ${s.color} flex-shrink-0`} />
+                    <p className="text-xs text-slate-600 flex-1">{s.label}</p>
+                    <span className="text-xs font-semibold text-slate-700">{s.count}</span>
+                    <div className="w-20 h-1.5 bg-slate-100 rounded-full overflow-hidden"><div className={`h-full ${s.color} rounded-full`} style={{ width: `${s.pct}%` }} /></div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Проблемные вопросы (ТЗ 12) */}
+          <div className="grid grid-cols-2 gap-6">
+            <div className="bg-white rounded-2xl border border-slate-200 p-6">
+              <div className="flex items-center gap-2 mb-5">
+                <AlertTriangle size={16} className="text-amber-500" />
+                <h3 className="text-sm font-semibold text-slate-900">Вопросы с высоким % ошибок</h3>
+              </div>
+              <div className="space-y-3">
+                {failStatsRows.map(s => (
+                  <div key={s.questionId} className="flex items-start gap-3">
+                    <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 text-xs font-bold ${s.failRate >= 60 ? "bg-red-100 text-red-700" : s.failRate >= 40 ? "bg-amber-100 text-amber-700" : "bg-slate-100 text-slate-600"}`}>{s.failRate}%</div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs font-medium text-slate-800 truncate">{s.text}</p>
+                      <p className="text-[10px] text-slate-400 mt-0.5">{s.course}</p>
+                    </div>
+                    <div className="w-16 h-1.5 bg-slate-100 rounded-full overflow-hidden self-center"><div className={`h-full rounded-full ${s.failRate >= 60 ? "bg-red-500" : "bg-amber-500"}`} style={{ width: `${s.failRate}%` }} /></div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Время и попытки */}
+            <div className="bg-white rounded-2xl border border-slate-200 p-6">
+              <div className="flex items-center gap-2 mb-5">
+                <Clock size={16} className="text-indigo-500" />
+                <h3 className="text-sm font-semibold text-slate-900">Время на тесты и попытки</h3>
+              </div>
+              <div className="space-y-3">
+                {employeeRows.map(e => (
+                  <div key={e.id} className="flex items-center gap-3">
+                    <div className="w-7 h-7 rounded-full bg-gradient-to-br from-indigo-400 to-violet-500 flex items-center justify-center text-white text-[10px] font-semibold flex-shrink-0">{e.name.split(" ").map(w => w[0]).join("").slice(0, 2)}</div>
+                    <div className="flex-1 min-w-0"><p className="text-xs font-medium text-slate-800 truncate">{e.name}</p></div>
+                    <div className="flex items-center gap-1.5 text-[10px] text-slate-500"><Clock size={9} />{e.testTime}</div>
+                    <div className={`flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full ${e.attempts >= 12 ? "bg-red-50 text-red-700" : e.attempts >= 8 ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-600"}`}><RefreshCw size={8} />{e.attempts} поп.</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {tab === "employees" && (
+        <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+          <div className="px-6 py-4 border-b border-slate-100 flex items-center gap-3">
+            <div className="relative flex-1 max-w-xs"><Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" /><input placeholder="Поиск сотрудников..." className="w-full pl-9 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm placeholder-slate-400 focus:outline-none focus:border-indigo-400 transition-all" /></div>
+            <select className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-600 focus:outline-none"><option>Все отделы</option><option>HR</option><option>Разработка</option><option>Финансы</option></select>
+          </div>
+          <table className="w-full">
+            <thead>
+              <tr className="bg-slate-50 border-b border-slate-100">
+                {["Сотрудник", "Отдел", "Назначено", "Завершено", "Ср. балл", "Попытки", "Время тестов", "Просрочено"].map(h => (
+                  <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {employeeRows.map(e => (
+                <tr key={e.id} className="border-b border-slate-50 hover:bg-slate-50 transition-colors">
+                  <td className="px-4 py-4">
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-400 to-violet-500 flex items-center justify-center text-white text-xs font-semibold flex-shrink-0">{e.name.split(" ").map(w => w[0]).join("").slice(0, 2)}</div>
+                      <span className="text-sm font-medium text-slate-800">{e.name}</span>
+                    </div>
+                  </td>
+                  <td className="px-4 py-4"><span className="text-xs bg-slate-100 text-slate-600 px-2.5 py-1 rounded-full font-medium">{e.dept}</span></td>
+                  <td className="px-4 py-4"><span className="text-sm font-semibold text-slate-700">{e.courses}</span></td>
+                  <td className="px-4 py-4">
+                    <div className="flex items-center gap-2">
+                      <div className="w-16 h-1.5 bg-slate-100 rounded-full overflow-hidden"><div className="h-full bg-emerald-500 rounded-full" style={{ width: `${e.courses > 0 ? (e.completed / e.courses) * 100 : 0}%` }} /></div>
+                      <span className="text-xs font-semibold text-slate-700">{e.completed}/{e.courses}</span>
+                    </div>
+                  </td>
+                  <td className="px-4 py-4"><span className={`text-xs font-bold ${e.avgScore >= 90 ? "text-emerald-600" : e.avgScore >= 75 ? "text-blue-600" : "text-red-600"}`}>{e.avgScore}%</span></td>
+                  <td className="px-4 py-4"><span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${e.attempts >= 12 ? "bg-red-50 text-red-700" : e.attempts >= 8 ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-600"}`}>{e.attempts}</span></td>
+                  <td className="px-4 py-4"><span className="text-xs text-slate-500">{e.testTime}</span></td>
+                  <td className="px-4 py-4">
+                    {e.overdue > 0 ? <span className="text-xs font-semibold text-red-600 bg-red-50 px-2.5 py-1 rounded-full">{e.overdue} просрочено</span> : <span className="text-xs text-emerald-600 font-medium">В срок</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {tab === "courses" && (
+        <div className="space-y-3">
+          {courseRows.map(c => {
+            const st = statusConfig[c.status] || statusConfig.not_started;
+            return (
+              <div key={c.id} className="bg-white rounded-2xl border border-slate-200 p-5 flex items-center gap-5">
+                <div className={`w-12 h-12 rounded-xl bg-gradient-to-br ${c.color} flex items-center justify-center text-xl flex-shrink-0`}>{c.cover}</div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-1">
+                    <h3 className="text-sm font-semibold text-slate-900 truncate">{c.title}</h3>
+                    {c.mandatory && <span className="text-[10px] font-semibold text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full flex-shrink-0">Обязательный</span>}
+                  </div>
+                  <div className="flex items-center gap-3 text-xs text-slate-500">
+                    <span>{c.duration}</span><span>·</span><span>{c.lessons} уроков</span><span>·</span>
+                    <span className="flex items-center gap-1"><RefreshCw size={10} /> до {c.maxAttempts} попыток</span><span>·</span>
+                    <span className="flex items-center gap-1"><Star size={10} className="text-amber-400 fill-amber-400" />{c.rating}</span>
+                  </div>
+                </div>
+                <div className="flex items-center gap-4">
+                  <div className="text-right"><p className="text-xs text-slate-400 mb-0.5">Прогресс</p><p className="text-sm font-bold text-slate-800">{c.progress}%</p></div>
+                  <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${st.bg} ${st.text}`}>{st.label}</span>
+                  <div className="flex items-center gap-1">
+                    <button className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-colors"><Edit size={15} /></button>
+                    <button className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-xl transition-colors"><MoreVertical size={15} /></button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}

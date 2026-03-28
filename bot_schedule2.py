@@ -16087,6 +16087,48 @@ def lms_admin_assign_course(course_id):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/lms/admin/learners', methods=['GET'])
+@require_api_key
+def lms_admin_learners():
+    requester_id, _, requester_role, error_response, status_code = _lms_resolve_request('manager')
+    if error_response:
+        return error_response, status_code
+
+    try:
+        visible_ids = None
+        if requester_role in ('sv', 'trainer'):
+            visible_ids = set(_lms_visible_learner_ids(requester_id, requester_role))
+
+        with db._get_cursor() as cursor:
+            params = [list(LMS_LEARNER_ROLES)]
+            where = ["LOWER(TRIM(COALESCE(role, ''))) = ANY(%s)"]
+
+            if visible_ids is not None:
+                if not visible_ids:
+                    return jsonify({"status": "success", "learners": []}), 200
+                where.append("id = ANY(%s)")
+                params.append(list(visible_ids))
+
+            cursor.execute(f"""
+                SELECT id, name, role
+                FROM users
+                WHERE {' AND '.join(where)}
+                ORDER BY name ASC, id ASC
+            """, params)
+            rows = cursor.fetchall()
+
+        learners = [{
+            "id": int(row[0]),
+            "name": row[1] or f"User #{row[0]}",
+            "role": _normalize_user_role(row[2])
+        } for row in rows]
+
+        return jsonify({"status": "success", "learners": learners}), 200
+    except Exception as e:
+        logging.exception("Error in /api/lms/admin/learners")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/api/lms/admin/materials/upload', methods=['POST'])
 @require_api_key
 def lms_admin_upload_materials():
