@@ -12545,6 +12545,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     minute: '2-digit'
                 });
             };
+            const isSwapExchangeRequest = useCallback((requestItem) => {
+                const requestMode = String(
+                    requestItem?.exchangeMode
+                    || requestItem?.requestType
+                    || requestItem?.type
+                    || ''
+                ).toLowerCase();
+                return requestMode.includes('exchange')
+                    || (Array.isArray(requestItem?.targetSegments) && requestItem.targetSegments.length > 0);
+            }, []);
             const swapJournalFilteredItems = useMemo(() => {
                 const raw = Array.isArray(swapJournalItems) ? swapJournalItems : [];
                 const query = String(swapJournalSearch || '').trim().toLowerCase();
@@ -12552,11 +12562,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                 return raw.filter(item => {
                     const statusMeta = getSwapStatusMeta(item?.status);
+                    const requestTypeLabel = isSwapExchangeRequest(item) ? 'обмен' : 'передача';
                     const haystack = [
                         formatSwapIntervalLabel(item),
                         item?.requester?.name,
                         item?.target?.name,
                         item?.direction?.name,
+                        requestTypeLabel,
                         statusMeta?.label,
                         item?.status,
                         item?.requestComment,
@@ -12566,7 +12578,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         .join(' ');
                     return haystack.includes(query);
                 });
-            }, [swapJournalItems, swapJournalSearch]);
+            }, [swapJournalItems, swapJournalSearch, isSwapExchangeRequest]);
             const myUpcomingShiftItems = useMemo(() => {
                 const now = new Date();
                 const nowTs = now.getTime();
@@ -18569,10 +18581,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     {swapJournalFilteredItems.map(item => {
                                         const statusMeta = getSwapStatusMeta(item?.status);
                                         const periodLabel = formatSwapIntervalLabel(item);
+                                        const isExchangeRequest = isSwapExchangeRequest(item);
                                         return (
                                             <tr key={`swap-journal-${item?.id}`} className="align-top odd:bg-white even:bg-slate-50/50">
                                                 <td className="px-3 py-2 border-b border-slate-100">
-                                                    <div className="font-medium text-slate-900">{periodLabel}</div>
+                                                    <div className="flex flex-wrap items-center gap-2">
+                                                        <div className="font-medium text-slate-900">{periodLabel}</div>
+                                                        {isExchangeRequest && (
+                                                            <span className="px-2 py-0.5 rounded-md border text-[11px] font-semibold bg-violet-100 text-violet-800 border-violet-200">
+                                                                Обмен
+                                                            </span>
+                                                        )}
+                                                    </div>
                                                     <div className="text-xs text-slate-500">
                                                         Длительность: {formatMinutesOnly(item?.summary?.totalMinutes ?? 0)}
                                                     </div>
