@@ -13284,6 +13284,23 @@ def _lms_to_int(value, default=0):
         return int(default)
 
 
+def _lms_normalize_skills(value, limit=30):
+    if not isinstance(value, list):
+        return []
+    out = []
+    for item in value:
+        text = str(item or '').strip()
+        if not text:
+            continue
+        if len(text) > 80:
+            text = text[:80].strip()
+        if text and text not in out:
+            out.append(text)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _lms_parse_bool(value, default=False):
     if isinstance(value, bool):
         return value
@@ -13372,6 +13389,19 @@ def _lms_signed_url(bucket_name, blob_path, expires_minutes=120):
         )
     except Exception:
         return None
+
+
+def _lms_resolve_cover_payload(version_settings):
+    settings = version_settings if isinstance(version_settings, dict) else {}
+    cover_url = (str(settings.get("cover_url") or "").strip() or None)
+    cover_bucket = (str(settings.get("cover_bucket") or "").strip() or None)
+    cover_blob_path = (str(settings.get("cover_blob_path") or "").strip() or None)
+    signed_cover_url = _lms_signed_url(cover_bucket, cover_blob_path, expires_minutes=240) if cover_bucket and cover_blob_path else None
+    return {
+        "cover_url": signed_cover_url or cover_url,
+        "cover_bucket": cover_bucket,
+        "cover_blob_path": cover_blob_path
+    }
 
 
 def _lms_emit_notification(cursor, user_id, notification_type, title, message=None, payload=None):
@@ -14174,7 +14204,8 @@ def _lms_course_structure_tx(cursor, course_id, course_version_id):
         SELECT
             c.id, c.title, c.description, c.category, c.status,
             c.default_pass_threshold, c.default_attempt_limit,
-            cv.id, cv.version_number, cv.status, cv.pass_threshold, cv.attempt_limit
+            cv.id, cv.version_number, cv.status, cv.pass_threshold, cv.attempt_limit,
+            cv.anti_cheat_settings
         FROM lms_courses c
         JOIN lms_course_versions cv ON cv.id = %s AND cv.course_id = c.id
         WHERE c.id = %s
@@ -14275,6 +14306,8 @@ def _lms_course_structure_tx(cursor, course_id, course_version_id):
             "question_count": question_count
         })
 
+    version_settings = _lms_parse_json(header[12], {})
+    cover_payload = _lms_resolve_cover_payload(version_settings)
     return {
         "id": int(header[0]),
         "title": header[1],
@@ -14288,7 +14321,11 @@ def _lms_course_structure_tx(cursor, course_id, course_version_id):
             "version_number": int(header[8] or 1),
             "status": header[9],
             "pass_threshold": float(header[10] if header[10] is not None else LMS_DEFAULT_PASS_THRESHOLD),
-            "attempt_limit": int(header[11] if header[11] is not None else LMS_DEFAULT_ATTEMPT_LIMIT)
+            "attempt_limit": int(header[11] if header[11] is not None else LMS_DEFAULT_ATTEMPT_LIMIT),
+            "cover_url": cover_payload["cover_url"],
+            "cover_bucket": cover_payload["cover_bucket"],
+            "cover_blob_path": cover_payload["cover_blob_path"],
+            "skills": _lms_normalize_skills(version_settings.get("skills"))
         },
         "modules": modules,
         "tests": tests
@@ -14307,9 +14344,11 @@ def lms_home():
             cursor.execute("""
                 SELECT
                     a.id, a.course_id, a.course_version_id, a.status, a.due_at, a.started_at, a.completed_at,
-                    c.title, c.description, c.category
+                    c.title, c.description, c.category,
+                    cv.anti_cheat_settings
                 FROM lms_course_assignments a
                 JOIN lms_courses c ON c.id = a.course_id
+                LEFT JOIN lms_course_versions cv ON cv.id = a.course_version_id
                 WHERE a.user_id = %s
                 ORDER BY COALESCE(a.due_at, a.created_at) ASC, a.id DESC
             """, (requester_id,))
@@ -14362,6 +14401,8 @@ def lms_home():
                     progress_percent = 100.0
 
                 deadline_status = _lms_deadline_status(row[4], row[6])
+                version_settings = _lms_parse_json(row[10], {})
+                cover_payload = _lms_resolve_cover_payload(version_settings)
                 courses.append({
                     "assignment_id": assignment_id,
                     "course_id": int(row[1]),
@@ -14369,6 +14410,10 @@ def lms_home():
                     "title": row[7],
                     "description": row[8],
                     "category": row[9],
+                    "cover_url": cover_payload["cover_url"],
+                    "cover_bucket": cover_payload["cover_bucket"],
+                    "cover_blob_path": cover_payload["cover_blob_path"],
+                    "skills": _lms_normalize_skills(version_settings.get("skills")),
                     "status": row[3],
                     "due_at": row[4].isoformat() if row[4] else None,
                     "started_at": row[5].isoformat() if row[5] else None,
@@ -15517,7 +15562,8 @@ def lms_admin_courses():
                         c.id, c.slug, c.title, c.description, c.category, c.status,
                         c.default_pass_threshold, c.default_attempt_limit,
                         c.current_version_id,
-                        cv.version_number, cv.status, cv.pass_threshold, cv.attempt_limit
+                        cv.version_number, cv.status, cv.pass_threshold, cv.attempt_limit,
+                        cv.anti_cheat_settings
                     FROM lms_courses c
                     LEFT JOIN lms_course_versions cv ON cv.id = c.current_version_id
                     ORDER BY c.updated_at DESC, c.id DESC
@@ -15525,6 +15571,8 @@ def lms_admin_courses():
                 rows = cursor.fetchall()
                 courses = []
                 for row in rows:
+                    version_settings = _lms_parse_json(row[13], {})
+                    cover_payload = _lms_resolve_cover_payload(version_settings)
                     courses.append({
                         "id": int(row[0]),
                         "slug": row[1],
@@ -15532,6 +15580,10 @@ def lms_admin_courses():
                         "description": row[3],
                         "category": row[4],
                         "status": row[5],
+                        "cover_url": cover_payload["cover_url"],
+                        "cover_bucket": cover_payload["cover_bucket"],
+                        "cover_blob_path": cover_payload["cover_blob_path"],
+                        "skills": _lms_normalize_skills(version_settings.get("skills")),
                         "default_pass_threshold": float(row[6] if row[6] is not None else LMS_DEFAULT_PASS_THRESHOLD),
                         "default_attempt_limit": int(row[7] if row[7] is not None else LMS_DEFAULT_ATTEMPT_LIMIT),
                         "current_version_id": int(row[8]) if row[8] is not None else None,
@@ -15552,6 +15604,10 @@ def lms_admin_courses():
 
             description = str(data.get('description') or '').strip() or None
             category = str(data.get('category') or '').strip() or None
+            cover_url = str(data.get('cover_url') or '').strip() or None
+            cover_bucket = str(data.get('cover_bucket') or '').strip() or None
+            cover_blob_path = str(data.get('cover_blob_path') or '').strip() or None
+            skills = _lms_normalize_skills(data.get('skills'))
             pass_threshold = min(100.0, max(0.0, _lms_to_float(data.get('pass_threshold'), LMS_DEFAULT_PASS_THRESHOLD)))
             attempt_limit = max(1, _lms_to_int(data.get('attempt_limit'), LMS_DEFAULT_ATTEMPT_LIMIT))
             modules = data.get('modules') if isinstance(data.get('modules'), list) else []
@@ -15591,7 +15647,11 @@ def lms_admin_courses():
                     json.dumps({
                         "heartbeat_seconds": LMS_HEARTBEAT_SECONDS,
                         "stale_gap_seconds": LMS_STALE_GAP_SECONDS,
-                        "completion_threshold_percent": LMS_COMPLETION_THRESHOLD
+                        "completion_threshold_percent": LMS_COMPLETION_THRESHOLD,
+                        "cover_url": cover_url,
+                        "cover_bucket": cover_bucket,
+                        "cover_blob_path": cover_blob_path,
+                        "skills": skills
                     }, ensure_ascii=False),
                     requester_id,
                     now
@@ -15624,22 +15684,92 @@ def lms_admin_courses():
                         lesson_title = str(lesson.get('title') or '').strip()
                         if not lesson_title:
                             continue
+                        lesson_desc = str(lesson.get('description') or '').strip() or None
+                        lesson_type = str(lesson.get('lesson_type') or lesson.get('type') or '').strip().lower()
+                        lesson_materials = lesson.get('materials') if isinstance(lesson.get('materials'), list) else []
                         cursor.execute("""
                             INSERT INTO lms_lessons (
                                 module_id, title, description, position, duration_seconds,
                                 allow_fast_forward, completion_threshold, created_at
                             )
                             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                            RETURNING id
                         """, (
                             module_id,
                             lesson_title,
-                            str(lesson.get('description') or '').strip() or None,
+                            lesson_desc,
                             max(1, _lms_to_int(lesson.get('position'), lesson_index)),
                             max(0, _lms_to_int(lesson.get('duration_seconds'), 0)),
                             _lms_parse_bool(lesson.get('allow_fast_forward'), False),
                             min(100.0, max(0.0, _lms_to_float(lesson.get('completion_threshold'), LMS_COMPLETION_THRESHOLD))),
                             now
                         ))
+                        lesson_id = int(cursor.fetchone()[0])
+
+                        material_position = 1
+                        has_text_material = False
+                        for material in lesson_materials:
+                            if not isinstance(material, dict):
+                                continue
+                            material_type = str(material.get('material_type') or material.get('type') or 'file').strip().lower()
+                            if material_type not in ('video', 'pdf', 'link', 'text', 'file'):
+                                material_type = 'file'
+                            content_url = str(material.get('content_url') or material.get('url') or '').strip() or None
+                            content_text = str(material.get('content_text') or '').strip() or None
+                            if material_type == 'text' and content_text:
+                                has_text_material = True
+                            if not content_url and not content_text:
+                                continue
+                            title_raw = str(material.get('title') or '').strip()
+                            material_title = title_raw or ("Текстовый материал" if material_type == 'text' else f"Материал {material_position}")
+                            mime_type = str(material.get('mime_type') or material.get('content_type') or '').strip() or None
+                            gcs_bucket = str(material.get('bucket') or material.get('gcs_bucket') or '').strip() or None
+                            gcs_blob_path = str(material.get('blob_path') or material.get('gcs_blob_path') or '').strip() or None
+                            metadata = material.get('metadata') if isinstance(material.get('metadata'), dict) else {}
+                            uploaded_name = str(material.get('file_name') or material.get('uploaded_file_name') or '').strip()
+                            if uploaded_name:
+                                metadata["uploaded_file_name"] = uploaded_name
+                            position = max(1, _lms_to_int(material.get('position'), material_position))
+                            cursor.execute("""
+                                INSERT INTO lms_lesson_materials (
+                                    lesson_id, title, material_type, content_text, content_url,
+                                    gcs_bucket, gcs_blob_path, mime_type, metadata, position, created_by, created_at
+                                )
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s)
+                            """, (
+                                lesson_id,
+                                material_title,
+                                material_type,
+                                content_text,
+                                content_url,
+                                gcs_bucket,
+                                gcs_blob_path,
+                                mime_type,
+                                json.dumps(metadata, ensure_ascii=False),
+                                position,
+                                requester_id,
+                                now
+                            ))
+                            material_position += 1
+
+                        if lesson_type == 'text' and not has_text_material:
+                            fallback_text = str(lesson.get('content_text') or lesson_desc or '').strip()
+                            if fallback_text:
+                                cursor.execute("""
+                                    INSERT INTO lms_lesson_materials (
+                                        lesson_id, title, material_type, content_text, content_url,
+                                        gcs_bucket, gcs_blob_path, mime_type, metadata, position, created_by, created_at
+                                    )
+                                    VALUES (%s, %s, 'text', %s, NULL, NULL, NULL, 'text/plain', %s::jsonb, %s, %s, %s)
+                                """, (
+                                    lesson_id,
+                                    "Текстовый материал",
+                                    fallback_text,
+                                    json.dumps({}, ensure_ascii=False),
+                                    material_position,
+                                    requester_id,
+                                    now
+                                ))
 
                 for test_index, test in enumerate(tests, start=1):
                     if not isinstance(test, dict):
@@ -15799,6 +15929,7 @@ def lms_admin_courses():
                 version_updates = []
                 version_params = []
                 if version_id > 0:
+                    next_version_settings = None
                     if 'version_status' in data:
                         status = str(data.get('version_status') or '').strip().lower()
                         if status not in ('draft', 'published', 'archived'):
@@ -15817,6 +15948,29 @@ def lms_admin_courses():
                     if 'attempt_limit' in data:
                         version_updates.append("attempt_limit = %s")
                         version_params.append(max(1, _lms_to_int(data.get('attempt_limit'), LMS_DEFAULT_ATTEMPT_LIMIT)))
+                    if 'cover_url' in data or 'cover_bucket' in data or 'cover_blob_path' in data or 'skills' in data:
+                        cursor.execute("""
+                            SELECT anti_cheat_settings
+                            FROM lms_course_versions
+                            WHERE id = %s AND course_id = %s
+                            LIMIT 1
+                        """, (version_id, course_id))
+                        settings_row = cursor.fetchone()
+                        if not settings_row:
+                            return jsonify({"error": "Version not found for course"}), 404
+                        next_version_settings = _lms_parse_json(settings_row[0], {})
+                        if not isinstance(next_version_settings, dict):
+                            next_version_settings = {}
+                        if 'cover_url' in data:
+                            next_version_settings['cover_url'] = (str(data.get('cover_url') or '').strip() or None)
+                        if 'cover_bucket' in data:
+                            next_version_settings['cover_bucket'] = (str(data.get('cover_bucket') or '').strip() or None)
+                        if 'cover_blob_path' in data:
+                            next_version_settings['cover_blob_path'] = (str(data.get('cover_blob_path') or '').strip() or None)
+                        if 'skills' in data:
+                            next_version_settings['skills'] = _lms_normalize_skills(data.get('skills'))
+                        version_updates.append("anti_cheat_settings = %s::jsonb")
+                        version_params.append(json.dumps(next_version_settings, ensure_ascii=False))
                     if version_updates:
                         cursor.execute(f"""
                             UPDATE lms_course_versions
