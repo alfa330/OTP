@@ -9455,7 +9455,7 @@ def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, in
     events_by_operator = {}
     source_order_stats = {}
 
-    def _push_invalid(row_num, reason, operator_name, raw_state_name, state_note, time_change):
+    def _push_invalid(row_num, reason, operator_name, source_state_name, state_note, time_change):
         nonlocal invalid_rows_count
         invalid_rows_count += 1
         if len(invalid_rows_preview) >= preview_limit_value:
@@ -9464,7 +9464,7 @@ def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, in
             'row': int(row_num),
             'reason': str(reason or '').strip() or 'Некорректная строка',
             'operator_name': str(operator_name or '').strip(),
-            'state_name': str(raw_state_name or '').strip(),
+            'state_name': str(source_state_name or '').strip(),
             'state_note': str(state_note or '').strip(),
             'time_change': str(time_change or '').strip()
         })
@@ -9475,19 +9475,19 @@ def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, in
             raise OverflowError(f"Лимит строк CSV превышен ({max_rows_value})")
 
         operator_name = _cell(cols, operator_col)
-        raw_state_name = _cell(cols, state_col)
+        source_state_name = _cell(cols, state_col)
         state_note = _cell(cols, note_col)
         time_change = _cell(cols, time_col)
 
-        if not operator_name and not raw_state_name and not state_note and not time_change:
+        if not operator_name and not source_state_name and not state_note and not time_change:
             continue
 
-        if not operator_name or not raw_state_name or not time_change:
+        if not operator_name or not source_state_name or not time_change:
             _push_invalid(
                 row_num=row_num,
                 reason='Отсутствуют обязательные поля',
                 operator_name=operator_name,
-                raw_state_name=raw_state_name,
+                source_state_name=source_state_name,
                 state_note=state_note,
                 time_change=time_change
             )
@@ -9499,7 +9499,7 @@ def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, in
                 row_num=row_num,
                 reason='Некорректный формат TimeChange',
                 operator_name=operator_name,
-                raw_state_name=raw_state_name,
+                source_state_name=source_state_name,
                 state_note=state_note,
                 time_change=time_change
             )
@@ -9514,13 +9514,13 @@ def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, in
                 row_num=row_num,
                 reason='Оператор не найден' if len(operator_matches) == 0 else 'Найдено несколько операторов с таким именем',
                 operator_name=operator_name,
-                raw_state_name=raw_state_name,
+                source_state_name=source_state_name,
                 state_note=state_note,
                 time_change=time_change
             )
             continue
 
-        resolved = _status_import_resolve_display_state(raw_state_name, state_note)
+        resolved = _status_import_resolve_display_state(source_state_name, state_note)
         operator_info = operator_matches[0]
         operator_id = int(operator_info['id'])
 
@@ -9537,10 +9537,7 @@ def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, in
         events_by_operator.setdefault(operator_id, []).append({
             'operator_id': operator_id,
             'event_at': ts,
-            'status_name': resolved.get('label') or (raw_state_name or '—'),
-            'status_key': resolved.get('key') or _status_import_normalize_key(raw_state_name),
-            'raw_state_name': raw_state_name,
-            'raw_state_key': _status_import_normalize_key(raw_state_name),
+            'status_key': resolved.get('key') or _status_import_normalize_key(source_state_name),
             'state_note': state_note,
             'source_row': int(row_num)
         })
@@ -9579,7 +9576,7 @@ def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, in
                 zero_or_negative_transitions += 1
                 continue
 
-            status_key_norm = _status_import_normalize_key(cur.get('status_key') or cur.get('status_name'))
+            status_key_norm = _status_import_normalize_key(cur.get('status_key'))
             is_work = status_key_norm in STATUS_IMPORT_WORK_KEYS
             is_break = status_key_norm in STATUS_IMPORT_BREAK_KEYS
             is_no_phone = status_key_norm == STATUS_IMPORT_NO_PHONE_KEY
@@ -9591,10 +9588,7 @@ def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, in
                     'start_at': part['start'],
                     'end_at': part['end'],
                     'duration_sec': int(part['duration_sec']),
-                    'status_name': cur.get('status_name'),
                     'status_key': cur.get('status_key'),
-                    'raw_state_name': cur.get('raw_state_name'),
-                    'raw_state_key': cur.get('raw_state_key'),
                     'state_note': cur.get('state_note'),
                     'source_row': cur.get('source_row'),
                     'is_work': is_work,

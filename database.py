@@ -280,6 +280,22 @@ SCHEDULE_AUTO_WORK_STATUS_KEYS = {'готов', 'занят', 'занята', '�
 SCHEDULE_AUTO_TALK_STATUS_KEYS = {'занят', 'занята'}
 SCHEDULE_AUTO_BREAK_STATUS_KEYS = {'перерыв', 'авто'}
 SCHEDULE_AUTO_TRAINING_STATUS_KEY = 'тренинг'
+SCHEDULE_STATUS_KEY_LABELS = {
+    'готов': 'Готов',
+    'занят': 'Занят',
+    'занята': 'Занята',
+    'перезвон': 'Перезвон',
+    'перерыв': 'Перерыв',
+    'авто': 'Авто',
+    'вышел': 'Вышел',
+    'тренинг': 'Тренинг',
+    'training': 'Training',
+    'без телефона': 'Без телефона',
+    'нет статуса': 'Нет статуса',
+    'отключен': 'Отключен',
+    'отключена': 'Отключена',
+    'отключено': 'Отключено'
+}
 SCHEDULE_AUTO_FINE_RATE_PER_MINUTE = float(os.getenv('SCHEDULE_AUTO_FINE_RATE_PER_MINUTE', '50'))
 
 TECHNICAL_ISSUE_REASONS: List[str] = [
@@ -1169,10 +1185,7 @@ class Database:
                     operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                     event_at TIMESTAMP NOT NULL,
                     event_date DATE NOT NULL,
-                    status_name VARCHAR(128) NOT NULL,
                     status_key VARCHAR(128) NOT NULL,
-                    raw_state_name VARCHAR(128) NULL,
-                    raw_state_key VARCHAR(128) NULL,
                     state_note VARCHAR(255) NULL,
                     source_row INTEGER NULL,
                     source_file_name VARCHAR(255) NULL,
@@ -1189,10 +1202,7 @@ class Database:
                     start_at TIMESTAMP NOT NULL,
                     end_at TIMESTAMP NOT NULL,
                     duration_sec INTEGER NOT NULL,
-                    status_name VARCHAR(128) NOT NULL,
                     status_key VARCHAR(128) NOT NULL,
-                    raw_state_name VARCHAR(128) NULL,
-                    raw_state_key VARCHAR(128) NULL,
                     state_note VARCHAR(255) NULL,
                     source_row INTEGER NULL,
                     is_work BOOLEAN NOT NULL DEFAULT FALSE,
@@ -5251,7 +5261,7 @@ class Database:
                     d_cell.border = bottom_bold_border
 
                     # E..I (часы по статусам) и J..N (секунды) — заполняем и даём заливку по статусу, если >0
-                    for idx, (status_key, status_name, fill) in enumerate(status_order):
+                    for idx, (status_key, status_label, fill) in enumerate(status_order):
                         dur_td = day_status_times_dict.get(status_key, timedelta(0))
                         dur_sec = int(dur_td.total_seconds())
                         dur_hours = round(dur_sec / 3600.0, 2)
@@ -8182,6 +8192,21 @@ class Database:
             })
         return chunks
 
+    def _normalize_import_status_key(self, status_key_value):
+        return ' '.join(str(status_key_value or '').strip().lower().split())
+
+    def _status_label_from_key(self, status_key_value, fallback_name=None):
+        key = self._normalize_import_status_key(status_key_value)
+        if not key:
+            fallback_text = str(fallback_name or '').strip()
+            return fallback_text or 'Статус'
+        if self._schedule_auto_is_tech_reason_status_key(key):
+            return 'Тех причина'
+        direct = SCHEDULE_STATUS_KEY_LABELS.get(key)
+        if direct:
+            return direct
+        return ' '.join(part[:1].upper() + part[1:] for part in key.split(' ') if part)
+
     def _schedule_auto_compact_status_key(self, status_key_value):
         key = str(status_key_value or '').strip().lower()
         if not key:
@@ -8193,7 +8218,7 @@ class Database:
         return compact_key == 'техпричина'
 
     def _schedule_auto_is_late_excused_status_key(self, status_key_value):
-        key = str(status_key_value or '').strip().lower()
+        key = self._normalize_import_status_key(status_key_value)
         if not key:
             return False
         if key in (SCHEDULE_AUTO_TRAINING_STATUS_KEY, 'training'):
@@ -9817,10 +9842,7 @@ class Database:
                 start_at,
                 end_at,
                 duration_sec,
-                status_name,
                 status_key,
-                raw_state_name,
-                raw_state_key,
                 state_note,
                 source_row,
                 COALESCE(is_work, FALSE),
@@ -9852,10 +9874,7 @@ class Database:
                 start_at_value,
                 end_at_value,
                 duration_sec,
-                status_name,
                 status_key,
-                raw_state_name,
-                raw_state_key,
                 state_note,
                 source_row,
                 is_work,
@@ -9871,15 +9890,18 @@ class Database:
             if not day_key:
                 continue
 
+            status_key_norm = self._normalize_import_status_key(status_key)
+            if not status_key_norm:
+                continue
+            state_label_value = self._status_label_from_key(status_key_norm)
+
             target.setdefault(day_key, []).append({
                 'statusDate': day_key,
                 'start': start_at_value.isoformat() if hasattr(start_at_value, 'isoformat') else str(start_at_value or ''),
                 'end': end_at_value.isoformat() if hasattr(end_at_value, 'isoformat') else str(end_at_value or ''),
                 'durationSec': int(duration_sec or 0),
-                'stateName': str(status_name or ''),
-                'stateKey': str(status_key or ''),
-                'rawStateName': str(raw_state_name or ''),
-                'rawStateKey': str(raw_state_key or ''),
+                'stateName': str(state_label_value or ''),
+                'stateKey': str(status_key_norm or ''),
                 'stateNote': str(state_note or ''),
                 'sourceRow': int(source_row) if source_row is not None else None,
                 'isWork': bool(is_work),
@@ -12783,8 +12805,8 @@ class Database:
         source_file_name_norm = str(source_file_name or '').strip() or None
         batch_id = uuid.uuid4()
 
-        normalized_events = events
-        normalized_segments = segments
+        normalized_events = []
+        normalized_segments = []
 
         event_ranges_map = {}
         segment_ranges_map = {}
@@ -12800,7 +12822,6 @@ class Database:
             if day_value > prev[1]:
                 prev[1] = day_value
 
-        event_write_idx = 0
         for item in events:
             if not isinstance(item, dict):
                 continue
@@ -12824,13 +12845,14 @@ class Database:
                 continue
 
             event_date_obj = event_at_obj.date()
-            status_name = str(item.get('status_name') or item.get('state_name') or '').strip()
-            status_key = str(item.get('status_key') or item.get('state_key') or '').strip().lower()
-            if not status_name or not status_key:
+            state_name_raw = str(item.get('state_name') or '').strip()
+            status_key = self._normalize_import_status_key(
+                item.get('status_key')
+                or item.get('state_key')
+                or state_name_raw
+            )
+            if not status_key:
                 continue
-
-            raw_state_name = str(item.get('raw_state_name') or '').strip() or None
-            raw_state_key = str(item.get('raw_state_key') or '').strip().lower() or None
             state_note = str(item.get('state_note') or '').strip() or None
             source_row = item.get('source_row')
             try:
@@ -12838,26 +12860,20 @@ class Database:
             except Exception:
                 source_row = None
 
-            normalized_events[event_write_idx] = (
-                operator_id,
-                event_at_obj,
-                event_date_obj,
-                status_name,
-                status_key,
-                raw_state_name,
-                raw_state_key,
-                state_note,
-                source_row,
-                source_file_name_norm,
-                str(batch_id),
-                imported_by_id
-            )
-            event_write_idx += 1
+            normalized_events.append({
+                'operator_id': operator_id,
+                'event_at': event_at_obj,
+                'event_date': event_date_obj,
+                'status_key': status_key,
+                'state_note': state_note,
+                'source_row': source_row,
+                'source_file_name': source_file_name_norm,
+                'import_batch_id': str(batch_id),
+                'imported_by': imported_by_id
+            })
             affected_operator_ids.add(operator_id)
             _extend_range(event_ranges_map, operator_id, event_date_obj)
-        del normalized_events[event_write_idx:]
 
-        segment_write_idx = 0
         for item in segments:
             if not isinstance(item, dict):
                 continue
@@ -12917,13 +12933,14 @@ class Database:
             if duration_sec <= 0:
                 continue
 
-            status_name = str(item.get('status_name') or item.get('state_name') or '').strip()
-            status_key = str(item.get('status_key') or item.get('state_key') or '').strip().lower()
-            if not status_name or not status_key:
+            state_name_raw = str(item.get('state_name') or '').strip()
+            status_key = self._normalize_import_status_key(
+                item.get('status_key')
+                or item.get('state_key')
+                or state_name_raw
+            )
+            if not status_key:
                 continue
-
-            raw_state_name = str(item.get('raw_state_name') or '').strip() or None
-            raw_state_key = str(item.get('raw_state_key') or '').strip().lower() or None
             state_note = str(item.get('state_note') or '').strip() or None
             source_row = item.get('source_row')
             try:
@@ -12935,29 +12952,24 @@ class Database:
             is_break = bool(item.get('is_break'))
             is_no_phone = bool(item.get('is_no_phone'))
 
-            normalized_segments[segment_write_idx] = (
-                operator_id,
-                status_date_obj,
-                start_at_obj,
-                end_at_obj,
-                duration_sec,
-                status_name,
-                status_key,
-                raw_state_name,
-                raw_state_key,
-                state_note,
-                source_row,
-                is_work,
-                is_break,
-                is_no_phone,
-                source_file_name_norm,
-                str(batch_id),
-                imported_by_id
-            )
-            segment_write_idx += 1
+            normalized_segments.append({
+                'operator_id': operator_id,
+                'status_date': status_date_obj,
+                'start_at': start_at_obj,
+                'end_at': end_at_obj,
+                'duration_sec': duration_sec,
+                'status_key': status_key,
+                'state_note': state_note,
+                'source_row': source_row,
+                'is_work': is_work,
+                'is_break': is_break,
+                'is_no_phone': is_no_phone,
+                'source_file_name': source_file_name_norm,
+                'import_batch_id': str(batch_id),
+                'imported_by': imported_by_id
+            })
             affected_operator_ids.add(operator_id)
             _extend_range(segment_ranges_map, operator_id, status_date_obj)
-        del normalized_segments[segment_write_idx:]
 
         event_ranges = sorted(
             [(int(op_id), bounds[0], bounds[1]) for op_id, bounds in event_ranges_map.items()],
@@ -13075,33 +13087,69 @@ class Database:
             )
 
             if normalized_events:
+                event_insert_columns = [
+                    'operator_id',
+                    'event_at',
+                    'event_date',
+                    'status_key',
+                    'state_note',
+                    'source_row',
+                    'source_file_name',
+                    'import_batch_id',
+                    'imported_by'
+                ]
+                event_values = []
+                for item in normalized_events:
+                    row_values = []
+                    for col in event_insert_columns:
+                        row_values.append(item.get(col))
+                    event_values.append(tuple(row_values))
+                event_columns_sql = ', '.join(event_insert_columns)
                 execute_values(
                     cursor,
-                    """
+                    f"""
                     INSERT INTO operator_status_events (
-                        operator_id, event_at, event_date,
-                        status_name, status_key, raw_state_name, raw_state_key, state_note,
-                        source_row, source_file_name, import_batch_id, imported_by
+                        {event_columns_sql}
                     )
                     VALUES %s
                     """,
-                    normalized_events,
+                    event_values,
                     page_size=STATUS_IMPORT_INSERT_PAGE_SIZE
                 )
 
             if normalized_segments:
+                segment_insert_columns = [
+                    'operator_id',
+                    'status_date',
+                    'start_at',
+                    'end_at',
+                    'duration_sec',
+                    'status_key',
+                    'state_note',
+                    'source_row',
+                    'is_work',
+                    'is_break',
+                    'is_no_phone',
+                    'source_file_name',
+                    'import_batch_id',
+                    'imported_by'
+                ]
+                segment_values = []
+                for item in normalized_segments:
+                    row_values = []
+                    for col in segment_insert_columns:
+                        row_values.append(item.get(col))
+                    segment_values.append(tuple(row_values))
+                segment_columns_sql = ', '.join(segment_insert_columns)
                 execute_values(
                     cursor,
-                    """
+                    f"""
                     INSERT INTO operator_status_segments (
-                        operator_id, status_date, start_at, end_at, duration_sec,
-                        status_name, status_key, raw_state_name, raw_state_key, state_note,
-                        source_row, is_work, is_break, is_no_phone,
-                        source_file_name, import_batch_id, imported_by
+                        {segment_columns_sql}
                     )
                     VALUES %s
                     """,
-                    normalized_segments,
+                    segment_values,
                     page_size=STATUS_IMPORT_INSERT_PAGE_SIZE
                 )
 

@@ -5335,6 +5335,34 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             if (!key) return false;
             return key === 'тренинг' || key === 'training' || plannerStatusIsTechReasonKey(key);
             };
+            const plannerStatusKeyLabelMap = {
+            'готов': 'Готов',
+            'занят': 'Занят',
+            'занята': 'Занята',
+            'перезвон': 'Перезвон',
+            'перерыв': 'Перерыв',
+            'авто': 'Авто',
+            'вышел': 'Вышел',
+            'тренинг': 'Тренинг',
+            'training': 'Training',
+            'без телефона': 'Без телефона',
+            'нет статуса': 'Нет статуса',
+            'отключен': 'Отключен',
+            'отключена': 'Отключена',
+            'отключено': 'Отключено'
+            };
+            const plannerStatusLabelFromKey = (statusKeyRaw, fallback = 'Статус') => {
+            const key = plannerStatusNormalizeKey(statusKeyRaw);
+            if (!key) return String(fallback || 'Статус');
+            if (plannerStatusIsTechReasonKey(key)) return 'Тех причина';
+            const direct = plannerStatusKeyLabelMap[key];
+            if (direct) return direct;
+            return key
+                .split(' ')
+                .filter(Boolean)
+                .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+                .join(' ');
+            };
             const plannerStatusNormalizeOperatorName = (v) => String(v ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
             const plannerStatusResolveBreakNoteLabel = (stateNoteRaw) => {
             const noteKey = plannerStatusNormalizeKey(stateNoteRaw);
@@ -5523,7 +5551,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     ...seg,
                     startMin: Number(seg?.startMin ?? seg?.start ?? 0),
                     endMin: Number(seg?.endMin ?? seg?.end ?? 0),
-                    statusKeyNorm: plannerStatusNormalizeKey(seg?.stateName || seg?.stateKey || '')
+                    statusKeyNorm: plannerStatusNormalizeKey(seg?.stateKey || seg?.statusKey || seg?.stateName || seg?.statusName || '')
                 }))
                 .filter(seg => seg.endMin > seg.startMin);
             const workStatusIntervals = mergeIntervals(
@@ -5701,7 +5729,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             let noPhoneSec = 0;
             let noPhoneAnomalyCount = 0;
             const timelineDecorated = (Array.isArray(timeline) ? timeline : []).map(seg => {
-                const statusKeyNorm = plannerStatusNormalizeKey(seg?.rawStateKey || seg?.stateKey || seg?.rawStateName || seg?.stateName || '');
+                const statusKeyNorm = plannerStatusNormalizeKey(seg?.stateKey || seg?.statusKey || seg?.stateName || seg?.statusName || '');
                 const isNoPhone = statusKeyNorm === PLANNER_STATUS_NO_PHONE_KEY;
                 if (!isNoPhone || !dateKey || shiftIntervals.length === 0) {
                     return {
@@ -5752,27 +5780,25 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const events = [];
             rows.forEach((row, i) => {
                 const operatorName = String(row?.operatorname ?? row?.operator ?? row?.name ?? '').trim();
-                const rawStateName = String(row?.statename ?? row?.state ?? row?.status ?? '').trim();
+                const sourceStateName = String(row?.statename ?? row?.state ?? row?.status ?? '').trim();
                 const stateNote = String(row?.statenote ?? row?.statusnote ?? row?.note ?? '').trim();
                 const timeChange = String(row?.timechange ?? row?.time ?? row?.datetime ?? '').trim();
-                if (!operatorName && !rawStateName && !timeChange && !stateNote) return;
-                if (!operatorName || !rawStateName || !timeChange) {
-                invalidRows.push({ row: i + 2, reason: 'Отсутствуют обязательные поля', operatorName, stateName: rawStateName, stateNote, timeChange });
+                if (!operatorName && !sourceStateName && !timeChange && !stateNote) return;
+                if (!operatorName || !sourceStateName || !timeChange) {
+                invalidRows.push({ row: i + 2, reason: 'Отсутствуют обязательные поля', operatorName, stateName: sourceStateName, stateNote, timeChange });
                 return;
                 }
                 const ts = plannerStatusParseDateTime(timeChange);
                 if (!ts) {
-                invalidRows.push({ row: i + 2, reason: 'Некорректный формат TimeChange', operatorName, stateName: rawStateName, stateNote, timeChange });
+                invalidRows.push({ row: i + 2, reason: 'Некорректный формат TimeChange', operatorName, stateName: sourceStateName, stateNote, timeChange });
                 return;
                 }
-                const resolvedState = plannerStatusResolveDisplayState(rawStateName, stateNote);
+                const resolvedState = plannerStatusResolveDisplayState(sourceStateName, stateNote);
                 events.push({
                 row: i + 2,
                 operatorName,
                 stateName: resolvedState.label,
                 stateKey: resolvedState.key,
-                rawStateName,
-                rawStateKey: plannerStatusNormalizeKey(rawStateName),
                 stateNote,
                 ts,
                 tsMs: ts.getTime()
@@ -5834,14 +5860,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (next.tsMs <= cur.tsMs) { zeroOrNegativeTransitions += 1; continue; }
                 const parts = plannerStatusSplitSegmentByDay(cur.ts, next.ts);
                 for (const p of parts) {
-                    const isNoPhone = (cur.rawStateKey || cur.stateKey) === PLANNER_STATUS_NO_PHONE_KEY;
+                    const isNoPhone = plannerStatusNormalizeKey(cur.stateKey) === PLANNER_STATUS_NO_PHONE_KEY;
                     const isNoPhoneAnomaly = isNoPhone && p.durationSec > PLANNER_STATUS_NO_PHONE_ANOMALY_SECONDS;
                     const seg = {
                     operatorName,
                     stateName: cur.stateName,
                     stateKey: cur.stateKey,
-                    rawStateName: cur.rawStateName || cur.stateName,
-                    rawStateKey: cur.rawStateKey || cur.stateKey,
                     stateNote: cur.stateNote || '',
                     ...p,
                     isNoPhone,
@@ -5926,10 +5950,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         const start = seg?.start instanceof Date ? seg.start : new Date(seg?.start);
                         const end = seg?.end instanceof Date ? seg.end : new Date(seg?.end);
                         if (Number.isNaN(start?.getTime?.()) || Number.isNaN(end?.getTime?.()) || end <= start) return;
-                        const statusName = String(seg?.stateName || seg?.statusName || seg?.stateKey || seg?.statusKey || 'Статус').trim() || 'Статус';
-                        const statusKey = plannerStatusNormalizeKey(seg?.stateKey || seg?.statusKey || statusName);
-                        const rawStateName = String(seg?.rawStateName || seg?.raw_state_name || statusName).trim() || statusName;
-                        const rawStateKey = plannerStatusNormalizeKey(seg?.rawStateKey || seg?.raw_state_key || rawStateName);
+                        const statusKey = plannerStatusNormalizeKey(seg?.stateKey || seg?.statusKey || seg?.stateName || seg?.statusName || '');
+                        if (!statusKey) return;
+                        const statusName = String(
+                            seg?.stateName
+                            || seg?.statusName
+                            || plannerStatusLabelFromKey(statusKey, 'Статус')
+                        ).trim() || plannerStatusLabelFromKey(statusKey, 'Статус');
                         const stateNote = String(seg?.stateNote || seg?.state_note || '').trim();
                         let durationSec = Math.round(Number(seg?.durationSec ?? seg?.duration_sec ?? 0));
                         if (!Number.isFinite(durationSec) || durationSec <= 0) durationSec = Math.max(0, Math.round((end - start) / 1000));
@@ -5942,8 +5969,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             operatorName,
                             stateName: statusName,
                             stateKey: statusKey,
-                            rawStateName,
-                            rawStateKey,
                             stateNote,
                             dateKey,
                             start,
@@ -7725,7 +7750,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 String(seg?.start || ''),
                                 String(seg?.end || ''),
                                 String(seg?.stateKey || seg?.statusKey || ''),
-                                String(seg?.rawStateKey || seg?.raw_state_key || ''),
                                 String(seg?.stateNote || seg?.state_note || ''),
                                 String(mins.start),
                                 String(mins.end)
@@ -7776,7 +7800,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             String(seg?.start || ''),
                             String(seg?.end || ''),
                             String(seg?.stateKey || seg?.statusKey || ''),
-                            String(seg?.rawStateKey || seg?.raw_state_key || ''),
                             String(seg?.stateNote || seg?.state_note || ''),
                             String(startMin),
                             String(endMin)
@@ -7797,7 +7820,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, [importedStatusTimelineByOperatorDateKey]);
 
             const buildEditTimelineStatusFocusKey = (seg, idx = 0) => (
-                `${Number(seg?.startMin ?? seg?.start ?? 0)}:${Number(seg?.endMin ?? seg?.end ?? 0)}:${plannerStatusNormalizeKey(seg?.stateName || seg?.stateKey || '')}:${idx}`
+                `${Number(seg?.startMin ?? seg?.start ?? 0)}:${Number(seg?.endMin ?? seg?.end ?? 0)}:${plannerStatusNormalizeKey(seg?.stateKey || seg?.statusKey || seg?.stateName || seg?.statusName || '')}:${idx}`
             );
 
             const scrollEditTimelineToFocusedStatus = (focusKey, behavior = 'smooth') => {
@@ -10599,7 +10622,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const buildModalStatusSegments = useCallback((matchFn, idPrefix = 'status') => {
                 const raw = (Array.isArray(modalImportedStatusTimeline) ? modalImportedStatusTimeline : [])
                     .map((seg) => {
-                        const statusKey = plannerStatusNormalizeKey(seg?.stateName || seg?.stateKey || seg?.rawStateName || seg?.rawStateKey || '');
+                        const statusKey = plannerStatusNormalizeKey(seg?.stateKey || seg?.statusKey || seg?.stateName || seg?.statusName || '');
                         if (!matchFn(statusKey)) return null;
                         const startRaw = Number(seg?.startMin ?? seg?.start ?? 0);
                         const endRaw = Number(seg?.endMin ?? seg?.end ?? 0);
@@ -17842,7 +17865,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <div className="mt-1 text-slate-700 tabular-nums">
                                                     {minutesToTime(seg.startMin)} — {minutesToTime(seg.endMin)}
                                                 </div>
-                                                {seg.stateNote && plannerStatusNormalizeKey(seg.rawStateName) === 'перерыв' && (
+                                                {seg.stateNote && (
                                                     <div className="mt-1 text-[11px] text-slate-500">
                                                         note: {seg.stateNote}
                                                     </div>
@@ -17909,8 +17932,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 const statusKeyNorm = plannerStatusNormalizeKey(
                                     seg?.stateKey
                                     || seg?.statusKey
-                                    || seg?.rawStateKey
-                                    || seg?.raw_state_key
                                     || seg?.stateName
                                     || seg?.statusName
                                     || ''
@@ -17935,8 +17956,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 plannerIntersectIntervalWithList({ start, end }, previewShiftIntervals)
                             );
                             if (overlapMin <= 0) return;
-                            const key = plannerStatusNormalizeKey(seg?.stateName || seg?.stateKey || '');
-                            const label = seg?.stateName || seg?.stateKey || 'Статус';
+                            const key = plannerStatusNormalizeKey(seg?.stateKey || seg?.statusKey || seg?.stateName || seg?.statusName || '');
+                            if (!key) return;
+                            const label = plannerStatusLabelFromKey(
+                                key,
+                                seg?.stateName || seg?.statusName || seg?.stateKey || seg?.statusKey || 'Статус'
+                            );
                             const prev = totals.get(key) || { key, label, min: 0 };
                             prev.min += overlapMin;
                             if (!prev.label || prev.label === prev.key) prev.label = label;
@@ -18722,8 +18747,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 const segEnd = Number(seg?.endMin ?? seg?.end ?? 0);
                                 if (!Number.isFinite(segStart) || !Number.isFinite(segEnd) || segEnd <= segStart) return;
                                 if (!(segStart <= pointMin && segEnd > pointMin)) return;
-                                const label = String(seg?.stateName || seg?.stateKey || 'Статус').trim() || 'Статус';
-                                const key = plannerStatusNormalizeKey(seg?.stateName || seg?.stateKey || label);
+                                const key = plannerStatusNormalizeKey(seg?.stateKey || seg?.statusKey || seg?.stateName || seg?.statusName || '');
+                                if (!key) return;
+                                const label = plannerStatusLabelFromKey(
+                                    key,
+                                    String(seg?.stateName || seg?.statusName || seg?.stateKey || seg?.statusKey || 'Статус').trim() || 'Статус'
+                                );
                                 const candidate = { label, key, segStart, segEnd };
                                 if (!active || segStart >= active.segStart) active = candidate;
                             });
@@ -19770,7 +19799,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                         <span className={`px-1.5 py-0.5 rounded border ${pillClass}`}>
                                                                                             {seg.stateName}
                                                                                         </span>
-                                                                                        {seg.stateNote && plannerStatusNormalizeKey(seg.rawStateName) === 'перерыв' && (
+                                                                                        {seg.stateNote && (
                                                                                             <span className="px-1.5 py-0.5 rounded border border-slate-200 bg-white text-slate-600">
                                                                                                 note: {seg.stateNote}
                                                                                             </span>
