@@ -20,6 +20,18 @@ const parseWeeksInput = (value) => {
     if (!Number.isFinite(number)) return null;
     return Math.max(0, Math.floor(number));
 };
+const isDismissedOperatorStatus = (value) => {
+    const normalized = String(value || '').trim().toLowerCase();
+    return (
+        normalized === 'fired'
+        || normalized === 'dismissal'
+        || normalized === 'dismissed'
+        || normalized === 'уволен'
+        || normalized === 'уволена'
+        || normalized === 'уволено'
+        || normalized === 'уволены'
+    );
+};
 
 const toUniqueTrimmedList = (values) => {
     const source = Array.isArray(values) ? values : [];
@@ -169,8 +181,9 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
             .map((operator) => {
                 const id = Number(operator?.id);
                 if (!Number.isFinite(id)) return null;
-                const status = String(operator?.status || 'working').trim().toLowerCase();
-                if (status === 'fired' || status === 'dismissal') return null;
+                const status = String(operator?.status || '').trim().toLowerCase();
+                const statusPeriodCode = String(operator?.status_period_status_code || '').trim().toLowerCase();
+                if (isDismissedOperatorStatus(status) || isDismissedOperatorStatus(statusPeriodCode)) return null;
                 const directionId = operator?.direction_id != null ? String(operator.direction_id) : 'none';
                 const weeks = getTenureWeeks(operator?.hire_date);
                 return {
