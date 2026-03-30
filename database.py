@@ -279,6 +279,7 @@ SCHEDULE_AUTO_FLAG_ALLOWED = {
 SCHEDULE_AUTO_WORK_STATUS_KEYS = {'готов', 'занят', 'занята', 'перезвон'}
 SCHEDULE_AUTO_TALK_STATUS_KEYS = {'занят', 'занята'}
 SCHEDULE_AUTO_BREAK_STATUS_KEYS = {'перерыв', 'авто'}
+SCHEDULE_AUTO_NO_PHONE_STATUS_KEY = 'без телефона'
 SCHEDULE_AUTO_TRAINING_STATUS_KEY = 'тренинг'
 SCHEDULE_STATUS_KEY_LABELS = {
     'готов': 'Готов',
@@ -1160,7 +1161,6 @@ class Database:
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS operator_status_import_batches (
                     id UUID PRIMARY KEY,
-                    source_file_name VARCHAR(255),
                     imported_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
                     source_rows INTEGER NOT NULL DEFAULT 0,
                     valid_events INTEGER NOT NULL DEFAULT 0,
@@ -1175,8 +1175,7 @@ class Database:
                     zero_or_negative_transitions INTEGER NOT NULL DEFAULT 0,
                     date_from DATE NULL,
                     date_to DATE NULL,
-                    meta_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    meta_json JSONB NOT NULL DEFAULT '{}'::jsonb
                 );
             """)
             cursor.execute("""
@@ -1187,10 +1186,7 @@ class Database:
                     event_date DATE NOT NULL,
                     status_key VARCHAR(128) NOT NULL,
                     state_note VARCHAR(255) NULL,
-                    source_file_name VARCHAR(255) NULL,
-                    import_batch_id UUID NULL REFERENCES operator_status_import_batches(id) ON DELETE SET NULL,
-                    imported_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
-                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    imported_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL
                 );
             """)
             cursor.execute("""
@@ -1203,13 +1199,7 @@ class Database:
                     duration_sec INTEGER NOT NULL,
                     status_key VARCHAR(128) NOT NULL,
                     state_note VARCHAR(255) NULL,
-                    is_work BOOLEAN NOT NULL DEFAULT FALSE,
-                    is_break BOOLEAN NOT NULL DEFAULT FALSE,
-                    is_no_phone BOOLEAN NOT NULL DEFAULT FALSE,
-                    source_file_name VARCHAR(255) NULL,
-                    import_batch_id UUID NULL REFERENCES operator_status_import_batches(id) ON DELETE SET NULL,
                     imported_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
-                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     CHECK (end_at > start_at),
                     CHECK (duration_sec > 0)
                 );
@@ -1223,8 +1213,8 @@ class Database:
                 ON operator_status_events(operator_id, event_date);
             """)
             cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_operator_status_events_batch
-                ON operator_status_events(import_batch_id);
+                CREATE INDEX IF NOT EXISTS idx_operator_status_events_imported_by
+                ON operator_status_events(imported_by);
             """)
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_operator_status_segments_operator_date
@@ -1239,8 +1229,8 @@ class Database:
                 ON operator_status_segments(status_key);
             """)
             cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_operator_status_segments_batch
-                ON operator_status_segments(import_batch_id);
+                CREATE INDEX IF NOT EXISTS idx_operator_status_segments_imported_by
+                ON operator_status_segments(imported_by);
             """)
 
             # AI feedback cache table
@@ -8697,9 +8687,7 @@ class Database:
                 status_date,
                 start_at,
                 end_at,
-                status_key,
-                COALESCE(is_work, FALSE),
-                COALESCE(is_break, FALSE)
+                status_key
             FROM operator_status_segments
             WHERE operator_id = ANY(%s)
               AND status_date >= %s
@@ -8708,7 +8696,7 @@ class Database:
         """, (op_ids, status_start_for_query, status_end_for_query))
         status_rows = cursor.fetchall() or []
         statuses_by_day = {}
-        for op_id, status_date_value, start_at_value, end_at_value, status_key, is_work, is_break in status_rows:
+        for op_id, status_date_value, start_at_value, end_at_value, status_key in status_rows:
             day_chunks = self._schedule_auto_split_status_segment_by_day(
                 status_date_value=status_date_value,
                 start_at_value=start_at_value,
@@ -8730,9 +8718,7 @@ class Database:
                 statuses_by_day.setdefault(day_key, []).append({
                     'start': int(start_sec),
                     'end': int(end_sec),
-                    'status_key': str(status_key or '').strip().lower(),
-                    'is_work': bool(is_work),
-                    'is_break': bool(is_break)
+                    'status_key': str(status_key or '').strip().lower()
                 })
 
         cursor.execute("""
@@ -8799,7 +8785,7 @@ class Database:
 
             day_work_status = pick_status_intervals(
                 day_statuses,
-                lambda seg: bool(seg.get('is_work')) or str(seg.get('status_key') or '') in SCHEDULE_AUTO_WORK_STATUS_KEYS
+                lambda seg: str(seg.get('status_key') or '') in SCHEDULE_AUTO_WORK_STATUS_KEYS
             )
             day_talk_status = pick_status_intervals(
                 day_statuses,
@@ -8807,7 +8793,7 @@ class Database:
             )
             day_break_status = pick_status_intervals(
                 day_statuses,
-                lambda seg: bool(seg.get('is_break')) or str(seg.get('status_key') or '') in SCHEDULE_AUTO_BREAK_STATUS_KEYS
+                lambda seg: str(seg.get('status_key') or '') in SCHEDULE_AUTO_BREAK_STATUS_KEYS
             )
             day_training_status = pick_status_intervals(
                 day_statuses,
@@ -8840,7 +8826,7 @@ class Database:
                 next_day_statuses = statuses_by_day.get((op_id, day_value + timedelta(days=1))) or []
                 next_day_work_status = pick_status_intervals(
                     next_day_statuses,
-                    lambda seg: bool(seg.get('is_work')) or str(seg.get('status_key') or '') in SCHEDULE_AUTO_WORK_STATUS_KEYS
+                    lambda seg: str(seg.get('status_key') or '') in SCHEDULE_AUTO_WORK_STATUS_KEYS
                 )
                 next_day_late_excused_status = pick_status_intervals(
                     next_day_statuses,
@@ -9841,10 +9827,7 @@ class Database:
                 end_at,
                 duration_sec,
                 status_key,
-                state_note,
-                COALESCE(is_work, FALSE),
-                COALESCE(is_break, FALSE),
-                COALESCE(is_no_phone, FALSE)
+                state_note
             FROM operator_status_segments
             WHERE operator_id = ANY(%s)
         """
@@ -9872,10 +9855,7 @@ class Database:
                 end_at_value,
                 duration_sec,
                 status_key,
-                state_note,
-                is_work,
-                is_break,
-                is_no_phone
+                state_note
             ) = row
             op_id = int(operator_id)
             target = result.get(op_id)
@@ -9890,6 +9870,9 @@ class Database:
             if not status_key_norm:
                 continue
             state_label_value = self._status_label_from_key(status_key_norm)
+            is_work = status_key_norm in SCHEDULE_AUTO_WORK_STATUS_KEYS
+            is_break = status_key_norm in SCHEDULE_AUTO_BREAK_STATUS_KEYS
+            is_no_phone = status_key_norm == SCHEDULE_AUTO_NO_PHONE_STATUS_KEY
 
             target.setdefault(day_key, []).append({
                 'statusDate': day_key,
@@ -12774,7 +12757,7 @@ class Database:
         summary['affected_operator_ids'] = sorted(affected_operator_ids)
         return summary
 
-    def save_operator_status_import(self, events, segments, imported_by=None, source_file_name=None, summary=None):
+    def save_operator_status_import(self, events, segments, imported_by=None, summary=None):
         """
         Сохранить импорт статусов операторов:
         - сырые события переключений (operator_status_events)
@@ -12797,7 +12780,6 @@ class Database:
                 return int(default)
 
         imported_by_id = int(imported_by) if imported_by is not None else None
-        source_file_name_norm = str(source_file_name or '').strip() or None
         batch_id = uuid.uuid4()
 
         normalized_events = []
@@ -12856,8 +12838,6 @@ class Database:
                 'event_date': event_date_obj,
                 'status_key': status_key,
                 'state_note': state_note,
-                'source_file_name': source_file_name_norm,
-                'import_batch_id': str(batch_id),
                 'imported_by': imported_by_id
             })
             affected_operator_ids.add(operator_id)
@@ -12932,10 +12912,6 @@ class Database:
                 continue
             state_note = str(item.get('state_note') or '').strip() or None
 
-            is_work = bool(item.get('is_work'))
-            is_break = bool(item.get('is_break'))
-            is_no_phone = bool(item.get('is_no_phone'))
-
             normalized_segments.append({
                 'operator_id': operator_id,
                 'status_date': status_date_obj,
@@ -12944,11 +12920,6 @@ class Database:
                 'duration_sec': duration_sec,
                 'status_key': status_key,
                 'state_note': state_note,
-                'is_work': is_work,
-                'is_break': is_break,
-                'is_no_phone': is_no_phone,
-                'source_file_name': source_file_name_norm,
-                'import_batch_id': str(batch_id),
                 'imported_by': imported_by_id
             })
             affected_operator_ids.add(operator_id)
@@ -13032,7 +13003,7 @@ class Database:
             cursor.execute(
                 """
                 INSERT INTO operator_status_import_batches (
-                    id, source_file_name, imported_by,
+                    id, imported_by,
                     source_rows, valid_events, matched_events, segments_saved,
                     deleted_events, deleted_segments,
                     invalid_rows_count, parse_errors_count,
@@ -13040,7 +13011,7 @@ class Database:
                     date_from, date_to, meta_json
                 )
                 VALUES (
-                    %s, %s, %s,
+                    %s, %s,
                     %s, %s, %s, %s,
                     %s, %s,
                     %s, %s,
@@ -13050,7 +13021,6 @@ class Database:
                 """,
                 (
                     str(batch_id),
-                    source_file_name_norm,
                     imported_by_id,
                     _safe_int(summary_payload.get('source_rows'), default=0),
                     _safe_int(summary_payload.get('valid_events'), default=0),
@@ -13076,8 +13046,6 @@ class Database:
                     'event_date',
                     'status_key',
                     'state_note',
-                    'source_file_name',
-                    'import_batch_id',
                     'imported_by'
                 ]
                 event_values = []
@@ -13108,11 +13076,6 @@ class Database:
                     'duration_sec',
                     'status_key',
                     'state_note',
-                    'is_work',
-                    'is_break',
-                    'is_no_phone',
-                    'source_file_name',
-                    'import_batch_id',
                     'imported_by'
                 ]
                 segment_values = []

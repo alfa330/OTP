@@ -9278,9 +9278,6 @@ def _parse_schedule_excel_cell_value(raw_value):
     return {'kind': 'invalid', 'error': 'Ячейка не похожа на смену или "Выходной"'}
 
 
-STATUS_IMPORT_WORK_KEYS = {'готов', 'занят', 'занята', 'перезвон'}
-STATUS_IMPORT_BREAK_KEYS = {'перерыв', 'авто'}
-STATUS_IMPORT_NO_PHONE_KEY = 'без телефона'
 STATUS_IMPORT_MAX_FILE_SIZE_MB = max(1, int(os.getenv('STATUS_IMPORT_MAX_FILE_SIZE_MB', '12')))
 STATUS_IMPORT_MAX_FILE_SIZE_BYTES = STATUS_IMPORT_MAX_FILE_SIZE_MB * 1024 * 1024
 STATUS_IMPORT_MAX_SOURCE_ROWS = max(1, int(os.getenv('STATUS_IMPORT_MAX_SOURCE_ROWS', '120000')))
@@ -9576,11 +9573,6 @@ def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, in
                 zero_or_negative_transitions += 1
                 continue
 
-            status_key_norm = _status_import_normalize_key(cur.get('status_key'))
-            is_work = status_key_norm in STATUS_IMPORT_WORK_KEYS
-            is_break = status_key_norm in STATUS_IMPORT_BREAK_KEYS
-            is_no_phone = status_key_norm == STATUS_IMPORT_NO_PHONE_KEY
-
             for part in _status_import_split_segment_by_day(cur_ts, next_ts):
                 segments.append({
                     'operator_id': int(operator_id),
@@ -9589,10 +9581,7 @@ def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, in
                     'end_at': part['end'],
                     'duration_sec': int(part['duration_sec']),
                     'status_key': cur.get('status_key'),
-                    'state_note': cur.get('state_note'),
-                    'is_work': is_work,
-                    'is_break': is_break,
-                    'is_no_phone': is_no_phone
+                    'state_note': cur.get('state_note')
                 })
 
         open_tail_events += 1
@@ -11567,7 +11556,6 @@ def import_work_schedules_statuses_csv():
             events=parsed.get('events') or [],
             segments=parsed.get('segments') or [],
             imported_by=requester_id,
-            source_file_name=file_name,
             summary={
                 'source_rows': int(parsed.get('source_rows') or 0),
                 'valid_events': int(parsed.get('valid_events') or 0),
@@ -11577,7 +11565,6 @@ def import_work_schedules_statuses_csv():
                 'zero_or_negative_transitions': int(parsed.get('zero_or_negative_transitions') or 0),
                 'meta': {
                     'api': 'import_statuses_csv',
-                    'source_file_name': file_name,
                     'file_size_bytes': len(raw_bytes or b'')
                 }
             }

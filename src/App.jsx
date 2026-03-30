@@ -5961,8 +5961,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         let durationSec = Math.round(Number(seg?.durationSec ?? seg?.duration_sec ?? 0));
                         if (!Number.isFinite(durationSec) || durationSec <= 0) durationSec = Math.max(0, Math.round((end - start) / 1000));
                         if (durationSec <= 0) return;
-                        const isWork = Boolean(seg?.isWork ?? seg?.is_work);
-                        const isBreak = Boolean(seg?.isBreak ?? seg?.is_break);
+                        const isWork = PLANNER_IMPORTED_WORK_STATUS_KEYS.has(statusKey);
+                        const isBreak = PLANNER_IMPORTED_BREAK_STATUS_KEYS.has(statusKey);
                         const isNoPhone = statusKey === PLANNER_STATUS_NO_PHONE_KEY;
                         const isNoPhoneAnomaly = isNoPhone && durationSec > PLANNER_STATUS_NO_PHONE_ANOMALY_SECONDS;
                         const preparedSeg = {
@@ -17936,8 +17936,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     || seg?.statusName
                                     || ''
                                 );
-                                const statusIsWork = Boolean(seg?.isWork ?? seg?.is_work);
-                                if (!statusIsWork && !PLANNER_IMPORTED_WORK_STATUS_KEYS.has(statusKeyNorm)) return null;
+                                const statusIsWork = PLANNER_IMPORTED_WORK_STATUS_KEYS.has(statusKeyNorm);
+                                if (!statusIsWork) return null;
                                 return { start, end };
                             })
                             .filter(Boolean)
