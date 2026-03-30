@@ -9590,7 +9590,6 @@ def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, in
                     'duration_sec': int(part['duration_sec']),
                     'status_key': cur.get('status_key'),
                     'state_note': cur.get('state_note'),
-                    'source_row': cur.get('source_row'),
                     'is_work': is_work,
                     'is_break': is_break,
                     'is_no_phone': is_no_phone

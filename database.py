@@ -1187,7 +1187,6 @@ class Database:
                     event_date DATE NOT NULL,
                     status_key VARCHAR(128) NOT NULL,
                     state_note VARCHAR(255) NULL,
-                    source_row INTEGER NULL,
                     source_file_name VARCHAR(255) NULL,
                     import_batch_id UUID NULL REFERENCES operator_status_import_batches(id) ON DELETE SET NULL,
                     imported_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
@@ -1204,7 +1203,6 @@ class Database:
                     duration_sec INTEGER NOT NULL,
                     status_key VARCHAR(128) NOT NULL,
                     state_note VARCHAR(255) NULL,
-                    source_row INTEGER NULL,
                     is_work BOOLEAN NOT NULL DEFAULT FALSE,
                     is_break BOOLEAN NOT NULL DEFAULT FALSE,
                     is_no_phone BOOLEAN NOT NULL DEFAULT FALSE,
@@ -9844,7 +9842,6 @@ class Database:
                 duration_sec,
                 status_key,
                 state_note,
-                source_row,
                 COALESCE(is_work, FALSE),
                 COALESCE(is_break, FALSE),
                 COALESCE(is_no_phone, FALSE)
@@ -9876,7 +9873,6 @@ class Database:
                 duration_sec,
                 status_key,
                 state_note,
-                source_row,
                 is_work,
                 is_break,
                 is_no_phone
@@ -9903,7 +9899,6 @@ class Database:
                 'stateName': str(state_label_value or ''),
                 'stateKey': str(status_key_norm or ''),
                 'stateNote': str(state_note or ''),
-                'sourceRow': int(source_row) if source_row is not None else None,
                 'isWork': bool(is_work),
                 'isBreak': bool(is_break),
                 'isNoPhone': bool(is_no_phone)
@@ -12854,11 +12849,6 @@ class Database:
             if not status_key:
                 continue
             state_note = str(item.get('state_note') or '').strip() or None
-            source_row = item.get('source_row')
-            try:
-                source_row = int(source_row) if source_row is not None else None
-            except Exception:
-                source_row = None
 
             normalized_events.append({
                 'operator_id': operator_id,
@@ -12866,7 +12856,6 @@ class Database:
                 'event_date': event_date_obj,
                 'status_key': status_key,
                 'state_note': state_note,
-                'source_row': source_row,
                 'source_file_name': source_file_name_norm,
                 'import_batch_id': str(batch_id),
                 'imported_by': imported_by_id
@@ -12942,11 +12931,6 @@ class Database:
             if not status_key:
                 continue
             state_note = str(item.get('state_note') or '').strip() or None
-            source_row = item.get('source_row')
-            try:
-                source_row = int(source_row) if source_row is not None else None
-            except Exception:
-                source_row = None
 
             is_work = bool(item.get('is_work'))
             is_break = bool(item.get('is_break'))
@@ -12960,7 +12944,6 @@ class Database:
                 'duration_sec': duration_sec,
                 'status_key': status_key,
                 'state_note': state_note,
-                'source_row': source_row,
                 'is_work': is_work,
                 'is_break': is_break,
                 'is_no_phone': is_no_phone,
@@ -13093,7 +13076,6 @@ class Database:
                     'event_date',
                     'status_key',
                     'state_note',
-                    'source_row',
                     'source_file_name',
                     'import_batch_id',
                     'imported_by'
@@ -13126,7 +13108,6 @@ class Database:
                     'duration_sec',
                     'status_key',
                     'state_note',
-                    'source_row',
                     'is_work',
                     'is_break',
                     'is_no_phone',
