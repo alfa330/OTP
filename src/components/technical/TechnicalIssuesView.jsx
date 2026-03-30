@@ -102,13 +102,12 @@ const TechnicalIssuesView = ({
         const filtered = list.filter((op) => {
             const opRole = String(op?.role || 'operator').trim().toLowerCase();
             if (opRole !== 'operator') return false;
-            if (role === 'sv' && Number(op?.supervisor_id) !== Number(user?.id)) return false;
             return true;
         });
         return filtered.sort((a, b) =>
             String(a?.name || '').localeCompare(String(b?.name || ''), 'ru', { sensitivity: 'base' })
         );
-    }, [operators, role, user?.id]);
+    }, [operators]);
 
     const visibleDirections = useMemo(() => {
         const list = Array.isArray(directions) ? directions : [];

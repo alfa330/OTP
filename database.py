@@ -5659,7 +5659,15 @@ class Database:
         """, (normalized_ids,))
         return {int(row[0]): row[1] for row in cursor.fetchall()}
 
-    def _resolve_technical_issue_operator_ids_tx(self, cursor, requester_id, requester_role, operator_ids=None, direction_ids=None):
+    def _resolve_technical_issue_operator_ids_tx(
+        self,
+        cursor,
+        requester_id,
+        requester_role,
+        operator_ids=None,
+        direction_ids=None,
+        enforce_supervisor_scope=True
+    ):
         role_norm = self._normalize_technical_issue_role(requester_role)
         if not (role_has_min(role_norm, 'admin') or role_norm == 'sv'):
             raise ValueError("Only admin and sv can register technical issues")
@@ -5680,7 +5688,7 @@ class Database:
             if missing_ids:
                 raise ValueError(f"Operators not found: {', '.join(map(str, missing_ids))}")
 
-            if role_norm == 'sv':
+            if role_norm == 'sv' and enforce_supervisor_scope:
                 forbidden_ids = [int(op_id) for op_id, supervisor_id in rows if int(supervisor_id or 0) != int(requester_id)]
                 if forbidden_ids:
                     raise ValueError(f"Forbidden operators for sv: {', '.join(map(str, forbidden_ids))}")
@@ -5697,7 +5705,7 @@ class Database:
             if missing_directions:
                 raise ValueError(f"Directions not found or inactive: {', '.join(map(str, missing_directions))}")
 
-            if role_norm == 'sv':
+            if role_norm == 'sv' and enforce_supervisor_scope:
                 cursor.execute("""
                     SELECT id
                     FROM users
@@ -5758,7 +5766,8 @@ class Database:
                 requester_id=requester_id_int,
                 requester_role=role_norm,
                 operator_ids=operator_ids,
-                direction_ids=direction_ids
+                direction_ids=direction_ids,
+                enforce_supervisor_scope=False
             )
 
             overlaps_by_operator = self._find_shift_overlap_intervals_for_technical_issue_tx(
@@ -5852,13 +5861,8 @@ class Database:
 
         limit_int = max(1, min(int(limit or 500), 5000))
         offset_int = max(0, int(offset or 0))
-        requester_id_int = int(requester_id)
-
         where_parts = []
         params = []
-        if role_norm == 'sv':
-            where_parts.append("op.supervisor_id = %s")
-            params.append(requester_id_int)
 
         if issue_date:
             issue_date_obj = self._parse_technical_issue_date(issue_date, field_name='date')
@@ -5992,6 +5996,7 @@ class Database:
                     ti.batch_id::text,
                     ti.operator_id,
                     op.supervisor_id,
+                    ti.created_by,
                     ti.issue_date,
                     ti.start_time,
                     ti.end_time,
@@ -6007,8 +6012,12 @@ class Database:
                 raise ValueError("Technical issue not found")
 
             supervisor_id = int(row[3]) if row[3] is not None else None
-            if role_norm == 'sv' and supervisor_id != requester_id_int:
-                raise PermissionError("Forbidden")
+            issue_created_by = int(row[4]) if row[4] is not None else None
+            if role_norm == 'sv':
+                can_manage_by_scope = supervisor_id == requester_id_int
+                can_manage_by_creator = issue_created_by == requester_id_int
+                if not (can_manage_by_scope or can_manage_by_creator):
+                    raise PermissionError("Forbidden")
 
             cursor.execute(
                 """
@@ -6026,10 +6035,10 @@ class Database:
                 'id': int(row[0]),
                 'batch_id': row[1],
                 'operator_id': int(row[2]),
-                'date': row[4].strftime('%Y-%m-%d') if row[4] else None,
-                'start_time': row[5].strftime('%H:%M') if row[5] else None,
-                'end_time': row[6].strftime('%H:%M') if row[6] else None,
-                'reason': row[7]
+                'date': row[5].strftime('%Y-%m-%d') if row[5] else None,
+                'start_time': row[6].strftime('%H:%M') if row[6] else None,
+                'end_time': row[7].strftime('%H:%M') if row[7] else None,
+                'reason': row[8]
             }
 
     def create_operator_offline_activity(
