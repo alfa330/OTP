@@ -14148,6 +14148,19 @@ class Database:
             assignments = assignments_by_survey.get(survey_id, [])
             responses = responses_by_survey.get(survey_id, [])
             question_positions = question_positions_by_survey.get(survey_id, {})
+            test_question_meta_by_id = {}
+            test_total_questions = 0
+            if is_test:
+                for question in questions:
+                    question_id = int(question.get('id') or 0)
+                    question_type = str(question.get('type') or '')
+                    correct_options = [str(item) for item in (question.get('correct_options') or [])]
+                    test_question_meta_by_id[question_id] = {
+                        'type': question_type,
+                        'correct_options': correct_options
+                    }
+                    if question_type in ('single', 'multiple'):
+                        test_total_questions += 1
 
             assigned_count = len(assignments)
             completed_count = sum(1 for assignment in assignments if assignment.get('status') == 'completed')
@@ -14183,13 +14196,61 @@ class Database:
                 )
 
                 answers_by_question = {}
+                normalized_answers = []
+                test_answered_questions = 0
+                test_correct_answers = 0
+
                 for answer in response_answers:
                     question_id = int(answer.get('question_id'))
-                    answers_by_question[str(question_id)] = {
+                    selected_options = list(answer.get('selected_options') or [])
+                    answer_text = str(answer.get('answer_text') or '')
+                    answer_payload = {
                         'question_id': question_id,
-                        'selected_options': list(answer.get('selected_options') or []),
-                        'answer_text': str(answer.get('answer_text') or ''),
+                        'selected_options': selected_options,
+                        'answer_text': answer_text,
                         'rating_value': answer.get('rating_value')
+                    }
+                    if is_test:
+                        question_meta = test_question_meta_by_id.get(question_id) or {}
+                        expected_options = list(question_meta.get('correct_options') or [])
+                        question_type = str(question_meta.get('type') or '')
+                        has_answer = bool(selected_options or answer_text or answer.get('rating_value') is not None)
+                        if has_answer:
+                            test_answered_questions += 1
+
+                        is_correct_answer = False
+                        if question_type == 'single':
+                            is_correct_answer = (
+                                len(expected_options) == 1
+                                and len(selected_options) == 1
+                                and selected_options[0] == expected_options[0]
+                                and not answer_text
+                            )
+                        elif question_type == 'multiple':
+                            is_correct_answer = (
+                                len(expected_options) > 0
+                                and set(selected_options) == set(expected_options)
+                                and not answer_text
+                            )
+                        if is_correct_answer:
+                            test_correct_answers += 1
+
+                        answer_payload['is_correct'] = bool(is_correct_answer)
+                        answer_payload['expected_options'] = expected_options
+
+                    answers_by_question[str(question_id)] = answer_payload
+                    normalized_answers.append(answer_payload)
+
+                test_summary = None
+                if is_test:
+                    score_percent = None
+                    if response_id is not None:
+                        score_percent = round((test_correct_answers / test_total_questions) * 100, 1) if test_total_questions > 0 else 0.0
+                    test_summary = {
+                        'total_questions': int(test_total_questions),
+                        'answered_questions': int(test_answered_questions),
+                        'correct_answers': int(test_correct_answers),
+                        'score_percent': float(score_percent) if score_percent is not None else None
                     }
 
                 responses_detailed.append({
@@ -14203,8 +14264,9 @@ class Database:
                     'repeat_iteration': int(repeat_iteration),
                     'repeat_root_id': int(repeat_root_id),
                     'repeat_survey_id': int(survey_id),
-                    'answers': response_answers,
-                    'answers_by_question': answers_by_question
+                    'answers': normalized_answers,
+                    'answers_by_question': answers_by_question,
+                    'test_summary': test_summary
                 })
 
             serialized.append({
