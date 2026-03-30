@@ -146,6 +146,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [isStatsExporting, setIsStatsExporting] = useState(false);
     const [activeTab, setActiveTab] = useState('questions'); // 'questions' | 'stats'
+    const [statsViewMode, setStatsViewMode] = useState('answers'); // 'scores' | 'answers'
     const [statsOperatorQuery, setStatsOperatorQuery] = useState('');
     const showToastRef = useRef(showToast);
     const onSurveyProgressChangedRef = useRef(onSurveyProgressChanged);
@@ -273,12 +274,15 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
 
     useEffect(() => {
         setStatsOperatorQuery('');
-    }, [selectedSurveyId]);
+        const currentSurvey = (surveys || []).find((item) => String(item.id) === String(selectedSurveyId));
+        setStatsViewMode(currentSurvey?.is_test ? 'scores' : 'answers');
+    }, [selectedSurveyId, surveys]);
 
     const selectedSurvey = useMemo(
         () => surveys.find((item) => String(item.id) === String(selectedSurveyId)) || null,
         [selectedSurveyId, surveys]
     );
+    const isTestStatsSurvey = !!selectedSurvey?.is_test;
 
     const surveyQuestionsBySurveyId = useMemo(() => {
         const map = new Map();
@@ -404,6 +408,16 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
         }
         return false;
     }, [getExpectedOptionsForTest]);
+
+    const hasSurveyAnswer = useCallback((question, answer) => {
+        if (!question || !answer) return false;
+        if (question.type === 'rating') {
+            return Number.isFinite(Number(answer?.rating_value));
+        }
+        const selectedOptions = toUniqueTrimmedList(answer?.selected_options);
+        const answerText = String(answer?.answer_text || '').trim();
+        return selectedOptions.length > 0 || answerText.length > 0;
+    }, []);
 
     const formatSurveyDateTime = useCallback((value) => {
         if (!value) return '—';
@@ -1768,12 +1782,42 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                         <div className="border border-gray-100 rounded-xl p-4 bg-white space-y-3">
                                             <div className="flex items-center justify-between gap-3 flex-wrap">
                                                 <div>
-                                                    <h4 className="text-sm font-semibold text-gray-800">Ответы сотрудников</h4>
+                                                    <h4 className="text-sm font-semibold text-gray-800">
+                                                        {isTestStatsSurvey && statsViewMode === 'scores' ? 'Общий балл сотрудников' : 'Ответы сотрудников'}
+                                                    </h4>
                                                     <p className="text-[11px] text-gray-500 mt-0.5">
-                                                        Табличный просмотр: что выбрал и что написал каждый сотрудник
+                                                        {isTestStatsSurvey && statsViewMode === 'scores'
+                                                            ? 'Сводная таблица по результатам теста для каждого сотрудника.'
+                                                            : 'Табличный просмотр: что выбрал и что написал каждый сотрудник.'}
                                                     </p>
                                                 </div>
-                                                <div className="flex items-center gap-2">
+                                                <div className="flex items-center gap-2 flex-wrap">
+                                                    {isTestStatsSurvey && (
+                                                        <div className="inline-flex rounded-lg border border-gray-200 p-0.5 bg-gray-50">
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => setStatsViewMode('scores')}
+                                                                className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
+                                                                    statsViewMode === 'scores'
+                                                                        ? 'bg-blue-600 text-white'
+                                                                        : 'text-gray-600 hover:bg-gray-100'
+                                                                }`}
+                                                            >
+                                                                Общий балл
+                                                            </button>
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => setStatsViewMode('answers')}
+                                                                className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
+                                                                    statsViewMode === 'answers'
+                                                                        ? 'bg-blue-600 text-white'
+                                                                        : 'text-gray-600 hover:bg-gray-100'
+                                                                }`}
+                                                            >
+                                                                Ответы
+                                                            </button>
+                                                        </div>
+                                                    )}
                                                     <button
                                                         type="button"
                                                         onClick={exportSurveyStatsExcel}
@@ -1801,73 +1845,175 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                             </div>
 
                                             <div className="overflow-x-auto border border-gray-100 rounded-lg">
-                                                <table className="min-w-full divide-y divide-gray-100 text-xs">
-                                                    <thead className="bg-gray-50">
-                                                        <tr>
-                                                            <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Сотрудник</th>
-                                                            <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Статус</th>
-                                                            <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Отправлено</th>
-                                                            <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Повтор</th>
-                                                            {(selectedSurvey?.questions || []).map((question, qIndex) => (
-                                                                <th key={`table_q_${question.id}`} className="px-3 py-2 text-left font-semibold text-gray-600 min-w-[220px]">
-                                                                    <div className="text-[10px] text-gray-400 mb-0.5">Вопрос #{qIndex + 1}</div>
-                                                                    <div className="line-clamp-2">{question.text}</div>
-                                                                </th>
-                                                            ))}
-                                                        </tr>
-                                                    </thead>
-                                                    <tbody className="divide-y divide-gray-100">
-                                                        {detailedStatsRows.length === 0 && (
+                                                {isTestStatsSurvey && statsViewMode === 'scores' ? (
+                                                    <table className="min-w-full divide-y divide-gray-100 text-xs">
+                                                        <thead className="bg-gray-50">
                                                             <tr>
-                                                                <td
-                                                                    className="px-3 py-4 text-center text-gray-400"
-                                                                    colSpan={4 + (selectedSurvey?.questions || []).length}
-                                                                >
-                                                                    Сотрудники не найдены
-                                                                </td>
+                                                                <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Сотрудник</th>
+                                                                <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Статус</th>
+                                                                <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Отправлено</th>
+                                                                <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Повтор</th>
+                                                                <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Общий балл</th>
+                                                                <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Верно</th>
+                                                                <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Отвечено</th>
                                                             </tr>
-                                                        )}
-                                                        {detailedStatsRows.map((row) => {
-                                                            const isCompleted = String(row?.status || '').toLowerCase() === 'completed';
-                                                            const repeatIteration = Number(
-                                                                row?.repeat_iteration != null
-                                                                    ? row.repeat_iteration
-                                                                    : (selectedSurvey?.repeat?.iteration || 1)
-                                                            );
-                                                            const repeatSurveyId = Number(row?.repeat_survey_id || selectedSurvey?.id || 0);
-                                                            return (
-                                                                <tr key={`stats_row_${row?.operator_id}_${repeatSurveyId}`}>
-                                                                    <td className="px-3 py-2.5 whitespace-nowrap text-gray-800 font-medium">
-                                                                        {row?.operator_name || `#${row?.operator_id || '—'}`}
+                                                        </thead>
+                                                        <tbody className="divide-y divide-gray-100">
+                                                            {detailedStatsRows.length === 0 && (
+                                                                <tr>
+                                                                    <td className="px-3 py-4 text-center text-gray-400" colSpan={7}>
+                                                                        Сотрудники не найдены
                                                                     </td>
-                                                                    <td className="px-3 py-2.5 whitespace-nowrap">
-                                                                        <Badge color={isCompleted ? 'green' : 'amber'}>
-                                                                            {isCompleted ? 'Пройден' : 'Назначен'}
-                                                                        </Badge>
-                                                                    </td>
-                                                                    <td className="px-3 py-2.5 whitespace-nowrap text-gray-600">
-                                                                        {formatSurveyDateTime(row?.submitted_at)}
-                                                                    </td>
-                                                                    <td className="px-3 py-2.5 whitespace-nowrap">
-                                                                        <Badge color={repeatIteration > 1 ? 'blue' : 'gray'}>
-                                                                            #{repeatIteration}
-                                                                        </Badge>
-                                                                    </td>
-                                                                    {(selectedSurvey?.questions || []).map((question, questionIndex) => {
-                                                                        const resolved = resolveStatsQuestionAndAnswer(row, question, questionIndex);
-                                                                        return (
-                                                                            <td key={`stats_row_${row?.operator_id}_${repeatSurveyId}_q_${question.id}`} className="px-3 py-2.5 align-top text-gray-700">
-                                                                                <div className="max-w-[280px] break-words">
-                                                                                    {formatQuestionAnswerText(resolved.question, resolved.answer)}
-                                                                                </div>
-                                                                            </td>
-                                                                        );
-                                                                    })}
                                                                 </tr>
-                                                            );
-                                                        })}
-                                                    </tbody>
-                                                </table>
+                                                            )}
+                                                            {detailedStatsRows.map((row) => {
+                                                                const isCompleted = String(row?.status || '').toLowerCase() === 'completed';
+                                                                const repeatIteration = Number(
+                                                                    row?.repeat_iteration != null
+                                                                        ? row.repeat_iteration
+                                                                        : (selectedSurvey?.repeat?.iteration || 1)
+                                                                );
+                                                                const repeatSurveyId = Number(row?.repeat_survey_id || selectedSurvey?.id || 0);
+                                                                const testSummary = row?.test_summary || {};
+                                                                const totalQuestions = Number(testSummary?.total_questions || 0);
+                                                                const answeredQuestions = Number(testSummary?.answered_questions || 0);
+                                                                const correctAnswers = Number(testSummary?.correct_answers || 0);
+                                                                const scoreRaw = testSummary?.score_percent;
+                                                                const hasScore = (
+                                                                    scoreRaw !== null
+                                                                    && scoreRaw !== undefined
+                                                                    && `${scoreRaw}`.trim() !== ''
+                                                                    && Number.isFinite(Number(scoreRaw))
+                                                                );
+                                                                const scoreValue = hasScore ? Number(scoreRaw) : 0;
+                                                                return (
+                                                                    <tr key={`stats_score_row_${row?.operator_id}_${repeatSurveyId}`}>
+                                                                        <td className="px-3 py-2.5 whitespace-nowrap text-gray-800 font-medium">
+                                                                            {row?.operator_name || `#${row?.operator_id || '—'}`}
+                                                                        </td>
+                                                                        <td className="px-3 py-2.5 whitespace-nowrap">
+                                                                            <Badge color={isCompleted ? 'green' : 'amber'}>
+                                                                                {isCompleted ? 'Пройден' : 'Назначен'}
+                                                                            </Badge>
+                                                                        </td>
+                                                                        <td className="px-3 py-2.5 whitespace-nowrap text-gray-600">
+                                                                            {formatSurveyDateTime(row?.submitted_at)}
+                                                                        </td>
+                                                                        <td className="px-3 py-2.5 whitespace-nowrap">
+                                                                            <Badge color={repeatIteration > 1 ? 'blue' : 'gray'}>
+                                                                                #{repeatIteration}
+                                                                            </Badge>
+                                                                        </td>
+                                                                        <td className="px-3 py-2.5 align-top">
+                                                                            {hasScore ? (
+                                                                                <div className="min-w-[140px] space-y-1">
+                                                                                    <div className="text-sm font-semibold text-gray-800">
+                                                                                        {scoreValue.toFixed(1).replace(/\.0$/, '')}%
+                                                                                    </div>
+                                                                                    <ProgressBar
+                                                                                        value={scoreValue}
+                                                                                        color={scoreValue >= 80 ? 'emerald' : (scoreValue >= 60 ? 'blue' : 'amber')}
+                                                                                    />
+                                                                                </div>
+                                                                            ) : (
+                                                                                <span className="text-gray-400">—</span>
+                                                                            )}
+                                                                        </td>
+                                                                        <td className="px-3 py-2.5 whitespace-nowrap text-gray-700">
+                                                                            {totalQuestions > 0 ? `${correctAnswers}/${totalQuestions}` : '—'}
+                                                                        </td>
+                                                                        <td className="px-3 py-2.5 whitespace-nowrap text-gray-700">
+                                                                            {totalQuestions > 0 ? `${answeredQuestions}/${totalQuestions}` : '—'}
+                                                                        </td>
+                                                                    </tr>
+                                                                );
+                                                            })}
+                                                        </tbody>
+                                                    </table>
+                                                ) : (
+                                                    <table className="min-w-full divide-y divide-gray-100 text-xs">
+                                                        <thead className="bg-gray-50">
+                                                            <tr>
+                                                                <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Сотрудник</th>
+                                                                <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Статус</th>
+                                                                <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Отправлено</th>
+                                                                <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Повтор</th>
+                                                                {(selectedSurvey?.questions || []).map((question, qIndex) => (
+                                                                    <th key={`table_q_${question.id}`} className="px-3 py-2 text-left font-semibold text-gray-600 min-w-[260px]">
+                                                                        <div className="text-[10px] text-gray-400 mb-0.5">Вопрос #{qIndex + 1}</div>
+                                                                        <div className="line-clamp-2">{question.text}</div>
+                                                                    </th>
+                                                                ))}
+                                                            </tr>
+                                                        </thead>
+                                                        <tbody className="divide-y divide-gray-100">
+                                                            {detailedStatsRows.length === 0 && (
+                                                                <tr>
+                                                                    <td
+                                                                        className="px-3 py-4 text-center text-gray-400"
+                                                                        colSpan={4 + (selectedSurvey?.questions || []).length}
+                                                                    >
+                                                                        Сотрудники не найдены
+                                                                    </td>
+                                                                </tr>
+                                                            )}
+                                                            {detailedStatsRows.map((row) => {
+                                                                const isCompleted = String(row?.status || '').toLowerCase() === 'completed';
+                                                                const repeatIteration = Number(
+                                                                    row?.repeat_iteration != null
+                                                                        ? row.repeat_iteration
+                                                                        : (selectedSurvey?.repeat?.iteration || 1)
+                                                                );
+                                                                const repeatSurveyId = Number(row?.repeat_survey_id || selectedSurvey?.id || 0);
+                                                                return (
+                                                                    <tr key={`stats_row_${row?.operator_id}_${repeatSurveyId}`}>
+                                                                        <td className="px-3 py-2.5 whitespace-nowrap text-gray-800 font-medium">
+                                                                            {row?.operator_name || `#${row?.operator_id || '—'}`}
+                                                                        </td>
+                                                                        <td className="px-3 py-2.5 whitespace-nowrap">
+                                                                            <Badge color={isCompleted ? 'green' : 'amber'}>
+                                                                                {isCompleted ? 'Пройден' : 'Назначен'}
+                                                                            </Badge>
+                                                                        </td>
+                                                                        <td className="px-3 py-2.5 whitespace-nowrap text-gray-600">
+                                                                            {formatSurveyDateTime(row?.submitted_at)}
+                                                                        </td>
+                                                                        <td className="px-3 py-2.5 whitespace-nowrap">
+                                                                            <Badge color={repeatIteration > 1 ? 'blue' : 'gray'}>
+                                                                                #{repeatIteration}
+                                                                            </Badge>
+                                                                        </td>
+                                                                        {(selectedSurvey?.questions || []).map((question, questionIndex) => {
+                                                                            const resolved = resolveStatsQuestionAndAnswer(row, question, questionIndex);
+                                                                            const hasAnswer = hasSurveyAnswer(resolved.question, resolved.answer);
+                                                                            const isCorrect = isTestStatsSurvey ? isTestAnswerCorrect(resolved.question, resolved.answer) : false;
+                                                                            const expectedOptions = isTestStatsSurvey ? getExpectedOptionsForTest(resolved.question, resolved.answer) : [];
+                                                                            return (
+                                                                                <td key={`stats_row_${row?.operator_id}_${repeatSurveyId}_q_${question.id}`} className="px-3 py-2.5 align-top text-gray-700">
+                                                                                    <div className="max-w-[300px] break-words">
+                                                                                        {formatQuestionAnswerText(resolved.question, resolved.answer)}
+                                                                                    </div>
+                                                                                    {isTestStatsSurvey && (
+                                                                                        <div className="mt-1 space-y-1">
+                                                                                            <Badge color={!hasAnswer ? 'gray' : (isCorrect ? 'green' : 'amber')}>
+                                                                                                {!hasAnswer ? 'Нет ответа' : (isCorrect ? 'Верно' : 'Неверно')}
+                                                                                            </Badge>
+                                                                                            {expectedOptions.length > 0 && (
+                                                                                                <div className="text-[10px] text-emerald-700 break-words">
+                                                                                                    Правильный: {expectedOptions.join(', ')}
+                                                                                                </div>
+                                                                                            )}
+                                                                                        </div>
+                                                                                    )}
+                                                                                </td>
+                                                                            );
+                                                                        })}
+                                                                    </tr>
+                                                                );
+                                                            })}
+                                                        </tbody>
+                                                    </table>
+                                                )}
                                             </div>
                                         </div>
                                     </div>

@@ -6538,6 +6538,114 @@ def _survey_export_answer_text(question, answer):
     return '—'
 
 
+def _survey_export_unique_trimmed_list(values):
+    source = values if isinstance(values, list) else []
+    normalized = []
+    for value in source:
+        text = str(value or '').strip()
+        if text and text not in normalized:
+            normalized.append(text)
+    return normalized
+
+
+def _survey_export_expected_options(question, answer):
+    expected_from_answer = _survey_export_unique_trimmed_list((answer or {}).get('expected_options'))
+    if expected_from_answer:
+        return expected_from_answer
+    return _survey_export_unique_trimmed_list((question or {}).get('correct_options'))
+
+
+def _survey_export_is_answer_present(question, answer):
+    if not question or not answer:
+        return False
+
+    qtype = str((question or {}).get('type') or '').strip().lower()
+    if qtype == 'rating':
+        try:
+            return answer.get('rating_value') is not None and str(answer.get('rating_value')).strip() != ''
+        except Exception:
+            return False
+
+    selected = _survey_export_unique_trimmed_list((answer or {}).get('selected_options'))
+    answer_text = str((answer or {}).get('answer_text') or '').strip()
+    return bool(selected or answer_text)
+
+
+def _survey_export_is_test_answer_correct(question, answer):
+    if not question or not answer:
+        return False
+    if isinstance(answer.get('is_correct'), bool):
+        return bool(answer.get('is_correct'))
+
+    qtype = str((question or {}).get('type') or '').strip().lower()
+    selected_options = _survey_export_unique_trimmed_list((answer or {}).get('selected_options'))
+    answer_text = str((answer or {}).get('answer_text') or '').strip()
+    expected_options = _survey_export_expected_options(question, answer)
+
+    if qtype == 'single':
+        return (
+            len(expected_options) == 1
+            and len(selected_options) == 1
+            and selected_options[0] == expected_options[0]
+            and not answer_text
+        )
+    if qtype == 'multiple':
+        return (
+            len(expected_options) > 0
+            and len(selected_options) == len(expected_options)
+            and all(option in selected_options for option in expected_options)
+            and not answer_text
+        )
+    return False
+
+
+def _survey_export_answer_text_for_test(question, answer):
+    base_text = _survey_export_answer_text(question, answer)
+    has_answer = _survey_export_is_answer_present(question, answer)
+    if not has_answer:
+        return f"{base_text} [Нет ответа]"
+
+    is_correct = _survey_export_is_test_answer_correct(question, answer)
+    status_text = 'Верно' if is_correct else 'Неверно'
+    expected_options = _survey_export_expected_options(question, answer)
+    if expected_options:
+        return f"{base_text} [{status_text}] (Правильный: {', '.join(expected_options)})"
+    return f"{base_text} [{status_text}]"
+
+
+def _survey_export_test_row_metrics(row):
+    summary = row.get('test_summary') or {}
+    total_questions = int(summary.get('total_questions') or 0)
+    answered_questions = int(summary.get('answered_questions') or 0)
+    correct_answers = int(summary.get('correct_answers') or 0)
+
+    score_percent = None
+    try:
+        if summary.get('score_percent') is not None:
+            score_percent = float(summary.get('score_percent'))
+    except Exception:
+        score_percent = None
+
+    if total_questions > 0:
+        correct_ratio = f"{correct_answers}/{total_questions}"
+        answered_ratio = f"{answered_questions}/{total_questions}"
+    else:
+        correct_ratio = '—'
+        answered_ratio = '—'
+
+    return {
+        'score_percent': score_percent,
+        'correct_ratio': correct_ratio,
+        'answered_ratio': answered_ratio
+    }
+
+
+def _survey_export_answer_text_with_mode(question, answer, is_test=False):
+    if is_test:
+        return _survey_export_answer_text_for_test(question, answer)
+    return _survey_export_answer_text(question, answer)
+
+
 @app.route('/api/surveys/<int:survey_id>/export_excel', methods=['GET', 'OPTIONS'])
 @require_api_key
 def export_survey_statistics_excel(survey_id):
@@ -6566,8 +6674,10 @@ def export_survey_statistics_excel(survey_id):
         description = str(selected_survey.get('description') or '')
         statistics = selected_survey.get('statistics') or {}
         questions = list(selected_survey.get('questions') or [])
+        is_test = bool(selected_survey.get('is_test'))
         question_stats = list(statistics.get('question_stats') or [])
-        responses_detailed = list(statistics.get('responses_detailed') or [])
+        responses_detailed_all = list(statistics.get('responses_detailed_all_repetitions') or [])
+        responses_detailed = responses_detailed_all if responses_detailed_all else list(statistics.get('responses_detailed') or [])
         repeat_info = selected_survey.get('repeat') or {}
         try:
             repeat_iteration = int(repeat_info.get('iteration') or 1)
@@ -6603,6 +6713,16 @@ def export_survey_statistics_excel(survey_id):
         ws_summary.append(['Пройдено', int(statistics.get('completed_count') or 0)])
         ws_summary.append(['Ожидают', int(statistics.get('pending_count') or 0)])
         ws_summary.append(['Процент прохождения, %', float(statistics.get('completion_rate') or 0)])
+        if is_test:
+            score_values = []
+            for response_row in responses_detailed:
+                metrics = _survey_export_test_row_metrics(response_row)
+                score_percent = metrics.get('score_percent')
+                if isinstance(score_percent, (int, float)):
+                    score_values.append(float(score_percent))
+            ws_summary.append(['Средний балл теста, %', round(sum(score_values) / len(score_values), 1) if score_values else '—'])
+            ws_summary.append(['Лучший балл теста, %', max(score_values) if score_values else '—'])
+            ws_summary.append(['Минимальный балл теста, %', min(score_values) if score_values else '—'])
         ws_summary.append([])
         ws_summary.append(['Статистика по вопросам'])
         ws_summary.append([
@@ -6688,8 +6808,29 @@ def export_survey_statistics_excel(survey_id):
                     float(option_item.get('percent_of_respondents') or option_item.get('percent') or 0)
                 ])
 
+        ws_scores = None
+        if is_test:
+            ws_scores = wb.create_sheet('Баллы теста')
+            ws_scores.append(['Сотрудник', 'ID', 'Статус', 'Отправлено', 'Повторение', 'Общий балл, %', 'Верно', 'Отвечено'])
+            for row in responses_detailed:
+                status_raw = str(row.get('status') or '').strip().lower()
+                status_label = 'Пройден' if status_raw == 'completed' else 'Назначен'
+                test_metrics = _survey_export_test_row_metrics(row)
+                ws_scores.append([
+                    str(row.get('operator_name') or f"#{row.get('operator_id') or ''}"),
+                    int(row.get('operator_id') or 0),
+                    status_label,
+                    _survey_export_format_dt(row.get('submitted_at')),
+                    int(row.get('repeat_iteration') or repeat_iteration),
+                    test_metrics.get('score_percent') if test_metrics.get('score_percent') is not None else '—',
+                    test_metrics.get('correct_ratio'),
+                    test_metrics.get('answered_ratio')
+                ])
+
         ws_answers = wb.create_sheet('Ответы сотрудников')
         answer_headers = ['Сотрудник', 'ID', 'Статус', 'Отправлено', 'Повторение']
+        if is_test:
+            answer_headers.extend(['Общий балл, %', 'Верно', 'Отвечено'])
         for idx, question in enumerate(questions, start=1):
             question_text = str(question.get('text') or f'Вопрос #{idx}').replace('\n', ' ').strip()
             if len(question_text) > 100:
@@ -6708,11 +6849,18 @@ def export_survey_statistics_excel(survey_id):
                 _survey_export_format_dt(row.get('submitted_at')),
                 int(row.get('repeat_iteration') or repeat_iteration)
             ]
+            if is_test:
+                test_metrics = _survey_export_test_row_metrics(row)
+                row_values.extend([
+                    test_metrics.get('score_percent') if test_metrics.get('score_percent') is not None else '—',
+                    test_metrics.get('correct_ratio'),
+                    test_metrics.get('answered_ratio')
+                ])
 
             for question in questions:
                 question_id = int(question.get('id') or 0)
                 answer = answers_by_question.get(str(question_id)) or answers_by_question.get(question_id)
-                row_values.append(_survey_export_answer_text(question, answer))
+                row_values.append(_survey_export_answer_text_with_mode(question, answer, is_test=is_test))
 
             ws_answers.append(row_values)
 
@@ -6814,6 +6962,7 @@ def export_survey_statistics_excel(survey_id):
             ws_summary.row_dimensions[summary_header_row].height = 30
 
         # ---- Answers sheet styles ----
+        answers_question_start_col = 9 if is_test else 6
         last_answers_col = ws_answers.max_column
         last_answers_row = ws_answers.max_row
 
@@ -6833,12 +6982,17 @@ def export_survey_statistics_excel(survey_id):
                 if row_idx % 2 == 0:
                     cell.fill = even_row_fill
 
-                if col_idx >= 6:
+                if col_idx >= answers_question_start_col:
                     cell.alignment = Alignment(horizontal='left', vertical='top', wrap_text=True)
-                elif col_idx in (2, 3, 4, 5):
+                elif col_idx in (2, 3, 4, 5, 6, 7, 8):
                     cell.alignment = Alignment(horizontal='center', vertical='center')
                 else:
                     cell.alignment = Alignment(horizontal='left', vertical='center')
+
+                if isinstance(cell.value, (int, float)) and (
+                    (is_test and col_idx == 6)
+                ):
+                    cell.number_format = '0.0"%"'
 
             status_cell = ws_answers.cell(row=row_idx, column=3)
             status_text = str(status_cell.value or '').strip().lower()
@@ -6853,11 +7007,63 @@ def export_survey_statistics_excel(survey_id):
         ws_answers.column_dimensions['C'].width = 14
         ws_answers.column_dimensions['D'].width = 20
         ws_answers.column_dimensions['E'].width = 12
-        for col_idx in range(6, last_answers_col + 1):
+        if is_test:
+            ws_answers.column_dimensions['F'].width = 14
+            ws_answers.column_dimensions['G'].width = 12
+            ws_answers.column_dimensions['H'].width = 12
+        for col_idx in range(answers_question_start_col, last_answers_col + 1):
             ws_answers.column_dimensions[get_column_letter(col_idx)].width = 38
 
-        ws_answers.freeze_panes = 'F2'
+        ws_answers.freeze_panes = 'I2' if is_test else 'F2'
         ws_answers.auto_filter.ref = f"A1:{get_column_letter(last_answers_col)}{max(1, last_answers_row)}"
+
+        # ---- Test scores sheet styles ----
+        if ws_scores is not None:
+            last_scores_col = ws_scores.max_column
+            last_scores_row = ws_scores.max_row
+
+            for col_idx in range(1, last_scores_col + 1):
+                header_cell = ws_scores.cell(row=1, column=col_idx)
+                header_cell.fill = header_fill
+                header_cell.font = white_bold_font
+                header_cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+                header_cell.border = thin_border
+            ws_scores.row_dimensions[1].height = 28
+
+            for row_idx in range(2, last_scores_row + 1):
+                for col_idx in range(1, last_scores_col + 1):
+                    cell = ws_scores.cell(row=row_idx, column=col_idx)
+                    cell.font = regular_font
+                    cell.border = thin_border
+                    if row_idx % 2 == 0:
+                        cell.fill = even_row_fill
+
+                    if col_idx in (1,):
+                        cell.alignment = Alignment(horizontal='left', vertical='center')
+                    else:
+                        cell.alignment = Alignment(horizontal='center', vertical='center')
+
+                    if col_idx == 6 and isinstance(cell.value, (int, float)):
+                        cell.number_format = '0.0"%"'
+
+                status_cell = ws_scores.cell(row=row_idx, column=3)
+                status_text = str(status_cell.value or '').strip().lower()
+                if status_text == 'пройден':
+                    status_cell.fill = status_done_fill
+                else:
+                    status_cell.fill = status_pending_fill
+                status_cell.font = Font(color='1F2937', bold=True)
+
+            ws_scores.column_dimensions['A'].width = 28
+            ws_scores.column_dimensions['B'].width = 10
+            ws_scores.column_dimensions['C'].width = 14
+            ws_scores.column_dimensions['D'].width = 20
+            ws_scores.column_dimensions['E'].width = 12
+            ws_scores.column_dimensions['F'].width = 14
+            ws_scores.column_dimensions['G'].width = 12
+            ws_scores.column_dimensions['H'].width = 12
+            ws_scores.freeze_panes = 'F2'
+            ws_scores.auto_filter.ref = f"A1:{get_column_letter(last_scores_col)}{max(1, last_scores_row)}"
 
         output = BytesIO()
         wb.save(output)
