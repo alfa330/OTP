@@ -2377,7 +2377,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <div className="w-36 p-2 text-sm text-center border-l">{displayedTotal.toFixed(2)}</div>
                                     <div className="w-36 p-2 text-sm text-center border-l">{formatNumber(regular, 2)}</div>
                                     <div className="w-32 p-2 text-sm text-center border-l">
-                                    {norm > 0 ? `${((displayedTotal.toFixed(2) / norm) * 100).toFixed(2)}%` : '—'}
+                                    {norm > 0 ? `${((displayedTotal / norm) * 100).toFixed(2)}%` : '—'}
                                     </div>
                                     <div className="w-36 p-2 text-sm text-center border-l">
                                     <div className={`inline-flex items-center gap-2 px-3 py-1 rounded-md ${productionColorClass(prodDiff, norm)}`}>
