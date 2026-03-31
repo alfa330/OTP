@@ -6708,6 +6708,7 @@ class Database:
 
         Правила форматирования (по заданию пользователя):
         - Все числовые данные пишем без дополнительного округления.
+        - В Excel визуально показываем максимум 2 знака после запятой (через number format), без изменения фактического значения.
         - Внутри таблицы по дням значение 0 отображается как целое 0 (не 0.0).
         - Ячейки по дням, где значение > 0, закрашивать светло-серым (теперь чуть темнее).
         - Calls (количество звонков) остаются целыми числами.
@@ -7027,9 +7028,14 @@ class Database:
         default = wb.active
         wb.remove(default)
 
+        FLOAT_DISPLAY_FORMAT = '0.##'
+
         def set_cell(ws, r, c, value, align_center=True, fill=None):
             cell = ws.cell(r, c)
             cell.value = value
+            # Визуально показываем максимум 2 знака после запятой без фактического округления значения.
+            if isinstance(value, float):
+                cell.number_format = FLOAT_DISPLAY_FORMAT
             if align_center:
                 cell.alignment = Alignment(horizontal='center', vertical='center')
             cell.border = BORDER_ALL
@@ -7131,7 +7137,7 @@ class Database:
             headers = ["Оператор"]
             if include_supervisor:
                 headers.append("Супервайзер")
-            headers += ["Ставка", "Норма часов (ч)"] + [f"{d:02d}.{mon:02d}" for d in days] + ["Итого часов", "База часов", "Тех. сбои (ч)", "Офлайн активность (ч)", "Вып нормы (%)", "Выработка"]
+            headers += ["Ставка", "Норма часов (ч)"] + [f"{d:02d}.{mon:02d}" for d in days] + ["Итого часов", "База часов", "Тех. сбои (ч)", "Тренинги (ч)", "Офлайн активность (ч)", "Вып нормы (%)", "Выработка"]
             _make_header(ws, headers)
             row = 2
             for op in operators:
@@ -7200,13 +7206,14 @@ class Database:
                 set_cell(ws, row, base_total_col, fmt_total_value('work_time', itogo_chasov))
                 set_cell(ws, row, base_total_col + 1, fmt_total_value('work_time', total_work))
                 set_cell(ws, row, base_total_col + 2, fmt_total_value('work_time', total_technical_issues))
-                set_cell(ws, row, base_total_col + 3, fmt_total_value('work_time', total_offline_activities))
+                set_cell(ws, row, base_total_col + 3, fmt_total_value('work_time', total_counted_trainings))
+                set_cell(ws, row, base_total_col + 4, fmt_total_value('work_time', total_offline_activities))
                 if norm and norm != 0:
                     percent_display = (itogo_chasov / norm) * 100
                 else:
                     percent_display = None
-                set_cell(ws, row, base_total_col + 4, percent_display)
-                set_cell(ws, row, base_total_col + 5, fmt_total_value('work_time', (norm - itogo_chasov) if norm is not None else None))
+                set_cell(ws, row, base_total_col + 5, percent_display)
+                set_cell(ws, row, base_total_col + 6, fmt_total_value('work_time', (norm - itogo_chasov) if norm is not None else None))
 
                 row += 1
 
