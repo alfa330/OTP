@@ -9543,20 +9543,7 @@ def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, in
     zero_or_negative_transitions = 0
     segments = []
     events_for_db = []
-    latest_event_at = None
-    for events_list in events_by_operator.values():
-        for ev in (events_list or []):
-            event_at = ev.get('event_at')
-            if not isinstance(event_at, datetime):
-                continue
-            if latest_event_at is None or event_at > latest_event_at:
-                latest_event_at = event_at
-
-    tail_anchor_dt = latest_event_at
     now_dt = datetime.now()
-    if isinstance(latest_event_at, datetime):
-        if (now_dt - latest_event_at) <= timedelta(hours=48):
-            tail_anchor_dt = now_dt
 
     for operator_id, events_list in events_by_operator.items():
         if not events_list:
@@ -9596,6 +9583,9 @@ def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, in
 
         last_event = events_list[-1]
         last_event_at = last_event.get('event_at')
+        tail_anchor_dt = last_event_at
+        if isinstance(last_event_at, datetime) and (now_dt - last_event_at) <= timedelta(hours=48):
+            tail_anchor_dt = now_dt
         if (
             isinstance(last_event_at, datetime)
             and isinstance(tail_anchor_dt, datetime)
