@@ -16857,10 +16857,22 @@ def lms_admin_upload_materials():
         requested_material_type = str(request.form.get('material_type') or 'file').strip().lower()
         if requested_material_type not in ('video', 'pdf', 'link', 'text', 'file', 'cover'):
             requested_material_type = 'file'
+        replace_bucket = str(request.form.get('replace_bucket') or '').strip() or None
+        replace_blob_path = str(request.form.get('replace_blob_path') or '').strip() or None
+        replace_requested = bool(replace_bucket and replace_blob_path)
+        if not replace_requested:
+            replace_bucket = None
+            replace_blob_path = None
 
         client = get_gcs_client()
         bucket = client.bucket(bucket_name)
         uploaded = []
+        replacement_cleanup = {
+            "requested": replace_requested,
+            "attempted": 0,
+            "deleted": 0,
+            "failed": []
+        }
         now = _lms_now()
         with db._get_cursor() as cursor:
             if lesson_id is not None:
@@ -16929,6 +16941,28 @@ def lms_admin_upload_materials():
                     "signed_url": signed_url
                 })
 
+            replacement_skipped_reason = None
+            if replace_requested:
+                if len(uploaded) != 1:
+                    replacement_skipped_reason = "multiple_uploads_not_supported"
+                elif replace_bucket != bucket_name:
+                    replacement_skipped_reason = "bucket_mismatch"
+                elif not str(replace_blob_path).startswith("lms/materials/"):
+                    replacement_skipped_reason = "blob_path_out_of_scope"
+                elif any(
+                    (str(item.get("bucket") or "").strip() == replace_bucket)
+                    and (str(item.get("blob_path") or "").strip() == replace_blob_path)
+                    for item in uploaded
+                ):
+                    replacement_skipped_reason = "same_as_new_upload"
+                else:
+                    cleanup_result = _lms_delete_blob_refs([(replace_bucket, replace_blob_path)])
+                    replacement_cleanup["attempted"] = int(cleanup_result.get("attempted") or 0)
+                    replacement_cleanup["deleted"] = int(cleanup_result.get("deleted") or 0)
+                    replacement_cleanup["failed"] = cleanup_result.get("failed") or []
+            if replacement_skipped_reason:
+                replacement_cleanup["skipped_reason"] = replacement_skipped_reason
+
             _lms_audit(
                 cursor,
                 actor_id=requester_id,
@@ -16936,10 +16970,23 @@ def lms_admin_upload_materials():
                 action='upload_material',
                 entity_type='lms_lesson',
                 entity_id=lesson_id,
-                details={"files": [item["file_name"] for item in uploaded]}
+                details={
+                    "files": [item["file_name"] for item in uploaded],
+                    "replacement_cleanup": {
+                        "requested": replacement_cleanup.get("requested"),
+                        "attempted": replacement_cleanup.get("attempted"),
+                        "deleted": replacement_cleanup.get("deleted"),
+                        "failed_count": len(replacement_cleanup.get("failed") or []),
+                        "skipped_reason": replacement_cleanup.get("skipped_reason")
+                    }
+                }
             )
 
-        return jsonify({"status": "success", "uploaded": uploaded}), 200
+        return jsonify({
+            "status": "success",
+            "uploaded": uploaded,
+            "replacement_cleanup": replacement_cleanup
+        }), 200
     except Exception as e:
         logging.exception("Error in /api/lms/admin/materials/upload")
         return jsonify({"error": str(e)}), 500
