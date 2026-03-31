@@ -1861,6 +1861,7 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
   const sendHeartbeat = useCallback(async () => {
     if (!canTrack) return null;
     const positionSecondsFromVideo = Number(videoRef.current?.currentTime || 0);
+    const mediaDurationSeconds = Number(videoRef.current?.duration || safeTotalSeconds || 0);
     const localSeconds = Number.isFinite(positionSecondsFromVideo) && positionSecondsFromVideo >= 0
       ? positionSecondsFromVideo
       : Math.floor((progressRef.current * safeTotalSeconds) / 100);
@@ -1868,6 +1869,9 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
       method: "POST",
       body: {
         position_seconds: Math.max(0, Number(localSeconds.toFixed(2))),
+        media_duration_seconds: Number.isFinite(mediaDurationSeconds) && mediaDurationSeconds > 0
+          ? Number(mediaDurationSeconds.toFixed(2))
+          : undefined,
         tab_visible: visibleRef.current,
         client_ts: new Date().toISOString(),
       },
