@@ -7138,6 +7138,14 @@ class Database:
             for op in operators:
                 daily = op.get('daily', {})
                 name = op.get('name') or f"op_{op.get('operator_id')}"
+                op_id_raw = op.get('operator_id')
+                try:
+                    op_id_int = int(op_id_raw)
+                except Exception:
+                    op_id_int = None
+                trainings_by_day = trainings_map.get(op_id_int, {}) if op_id_int is not None else {}
+                technical_by_day = technical_issues_map.get(op_id_int, {}) if op_id_int is not None else {}
+                offline_by_day = offline_activities_map.get(op_id_int, {}) if op_id_int is not None else {}
                 set_cell(ws, row, 1, name, align_center=False)
                 if include_supervisor:
                     sup_name = op.get('supervisor_name') or ""
