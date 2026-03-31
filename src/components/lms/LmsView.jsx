@@ -1867,7 +1867,7 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
     const payload = await lmsRequest(`/api/lms/lessons/${lessonId}/heartbeat`, {
       method: "POST",
       body: {
-        position_seconds: Math.max(0, Math.floor(localSeconds)),
+        position_seconds: Math.max(0, Number(localSeconds.toFixed(2))),
         tab_visible: visibleRef.current,
         client_ts: new Date().toISOString(),
       },
@@ -3289,8 +3289,8 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
       const replaceBlobPath = String(selectedLessonVideoMaterial?.blob_path || "").trim();
       const detectedDuration = await readVideoDurationSeconds(file);
       const nextDurationSeconds = detectedDuration != null
-        ? Math.max(30, Math.round(detectedDuration))
-        : Math.max(30, Number(selectedLessonModel?.durationSeconds || 0) || 15 * 60);
+        ? Math.max(1, Math.round(detectedDuration))
+        : Math.max(1, Number(selectedLessonModel?.durationSeconds || 0) || 15 * 60);
       const uploaded = await uploadSingleMaterial(file, "video", { replaceBucket, replaceBlobPath });
       updateLessonById(selectedLessonModel.id, (prev) => {
         const base = Array.isArray(prev?.materials) ? prev.materials.filter((item) => String(item?.material_type || item?.type || "").toLowerCase() !== "video") : [];
@@ -3558,7 +3558,10 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
               description,
               lesson_type: lessonType,
               position: lessonIndex + 1,
-              duration_seconds: Math.max(30, Number(lessonItem?.durationSeconds || (lessonType === "video" ? 15 * 60 : 8 * 60))),
+              duration_seconds: Math.max(
+                lessonType === "video" ? 1 : 30,
+                Number(lessonItem?.durationSeconds || (lessonType === "video" ? 15 * 60 : 8 * 60))
+              ),
               allow_fast_forward: false,
               completion_threshold: Math.max(1, Math.min(100, Number(lessonItem?.completionThreshold || 95))),
               content_text: contentText || null,

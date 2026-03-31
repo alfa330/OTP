@@ -14072,13 +14072,22 @@ def _lms_get_lesson_context_tx(cursor, user_id, lesson_id):
             l.duration_seconds,
             COALESCE(l.allow_fast_forward, FALSE),
             COALESCE(l.completion_threshold, %s),
-            m.title as module_title
+            m.title as module_title,
+            vm.metadata as video_metadata
         FROM lms_lessons l
         JOIN lms_modules m ON m.id = l.module_id
         JOIN lms_course_versions cv ON cv.id = m.course_version_id
         JOIN lms_course_assignments a
             ON a.course_version_id = cv.id
            AND a.user_id = %s
+        LEFT JOIN LATERAL (
+            SELECT metadata
+            FROM lms_lesson_materials lm
+            WHERE lm.lesson_id = l.id
+              AND lm.material_type = 'video'
+            ORDER BY lm.position ASC, lm.id ASC
+            LIMIT 1
+        ) vm ON TRUE
         WHERE l.id = %s
         LIMIT 1
     """, (LMS_COMPLETION_THRESHOLD, user_id, lesson_id))
@@ -14088,6 +14097,12 @@ def _lms_get_lesson_context_tx(cursor, user_id, lesson_id):
 
     assignment_id = int(row[0])
     lesson_id = int(row[5])
+    lesson_duration_seconds = max(0.0, _lms_to_float(row[8], 0.0))
+    video_metadata = _lms_parse_json(row[12], {})
+    if isinstance(video_metadata, dict):
+        video_duration_seconds = max(0.0, _lms_to_float(video_metadata.get("duration_seconds"), 0.0))
+        if video_duration_seconds > 0:
+            lesson_duration_seconds = video_duration_seconds
     progress, session = _lms_ensure_progress_and_session_tx(cursor, assignment_id, lesson_id, int(user_id))
     return {
         "assignment_id": assignment_id,
@@ -14098,7 +14113,7 @@ def _lms_get_lesson_context_tx(cursor, user_id, lesson_id):
         "lesson_id": lesson_id,
         "lesson_title": row[6],
         "lesson_description": row[7],
-        "duration_seconds": int(row[8] or 0),
+        "duration_seconds": lesson_duration_seconds,
         "allow_fast_forward": bool(row[9]),
         "completion_threshold": float(row[10] or LMS_COMPLETION_THRESHOLD),
         "module_title": row[11],
