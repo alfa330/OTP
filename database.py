@@ -13936,10 +13936,10 @@ class Database:
 
     def _build_survey_question_stats(self, questions, answers_for_survey, respondents_total=0):
         try:
-            respondents_total = int(respondents_total or 0)
+            survey_respondents_total = int(respondents_total or 0)
         except Exception:
-            respondents_total = 0
-        respondents_total = max(0, respondents_total)
+            survey_respondents_total = 0
+        survey_respondents_total = max(0, survey_respondents_total)
 
         answers_by_question = defaultdict(list)
         for answer in answers_for_survey:
@@ -13953,6 +13953,8 @@ class Database:
         for question in questions:
             question_id = int(question['id'])
             qtype = question.get('type')
+            question_text = str(question.get('text') or '')
+            correct_options = [str(item) for item in (question.get('correct_options') or [])]
             question_answers = answers_by_question.get(question_id, [])
             answered_count = 0
 
@@ -13985,16 +13987,20 @@ class Database:
                         'value': score,
                         'count': count,
                         'percent_of_answers': round((count / answered_count) * 100, 1) if answered_count > 0 else 0.0,
-                        'percent_of_respondents': round((count / respondents_total) * 100, 1) if respondents_total > 0 else 0.0
+                        'percent_of_respondents': round((count / survey_respondents_total) * 100, 1) if survey_respondents_total > 0 else 0.0
                     })
 
                 stats.append({
                     'question_id': question_id,
+                    'text': question_text,
                     'type': qtype,
-                    'respondents_total': respondents_total,
+                    'correct_options': correct_options,
+                    'respondents_total': survey_respondents_total,
+                    'question_respondents_total': answered_count,
+                    'survey_respondents_total': survey_respondents_total,
                     'responses_with_answer': answered_count,
-                    'skipped_count': max(0, respondents_total - answered_count),
-                    'response_rate': round((answered_count / respondents_total) * 100, 1) if respondents_total > 0 else 0.0,
+                    'skipped_count': max(0, survey_respondents_total - answered_count),
+                    'response_rate': round((answered_count / survey_respondents_total) * 100, 1) if survey_respondents_total > 0 else 0.0,
                     'average_rating': round(sum(values) / len(values), 2) if values else None,
                     'median_rating': median_rating,
                     'min_rating': min(values) if values else None,
@@ -14033,7 +14039,7 @@ class Database:
                     'count': count,
                     'percent': round((count / answered_count) * 100, 1) if answered_count > 0 else 0.0,
                     'percent_of_answers': round((count / answered_count) * 100, 1) if answered_count > 0 else 0.0,
-                    'percent_of_respondents': round((count / respondents_total) * 100, 1) if respondents_total > 0 else 0.0,
+                    'percent_of_respondents': round((count / survey_respondents_total) * 100, 1) if survey_respondents_total > 0 else 0.0,
                     'percent_of_selections': round((count / selections_total) * 100, 1) if selections_total > 0 else 0.0
                 })
             if question.get('allow_other'):
@@ -14043,7 +14049,7 @@ class Database:
                     'is_other': True,
                     'percent': round((other_count / answered_count) * 100, 1) if answered_count > 0 else 0.0,
                     'percent_of_answers': round((other_count / answered_count) * 100, 1) if answered_count > 0 else 0.0,
-                    'percent_of_respondents': round((other_count / respondents_total) * 100, 1) if respondents_total > 0 else 0.0,
+                    'percent_of_respondents': round((other_count / survey_respondents_total) * 100, 1) if survey_respondents_total > 0 else 0.0,
                     'percent_of_selections': None
                 })
 
@@ -14056,11 +14062,15 @@ class Database:
 
             stats.append({
                 'question_id': question_id,
+                'text': question_text,
                 'type': qtype,
-                'respondents_total': respondents_total,
+                'correct_options': correct_options,
+                'respondents_total': survey_respondents_total,
+                'question_respondents_total': answered_count,
+                'survey_respondents_total': survey_respondents_total,
                 'responses_with_answer': answered_count,
-                'skipped_count': max(0, respondents_total - answered_count),
-                'response_rate': round((answered_count / respondents_total) * 100, 1) if respondents_total > 0 else 0.0,
+                'skipped_count': max(0, survey_respondents_total - answered_count),
+                'response_rate': round((answered_count / survey_respondents_total) * 100, 1) if survey_respondents_total > 0 else 0.0,
                 'selections_total': int(selections_total),
                 'options': options_stats,
                 'top_options': top_options
