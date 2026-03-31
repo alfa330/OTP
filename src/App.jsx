@@ -5882,12 +5882,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (isNoPhone) overallNoPhoneSec += p.durationSec;
                 if (isNoPhoneAnomaly) overallNoPhoneAnomalies += 1;
             };
-            const latestEventTsMs = events.reduce((maxTs, ev) => Math.max(maxTs, Number(ev?.tsMs || 0)), 0);
             const nowTsMs = Date.now();
             const recentWindowMs = 48 * 60 * 60 * 1000;
-            const tailAnchorTsMs = (latestEventTsMs > 0 && (nowTsMs - latestEventTsMs) <= recentWindowMs)
-                ? nowTsMs
-                : latestEventTsMs;
             for (const [operatorName, list] of byOperator.entries()) {
                 if (!list.length) continue;
                 for (let i = 0; i < list.length - 1; i++) {
@@ -5907,6 +5903,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
                 const last = list[list.length - 1];
                 const lastTsMs = Number(last?.tsMs || 0);
+                const tailAnchorTsMs = (lastTsMs > 0 && (nowTsMs - lastTsMs) <= recentWindowMs)
+                    ? nowTsMs
+                    : lastTsMs;
                 if (
                     tailAnchorTsMs > lastTsMs
                     && last?.ts instanceof Date
