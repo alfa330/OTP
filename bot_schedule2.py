@@ -15309,6 +15309,7 @@ def lms_lesson_heartbeat(lesson_id):
 
     data = request.get_json(silent=True) or {}
     raw_position = data.get('position_seconds')
+    raw_media_duration = data.get('media_duration_seconds')
     tab_visible = _lms_parse_bool(data.get('tab_visible'), True)
 
     try:
@@ -15323,7 +15324,13 @@ def lms_lesson_heartbeat(lesson_id):
             progress_id = int(progress[0])
             session_id = int(session[0])
             lesson_duration = float(context["duration_seconds"] or 0.0)
+            media_duration = max(0.0, _lms_to_float(raw_media_duration, default=0.0))
             allow_fast_forward = bool(context["allow_fast_forward"])
+
+            # Use effective media duration from player when available.
+            # This prevents inflated lesson durations from skewing completion ratio.
+            if media_duration > 0.0:
+                lesson_duration = media_duration if lesson_duration <= 0.0 else min(lesson_duration, media_duration)
 
             now = _lms_now()
             requested_position = max(0.0, _lms_to_float(raw_position, default=0.0))
@@ -15428,6 +15435,8 @@ def lms_lesson_heartbeat(lesson_id):
                 json.dumps({
                     "requested_position_seconds": requested_position,
                     "effective_position_seconds": effective_position,
+                    "effective_duration_seconds": lesson_duration,
+                    "media_duration_seconds": media_duration,
                     "tab_visible": tab_visible,
                     "stale_gap": stale_gap,
                     "blocked_forward_seek": blocked_forward_seek
@@ -15440,6 +15449,7 @@ def lms_lesson_heartbeat(lesson_id):
             "status": "success",
             "position_seconds": effective_position,
             "completion_ratio": completion_ratio,
+            "effective_duration_seconds": lesson_duration,
             "active_seconds": next_active,
             "stale_gap": stale_gap,
             "blocked_forward_seek": blocked_forward_seek,
