@@ -3159,8 +3159,10 @@ def preview_calls_table():
             if not selected_sv or selected_sv_role not in ('sv', 'supervisor'):
                 return jsonify({"error": "Супервайзер не найден"}), 404 
 
-        # Только парсим файл, не сохраняем
-        sheet_name, operators, error = db.parse_calls_file(file)
+        # Только парсим файл, не сохраняем.
+        # date (YYYY-MM-DD) опционально: если передан, вернем только строки этой даты.
+        target_date = (request.form.get('date') or '').strip() or None
+        sheet_name, operators, error = db.parse_calls_file(file, target_date=target_date)
         if error:
             return jsonify({"error": error}), 400
 
@@ -3383,49 +3385,72 @@ def upload_group_day():
         skipped = []
         errors = []
         processed_operator_ids = set()
+        processed_months_by_operator = {}
 
         for idx, row in enumerate(operators):
             try:
                 # Normalize fields
                 op_id = row.get('operator_id')
-                name = (row.get('name') or '').strip()
-                # numeric fields: ensure floats/ints
+                name = str(row.get('name') or '').strip()
+
+                row_date_str = str(row.get('date') or date_str).strip()
                 try:
-                    work_time = float(row.get('work_time') or 0.0)
+                    row_day_obj = datetime.strptime(row_date_str, "%Y-%m-%d").date()
                 except Exception:
-                    work_time = 0.0
-                try:
-                    break_time = float(row.get('break_time') or 0.0)
-                except Exception:
-                    break_time = 0.0
-                try:
-                    talk_time = float(row.get('talk_time') or 0.0)
-                except Exception:
-                    talk_time = 0.0
-                try:
-                    calls = int(row.get('calls') or 0)
-                except Exception:
-                    calls = 0
-                try:
-                    efficiency = float(row.get('efficiency') or 0.0)  # в часах
-                except Exception:
-                    efficiency = 0.0
-                try:
-                    fine_amount = float(row.get('fine_amount') or 0.0)
-                except Exception:
-                    fine_amount = 0.0
-                
-                fine_reason = (row.get('fine_reason') or None)
+                    skipped.append({"row": idx, "reason": "invalid row date format", "date": row.get('date')})
+                    continue
+
+                row_month = str(row.get('month') or row_date_str[:7]).strip()
+                if not re.match(r'^\d{4}-\d{2}$', row_month):
+                    row_month = row_date_str[:7]
+
+                def _optional_float(field_name):
+                    if field_name not in row:
+                        return None
+                    raw_val = row.get(field_name)
+                    if raw_val is None or raw_val == '':
+                        return None
+                    try:
+                        return float(raw_val)
+                    except Exception:
+                        return None
+
+                def _optional_int(field_name):
+                    if field_name not in row:
+                        return None
+                    raw_val = row.get(field_name)
+                    if raw_val is None or raw_val == '':
+                        return 0
+                    try:
+                        return max(int(float(raw_val)), 0)
+                    except Exception:
+                        return 0
+
+                # Поля, которых нет в payload, должны быть сохранены как есть из текущей записи дня.
+                # Это позволяет при загрузке файла обновлять только calls, не затирая часы.
+                work_time = _optional_float('work_time')
+                break_time = _optional_float('break_time')
+                talk_time = _optional_float('talk_time')
+                calls = _optional_int('calls')
+                efficiency = _optional_float('efficiency')
+                fine_amount = _optional_float('fine_amount')
+
+                fine_reason_provided = 'fine_reason' in row
+                fine_comment_provided = 'fine_comment' in row
+                fine_reason = (row.get('fine_reason') if fine_reason_provided else None)
+                fine_comment = (row.get('fine_comment') if fine_comment_provided else None)
+                if fine_reason is not None:
+                    fine_reason = str(fine_reason).strip() or None
+                if fine_comment is not None:
+                    fine_comment = str(fine_comment).strip() or None
+
                 # защита: принимаем только разрешённые причины (опционально)
                 ALLOWED_FINE_REASONS = ['Корп такси', 'Опоздание', 'Прокси карта', 'Не выход', 'Другое']
                 if fine_reason and fine_reason not in ALLOWED_FINE_REASONS:
                     # если невалидная причина — помечаем как "Другое" или сохраняем как есть, в примере — нормализуем в 'Другое'
                     fine_reason = 'Другое'
-
-                fine_comment = (row.get('fine_comment') or None)
                 # accept fines array (new format): list of {amount, reason, comment}
-                fines_arr = row.get('fines') if isinstance(row.get('fines'), list) else None
-                month = row.get('month') or default_month
+                fines_arr = row.get('fines') if ('fines' in row and isinstance(row.get('fines'), list)) else None
 
                 # resolve operator_id if not provided
                 resolved_operator_id = None
@@ -3489,6 +3514,49 @@ def upload_group_day():
                     skipped.append({"row": idx, "reason": "operator not found", "name": name})
                     continue
 
+                # Подтягиваем текущие значения дня, если какое-то поле не передано в payload.
+                existing_daily = None
+                needs_existing = any(v is None for v in (work_time, break_time, talk_time, calls, efficiency, fine_amount))
+                needs_existing = needs_existing or (not fine_reason_provided) or (not fine_comment_provided)
+                if needs_existing:
+                    with db._get_cursor() as cursor:
+                        cursor.execute("""
+                            SELECT
+                                COALESCE(work_time, 0),
+                                COALESCE(break_time, 0),
+                                COALESCE(talk_time, 0),
+                                COALESCE(calls, 0),
+                                COALESCE(efficiency, 0),
+                                COALESCE(fine_amount, 0),
+                                fine_reason,
+                                fine_comment
+                            FROM daily_hours
+                            WHERE operator_id = %s AND day = %s
+                            LIMIT 1
+                        """, (resolved_operator_id, row_day_obj))
+                        existing_daily = cursor.fetchone()
+
+                existing_work = float(existing_daily[0]) if existing_daily else 0.0
+                existing_break = float(existing_daily[1]) if existing_daily else 0.0
+                existing_talk = float(existing_daily[2]) if existing_daily else 0.0
+                existing_calls = int(existing_daily[3]) if existing_daily else 0
+                existing_eff = float(existing_daily[4]) if existing_daily else 0.0
+                existing_fine_amount = float(existing_daily[5]) if existing_daily else 0.0
+                existing_fine_reason = (existing_daily[6] if existing_daily else None)
+                existing_fine_comment = (existing_daily[7] if existing_daily else None)
+
+                work_time = float(existing_work if work_time is None else work_time)
+                break_time = float(existing_break if break_time is None else break_time)
+                talk_time = float(existing_talk if talk_time is None else talk_time)
+                calls = max(int(existing_calls if calls is None else calls), 0)
+                efficiency = float(existing_eff if efficiency is None else efficiency)
+                fine_amount = float(existing_fine_amount if fine_amount is None else fine_amount)
+
+                if not fine_reason_provided:
+                    fine_reason = existing_fine_reason
+                if not fine_comment_provided:
+                    fine_comment = existing_fine_comment
+
                 # Insert/update daily_hours
                 try:
                     logging.info(
@@ -3496,7 +3564,7 @@ def upload_group_day():
                         fine_amount, fine_reason, fine_comment
                     )
                     # use the Database helper (assumes method exists)
-                    db.insert_or_update_daily_hours(resolved_operator_id, date_str,
+                    db.insert_or_update_daily_hours(resolved_operator_id, row_date_str,
                                                     work_time=work_time,
                                                     break_time=break_time,
                                                     talk_time=talk_time,
@@ -3506,8 +3574,9 @@ def upload_group_day():
                                                     fine_reason=fine_reason,
                                                     fine_comment=fine_comment,
                                                     fines=fines_arr)
-                    processed.append({"row": idx, "operator_id": resolved_operator_id, "name": name})
+                    processed.append({"row": idx, "operator_id": resolved_operator_id, "name": name, "date": row_date_str})
                     processed_operator_ids.add(resolved_operator_id)
+                    processed_months_by_operator.setdefault(resolved_operator_id, set()).add(row_month)
                 except Exception as e:
                     errors.append({"row": idx, "operator_id": resolved_operator_id, "error": str(e)})
                     continue
@@ -3518,12 +3587,19 @@ def upload_group_day():
 
         # После всех вставок — агрегируем месяц для каждого обработанного оператора
         aggregations = {}
+        aggregations_by_month = {}
         for opid in processed_operator_ids:
-            try:
-                agg = db.aggregate_month_from_daily(opid, default_month)
-                aggregations[opid] = agg
-            except Exception as e:
-                aggregations[opid] = {"error": str(e)}
+            months_for_op = sorted(processed_months_by_operator.get(opid) or {default_month})
+            aggregations_by_month[opid] = {}
+            for month_value in months_for_op:
+                try:
+                    agg = db.aggregate_month_from_daily(opid, month_value)
+                    aggregations_by_month[opid][month_value] = agg
+                except Exception as e:
+                    aggregations_by_month[opid][month_value] = {"error": str(e)}
+            if months_for_op:
+                last_month = months_for_op[-1]
+                aggregations[opid] = aggregations_by_month[opid].get(last_month)
 
         return jsonify({
             "status": "success",
@@ -3534,7 +3610,8 @@ def upload_group_day():
             "skipped_count": len(skipped),
             "skipped": skipped,
             "errors": errors,
-            "aggregations": aggregations
+            "aggregations": aggregations,
+            "aggregations_by_month": aggregations_by_month
         }), 200
 
     except Exception as e:
