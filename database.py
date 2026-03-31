@@ -6715,9 +6715,37 @@ class Database:
         - Добавить границы ко всем ячейкам таблиц.
         """
 
-        trainings_map = trainings_map or {}
-        technical_issues_map = technical_issues_map or {}
-        offline_activities_map = offline_activities_map or {}
+        def _normalize_day_items_map(source_map: Any) -> Dict[int, Dict[int, List[Dict[str, Any]]]]:
+            normalized: Dict[int, Dict[int, List[Dict[str, Any]]]] = {}
+            if not isinstance(source_map, dict):
+                return normalized
+            for op_key, by_day in source_map.items():
+                try:
+                    op_id_int = int(op_key)
+                except Exception:
+                    continue
+                if not isinstance(by_day, dict):
+                    continue
+                op_bucket = normalized.setdefault(op_id_int, {})
+                for day_key, items in by_day.items():
+                    try:
+                        day_int = int(day_key)
+                    except Exception:
+                        continue
+                    if day_int <= 0:
+                        continue
+                    if isinstance(items, list):
+                        day_items = items
+                    elif isinstance(items, dict):
+                        day_items = [items]
+                    else:
+                        day_items = []
+                    op_bucket.setdefault(day_int, []).extend(day_items)
+            return normalized
+
+        trainings_map = _normalize_day_items_map(trainings_map or {})
+        technical_issues_map = _normalize_day_items_map(technical_issues_map or {})
+        offline_activities_map = _normalize_day_items_map(offline_activities_map or {})
         operators = operators["operators"]
 
         # If requested, ensure each operator has `supervisor_name` populated.
@@ -7030,6 +7058,14 @@ class Database:
             for op in operators:
                 daily = op.get('daily', {})
                 name = op.get('name') or f"op_{op.get('operator_id')}"
+                op_id_raw = op.get('operator_id')
+                try:
+                    op_id_int = int(op_id_raw)
+                except Exception:
+                    op_id_int = None
+                trainings_by_day = trainings_map.get(op_id_int, {}) if op_id_int is not None else {}
+                technical_by_day = technical_issues_map.get(op_id_int, {}) if op_id_int is not None else {}
+                offline_by_day = offline_activities_map.get(op_id_int, {}) if op_id_int is not None else {}
                 set_cell(ws, row, 1, name, align_center=False)
                 if include_supervisor:
                     sup_name = op.get('supervisor_name') or ""
@@ -7125,7 +7161,7 @@ class Database:
                     if d:
                         work_val = float(d.get('work_time') or 0.0)
                     # Рассчитываем зачётные часы тренинга для дня и добавляем их к дневному показателю
-                    trainings_for_day = trainings_map.get(op.get('operator_id'), {}).get(day, []) if trainings_map else []
+                    trainings_for_day = trainings_by_day.get(day, []) if trainings_by_day else []
                     counted_for_day = 0.0
                     for t in trainings_for_day:
                         dur = compute_training_duration_hours(t)
@@ -7133,12 +7169,12 @@ class Database:
                             counted_for_day += dur
 
                     technical_for_day = 0.0
-                    technical_items_for_day = technical_issues_map.get(op.get('operator_id'), {}).get(day, []) if technical_issues_map else []
+                    technical_items_for_day = technical_by_day.get(day, []) if technical_by_day else []
                     for item in technical_items_for_day:
                         technical_for_day += compute_technical_issue_duration_hours(item)
 
                     offline_for_day = 0.0
-                    offline_items_for_day = offline_activities_map.get(op.get('operator_id'), {}).get(day, []) if offline_activities_map else []
+                    offline_items_for_day = offline_by_day.get(day, []) if offline_by_day else []
                     for item in offline_items_for_day:
                         offline_for_day += compute_offline_activity_duration_hours(item)
 
@@ -7321,9 +7357,13 @@ class Database:
         for op in operators:
             name = op.get('name') or f"op_{op.get('operator_id')}"
             op_id = op.get('operator_id')
+            try:
+                op_id_int = int(op_id)
+            except Exception:
+                op_id_int = None
 
             # Берём все тренинги оператора (словарь day -> list)
-            op_trainings = trainings_map.get(op_id) or {}
+            op_trainings = trainings_map.get(op_id_int) or {}
 
             # Инициализация итогов
             total_all = 0.0
@@ -7374,7 +7414,11 @@ class Database:
         for op in operators:
             name = op.get('name') or f"op_{op.get('operator_id')}"
             op_id = op.get('operator_id')
-            op_issues = technical_issues_map.get(op_id) or {}
+            try:
+                op_id_int = int(op_id)
+            except Exception:
+                op_id_int = None
+            op_issues = technical_issues_map.get(op_id_int) or {}
 
             total_issue_hours = 0.0
             for day in days:
@@ -7418,7 +7462,11 @@ class Database:
         for op in operators:
             name = op.get('name') or f"op_{op.get('operator_id')}"
             op_id = op.get('operator_id')
-            op_activities = offline_activities_map.get(op_id) or {}
+            try:
+                op_id_int = int(op_id)
+            except Exception:
+                op_id_int = None
+            op_activities = offline_activities_map.get(op_id_int) or {}
 
             total_activity_hours = 0.0
             for day in days:
