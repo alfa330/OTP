@@ -840,9 +840,6 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                 ? stat.skipped_count
                 : Math.max(0, respondentsTotal - answeredCount)
         );
-        const responseRate = Number.isFinite(Number(stat.response_rate))
-            ? Number(stat.response_rate)
-            : (respondentsTotal > 0 ? (answeredCount / respondentsTotal) * 100 : 0);
         const expectedOptions = toUniqueTrimmedList(
             (Array.isArray(stat?.correct_options) && stat.correct_options.length > 0)
                 ? stat.correct_options
@@ -878,11 +875,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                     </Badge>
                 </div>
 
-                {/* Response rate bar */}
-                <div className="space-y-1">
-                    <ProgressBar value={responseRate} color="blue" />
-                    {skippedCount > 0 && <div className="text-[11px] text-gray-400">Пропустили: {skippedCount}</div>}
-                </div>
+                {skippedCount > 0 && <div className="text-[11px] text-gray-400">Пропустили: {skippedCount}</div>}
 
                 {/* Rating stats */}
                 {stat.type === 'rating' && (
