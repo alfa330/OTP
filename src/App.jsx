@@ -2500,7 +2500,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
                 <form onSubmit={handlePreviewUpload} className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md" onClick={e => e.stopPropagation()}>
                     <h3 className="text-lg font-semibold mb-3">Загрузить файл для {selectedDayUpload.dateStr}</h3>
-                    <p className="text-sm text-gray-600 mb-3">Формат файла: <span className="font-medium">ФИО, Дата, Кол-во звонков за день</span>.</p>
+                    <p className="text-sm text-gray-600 mb-3">Формат файла: <span className="font-medium">ФИО, Дата, Кол-во поступивших</span>.</p>
                     <input type="file" accept=".xlsx,.xls,.csv" onChange={e => setUploadFile(e.target.files?.[0] || null)} className="mb-3" />
                     <div className="flex justify-end gap-2">
                     <button type="button" onClick={() => setSelectedDayUpload(null)} className="px-3 py-2 rounded-md border">Отмена</button>
