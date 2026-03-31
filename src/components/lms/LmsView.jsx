@@ -4,7 +4,7 @@ import {
   ChevronDown, BarChart2, Plus, Trash2, Edit, Settings, Lock, Star, Download,
   X, Check, AlertCircle, ArrowLeft, Video, FileText, HelpCircle, Upload,
   Users, TrendingUp, Shield, Target, GripVertical, Filter, Calendar,
-  PlayCircle, AlignLeft, Layers, ChevronLeft, Eye, MoreVertical,
+  PlayCircle, AlignLeft, Layers, ChevronLeft, Eye,
   BookMarked, Zap, ToggleLeft, ToggleRight, LayoutGrid, List, Percent,
   UserCheck, RefreshCw, ClipboardList, PlusCircle, LogOut, ChevronUp,
   Save, Image, Link2, FileCheck, Pause, Volume2, Maximize, AlertTriangle,
@@ -812,6 +812,36 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
     }
   }, [view, loadAdminData]);
 
+  const handleDeleteAdminCourse = useCallback(async (courseLike) => {
+    if (!canUseManagerApi) {
+      emitToast("Недостаточно прав для удаления курса", "error");
+      return false;
+    }
+    if (typeof lmsRequest !== "function") {
+      emitToast("LMS API не подключен", "error");
+      return false;
+    }
+
+    const courseId = Number(courseLike?.id || courseLike || 0);
+    if (!courseId) {
+      emitToast("Некорректный курс", "error");
+      return false;
+    }
+
+    try {
+      await lmsRequest(`/api/lms/admin/courses/${courseId}`, { method: "DELETE" });
+      setAdminCourses((prev) => prev.filter((item) => Number(item?.id || 0) !== courseId));
+      setAdminProgressRows((prev) => prev.filter((item) => Number(item?.course_id || 0) !== courseId));
+      setAdminAttempts((prev) => prev.filter((item) => Number(item?.course_id || 0) !== courseId));
+      emitToast("Курс и его файлы в GCS удалены", "success");
+      await loadAdminData();
+      return true;
+    } catch (error) {
+      emitToast(`Не удалось удалить курс: ${String(error?.message || "ошибка")}`, "error");
+      return false;
+    }
+  }, [canUseManagerApi, lmsRequest, emitToast, loadAdminData]);
+
   const markNotificationRead = useCallback(async (notificationId) => {
     setNotifications((prev) => prev.map((item) => (item.id === notificationId ? { ...item, read: true } : item)));
     if (!apiRoot || !canUseLearnerApi) return;
@@ -1058,6 +1088,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
             attempts={adminAttempts}
             loading={loadingAdmin}
             onOpenBuilder={() => setView("builder")}
+            onDeleteCourse={handleDeleteAdminCourse}
           />
         )}
       </main>
@@ -4441,7 +4472,8 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
 
 // ─── ADMIN VIEW ───────────────────────────────────────────────────────────────
 
-function AdminView({ tab, setTab, adminCourses = [], progressRows = [], attempts = [], loading = false, onOpenBuilder }) {
+function AdminView({ tab, setTab, adminCourses = [], progressRows = [], attempts = [], loading = false, onOpenBuilder, onDeleteCourse }) {
+  const [deletingCourseId, setDeletingCourseId] = useState(null);
   const tabs = [
     { id: "analytics", label: "Аналитика", icon: BarChart2 },
     { id: "employees", label: "Сотрудники", icon: Users },
@@ -4568,6 +4600,23 @@ function AdminView({ tab, setTab, adminCourses = [], progressRows = [], attempts
     ...item,
     pct: Math.round((item.count / courseStatusTotal) * 100),
   }));
+
+  const handleDeleteCourse = async (courseItem) => {
+    const courseId = Number(courseItem?.id || 0);
+    if (!courseId || typeof onDeleteCourse !== "function") return;
+
+    const title = String(courseItem?.title || `Курс #${courseId}`).trim();
+    const confirmationText = `Удалить курс «${title}»?\n\nБудут удалены связанные файлы в GCS.`;
+    const isConfirmed = typeof window !== "undefined" ? window.confirm(confirmationText) : true;
+    if (!isConfirmed) return;
+
+    setDeletingCourseId(courseId);
+    try {
+      await onDeleteCourse(courseItem);
+    } finally {
+      setDeletingCourseId((prev) => (prev === courseId ? null : prev));
+    }
+  };
 
   return (
     <div className="max-w-screen-xl mx-auto px-6 py-8">
@@ -4757,7 +4806,14 @@ function AdminView({ tab, setTab, adminCourses = [], progressRows = [], attempts
                   <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${st.bg} ${st.text}`}>{st.label}</span>
                   <div className="flex items-center gap-1">
                     <button className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-colors"><Edit size={15} /></button>
-                    <button className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-xl transition-colors"><MoreVertical size={15} /></button>
+                    <button
+                      onClick={() => { void handleDeleteCourse(c); }}
+                      disabled={deletingCourseId === c.id}
+                      title={deletingCourseId === c.id ? "Удаляем..." : "Удалить курс"}
+                      className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {deletingCourseId === c.id ? <Clock size={15} /> : <Trash2 size={15} />}
+                    </button>
                   </div>
                 </div>
               </div>
