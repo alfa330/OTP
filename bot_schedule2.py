@@ -13635,6 +13635,105 @@ def _lms_signed_url(bucket_name, blob_path, expires_minutes=120):
         return None
 
 
+def _lms_collect_course_blob_refs_tx(cursor, course_id):
+    refs = set()
+
+    cursor.execute("""
+        SELECT anti_cheat_settings
+        FROM lms_course_versions
+        WHERE course_id = %s
+    """, (course_id,))
+    for row in cursor.fetchall():
+        settings = _lms_parse_json(row[0], {})
+        if not isinstance(settings, dict):
+            continue
+        cover_bucket = str(settings.get('cover_bucket') or '').strip()
+        cover_blob_path = str(settings.get('cover_blob_path') or '').strip()
+        if cover_bucket and cover_blob_path:
+            refs.add((cover_bucket, cover_blob_path))
+
+    cursor.execute("""
+        SELECT DISTINCT lm.gcs_bucket, lm.gcs_blob_path
+        FROM lms_lesson_materials lm
+        JOIN lms_lessons l ON l.id = lm.lesson_id
+        JOIN lms_modules m ON m.id = l.module_id
+        JOIN lms_course_versions cv ON cv.id = m.course_version_id
+        WHERE cv.course_id = %s
+          AND lm.gcs_bucket IS NOT NULL
+          AND lm.gcs_blob_path IS NOT NULL
+    """, (course_id,))
+    for row in cursor.fetchall():
+        bucket_name = str(row[0] or '').strip()
+        blob_path = str(row[1] or '').strip()
+        if bucket_name and blob_path:
+            refs.add((bucket_name, blob_path))
+
+    cursor.execute("""
+        SELECT DISTINCT gcs_bucket, gcs_blob_path
+        FROM lms_certificates
+        WHERE course_id = %s
+          AND pdf_storage_type = 'gcs'
+          AND gcs_bucket IS NOT NULL
+          AND gcs_blob_path IS NOT NULL
+    """, (course_id,))
+    for row in cursor.fetchall():
+        bucket_name = str(row[0] or '').strip()
+        blob_path = str(row[1] or '').strip()
+        if bucket_name and blob_path:
+            refs.add((bucket_name, blob_path))
+
+    return sorted(refs)
+
+
+def _lms_delete_blob_refs(blob_refs):
+    unique_refs = []
+    seen = set()
+    for item in (blob_refs or []):
+        if not isinstance(item, (tuple, list)) or len(item) < 2:
+            continue
+        bucket_name = str(item[0] or '').strip()
+        blob_path = str(item[1] or '').strip()
+        if not bucket_name or not blob_path:
+            continue
+        key = (bucket_name, blob_path)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_refs.append(key)
+
+    if not unique_refs:
+        return {"attempted": 0, "deleted": 0, "failed": []}
+
+    client = get_gcs_client()
+    bucket_cache = {}
+    failed = []
+    deleted_count = 0
+
+    for bucket_name, blob_path in unique_refs:
+        try:
+            bucket = bucket_cache.get(bucket_name)
+            if bucket is None:
+                bucket = client.bucket(bucket_name)
+                bucket_cache[bucket_name] = bucket
+            bucket.blob(blob_path).delete()
+            deleted_count += 1
+        except Exception as delete_error:
+            error_text = str(delete_error or '').lower()
+            if '404' in error_text or 'not found' in error_text or 'no such object' in error_text:
+                continue
+            failed.append({
+                "bucket": bucket_name,
+                "blob_path": blob_path,
+                "error": str(delete_error)
+            })
+
+    return {
+        "attempted": len(unique_refs),
+        "deleted": deleted_count,
+        "failed": failed
+    }
+
+
 def _lms_convert_image_to_webp(raw_bytes, max_side=1600, quality=88):
     if Image is None:
         return None
@@ -16308,6 +16407,59 @@ def lms_admin_courses():
         return jsonify({"error": "Method not allowed"}), 405
     except Exception as e:
         logging.exception("Error in /api/lms/admin/courses")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/lms/admin/courses/<int:course_id>', methods=['DELETE'])
+@require_api_key
+def lms_admin_delete_course(course_id):
+    requester_id, _, requester_role, error_response, status_code = _lms_resolve_request('manager')
+    if error_response:
+        return error_response, status_code
+
+    try:
+        cleanup_result = {"attempted": 0, "deleted": 0, "failed": []}
+        with db._get_cursor() as cursor:
+            cursor.execute("SELECT id, title FROM lms_courses WHERE id = %s LIMIT 1", (course_id,))
+            row = cursor.fetchone()
+            if not row:
+                return jsonify({"error": "Course not found"}), 404
+
+            course_title = str(row[1] or f"Course #{course_id}")
+            blob_refs = _lms_collect_course_blob_refs_tx(cursor, course_id)
+            cleanup_result = _lms_delete_blob_refs(blob_refs)
+            if cleanup_result.get("failed"):
+                first_error = cleanup_result["failed"][0]
+                raise RuntimeError(
+                    "Failed to delete one or more course files from GCS "
+                    f"(example: {first_error.get('bucket')}/{first_error.get('blob_path')})"
+                )
+
+            cursor.execute("DELETE FROM lms_courses WHERE id = %s", (course_id,))
+            if cursor.rowcount <= 0:
+                return jsonify({"error": "Course not found"}), 404
+
+            _lms_audit(
+                cursor,
+                actor_id=requester_id,
+                actor_role=requester_role,
+                action='delete_course',
+                entity_type='lms_course',
+                entity_id=course_id,
+                details={
+                    "course_title": course_title,
+                    "gcs_blobs_attempted": int(cleanup_result.get("attempted") or 0),
+                    "gcs_blobs_deleted": int(cleanup_result.get("deleted") or 0)
+                }
+            )
+
+        return jsonify({
+            "status": "success",
+            "course_id": course_id,
+            "deleted_gcs_blobs": int(cleanup_result.get("deleted") or 0)
+        }), 200
+    except Exception as e:
+        logging.exception("Error in /api/lms/admin/courses/<course_id> DELETE")
         return jsonify({"error": str(e)}), 500
 
 
