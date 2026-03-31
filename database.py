@@ -9821,7 +9821,6 @@ class Database:
 
         min_day = start_date_obj - timedelta(days=1) if start_date_obj else None
         max_day = end_date_obj + timedelta(days=1) if end_date_obj else None
-        latest_known_end_by_operator = {op_id: None for op_id in operator_ids}
 
         def _append_segment(op_id, status_date_value, start_at_value, end_at_value, duration_sec, status_key, state_note):
             target = result.get(int(op_id))
@@ -9901,82 +9900,6 @@ class Database:
                 status_key=status_key,
                 state_note=state_note
             )
-            if isinstance(end_at_value, datetime):
-                known_end = latest_known_end_by_operator.get(op_id)
-                if known_end is None or end_at_value > known_end:
-                    latest_known_end_by_operator[op_id] = end_at_value
-
-        # Для "живой" почасовой группировки добавляем незавершенный хвост
-        # от последнего события оператора до текущего момента (только для свежих данных).
-        now_dt = datetime.now()
-        max_live_tail_age = timedelta(hours=48)
-        cursor.execute(
-            """
-            SELECT DISTINCT ON (operator_id)
-                operator_id,
-                event_at,
-                status_key,
-                state_note
-            FROM operator_status_events
-            WHERE operator_id = ANY(%s)
-            ORDER BY operator_id, event_at DESC, id DESC
-            """,
-            (operator_ids,)
-        )
-        latest_event_rows = cursor.fetchall() or []
-        for operator_id, event_at_value, status_key, state_note in latest_event_rows:
-            op_id = int(operator_id)
-            if not isinstance(event_at_value, datetime):
-                continue
-            if now_dt <= event_at_value:
-                continue
-            if (now_dt - event_at_value) > max_live_tail_age:
-                continue
-
-            tail_start = event_at_value
-            known_end = latest_known_end_by_operator.get(op_id)
-            if isinstance(known_end, datetime) and known_end > tail_start:
-                tail_start = known_end
-            if now_dt <= tail_start:
-                continue
-
-            chunks = self._schedule_auto_split_status_segment_by_day(
-                status_date_value=tail_start.date(),
-                start_at_value=tail_start,
-                end_at_value=now_dt
-            )
-            for chunk in (chunks or []):
-                day_value = chunk.get('day')
-                if not isinstance(day_value, date):
-                    continue
-                if min_day and day_value < min_day:
-                    continue
-                if max_day and day_value > max_day:
-                    continue
-
-                start_sec = int(chunk.get('start') or 0)
-                end_sec = int(chunk.get('end') or 0)
-                if end_sec <= start_sec:
-                    continue
-
-                day_floor = datetime.combine(day_value, dt_time.min)
-                chunk_start = day_floor + timedelta(seconds=start_sec)
-                chunk_end = day_floor + timedelta(seconds=end_sec)
-                if chunk_end <= chunk_start:
-                    continue
-                chunk_duration_sec = int((chunk_end - chunk_start).total_seconds())
-                if chunk_duration_sec <= 0:
-                    continue
-
-                _append_segment(
-                    op_id=op_id,
-                    status_date_value=day_value,
-                    start_at_value=chunk_start,
-                    end_at_value=chunk_end,
-                    duration_sec=chunk_duration_sec,
-                    status_key=status_key,
-                    state_note=state_note
-                )
 
         for op_days in result.values():
             for segments in op_days.values():
