@@ -3132,7 +3132,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
     setNewSkill("");
   };
 
-  const uploadSingleMaterial = useCallback(async (file, materialType = "file") => {
+  const uploadSingleMaterial = useCallback(async (file, materialType = "file", options = {}) => {
     if (typeof lmsRequest !== "function") {
       throw new Error("LMS API не подключен");
     }
@@ -3140,6 +3140,12 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
     formData.append("file", file);
     formData.append("material_type", materialType);
     formData.append("title", file?.name || "Материал");
+    const replaceBucket = String(options?.replaceBucket || "").trim();
+    const replaceBlobPath = String(options?.replaceBlobPath || "").trim();
+    if (replaceBucket && replaceBlobPath) {
+      formData.append("replace_bucket", replaceBucket);
+      formData.append("replace_blob_path", replaceBlobPath);
+    }
     const payload = await lmsRequest("/api/lms/admin/materials/upload", {
       method: "POST",
       body: formData,
@@ -3279,11 +3285,13 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
     if (!file || !selectedLessonModel) return;
     setLessonUploading(true);
     try {
+      const replaceBucket = String(selectedLessonVideoMaterial?.bucket || "").trim();
+      const replaceBlobPath = String(selectedLessonVideoMaterial?.blob_path || "").trim();
       const detectedDuration = await readVideoDurationSeconds(file);
       const nextDurationSeconds = detectedDuration != null
         ? Math.max(30, Math.round(detectedDuration))
         : Math.max(30, Number(selectedLessonModel?.durationSeconds || 0) || 15 * 60);
-      const uploaded = await uploadSingleMaterial(file, "video");
+      const uploaded = await uploadSingleMaterial(file, "video", { replaceBucket, replaceBlobPath });
       updateLessonById(selectedLessonModel.id, (prev) => {
         const base = Array.isArray(prev?.materials) ? prev.materials.filter((item) => String(item?.material_type || item?.type || "").toLowerCase() !== "video") : [];
         return {
@@ -3709,6 +3717,10 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
 
   const selectedLessonMaterials = Array.isArray(selectedLessonModel?.materials) ? selectedLessonModel.materials : [];
   const selectedLessonVideoMaterial = selectedLessonMaterials.find((item) => String(item?.material_type || item?.type || "").toLowerCase() === "video");
+  const selectedLessonVideoUrl = String(
+    selectedLessonVideoMaterial?.url || selectedLessonVideoMaterial?.signed_url || selectedLessonVideoMaterial?.content_url || ""
+  ).trim();
+  const selectedLessonVideoName = selectedLessonVideoMaterial?.metadata?.uploaded_file_name || selectedLessonVideoMaterial?.title || "Видео";
   const selectedLessonVideoDurationSeconds = Math.max(
     0,
     Number(selectedLessonVideoMaterial?.metadata?.duration_seconds || selectedLessonModel?.durationSeconds || 0)
@@ -4161,6 +4173,23 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                             </div>
                             <div>
                               <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Видеофайл</label>
+                              {selectedLessonVideoMaterial && (
+                                <div className="mb-2 rounded-xl border border-slate-200 overflow-hidden bg-slate-950">
+                                  {selectedLessonVideoUrl ? (
+                                    <video
+                                      key={selectedLessonVideoUrl}
+                                      src={selectedLessonVideoUrl}
+                                      controls
+                                      preload="metadata"
+                                      className="w-full max-h-72 bg-black"
+                                    />
+                                  ) : (
+                                    <div className="px-3 py-8 text-xs text-slate-300 text-center">
+                                      Видео прикреплено, но ссылка для предпросмотра пока недоступна
+                                    </div>
+                                  )}
+                                </div>
+                              )}
                               <button
                                 type="button"
                                 onClick={() => lessonVideoInputRef.current?.click()}
@@ -4168,11 +4197,11 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                                 className="w-full border-2 border-dashed border-slate-200 hover:border-indigo-300 rounded-xl py-4 text-xs text-slate-500 hover:text-indigo-600 flex items-center justify-center gap-2 transition-all disabled:opacity-60 disabled:cursor-not-allowed"
                               >
                                 {lessonUploading ? <RefreshCw size={14} className="animate-spin" /> : <Upload size={14} />}
-                                {lessonUploading ? "Загрузка..." : "Загрузить видео"}
+                                {lessonUploading ? "Загрузка..." : selectedLessonVideoMaterial ? "Заменить видео" : "Загрузить видео"}
                               </button>
                               {selectedLessonVideoMaterial && (
                                 <div className="mt-2 text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2">
-                                  Прикреплено: {selectedLessonVideoMaterial?.metadata?.uploaded_file_name || selectedLessonVideoMaterial?.title || "Видео"}
+                                  Прикреплено: {selectedLessonVideoName}
                                 </div>
                               )}
                             </div>
