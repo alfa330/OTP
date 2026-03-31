@@ -25186,12 +25186,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return hh * 60 + mm;
                 };
 
+                const pickFiniteNumber = (...values) => {
+                    for (const value of values) {
+                    if (value === null || value === undefined || value === '') continue;
+                    const parsed = Number(value);
+                    if (Number.isFinite(parsed)) return parsed;
+                    }
+                    return null;
+                };
+
                 const computeTechnicalIssueDuration = (item) => {
                     if (!item) return 0;
-                    const byMinutes = Number(item.duration_minutes ?? item.durationMinutes ?? null);
-                    if (Number.isFinite(byMinutes)) return Math.max(0, byMinutes) / 60;
-                    const byHours = Number(item.duration_hours ?? item.durationHours ?? null);
-                    if (Number.isFinite(byHours)) return Math.max(0, byHours);
+                    const byMinutes = pickFiniteNumber(item.duration_minutes, item.durationMinutes);
+                    if (byMinutes !== null) return Math.max(0, byMinutes) / 60;
+                    const byHours = pickFiniteNumber(item.duration_hours, item.durationHours);
+                    if (byHours !== null) return Math.max(0, byHours);
                     const s = parseHMToMinutes(item.start_time ?? item.startTime);
                     const e = parseHMToMinutes(item.end_time ?? item.endTime);
                     if (s == null || e == null) return 0;
@@ -25202,10 +25211,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                 const computeOfflineActivityDuration = (item) => {
                     if (!item) return 0;
-                    const byMinutes = Number(item.duration_minutes ?? item.durationMinutes ?? null);
-                    if (Number.isFinite(byMinutes)) return Math.max(0, byMinutes) / 60;
-                    const byHours = Number(item.duration_hours ?? item.durationHours ?? null);
-                    if (Number.isFinite(byHours)) return Math.max(0, byHours);
+                    const byMinutes = pickFiniteNumber(item.duration_minutes, item.durationMinutes);
+                    if (byMinutes !== null) return Math.max(0, byMinutes) / 60;
+                    const byHours = pickFiniteNumber(item.duration_hours, item.durationHours);
+                    if (byHours !== null) return Math.max(0, byHours);
                     const s = parseHMToMinutes(item.start_time ?? item.startTime);
                     const e = parseHMToMinutes(item.end_time ?? item.endTime);
                     if (s == null || e == null) return 0;
@@ -25216,10 +25225,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                 const computeTrainingDuration = (item) => {
                     if (!item) return 0;
-                    const byMinutes = Number(item.duration_minutes ?? item.durationMinutes ?? null);
-                    if (Number.isFinite(byMinutes)) return Math.max(0, byMinutes) / 60;
-                    const byHours = Number(item.duration_hours ?? item.durationHours ?? item.hours ?? item.duration ?? item.count ?? null);
-                    if (Number.isFinite(byHours) && byHours > 0) return Math.max(0, byHours);
+                    const byMinutes = pickFiniteNumber(item.duration_minutes, item.durationMinutes);
+                    if (byMinutes !== null) return Math.max(0, byMinutes) / 60;
+                    const byHours = pickFiniteNumber(item.duration_hours, item.durationHours, item.hours, item.duration, item.count);
+                    if (byHours !== null && byHours > 0) return Math.max(0, byHours);
                     const s = parseHMToMinutes(item.start_time ?? item.startTime);
                     const e = parseHMToMinutes(item.end_time ?? item.endTime);
                     if (s == null || e == null) return 0;
