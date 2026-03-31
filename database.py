@@ -3642,9 +3642,8 @@ class Database:
             else:
                 calls_per_hour = 0.0
 
-            # 6) percent_complete: считаем с учётом зачётных тренингов и техсбоев.
-            # Оффлайн-активность отображается отдельно и не включается в рабочие часы.
-            accounted_hours = regular_hours + training_hours + technical_issue_hours
+            # 6) percent_complete: считаем с учётом зачётных тренингов, техсбоев и офлайн-активности.
+            accounted_hours = regular_hours + training_hours + technical_issue_hours + offline_activity_hours
             if norm_hours and norm_hours > 0:
                 percent_complete = (accounted_hours / norm_hours) * 100.0
             else:
@@ -3869,7 +3868,7 @@ class Database:
                 training_hours = round(float(row[7]), 2)
                 technical_issue_hours = round(float(row[8]), 2)
                 offline_activity_hours = round(float(row[9]), 2)
-                accounted_hours = round(regular_hours + training_hours + technical_issue_hours, 2)
+                accounted_hours = round(regular_hours + training_hours + technical_issue_hours + offline_activity_hours, 2)
 
                 effective_call_hours = max(0.0, float(regular_hours))
                 calls_per_hour = (
@@ -7074,6 +7073,14 @@ class Database:
                         # if fn returns percent-string already, keep
                         if isinstance(val, str):
                             set_cell(ws, row, total_col + i, val)
+                        elif metric_key == 'calls':
+                            if val is None:
+                                set_cell(ws, row, total_col + i, None)
+                            else:
+                                try:
+                                    set_cell(ws, row, total_col + i, round(float(val), 1))
+                                except Exception:
+                                    set_cell(ws, row, total_col + i, None)
                         else:
                             set_cell(ws, row, total_col + i, fmt_total_value(metric_key, val))
 
@@ -7135,17 +7142,17 @@ class Database:
                     for item in offline_items_for_day:
                         offline_for_day += compute_offline_activity_duration_hours(item)
 
-                    # Сохраняем в суммарные показатели отдельно, итоговая ячейка по дню — work + trainings + technical
+                    # Сохраняем в суммарные показатели отдельно, итоговая ячейка по дню — work + trainings + technical + offline
                     total_work += work_val
                     total_counted_trainings += counted_for_day
                     total_technical_issues += technical_for_day
                     total_offline_activities += offline_for_day
-                    combined = work_val + counted_for_day + technical_for_day
+                    combined = work_val + counted_for_day + technical_for_day + offline_for_day
                     cell_val = fmt_day_value('work_time', combined)
                     fill = FILL_POS if (isinstance(cell_val, (int, float)) and cell_val > 0) else None
                     set_cell(ws, row, c_idx, cell_val, fill=fill)
 
-                itogo_chasov = total_work + total_counted_trainings + total_technical_issues
+                itogo_chasov = total_work + total_counted_trainings + total_technical_issues + total_offline_activities
                 base_total_col = day_start + len(days)
                 set_cell(ws, row, base_total_col, fmt_total_value('work_time', itogo_chasov))
                 set_cell(ws, row, base_total_col + 1, fmt_total_value('work_time', total_work))

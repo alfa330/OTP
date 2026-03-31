@@ -12493,7 +12493,7 @@ async def show_operator_hours(callback: types.CallbackQuery):
             training_hours = round(hours.get('training_hours', 0) or 0, 2)
             technical_issue_hours = round(hours.get('technical_issue_hours', 0) or 0, 2)
             offline_activity_hours = round(hours.get('offline_activity_hours', 0) or 0, 2)
-            accounted_hours = round(hours.get('accounted_hours', regular_hours + training_hours + technical_issue_hours) or 0, 2)
+            accounted_hours = round(hours.get('accounted_hours', regular_hours + training_hours + technical_issue_hours + offline_activity_hours) or 0, 2)
             norm_hours = hours.get('norm_hours', 0) or 0
             percent_complete = 0
             if norm_hours > 0:
@@ -13493,7 +13493,7 @@ async def show_operator_stats(message: types.Message):
     if user and user[3] == 'operator':
         stats = db.get_operator_stats(user[0])
         current_month = datetime.now().strftime('%B %Y')
-        accounted_hours = stats.get('accounted_hours', (stats.get('regular_hours', 0) or 0) + (stats.get('training_hours', 0) or 0) + (stats.get('technical_issue_hours', 0) or 0))
+        accounted_hours = stats.get('accounted_hours', (stats.get('regular_hours', 0) or 0) + (stats.get('training_hours', 0) or 0) + (stats.get('technical_issue_hours', 0) or 0) + (stats.get('offline_activity_hours', 0) or 0))
         
         message_text = (
             f"<b>Ваша статистика за {current_month}:</b>\n\n"
