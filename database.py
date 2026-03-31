@@ -3383,12 +3383,16 @@ class Database:
                         (f"\nskipped: {reason}" if reason else "\nskipped", imported_call_id))
             return cur.rowcount == 1
 
-    def parse_calls_file(self, file):
+    def parse_calls_file(self, file, target_date: Optional[str] = None):
         try:
-            filename = file.filename.lower()
+            filename = str(file.filename or "").lower()
 
             if filename.endswith(".csv"):
-                df = pd.read_csv(file, sep=";")
+                try:
+                    df = pd.read_csv(file, sep=None, engine="python")
+                except Exception:
+                    file.stream.seek(0)
+                    df = pd.read_csv(file, sep=";")
                 sheet_name = "CSV"
             elif filename.endswith((".xls", ".xlsx")):
                 excel = pd.ExcelFile(file)
@@ -3397,58 +3401,147 @@ class Database:
             else:
                 return None, None, "Неверный формат файла. Поддерживаются только CSV, XLS, XLSX"
 
-            required_columns = [
-                "Name",
-                "Количество поступивших",
-                "Время в работе",
-                "Всего перерыва",
-                "Тех. причина",
-                "Тренинг",
-                "Время в разговоре",
-                "На удержании"
-            ]
-            for col in required_columns:
-                if col not in df.columns:
-                    return None, None, f"Не найдена колонка: {col}"
+            if df is None or df.empty:
+                return None, None, "Файл пустой или не содержит данных"
 
-            operators = []
-            month = date.today().strftime("%Y-%m")
+            df.columns = [str(col).strip() for col in df.columns]
+
+            def _norm_header(value):
+                txt = str(value or "").strip().lower()
+                txt = txt.replace("ё", "е")
+                txt = re.sub(r"\s+", " ", txt)
+                return txt
+
+            normalized_to_original = {_norm_header(col): col for col in df.columns}
+
+            def _pick_column(candidates):
+                # exact normalized match
+                for cand in candidates:
+                    found = normalized_to_original.get(_norm_header(cand))
+                    if found:
+                        return found
+                # soft contains match
+                candidate_norms = [_norm_header(c) for c in candidates]
+                for col in df.columns:
+                    col_norm = _norm_header(col)
+                    for cand_norm in candidate_norms:
+                        if cand_norm and (cand_norm in col_norm or col_norm in cand_norm):
+                            return col
+                return None
+
+            name_col = _pick_column(["ФИО", "ФИО оператора", "Оператор", "Name"])
+            date_col = _pick_column(["Дата", "Date", "День", "Дата звонка"])
+            calls_col = _pick_column([
+                "Кол-во звонков за день",
+                "Количество звонков за день",
+                "Кол-во звонков",
+                "Количество звонков",
+                "Звонки",
+                "Количество поступивших"
+            ])
+
+            if not name_col or not date_col or not calls_col:
+                return None, None, (
+                    "Ожидаются колонки: ФИО, Дата, Кол-во звонков за день "
+                    f"(найдены: {', '.join(map(str, df.columns))})"
+                )
+
+            target_date_obj = None
+            if target_date:
+                try:
+                    target_date_obj = datetime.strptime(str(target_date), "%Y-%m-%d").date()
+                except Exception:
+                    return None, None, "Некорректный формат выбранной даты. Ожидается YYYY-MM-DD"
+
+            def _parse_row_date(raw_value):
+                if raw_value is None or (isinstance(raw_value, float) and pd.isna(raw_value)):
+                    return None
+                if isinstance(raw_value, pd.Timestamp):
+                    return raw_value.date()
+                if isinstance(raw_value, datetime):
+                    return raw_value.date()
+                if isinstance(raw_value, date):
+                    return raw_value
+
+                text = str(raw_value).strip()
+                if not text or text.lower() == "nan":
+                    return None
+
+                for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y", "%Y/%m/%d", "%d-%m-%Y"):
+                    try:
+                        return datetime.strptime(text, fmt).date()
+                    except Exception:
+                        pass
+
+                parsed = pd.to_datetime(text, dayfirst=True, errors="coerce")
+                if pd.isna(parsed):
+                    return None
+                if isinstance(parsed, pd.Timestamp):
+                    return parsed.date()
+                return None
+
+            def _parse_calls(raw_value):
+                if raw_value is None or (isinstance(raw_value, float) and pd.isna(raw_value)):
+                    return 0
+                if isinstance(raw_value, (int, float)) and not pd.isna(raw_value):
+                    try:
+                        return max(int(round(float(raw_value))), 0)
+                    except Exception:
+                        return 0
+                text = str(raw_value).strip().replace(" ", "").replace("\xa0", "")
+                if not text or text.lower() == "nan":
+                    return 0
+                text = text.replace(",", ".")
+                try:
+                    return max(int(round(float(text))), 0)
+                except Exception:
+                    digits = re.sub(r"[^\d\-]", "", text)
+                    try:
+                        return max(int(digits), 0)
+                    except Exception:
+                        return 0
+
+            aggregated = {}
+            skipped_other_date = 0
 
             for _, row in df.iterrows():
-                try:
-                    name = str(row["Name"]).strip()
-                    calls = int(row["Количество поступивших"]) if not pd.isna(row["Количество поступивших"]) else 0
-
-                    def to_seconds(cell):
-                        try:
-                            return pd.to_timedelta(str(cell)).total_seconds()
-                        except Exception:
-                            return 0.0
-
-                    work_time_s = to_seconds(row["Время в работе"])
-                    break_time_s = to_seconds(row["Всего перерыва"])
-                    tech_time_s = to_seconds(row["Тех. причина"])
-                    training_time_s = to_seconds(row["Тренинг"])
-                    talk_time_s = to_seconds(row["Время в разговоре"])
-                    on_hold_s = to_seconds(row["На удержании"])
-
-                    work_time_h = max((work_time_s - break_time_s - tech_time_s - training_time_s) / 3600.0, 0.0)
-                    break_time_h = break_time_s / 3600.0
-                    talk_time_h = talk_time_s / 3600.0
-                    efficiency_h = (talk_time_s + on_hold_s) / 3600.0
-
-                    operators.append({
-                        "name": name,
-                        "work_time": round(work_time_h, 2),
-                        "break_time": round(break_time_h, 2),
-                        "talk_time": round(talk_time_h, 2),
-                        "calls": int(calls),
-                        "efficiency": round(efficiency_h, 2),
-                        "month": month
-                    })
-                except Exception as e:
-                    print(f"Ошибка при обработке строки {row}: {e}")
+                name_val = row.get(name_col)
+                name = str(name_val or "").strip()
+                if not name or name.lower() == "nan":
                     continue
+
+                row_date_obj = _parse_row_date(row.get(date_col))
+                if not row_date_obj:
+                    continue
+
+                if target_date_obj and row_date_obj != target_date_obj:
+                    skipped_other_date += 1
+                    continue
+
+                calls_value = _parse_calls(row.get(calls_col))
+                date_str = row_date_obj.strftime("%Y-%m-%d")
+                key = (name, date_str)
+                if key not in aggregated:
+                    aggregated[key] = {
+                        "name": name,
+                        "date": date_str,
+                        "calls": int(calls_value),
+                        "month": date_str[:7]
+                    }
+                else:
+                    aggregated[key]["calls"] = int(aggregated[key]["calls"]) + int(calls_value)
+
+            operators = sorted(
+                aggregated.values(),
+                key=lambda item: (item.get("date") or "", str(item.get("name") or "").lower())
+            )
+
+            if not operators:
+                if target_date_obj and skipped_other_date > 0:
+                    return None, None, (
+                        f"В файле нет строк за выбранную дату {target_date_obj.strftime('%Y-%m-%d')}"
+                    )
+                return None, None, "Не удалось распознать строки с данными ФИО/Дата/Кол-во звонков"
 
             return sheet_name, operators, None
 

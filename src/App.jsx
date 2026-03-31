@@ -790,6 +790,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             try {
             const form = new FormData();
             form.append('file', uploadFile);
+            form.append('date', selectedDayUpload.dateStr);
             if (selectedSvId) {
                 form.append('sv_id', String(selectedSvId));
             }
@@ -804,12 +805,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 _rowIndex: idx,
                 operator_id: r.operator_id ?? null,
                 name: r.name ?? '',
-                work_time: Number(r.work_time ?? 0),
-                break_time: Number(r.break_time ?? 0),
-                talk_time: Number(r.talk_time ?? 0),
+                date: String(r.date || selectedDayUpload.dateStr),
                 calls: Number(r.calls ?? 0),
-                efficiency: Number(r.efficiency ?? 0),
-                month: selectedDayUpload.dateStr.slice(0, 7)
+                month: String(r.date || selectedDayUpload.dateStr).slice(0, 7)
                 }));
                 setPreviewOperators(normalized);
                 setPreviewSheetName(resp.data.sheet_name || null);
@@ -842,12 +840,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 operators: previewOperators.map(r => ({
                 operator_id: r.operator_id,
                 name: r.name,
-                work_time: Number(r.work_time) || 0,
-                break_time: Number(r.break_time) || 0,
-                talk_time: Number(r.talk_time) || 0,
+                date: r.date || selectedDayUpload.dateStr,
                 calls: Number(r.calls) || 0,
-                efficiency: Number(r.efficiency) || 0,
-                month: r.month
+                month: (r.date || selectedDayUpload.dateStr).slice(0, 7)
                 }))
             };
             const resp = await axios.post(`${API_BASE_URL}/api/hours/upload_group_day`, payload, {
@@ -2505,6 +2500,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
                 <form onSubmit={handlePreviewUpload} className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md" onClick={e => e.stopPropagation()}>
                     <h3 className="text-lg font-semibold mb-3">Загрузить файл для {selectedDayUpload.dateStr}</h3>
+                    <p className="text-sm text-gray-600 mb-3">Формат файла: <span className="font-medium">ФИО, Дата, Кол-во звонков за день</span>.</p>
                     <input type="file" accept=".xlsx,.xls,.csv" onChange={e => setUploadFile(e.target.files?.[0] || null)} className="mb-3" />
                     <div className="flex justify-end gap-2">
                     <button type="button" onClick={() => setSelectedDayUpload(null)} className="px-3 py-2 rounded-md border">Отмена</button>
@@ -2532,21 +2528,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     <table className="min-w-full text-sm">
                         <thead className="bg-gray-100 sticky top-0">
                         <tr>
-                            <th className="p-2 text-left">Имя</th>
-                            <th className="p-2 text-center">Work</th>
-                            <th className="p-2 text-center">Break</th>
-                            <th className="p-2 text-center">Calls</th>
-                            <th className="p-2 text-center">Efficiency</th>
+                            <th className="p-2 text-left">ФИО</th>
+                            <th className="p-2 text-center">Дата</th>
+                            <th className="p-2 text-center">Кол-во звонков</th>
                         </tr>
                         </thead>
                         <tbody>
                         {previewOperators.map((row, idx) => (
                             <tr key={idx} className="border-b">
                             <td className="p-2">{row.name}</td>
-                            <td className="p-2"><input className="w-full p-1 border rounded-md" type="number" value={row.work_time} onChange={e => { const copy = [...previewOperators]; copy[idx].work_time = +e.target.value; setPreviewOperators(copy); }} /></td>
-                            <td className="p-2"><input className="w-full p-1 border rounded-md" type="number" value={row.break_time} onChange={e => { const copy = [...previewOperators]; copy[idx].break_time = +e.target.value; setPreviewOperators(copy); }} /></td>
-                            <td className="p-2"><input className="w-full p-1 border rounded-md" type="number" value={row.calls} onChange={e => { const copy = [...previewOperators]; copy[idx].calls = +e.target.value; setPreviewOperators(copy); }} /></td>
-                            <td className="p-2"><input className="w-full p-1 border rounded-md" type="number" value={row.efficiency} onChange={e => { const copy = [...previewOperators]; copy[idx].efficiency = +e.target.value; setPreviewOperators(copy); }} /></td>
+                            <td className="p-2 text-center">{row.date || selectedDayUpload.dateStr}</td>
+                            <td className="p-2"><input className="w-full p-1 border rounded-md" type="number" min="0" step="1" value={row.calls} onChange={e => { const copy = [...previewOperators]; copy[idx].calls = Math.max(parseInt(e.target.value, 10) || 0, 0); setPreviewOperators(copy); }} /></td>
                             </tr>
                         ))}
                         </tbody>
