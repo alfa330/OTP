@@ -9543,6 +9543,20 @@ def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, in
     zero_or_negative_transitions = 0
     segments = []
     events_for_db = []
+    latest_event_at = None
+    for events_list in events_by_operator.values():
+        for ev in (events_list or []):
+            event_at = ev.get('event_at')
+            if not isinstance(event_at, datetime):
+                continue
+            if latest_event_at is None or event_at > latest_event_at:
+                latest_event_at = event_at
+
+    tail_anchor_dt = latest_event_at
+    now_dt = datetime.now()
+    if isinstance(latest_event_at, datetime):
+        if (now_dt - latest_event_at) <= timedelta(hours=48):
+            tail_anchor_dt = now_dt
 
     for operator_id, events_list in events_by_operator.items():
         if not events_list:
@@ -9559,10 +9573,6 @@ def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, in
             )
 
         events_for_db.extend(events_list)
-
-        if len(events_list) == 1:
-            open_tail_events += 1
-            continue
 
         for idx in range(len(events_list) - 1):
             cur = events_list[idx]
@@ -9582,6 +9592,24 @@ def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, in
                     'duration_sec': int(part['duration_sec']),
                     'status_key': cur.get('status_key'),
                     'state_note': cur.get('state_note')
+                })
+
+        last_event = events_list[-1]
+        last_event_at = last_event.get('event_at')
+        if (
+            isinstance(last_event_at, datetime)
+            and isinstance(tail_anchor_dt, datetime)
+            and tail_anchor_dt > last_event_at
+        ):
+            for part in _status_import_split_segment_by_day(last_event_at, tail_anchor_dt):
+                segments.append({
+                    'operator_id': int(operator_id),
+                    'status_date': part['date'].strftime('%Y-%m-%d'),
+                    'start_at': part['start'],
+                    'end_at': part['end'],
+                    'duration_sec': int(part['duration_sec']),
+                    'status_key': last_event.get('status_key'),
+                    'state_note': last_event.get('state_note')
                 })
 
         open_tail_events += 1

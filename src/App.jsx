@@ -5851,45 +5851,78 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (!dayObj.operators.has(name)) dayObj.operators.set(name, { operatorName: name, totalObservedSec: 0, noPhoneSec: 0, noPhoneAnomalyCount: 0, statusTotals: {}, timeline: [] });
                 return dayObj.operators.get(name);
             };
+            const addSegmentPartToStats = (operatorName, stateName, stateKey, stateNote, p) => {
+                const isNoPhone = plannerStatusNormalizeKey(stateKey) === PLANNER_STATUS_NO_PHONE_KEY;
+                const isNoPhoneAnomaly = isNoPhone && p.durationSec > PLANNER_STATUS_NO_PHONE_ANOMALY_SECONDS;
+                const seg = {
+                operatorName,
+                stateName,
+                stateKey,
+                stateNote: stateNote || '',
+                ...p,
+                isNoPhone,
+                isNoPhoneAnomaly
+                };
+                const overall = ensureOverall(operatorName);
+                overall.totalObservedSec += p.durationSec;
+                addTotals(overall, stateName, p.durationSec);
+                if (isNoPhone) overall.noPhoneSec += p.durationSec;
+                if (isNoPhoneAnomaly) overall.noPhoneAnomalyCount += 1;
+                const day = ensureDay(p.dateKey);
+                day.totalObservedSec += p.durationSec;
+                addTotals(day, stateName, p.durationSec);
+                if (isNoPhone) day.noPhoneSec += p.durationSec;
+                if (isNoPhoneAnomaly) day.noPhoneAnomalyCount += 1;
+                const dayOp = ensureDayOperator(day, operatorName);
+                dayOp.totalObservedSec += p.durationSec;
+                addTotals(dayOp, stateName, p.durationSec);
+                if (isNoPhone) dayOp.noPhoneSec += p.durationSec;
+                if (isNoPhoneAnomaly) dayOp.noPhoneAnomalyCount += 1;
+                dayOp.timeline.push(seg);
+                if (isNoPhone) overallNoPhoneSec += p.durationSec;
+                if (isNoPhoneAnomaly) overallNoPhoneAnomalies += 1;
+            };
+            const latestEventTsMs = events.reduce((maxTs, ev) => Math.max(maxTs, Number(ev?.tsMs || 0)), 0);
+            const nowTsMs = Date.now();
+            const recentWindowMs = 48 * 60 * 60 * 1000;
+            const tailAnchorTsMs = (latestEventTsMs > 0 && (nowTsMs - latestEventTsMs) <= recentWindowMs)
+                ? nowTsMs
+                : latestEventTsMs;
             for (const [operatorName, list] of byOperator.entries()) {
                 if (!list.length) continue;
-                if (list.length === 1) { openTailEvents += 1; continue; }
                 for (let i = 0; i < list.length - 1; i++) {
                 const cur = list[i];
                 const next = list[i + 1];
                 if (next.tsMs <= cur.tsMs) { zeroOrNegativeTransitions += 1; continue; }
                 const parts = plannerStatusSplitSegmentByDay(cur.ts, next.ts);
                 for (const p of parts) {
-                    const isNoPhone = plannerStatusNormalizeKey(cur.stateKey) === PLANNER_STATUS_NO_PHONE_KEY;
-                    const isNoPhoneAnomaly = isNoPhone && p.durationSec > PLANNER_STATUS_NO_PHONE_ANOMALY_SECONDS;
-                    const seg = {
-                    operatorName,
-                    stateName: cur.stateName,
-                    stateKey: cur.stateKey,
-                    stateNote: cur.stateNote || '',
-                    ...p,
-                    isNoPhone,
-                    isNoPhoneAnomaly
-                    };
-                    const overall = ensureOverall(operatorName);
-                    overall.totalObservedSec += p.durationSec;
-                    addTotals(overall, cur.stateName, p.durationSec);
-                    if (isNoPhone) overall.noPhoneSec += p.durationSec;
-                    if (isNoPhoneAnomaly) overall.noPhoneAnomalyCount += 1;
-                    const day = ensureDay(p.dateKey);
-                    day.totalObservedSec += p.durationSec;
-                    addTotals(day, cur.stateName, p.durationSec);
-                    if (isNoPhone) day.noPhoneSec += p.durationSec;
-                    if (isNoPhoneAnomaly) day.noPhoneAnomalyCount += 1;
-                    const dayOp = ensureDayOperator(day, operatorName);
-                    dayOp.totalObservedSec += p.durationSec;
-                    addTotals(dayOp, cur.stateName, p.durationSec);
-                    if (isNoPhone) dayOp.noPhoneSec += p.durationSec;
-                    if (isNoPhoneAnomaly) dayOp.noPhoneAnomalyCount += 1;
-                    dayOp.timeline.push(seg);
-                    if (isNoPhone) overallNoPhoneSec += p.durationSec;
-                    if (isNoPhoneAnomaly) overallNoPhoneAnomalies += 1;
+                    addSegmentPartToStats(
+                        operatorName,
+                        cur.stateName,
+                        cur.stateKey,
+                        cur.stateNote || '',
+                        p
+                    );
                 }
+                }
+                const last = list[list.length - 1];
+                const lastTsMs = Number(last?.tsMs || 0);
+                if (
+                    tailAnchorTsMs > lastTsMs
+                    && last?.ts instanceof Date
+                    && typeof last.ts.getTime === 'function'
+                    && !Number.isNaN(last.ts.getTime())
+                ) {
+                    const tailParts = plannerStatusSplitSegmentByDay(last.ts, new Date(tailAnchorTsMs));
+                    for (const p of tailParts) {
+                        addSegmentPartToStats(
+                            operatorName,
+                            last.stateName,
+                            last.stateKey,
+                            last.stateNote || '',
+                            p
+                        );
+                    }
                 }
                 openTailEvents += 1;
             }
