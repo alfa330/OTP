@@ -283,6 +283,19 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
         [selectedSurveyId, surveys]
     );
     const isTestStatsSurvey = !!selectedSurvey?.is_test;
+    const selectedSurveyQuestionMetaById = useMemo(() => {
+        const map = new Map();
+        (selectedSurvey?.questions || []).forEach((question, index) => {
+            const questionId = Number(question?.id);
+            if (!Number.isFinite(questionId)) return;
+            map.set(questionId, {
+                index,
+                text: String(question?.text || `Вопрос ${index + 1}`),
+                correctOptions: toUniqueTrimmedList(question?.correct_options)
+            });
+        });
+        return map;
+    }, [selectedSurvey?.questions]);
 
     const surveyQuestionsBySurveyId = useMemo(() => {
         const map = new Map();
@@ -809,11 +822,23 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
     const renderDetailedQuestionStats = (stat, index) => {
         if (!stat) return null;
 
+        const statQuestionId = Number(stat?.question_id);
+        const questionMeta = Number.isFinite(statQuestionId)
+            ? selectedSurveyQuestionMetaById.get(statQuestionId)
+            : null;
+        const questionText = String(stat?.text || questionMeta?.text || `Вопрос ${index + 1}`);
         const answeredCount = Number(stat.responses_with_answer || 0);
         const respondentsTotal = Number(
-            stat.respondents_total != null
-                ? stat.respondents_total
-                : selectedSurvey?.statistics?.responses_count || 0
+            stat.survey_respondents_total != null
+                ? stat.survey_respondents_total
+                : (stat.respondents_total != null
+                    ? stat.respondents_total
+                    : selectedSurvey?.statistics?.responses_count || 0)
+        );
+        const questionRespondentsTotal = Number(
+            stat.question_respondents_total != null
+                ? stat.question_respondents_total
+                : answeredCount
         );
         const skippedCount = Number(
             stat.skipped_count != null
@@ -823,6 +848,12 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
         const responseRate = Number.isFinite(Number(stat.response_rate))
             ? Number(stat.response_rate)
             : (respondentsTotal > 0 ? (answeredCount / respondentsTotal) * 100 : 0);
+        const expectedOptions = toUniqueTrimmedList(
+            (Array.isArray(stat?.correct_options) && stat.correct_options.length > 0)
+                ? stat.correct_options
+                : (questionMeta?.correctOptions || [])
+        );
+        const expectedOptionsSet = new Set(expectedOptions);
 
         const ratingDistribution = Array.isArray(stat.ratings_distribution_detailed) && stat.ratings_distribution_detailed.length
             ? stat.ratings_distribution_detailed
@@ -845,7 +876,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                 <div className="flex items-start justify-between gap-2">
                     <div>
                         <div className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-0.5">Вопрос #{index + 1}</div>
-                        <div className="text-sm font-medium text-gray-800">{stat.text || `Вопрос ${index + 1}`}</div>
+                        <div className="text-sm font-medium text-gray-800">{questionText}</div>
                     </div>
                     <Badge color={stat.type === 'rating' ? 'amber' : 'blue'}>
                         {questionTypeLabel(stat.type)}
@@ -857,6 +888,9 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                     <div className="flex justify-between text-[11px] text-gray-500">
                         <span>Ответили: <strong className="text-gray-700">{answeredCount}</strong> из {respondentsTotal}</span>
                         <span>{formatPercent(responseRate)}</span>
+                    </div>
+                    <div className="text-[11px] text-gray-500">
+                        Респондентов по вопросу: <strong className="text-gray-700">{questionRespondentsTotal}</strong>
                     </div>
                     <ProgressBar value={responseRate} color="blue" />
                     {skippedCount > 0 && <div className="text-[11px] text-gray-400">Пропустили: {skippedCount}</div>}
@@ -903,13 +937,24 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                             const optionCount = Number(option?.count || 0);
                             const percentRespondents = Number(option?.percent_of_respondents != null ? option.percent_of_respondents : option?.percent || 0);
                             const percentAnswers = Number(option?.percent_of_answers != null ? option.percent_of_answers : option?.percent || 0);
+                            const isCorrectOption = isTestStatsSurvey && expectedOptionsSet.has(optionLabel);
                             return (
-                                <div key={`${selectedSurvey?.id || 'survey'}_stat_${index}_option_${optionIndex}`} className="space-y-1">
+                                <div
+                                    key={`${selectedSurvey?.id || 'survey'}_stat_${index}_option_${optionIndex}`}
+                                    className={`space-y-1 ${isCorrectOption ? 'rounded-md border border-emerald-200 bg-emerald-50/70 p-1.5' : ''}`}
+                                >
                                     <div className="flex items-center justify-between gap-2 text-[11px]">
-                                        <span className="truncate text-gray-700" title={optionLabel}>{optionLabel}</span>
+                                        <span className={`truncate ${isCorrectOption ? 'text-emerald-700 font-semibold' : 'text-gray-700'}`} title={optionLabel}>
+                                            {optionLabel}
+                                        </span>
                                         <span className="shrink-0 text-gray-500">{optionCount} ({formatPercent(percentRespondents)})</span>
                                     </div>
-                                    <ProgressBar value={percentRespondents} color="blue" />
+                                    {isCorrectOption && (
+                                        <div className="text-[10px] text-emerald-700 font-medium">
+                                            Правильный ответ
+                                        </div>
+                                    )}
+                                    <ProgressBar value={percentRespondents} color={isCorrectOption ? 'emerald' : 'blue'} />
                                     <div className="text-[10px] text-gray-400">От ответивших: {formatPercent(percentAnswers)}</div>
                                 </div>
                             );
@@ -1988,9 +2033,14 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                                                             const hasAnswer = hasSurveyAnswer(resolved.question, resolved.answer);
                                                                             const isCorrect = isTestStatsSurvey ? isTestAnswerCorrect(resolved.question, resolved.answer) : false;
                                                                             const expectedOptions = isTestStatsSurvey ? getExpectedOptionsForTest(resolved.question, resolved.answer) : [];
+                                                                            const answerCellClass = (
+                                                                                isTestStatsSurvey && hasAnswer
+                                                                                    ? (isCorrect ? 'bg-emerald-50/70' : 'bg-amber-50/70')
+                                                                                    : ''
+                                                                            );
                                                                             return (
-                                                                                <td key={`stats_row_${row?.operator_id}_${repeatSurveyId}_q_${question.id}`} className="px-3 py-2.5 align-top text-gray-700">
-                                                                                    <div className="max-w-[300px] break-words">
+                                                                                <td key={`stats_row_${row?.operator_id}_${repeatSurveyId}_q_${question.id}`} className={`px-3 py-2.5 align-top text-gray-700 ${answerCellClass}`}>
+                                                                                    <div className={`max-w-[300px] break-words ${isTestStatsSurvey && hasAnswer && isCorrect ? 'text-emerald-800 font-medium' : ''}`}>
                                                                                         {formatQuestionAnswerText(resolved.question, resolved.answer)}
                                                                                     </div>
                                                                                     {isTestStatsSurvey && (

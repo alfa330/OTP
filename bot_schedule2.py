@@ -6730,7 +6730,7 @@ def export_survey_statistics_excel(survey_id):
             'Вопрос',
             'Тип',
             'Ответили',
-            'Респондентов',
+            'Респондентов (по вопросу)',
             'Доля ответивших, %',
             'Метрика',
             'Значение',
@@ -6738,6 +6738,7 @@ def export_survey_statistics_excel(survey_id):
             '% от ответивших',
             '% от респондентов'
         ])
+        summary_correct_option_rows = set()
 
         for idx, question in enumerate(questions, start=1):
             question_id = int(question.get('id') or 0)
@@ -6751,8 +6752,9 @@ def export_survey_statistics_excel(survey_id):
                 continue
 
             answered = int(stat.get('responses_with_answer') or 0)
-            respondents = int(stat.get('respondents_total') or 0)
+            respondents = int(stat.get('question_respondents_total') or answered)
             response_rate = float(stat.get('response_rate') or 0)
+            correct_options_set = set(_survey_export_unique_trimmed_list((stat or {}).get('correct_options') or question.get('correct_options')))
 
             if qtype == 'rating':
                 ws_summary.append([
@@ -6794,6 +6796,8 @@ def export_survey_statistics_excel(survey_id):
                 continue
 
             for option_item in options:
+                option_text = str(option_item.get('option') or '').strip()
+                is_correct_option = is_test and option_text and option_text in correct_options_set
                 ws_summary.append([
                     idx,
                     question_text,
@@ -6801,12 +6805,14 @@ def export_survey_statistics_excel(survey_id):
                     answered,
                     respondents,
                     response_rate,
-                    'Вариант',
-                    str(option_item.get('option') or ''),
+                    'Вариант (правильный)' if is_correct_option else 'Вариант',
+                    option_text,
                     int(option_item.get('count') or 0),
                     float(option_item.get('percent_of_answers') or option_item.get('percent') or 0),
                     float(option_item.get('percent_of_respondents') or option_item.get('percent') or 0)
                 ])
+                if is_correct_option:
+                    summary_correct_option_rows.add(ws_summary.max_row)
 
         ws_scores = None
         if is_test:
@@ -6872,10 +6878,18 @@ def export_survey_statistics_excel(survey_id):
         even_row_fill = PatternFill(fill_type='solid', start_color='F8FAFF', end_color='F8FAFF')
         status_done_fill = PatternFill(fill_type='solid', start_color='E6F4EA', end_color='E6F4EA')
         status_pending_fill = PatternFill(fill_type='solid', start_color='FFF4E5', end_color='FFF4E5')
+        correct_option_fill = PatternFill(fill_type='solid', start_color='DCFCE7', end_color='DCFCE7')
+        answer_correct_fill = PatternFill(fill_type='solid', start_color='DCFCE7', end_color='DCFCE7')
+        answer_incorrect_fill = PatternFill(fill_type='solid', start_color='FEF2F2', end_color='FEF2F2')
+        answer_empty_fill = PatternFill(fill_type='solid', start_color='F3F4F6', end_color='F3F4F6')
 
         white_bold_font = Font(color='FFFFFF', bold=True)
         dark_bold_font = Font(color='1F4E78', bold=True)
         regular_font = Font(color='1F2937')
+        correct_option_font = Font(color='166534', bold=True)
+        answer_correct_font = Font(color='166534')
+        answer_incorrect_font = Font(color='991B1B')
+        answer_empty_font = Font(color='6B7280')
 
         thin_side = Side(style='thin', color='D9E2F3')
         thin_border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
@@ -6940,6 +6954,15 @@ def export_survey_statistics_excel(survey_id):
                         elif col_idx in (4, 5, 9):
                             cell.number_format = '0'
 
+            for row_idx in summary_correct_option_rows:
+                if row_idx <= summary_header_row or row_idx > ws_summary.max_row:
+                    continue
+                for col_idx in range(7, 12):
+                    marked_cell = ws_summary.cell(row=row_idx, column=col_idx)
+                    marked_cell.fill = correct_option_fill
+                    if col_idx in (7, 8):
+                        marked_cell.font = correct_option_font
+
         summary_widths = {
             1: 6,   # №
             2: 56,  # Вопрос
@@ -6993,6 +7016,18 @@ def export_survey_statistics_excel(survey_id):
                     (is_test and col_idx == 6)
                 ):
                     cell.number_format = '0.0"%"'
+
+                if is_test and col_idx >= answers_question_start_col:
+                    answer_text = str(cell.value or '')
+                    if '[Верно]' in answer_text:
+                        cell.fill = answer_correct_fill
+                        cell.font = answer_correct_font
+                    elif '[Неверно]' in answer_text:
+                        cell.fill = answer_incorrect_fill
+                        cell.font = answer_incorrect_font
+                    elif '[Нет ответа]' in answer_text:
+                        cell.fill = answer_empty_fill
+                        cell.font = answer_empty_font
 
             status_cell = ws_answers.cell(row=row_idx, column=3)
             status_text = str(status_cell.value or '').strip().lower()
