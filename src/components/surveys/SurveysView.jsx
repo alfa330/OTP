@@ -835,11 +835,6 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                     ? stat.respondents_total
                     : selectedSurvey?.statistics?.responses_count || 0)
         );
-        const questionRespondentsTotal = Number(
-            stat.question_respondents_total != null
-                ? stat.question_respondents_total
-                : answeredCount
-        );
         const skippedCount = Number(
             stat.skipped_count != null
                 ? stat.skipped_count
@@ -885,13 +880,6 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
 
                 {/* Response rate bar */}
                 <div className="space-y-1">
-                    <div className="flex justify-between text-[11px] text-gray-500">
-                        <span>Ответили: <strong className="text-gray-700">{answeredCount}</strong> из {respondentsTotal}</span>
-                        <span>{formatPercent(responseRate)}</span>
-                    </div>
-                    <div className="text-[11px] text-gray-500">
-                        Респондентов по вопросу: <strong className="text-gray-700">{questionRespondentsTotal}</strong>
-                    </div>
                     <ProgressBar value={responseRate} color="blue" />
                     {skippedCount > 0 && <div className="text-[11px] text-gray-400">Пропустили: {skippedCount}</div>}
                 </div>
@@ -955,7 +943,6 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                         </div>
                                     )}
                                     <ProgressBar value={percentRespondents} color={isCorrectOption ? 'emerald' : 'blue'} />
-                                    <div className="text-[10px] text-gray-400">От ответивших: {formatPercent(percentAnswers)}</div>
                                 </div>
                             );
                         })}
