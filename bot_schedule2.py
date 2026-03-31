@@ -14097,12 +14097,18 @@ def _lms_try_complete_assignment_tx(cursor, assignment_id, user_id, score_percen
         }
 
     cursor.execute("""
-        SELECT COUNT(*)
+        SELECT
+            COUNT(*) AS total_tests,
+            COUNT(*) FILTER (WHERE COALESCE(is_final, FALSE) = TRUE) AS total_final_tests
         FROM lms_tests
         WHERE course_version_id = %s
           AND status <> 'archived'
     """, (course_version_id,))
-    total_tests = int(cursor.fetchone()[0] or 0)
+    tests_count_row = cursor.fetchone() or (0, 0)
+    total_tests = int(tests_count_row[0] or 0)
+    total_final_tests = int(tests_count_row[1] or 0)
+    require_final_only = total_final_tests > 0
+    required_tests = total_final_tests if require_final_only else total_tests
 
     cursor.execute("""
         SELECT COUNT(DISTINCT ta.test_id)
@@ -14112,14 +14118,15 @@ def _lms_try_complete_assignment_tx(cursor, assignment_id, user_id, score_percen
           AND ta.user_id = %s
           AND ta.passed = TRUE
           AND t.course_version_id = %s
-    """, (assignment_id, user_id, course_version_id))
+          AND (%s::boolean = FALSE OR COALESCE(t.is_final, FALSE) = TRUE)
+    """, (assignment_id, user_id, course_version_id, require_final_only))
     passed_tests = int(cursor.fetchone()[0] or 0)
 
-    if total_tests > 0 and passed_tests < total_tests:
+    if required_tests > 0 and passed_tests < required_tests:
         return {
             "completed": False,
             "reason": "TESTS_INCOMPLETE",
-            "total_tests": total_tests,
+            "total_tests": required_tests,
             "passed_tests": passed_tests
         }
 
@@ -14649,6 +14656,28 @@ def lms_home():
                 completed_lessons = int(cursor.fetchone()[0] or 0)
 
                 cursor.execute("""
+                    SELECT COUNT(*)
+                    FROM lms_tests
+                    WHERE course_version_id = %s
+                      AND status <> 'archived'
+                      AND COALESCE(is_final, FALSE) = FALSE
+                """, (course_version_id,))
+                total_intermediate_tests = int(cursor.fetchone()[0] or 0)
+
+                cursor.execute("""
+                    SELECT COUNT(DISTINCT ta.test_id)
+                    FROM lms_test_attempts ta
+                    JOIN lms_tests t ON t.id = ta.test_id
+                    WHERE ta.assignment_id = %s
+                      AND ta.user_id = %s
+                      AND ta.status = 'finished'
+                      AND ta.passed = TRUE
+                      AND t.course_version_id = %s
+                      AND COALESCE(t.is_final, FALSE) = FALSE
+                """, (assignment_id, requester_id, course_version_id))
+                completed_intermediate_tests = int(cursor.fetchone()[0] or 0)
+
+                cursor.execute("""
                     SELECT MAX(score_percent)
                     FROM lms_test_attempts
                     WHERE assignment_id = %s
@@ -14666,11 +14695,14 @@ def lms_home():
                 """, (assignment_id,))
                 cert_row = cursor.fetchone()
 
+                progress_total_items = total_lessons + total_intermediate_tests
+                progress_completed_items = completed_lessons + completed_intermediate_tests
+
                 progress_percent = 0.0
-                if total_lessons > 0:
-                    progress_percent = round((completed_lessons / total_lessons) * 100.0, 2)
-                elif row[3] == 'completed':
+                if row[3] == 'completed':
                     progress_percent = 100.0
+                elif progress_total_items > 0:
+                    progress_percent = round((progress_completed_items / progress_total_items) * 100.0, 2)
 
                 deadline_status = _lms_deadline_status(row[4], row[6])
                 version_settings = _lms_parse_json(row[10], {})
@@ -14694,6 +14726,8 @@ def lms_home():
                     "progress_percent": progress_percent,
                     "completed_lessons": completed_lessons,
                     "total_lessons": total_lessons,
+                    "completed_intermediate_tests": completed_intermediate_tests,
+                    "total_intermediate_tests": total_intermediate_tests,
                     "best_score": float(best_score_raw) if best_score_raw is not None else None,
                     "certificate": (
                         {

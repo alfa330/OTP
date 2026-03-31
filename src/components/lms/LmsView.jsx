@@ -274,6 +274,12 @@ const inferLessonType = (lessonLike) => {
   return "video";
 };
 
+const resolveCourseAttemptTests = (tests) => {
+  const safeTests = Array.isArray(tests) ? tests : [];
+  const finalTests = safeTests.filter((test) => Boolean(test?.is_final));
+  return finalTests.length > 0 ? finalTests : safeTests;
+};
+
 const toRelativeTime = (isoDate) => {
   if (!isoDate) return "";
   const dt = new Date(isoDate);
@@ -322,8 +328,9 @@ const mapHomeCourseToView = (course) => {
     rating: course?.best_score ? Math.max(1, Math.min(5, Number(course.best_score) / 20)) : 0,
     reviews: 0,
     passingScore: 80,
-    maxAttempts: 3,
+    maxAttempts: 0,
     attemptsUsed: 0,
+    hasCourseAttemptLimit: false,
     modules_data: [],
   };
 };
@@ -339,6 +346,7 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
   const testProgress = assignment?.tests || {};
   const modulesRaw = Array.isArray(coursePayload?.modules) ? coursePayload.modules : [];
   const testsRaw = Array.isArray(coursePayload?.tests) ? coursePayload.tests : [];
+  const courseAttemptTests = resolveCourseAttemptTests(testsRaw);
   const versionCoverUrl = String(coursePayload?.course_version?.cover_url || "").trim();
   const versionSkills = Array.isArray(coursePayload?.course_version?.skills)
     ? coursePayload.course_version.skills.map((item) => String(item || "").trim()).filter(Boolean)
@@ -354,6 +362,8 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
   let progressionLocked = false;
   let regularLessonsTotal = 0;
   let regularLessonsCompleted = 0;
+  let progressItemsTotal = 0;
+  let progressItemsCompleted = 0;
   let durationSeconds = 0;
 
   const mapTestLesson = (test, isLockedByFlow = false) => {
@@ -384,6 +394,7 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
       requiresTest: true,
       maxAttempts: attemptLimit,
       attemptsUsed,
+      isFinal: Boolean(test?.is_final),
       passingScore: Number(test?.pass_threshold || coursePayload?.course_version?.pass_threshold || coursePayload?.default_pass_threshold || 80),
       questionCount: Math.max(0, Number(test?.question_count || 0)),
       moduleId: test?.module_id == null ? null : Number(test.module_id),
@@ -430,8 +441,12 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
         });
 
         regularLessonsTotal += 1;
+        progressItemsTotal += 1;
         durationSeconds += Math.max(0, Number(lessonItem?.duration_seconds || 0));
-        if (status === "completed") regularLessonsCompleted += 1;
+        if (status === "completed") {
+          regularLessonsCompleted += 1;
+          progressItemsCompleted += 1;
+        }
         if (status !== "completed") progressionLocked = true;
       });
 
@@ -440,6 +455,10 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
         const moduleHasIncompleteLesson = lessons.some((item) => item.type !== "quiz" && item.status !== "completed");
         const mappedTest = mapTestLesson(test, progressionLocked || moduleHasIncompleteLesson);
         lessons.push(mappedTest);
+        if (!mappedTest.isFinal) {
+          progressItemsTotal += 1;
+          if (mappedTest.status === "completed") progressItemsCompleted += 1;
+        }
         if (mappedTest.status !== "completed") progressionLocked = true;
       });
 
@@ -467,17 +486,22 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
     unboundTests.forEach((test) => {
       const mappedTest = mapTestLesson(test, progressionLocked);
       targetModule.lessons.push(mappedTest);
+      if (!mappedTest.isFinal) {
+        progressItemsTotal += 1;
+        if (mappedTest.status === "completed") progressItemsCompleted += 1;
+      }
       if (mappedTest.status !== "completed") progressionLocked = true;
     });
   }
 
-  const progressPercent = regularLessonsTotal > 0
-    ? Math.round((regularLessonsCompleted / regularLessonsTotal) * 100)
-    : (String(assignment?.status || "").toLowerCase() === "completed" ? 100 : 0);
+  const isAssignmentCompleted = String(assignment?.status || "").toLowerCase() === "completed";
+  const progressPercent = isAssignmentCompleted
+    ? 100
+    : (progressItemsTotal > 0 ? Math.round((progressItemsCompleted / progressItemsTotal) * 100) : 0);
 
   let status = mapAssignmentStatusToUi(assignment?.status, assignment?.deadline_status);
-  if (status !== "completed" && testsRaw.length > 0 && regularLessonsTotal > 0 && regularLessonsCompleted >= regularLessonsTotal) {
-    const hasFailedRequiredTest = testsRaw.some((test) => {
+  if (status !== "completed" && courseAttemptTests.length > 0 && regularLessonsTotal > 0 && regularLessonsCompleted >= regularLessonsTotal) {
+    const hasFailedRequiredTest = courseAttemptTests.some((test) => {
       const testState = testProgress?.[test.id] || testProgress?.[String(test.id)] || {};
       const passedAny = Boolean(testState?.passed_any);
       const attemptsUsed = Math.max(0, Number(testState?.attempts_used || 0));
@@ -487,10 +511,16 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
     status = hasFailedRequiredTest ? "test_failed" : "waiting_test";
   }
 
-  const attemptsUsedTotal = Object.values(testProgress || {}).reduce((sum, row) => sum + Math.max(0, Number(row?.attempts_used || 0)), 0);
-  const maxAttempts = testsRaw.length > 0
-    ? Math.max(...testsRaw.map((test) => Math.max(1, Number(test?.attempt_limit || coursePayload?.course_version?.attempt_limit || coursePayload?.default_attempt_limit || 3))))
-    : Math.max(1, Number(coursePayload?.course_version?.attempt_limit || coursePayload?.default_attempt_limit || fallbackCourse?.maxAttempts || 3));
+  const hasCourseAttemptLimit = courseAttemptTests.length > 0;
+  const attemptsUsedTotal = hasCourseAttemptLimit
+    ? courseAttemptTests.reduce((sum, test) => {
+      const testState = testProgress?.[test.id] || testProgress?.[String(test.id)] || {};
+      return sum + Math.max(0, Number(testState?.attempts_used || 0));
+    }, 0)
+    : 0;
+  const maxAttempts = hasCourseAttemptLimit
+    ? Math.max(...courseAttemptTests.map((test) => Math.max(1, Number(test?.attempt_limit || coursePayload?.course_version?.attempt_limit || coursePayload?.default_attempt_limit || 3))))
+    : 0;
 
   const lessonsCountWithTests = modulesData.reduce((sum, mod) => sum + (Array.isArray(mod?.lessons) ? mod.lessons.length : 0), 0);
 
@@ -517,6 +547,7 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
     passingScore: Number(coursePayload?.course_version?.pass_threshold || coursePayload?.default_pass_threshold || fallbackCourse?.passingScore || 80),
     maxAttempts,
     attemptsUsed: attemptsUsedTotal,
+    hasCourseAttemptLimit,
     modules_data: modulesData,
     tests: testsRaw,
     assignment,
@@ -1310,7 +1341,7 @@ function CourseCard({ course, onClick, busy = false }) {
           </div>
         )}
         {/* Попытки */}
-        {Number(course.maxAttempts || 0) > 0 && course.status !== "completed" && course.status !== "completed_late" && (
+        {course.hasCourseAttemptLimit && Number(course.maxAttempts || 0) > 0 && course.status !== "completed" && course.status !== "completed_late" && (
           <div className={`flex items-center gap-1 text-[10px] mb-3 ${attemptsLeft <= 1 ? "text-red-600" : "text-slate-500"}`}>
             <RefreshCw size={10} />
             <span>Попыток осталось: <strong>{attemptsLeft <= 0 ? "нет" : attemptsLeft}</strong> из {course.maxAttempts}</span>
@@ -1352,7 +1383,9 @@ function CourseListItem({ course, onClick, busy = false }) {
         <div className="flex items-center gap-3 text-xs text-slate-500 mt-1">
           <span className="flex items-center gap-1"><Clock size={11} /> {course.duration}</span>
           <span className="flex items-center gap-1"><BookOpen size={11} /> {course.lessons} уроков</span>
-          <span className="flex items-center gap-1"><RefreshCw size={11} /> {Math.max(0, Number(course.maxAttempts || 0) - Number(course.attemptsUsed || 0))} поп.</span>
+          {course.hasCourseAttemptLimit && (
+            <span className="flex items-center gap-1"><RefreshCw size={11} /> {Math.max(0, Number(course.maxAttempts || 0) - Number(course.attemptsUsed || 0))} поп.</span>
+          )}
         </div>
       </div>
       {course.status !== "completed" && course.status !== "not_started" && (
@@ -1473,7 +1506,7 @@ function CourseDetail({ course, onStartLesson }) {
               {[
                 { label: "Дедлайн", value: dl ? (dl.overdue ? <span className="text-red-600 font-semibold">Просрочен</span> : <span className={dl.urgent ? "text-amber-600 font-semibold" : "text-slate-700"}>{dl.label}</span>) : "Не задан", icon: Calendar },
                 { label: "Проходной балл", value: `${course.passingScore}%`, icon: Target },
-                { label: "Попыток доступно", value: <span className={attemptsLeft <= 0 ? "text-red-600 font-semibold" : attemptsLeft <= 1 ? "text-amber-600 font-semibold" : ""}>{attemptsLeft <= 0 ? "Исчерпаны" : `${attemptsLeft} из ${course.maxAttempts}`}</span>, icon: RefreshCw },
+                { label: "Попыток доступно", value: !course.hasCourseAttemptLimit ? "-" : <span className={attemptsLeft <= 0 ? "text-red-600 font-semibold" : attemptsLeft <= 1 ? "text-amber-600 font-semibold" : ""}>{attemptsLeft <= 0 ? "Исчерпаны" : `${attemptsLeft} из ${course.maxAttempts}`}</span>, icon: RefreshCw },
                 { label: "Модулей", value: course.modules, icon: Layers },
               ].map(r => (
                 <div key={r.label} className="flex items-center justify-between py-2 border-b border-slate-50 last:border-0">
@@ -1520,6 +1553,9 @@ function LessonView({
 }) {
   const isQuiz = lesson.type === "quiz";
   const isTextLesson = lesson.type === "text";
+  const lessonAttemptLimit = Math.max(0, Number(lesson?.maxAttempts ?? course?.maxAttempts ?? 0));
+  const lessonAttemptsUsed = Math.max(0, Number(lesson?.attemptsUsed ?? course?.attemptsUsed ?? 0));
+  const lessonAttemptsLeft = Math.max(0, lessonAttemptLimit - lessonAttemptsUsed);
 
   return (
     <div className="flex h-[calc(100vh-64px)]">
@@ -1576,10 +1612,10 @@ function LessonView({
             <p className="text-sm font-semibold text-slate-900">{lesson.title}</p>
           </div>
           <div className="flex items-center gap-3">
-            {lesson.type === "quiz" && course.maxAttempts && (
+            {lesson.type === "quiz" && lessonAttemptLimit > 0 && (
               <div className="flex items-center gap-1.5 text-xs text-slate-500 bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-lg">
                 <RefreshCw size={12} />
-                <span>Попыток: <strong className={Math.max(0, Number(course.maxAttempts || 0) - Number(course.attemptsUsed || 0)) <= 1 ? "text-red-600" : "text-slate-700"}>{Math.max(0, Number(course.maxAttempts || 0) - Number(course.attemptsUsed || 0))}</strong> / {course.maxAttempts}</span>
+                <span>Попыток: <strong className={lessonAttemptsLeft <= 1 ? "text-red-600" : "text-slate-700"}>{lessonAttemptsLeft}</strong> / {lessonAttemptLimit}</span>
               </div>
             )}
             <div className="flex items-center gap-2 text-xs text-slate-500"><Clock size={13} /> {lesson.duration}</div>
