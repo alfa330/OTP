@@ -6707,10 +6707,11 @@ class Database:
         Штрафы, Тренинги, Тех. сбои, Офлайн активность.
 
         Правила форматирования (по заданию пользователя):
-        - Все числовые данные пишем без дополнительного округления.
+        - Округлять все числа до 1 знака после запятой, КРОМЕ полей "Ставка" (rate) и "Норма часов" (norm_hours) — они оставляются как есть.
         - Внутри таблицы по дням значение 0 отображается как целое 0 (не 0.0).
         - Ячейки по дням, где значение > 0, закрашивать светло-серым (теперь чуть темнее).
         - Calls (количество звонков) остаются целыми числами.
+        - Везде, где значение должно быть процентом, добавлять знак "%".
         - Добавить границы ко всем ячейкам таблиц.
         """
 
@@ -6933,9 +6934,9 @@ class Database:
         def compute_training_duration_hours(t: Dict[str, Any]) -> float:
             try:
                 if t.get('duration_minutes') is not None:
-                    return float(t['duration_minutes']) / 60.0
+                    return round(float(t['duration_minutes']) / 60.0, 2)
                 if t.get('duration_hours') is not None:
-                    return float(t['duration_hours'])
+                    return round(float(t['duration_hours']), 2)
                 s = parse_time_to_minutes(t.get('start_time'))
                 e = parse_time_to_minutes(t.get('end_time'))
                 if s is None or e is None:
@@ -6943,16 +6944,16 @@ class Database:
                 diff = e - s
                 if diff < 0:
                     diff += 24 * 60
-                return diff / 60.0
+                return round(diff / 60.0, 2)
             except Exception:
                 return 0.0
 
         def compute_technical_issue_duration_hours(item: Dict[str, Any]) -> float:
             try:
                 if item.get('duration_minutes') is not None:
-                    return float(item['duration_minutes']) / 60.0
+                    return round(float(item['duration_minutes']) / 60.0, 2)
                 if item.get('duration_hours') is not None:
-                    return float(item['duration_hours'])
+                    return round(float(item['duration_hours']), 2)
                 s = parse_time_to_minutes(item.get('start_time'))
                 e = parse_time_to_minutes(item.get('end_time'))
                 if s is None or e is None:
@@ -6960,16 +6961,16 @@ class Database:
                 diff = e - s
                 if diff < 0:
                     diff += 24 * 60
-                return diff / 60.0
+                return round(diff / 60.0, 2)
             except Exception:
                 return 0.0
 
         def compute_offline_activity_duration_hours(item: Dict[str, Any]) -> float:
             try:
                 if item.get('duration_minutes') is not None:
-                    return float(item['duration_minutes']) / 60.0
+                    return round(float(item['duration_minutes']) / 60.0, 2)
                 if item.get('duration_hours') is not None:
-                    return float(item['duration_hours'])
+                    return round(float(item['duration_hours']), 2)
                 s = parse_time_to_minutes(item.get('start_time'))
                 e = parse_time_to_minutes(item.get('end_time'))
                 if s is None or e is None:
@@ -6977,14 +6978,14 @@ class Database:
                 diff = e - s
                 if diff < 0:
                     diff += 24 * 60
-                return diff / 60.0
+                return round(diff / 60.0, 2)
             except Exception:
                 return 0.0
 
         def fmt_day_value(metric_key: str, value: Any):
             """Формат для значений в столбцах по дням.
             - calls -> int
-            - for hours/perc/eff -> без дополнительного округления; 0 как integer 0
+            - for hours/perc/eff -> round to 1 decimal; show 0 as integer 0
             """
             if metric_key == 'calls':
                 try:
@@ -6998,12 +6999,12 @@ class Database:
             # represent exactly zero as int 0
             if abs(num) < 1e-9:
                 return 0
-            return num
+            return round(num, 2)
 
         def fmt_total_value(metric_key: str, value: Any):
             """Формат для итоговых/доп. колонок (итого, проценты и т.п.).
             - для calls оставляем int
-            - для остальных без дополнительного округления
+            - для остальных округляем до 1 знака (кроме rate и norm handled separately)
             """
             if value is None:
                 return None
@@ -7016,7 +7017,7 @@ class Database:
                 num = float(value)
             except Exception:
                 return None
-            return num
+            return round(num, 2)
 
         logging.info(month)
         year, mon = map(int, month.split('-'))
@@ -7113,7 +7114,7 @@ class Database:
                                 set_cell(ws, row, total_col + i, None)
                             else:
                                 try:
-                                    set_cell(ws, row, total_col + i, float(val))
+                                    set_cell(ws, row, total_col + i, round(float(val), 1))
                                 except Exception:
                                     set_cell(ws, row, total_col + i, None)
                         else:
@@ -7194,11 +7195,12 @@ class Database:
                 set_cell(ws, row, base_total_col + 2, fmt_total_value('work_time', total_technical_issues))
                 set_cell(ws, row, base_total_col + 3, fmt_total_value('work_time', total_offline_activities))
                 if norm and norm != 0:
-                    percent_display = (itogo_chasov / norm) * 100
+                    percent = round((itogo_chasov / norm) * 100, 2)
+                    percent_display = f"{percent}%"
                 else:
                     percent_display = None
                 set_cell(ws, row, base_total_col + 4, percent_display)
-                set_cell(ws, row, base_total_col + 5, fmt_total_value('work_time', (norm - itogo_chasov) if norm is not None else None))
+                set_cell(ws, row, base_total_col + 5, fmt_total_value('work_time', round(norm - itogo_chasov, 2) if norm is not None else None))
 
                 row += 1
 
@@ -7216,7 +7218,7 @@ class Database:
                 calls = totals.get('calls', 0)
                 effective_hours = max(0.0, float(work_hours))
                 if effective_hours > 0:
-                    return calls / effective_hours
+                    return round(calls / effective_hours, 1)
                 return None
 
             build_generic_sheet('calls', 'Звонки', 'calls', is_hour=False, extra_cols=[('КВЗ', kvz_fn)])
@@ -7229,7 +7231,8 @@ class Database:
                 for dnum in daily.values():
                     sum_work += float(dnum.get('work_time') or 0.0)
                 if sum_work and sum_work != 0:
-                    return (sum_eff / sum_work) * 100
+                    val = round((sum_eff / sum_work) * 100, 1)
+                    return f"{val}%"
                 return None
 
             build_generic_sheet('efficiency', 'Эффективность', 'efficiency', is_hour=True, extra_cols=[('Отн.', otn_fn)])
@@ -7256,7 +7259,7 @@ class Database:
             row = 2
             def fmt_amt(x):
                 try:
-                    return float(x or 0.0)
+                    return round(float(x or 0.0), 1)
                 except Exception:
                     return 0.0
 
@@ -7294,7 +7297,7 @@ class Database:
 
                         if rl == 'опоздание':
                             count_late += 1
-                            minutes = float(f.get('minutes')) if f.get('minutes') is not None else (amt / 50.0 if amt else 0.0)
+                            minutes = int(f.get('minutes')) if f.get('minutes') is not None else int(round(amt / 50)) if amt else 0
                             minutes_late += minutes
                             sum_late += amt
                         elif 'корп' in rl and 'такси' in rl:
@@ -7344,12 +7347,13 @@ class Database:
         headers += [f"{d:02d}.{mon:02d}" for d in days] + ["Всего (ч)"]
         _make_header(ws_t, headers)
 
+        def fmt_training_num(n):
+            """Форматируем число с двумя знаками после запятой для вкладки тренингов."""
+            return f"{n:.2f}".replace('.', ',')
+
         def fmt_num(n):
-            """Возвращаем число без дополнительного округления."""
-            try:
-                return float(n or 0.0)
-            except Exception:
-                return 0.0
+            """Форматируем число с одной цифрой после запятой, заменяем точку на запятую."""
+            return f"{n:.1f}".replace('.', ',')
 
         # Заполняем строки — показываем по дням только зачётные часы и одну итоговую колонку "Всего (ч)".
         row_counted = 2
@@ -7390,11 +7394,11 @@ class Database:
                 if counted == 0:
                     set_cell(ws_t, row_counted, c_idx, "")
                 else:
-                    set_cell(ws_t, row_counted, c_idx, fmt_num(counted), fill=FILL_POS)
+                    set_cell(ws_t, row_counted, c_idx, fmt_training_num(counted), fill=FILL_POS)
 
             # Итоги по строке — только Всего (ч)
             total_col = len(headers)
-            set_cell(ws_t, row_counted, total_col, fmt_num(total_all))
+            set_cell(ws_t, row_counted, total_col, fmt_training_num(total_all))
             row_counted += 1
 
         # Настройка ширины колонок для вкладки Тренинги
