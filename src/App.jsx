@@ -790,7 +790,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             try {
             const form = new FormData();
             form.append('file', uploadFile);
-            form.append('date', selectedDayUpload.dateStr);
             if (selectedSvId) {
                 form.append('sv_id', String(selectedSvId));
             }
@@ -835,7 +834,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             setIsSavingPreview(true);
             try {
             const payload = {
-                date: selectedDayUpload.dateStr,
+                date: (previewOperators[0]?.date || selectedDayUpload.dateStr),
                 sv_id: selectedSvId || null,
                 operators: previewOperators.map(r => ({
                 operator_id: r.operator_id,
@@ -2499,8 +2498,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             {selectedDayUpload && previewOperators.length === 0 && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
                 <form onSubmit={handlePreviewUpload} className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md" onClick={e => e.stopPropagation()}>
-                    <h3 className="text-lg font-semibold mb-3">Загрузить файл для {selectedDayUpload.dateStr}</h3>
-                    <p className="text-sm text-gray-600 mb-3">Формат файла: <span className="font-medium">ФИО, Дата, Кол-во поступивших</span>.</p>
+                    <h3 className="text-lg font-semibold mb-3">Загрузить файл учета</h3>
+                    <p className="text-sm text-gray-600 mb-3">Формат файла: <span className="font-medium">ФИО, Дата, Кол-во поступивших</span>. Будут обработаны и сохранены все даты из файла.</p>
                     <input type="file" accept=".xlsx,.xls,.csv" onChange={e => setUploadFile(e.target.files?.[0] || null)} className="mb-3" />
                     <div className="flex justify-end gap-2">
                     <button type="button" onClick={() => setSelectedDayUpload(null)} className="px-3 py-2 rounded-md border">Отмена</button>
@@ -2515,7 +2514,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 <div className="fixed inset-0 z-50 flex items-start pt-12 justify-center bg-black/40">
                 <div className="bg-white p-4 rounded-lg shadow-lg w-[95%] max-w-6xl">
                     <div className="flex items-center justify-between mb-4">
-                    <h3 className="text-lg font-semibold">Предпросмотр: {previewSheetName || 'файл'} — {selectedDayUpload.dateStr}</h3>
+                    <h3 className="text-lg font-semibold">Предпросмотр: {previewSheetName || 'файл'} (все даты из файла)</h3>
                     <div className="flex gap-2">
                         <button onClick={() => { setSelectedDayUpload(null); setPreviewOperators([]); setPreviewSheetName(null); }} className="px-3 py-1 rounded-md border">Отмена</button>
                         <button onClick={handleConfirmSave} disabled={isSavingPreview} className="px-3 py-1 bg-green-600 text-white rounded-md">
