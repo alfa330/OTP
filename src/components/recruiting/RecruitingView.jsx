@@ -130,6 +130,8 @@ const DEFAULT_PARSER_KEYWORDS = {
   ],
 };
 
+const RECRUITING_STATS_HIDDEN_STORAGE_KEY = "recruiting.stats.hidden";
+
 function normalizeText(value) {
   return String(value ?? "")
     .toLowerCase()
@@ -424,6 +426,15 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
   const [importError, setImportError] = useState("");
   const [isRunningParser, setIsRunningParser] = useState(false);
   const [isLoadingFromApi, setIsLoadingFromApi] = useState(false);
+  const [isStatsHidden, setIsStatsHidden] = useState(() => {
+    if (typeof window === "undefined") return false;
+    try {
+      const saved = window.localStorage.getItem(RECRUITING_STATS_HIDDEN_STORAGE_KEY);
+      return saved === "1" || saved === "true";
+    } catch (_error) {
+      return false;
+    }
+  });
   const [lastRunMeta, setLastRunMeta] = useState(null);
   const [apiStatusMessage, setApiStatusMessage] = useState("");
   const [isParserModalOpen, setIsParserModalOpen] = useState(false);
@@ -813,6 +824,17 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [isParserModalOpen]);
 
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        RECRUITING_STATS_HIDDEN_STORAGE_KEY,
+        isStatsHidden ? "1" : "0"
+      );
+    } catch (_error) {
+      // Ignore localStorage write failures.
+    }
+  }, [isStatsHidden]);
+
   const hydratedItems = useMemo(() => {
     return rawItems.map((item, index) => {
       const priority = getResumePriority(item);
@@ -1042,6 +1064,15 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                   <RefreshCw className={`mr-2 h-4 w-4 ${isRunningParser ? "animate-spin" : ""}`} />
                   Запустить парсер
                 </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="rounded-2xl"
+                  onClick={() => setIsStatsHidden((prev) => !prev)}
+                >
+                  <BarChart3 className="mr-2 h-4 w-4" />
+                  {isStatsHidden ? "Показать статистику" : "Скрыть статистику"}
+                </Button>
                 <Button className="rounded-2xl" onClick={exportFilteredExcel} disabled={!filteredItems.length}>
                   <Download className="mr-2 h-4 w-4" />
                   Export Excel
@@ -1191,19 +1222,21 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
               </CardContent>
             </Card>
 
-            <Card className="order-1 rounded-3xl border-slate-200/70 shadow-sm">
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2 text-lg"><BarChart3 className="h-5 w-5" /> Краткая сводка</CardTitle>
-                <CardDescription>Срез по текущим фильтрам.</CardDescription>
-              </CardHeader>
-              <CardContent className="grid gap-4 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
-                <StatCard title="Резюме" value={stats.total} hint="После применения фильтров" icon={Users} />
-                <StatCard title="Средняя зарплата" value={formatMoney(stats.avgSalary)} hint="Среди записей, где зарплата указана" icon={Wallet} />
-                <StatCard title="Свежие" value={stats.freshCount} hint="Опубликовано примерно за последние 3 дня" icon={CalendarDays} />
-                <StatCard title="Приоритетные" value={stats.highPriorityCount} hint="Резюме с высоким score релевантности" icon={Filter} />
-                <StatCard title="Средний score" value={stats.avgRelevance} hint="Средняя релевантность текущей выборки" icon={Sparkles} />
-              </CardContent>
-            </Card>
+            {!isStatsHidden ? (
+              <Card className="order-1 rounded-3xl border-slate-200/70 shadow-sm">
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2 text-lg"><BarChart3 className="h-5 w-5" /> Краткая сводка</CardTitle>
+                  <CardDescription>Срез по текущим фильтрам.</CardDescription>
+                </CardHeader>
+                <CardContent className="grid gap-4 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
+                  <StatCard title="Резюме" value={stats.total} hint="После применения фильтров" icon={Users} />
+                  <StatCard title="Средняя зарплата" value={formatMoney(stats.avgSalary)} hint="Среди записей, где зарплата указана" icon={Wallet} />
+                  <StatCard title="Свежие" value={stats.freshCount} hint="Опубликовано примерно за последние 3 дня" icon={CalendarDays} />
+                  <StatCard title="Приоритетные" value={stats.highPriorityCount} hint="Резюме с высоким score релевантности" icon={Filter} />
+                  <StatCard title="Средний score" value={stats.avgRelevance} hint="Средняя релевантность текущей выборки" icon={Sparkles} />
+                </CardContent>
+              </Card>
+            ) : null}
           </div>
 
           <div className="space-y-6">
@@ -1211,60 +1244,64 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
               <EmptyState onRefresh={handleRefreshFromApi} isRefreshing={isLoadingFromApi} />
             ) : (
               <>
-                <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr] 2xl:grid-cols-[1fr_1fr]">
-                  <Card className="rounded-3xl border-slate-200/70 shadow-sm">
-                    <CardHeader>
-                      <CardTitle>Распределение по группам</CardTitle>
-                      <CardDescription>Что преобладает в текущей выборке.</CardDescription>
-                    </CardHeader>
-                    <CardContent className="h-[280px] 2xl:h-[320px]">
-                      <ResponsiveContainer width="100%" height="100%">
-                        <BarChart data={groupChartData}>
-                          <XAxis dataKey="name" tickLine={false} axisLine={false} />
-                          <YAxis allowDecimals={false} tickLine={false} axisLine={false} />
-                          <Tooltip />
-                          <Bar dataKey="value" radius={[10, 10, 0, 0]} />
-                        </BarChart>
-                      </ResponsiveContainer>
-                    </CardContent>
-                  </Card>
+                {!isStatsHidden ? (
+                  <>
+                    <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr] 2xl:grid-cols-[1fr_1fr]">
+                      <Card className="rounded-3xl border-slate-200/70 shadow-sm">
+                        <CardHeader>
+                          <CardTitle>Распределение по группам</CardTitle>
+                          <CardDescription>Что преобладает в текущей выборке.</CardDescription>
+                        </CardHeader>
+                        <CardContent className="h-[280px] 2xl:h-[320px]">
+                          <ResponsiveContainer width="100%" height="100%">
+                            <BarChart data={groupChartData}>
+                              <XAxis dataKey="name" tickLine={false} axisLine={false} />
+                              <YAxis allowDecimals={false} tickLine={false} axisLine={false} />
+                              <Tooltip />
+                              <Bar dataKey="value" radius={[10, 10, 0, 0]} />
+                            </BarChart>
+                          </ResponsiveContainer>
+                        </CardContent>
+                      </Card>
 
-                  <Card className="rounded-3xl border-slate-200/70 shadow-sm">
-                    <CardHeader>
-                      <CardTitle>Топ районов / локаций</CardTitle>
-                      <CardDescription>Сгруппировано по первому блоку в поле location.</CardDescription>
-                    </CardHeader>
-                    <CardContent className="h-[280px] 2xl:h-[320px]">
-                      <ResponsiveContainer width="100%" height="100%">
-                        <PieChart>
-                          <Pie data={locationsData} dataKey="value" nameKey="name" innerRadius={58} outerRadius={88} paddingAngle={3}>
-                            {locationsData.map((entry, index) => (
-                              <Cell key={entry.name} fill={PIE_COLORS[index % PIE_COLORS.length]} />
-                            ))}
-                          </Pie>
-                          <Tooltip />
-                        </PieChart>
-                      </ResponsiveContainer>
-                    </CardContent>
-                  </Card>
-                </div>
+                      <Card className="rounded-3xl border-slate-200/70 shadow-sm">
+                        <CardHeader>
+                          <CardTitle>Топ районов / локаций</CardTitle>
+                          <CardDescription>Сгруппировано по первому блоку в поле location.</CardDescription>
+                        </CardHeader>
+                        <CardContent className="h-[280px] 2xl:h-[320px]">
+                          <ResponsiveContainer width="100%" height="100%">
+                            <PieChart>
+                              <Pie data={locationsData} dataKey="value" nameKey="name" innerRadius={58} outerRadius={88} paddingAngle={3}>
+                                {locationsData.map((entry, index) => (
+                                  <Cell key={entry.name} fill={PIE_COLORS[index % PIE_COLORS.length]} />
+                                ))}
+                              </Pie>
+                              <Tooltip />
+                            </PieChart>
+                          </ResponsiveContainer>
+                        </CardContent>
+                      </Card>
+                    </div>
 
-                <Card className="rounded-3xl border-slate-200/70 shadow-sm">
-                  <CardHeader>
-                    <CardTitle>Топ поисковых запросов</CardTitle>
-                    <CardDescription>Какие формулировки дали больше резюме в текущем наборе.</CardDescription>
-                  </CardHeader>
-                  <CardContent className="h-[260px] 2xl:h-[320px]">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={queryChartData} layout="vertical" margin={{ left: 24 }}>
-                        <XAxis type="number" allowDecimals={false} tickLine={false} axisLine={false} />
-                        <YAxis type="category" dataKey="name" width={180} tickLine={false} axisLine={false} />
-                        <Tooltip />
-                        <Bar dataKey="value" radius={[0, 10, 10, 0]} />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </CardContent>
-                </Card>
+                    <Card className="rounded-3xl border-slate-200/70 shadow-sm">
+                      <CardHeader>
+                        <CardTitle>Топ поисковых запросов</CardTitle>
+                        <CardDescription>Какие формулировки дали больше резюме в текущем наборе.</CardDescription>
+                      </CardHeader>
+                      <CardContent className="h-[260px] 2xl:h-[320px]">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <BarChart data={queryChartData} layout="vertical" margin={{ left: 24 }}>
+                            <XAxis type="number" allowDecimals={false} tickLine={false} axisLine={false} />
+                            <YAxis type="category" dataKey="name" width={180} tickLine={false} axisLine={false} />
+                            <Tooltip />
+                            <Bar dataKey="value" radius={[0, 10, 10, 0]} />
+                          </BarChart>
+                        </ResponsiveContainer>
+                      </CardContent>
+                    </Card>
+                  </>
+                ) : null}
 
                 <Tabs defaultValue="list" className="space-y-6">
                   <TabsList className="grid w-full grid-cols-2 rounded-2xl bg-slate-100 p-1">
