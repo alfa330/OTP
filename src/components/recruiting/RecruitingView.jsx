@@ -170,6 +170,37 @@ const PRIORITY_LABELS = {
   low: "Низкий",
 };
 
+const DEFAULT_PARSER_PAGES_PER_QUERY = 5;
+
+const DEFAULT_PARSER_KEYWORDS = {
+  sales_manager: [
+    "менеджер по продажам",
+    "специалист по продажам",
+    "менеджер продаж",
+    "sales manager",
+    "менеджер по работе с клиентами",
+    "аккаунт-менеджер",
+    "менеджер по привлечению клиентов",
+    "менеджер по развитию продаж",
+    "менеджер b2b продаж",
+    "менеджер b2c продаж",
+  ],
+  call_center_operator: [
+    "оператор call центра",
+    "оператор call-центра",
+    "оператор колл центра",
+    "оператор колл-центра",
+    "оператор контакт центра",
+    "оператор контакт-центра",
+    "специалист call центра",
+    "специалист контакт центра",
+    "телемаркетолог",
+    "оператор на телефоне",
+    "специалист по работе с клиентами",
+    "менеджер call центра",
+  ],
+};
+
 function normalizeText(value) {
   return String(value ?? "")
     .toLowerCase()
@@ -413,6 +444,8 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
   const fileInputRef = useRef(null);
   const bootstrapKeyRef = useRef("");
   const loadRequestRef = useRef(null);
+  const parserStatusRequestRef = useRef(false);
+  const parserCompletedJobsRef = useRef(new Set());
   const [rawItems, setRawItems] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
   const [search, setSearch] = useState("");
@@ -428,6 +461,14 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
   const [isLoadingFromApi, setIsLoadingFromApi] = useState(false);
   const [lastRunMeta, setLastRunMeta] = useState(null);
   const [apiStatusMessage, setApiStatusMessage] = useState("");
+  const [parserPagesPerQuery, setParserPagesPerQuery] = useState(String(DEFAULT_PARSER_PAGES_PER_QUERY));
+  const [parserKeywordDrafts, setParserKeywordDrafts] = useState({
+    sales_manager: DEFAULT_PARSER_KEYWORDS.sales_manager.join("\n"),
+    call_center_operator: DEFAULT_PARSER_KEYWORDS.call_center_operator.join("\n"),
+  });
+  const [parserJobId, setParserJobId] = useState("");
+  const [parserJobStatus, setParserJobStatus] = useState("idle");
+  const [parserLogs, setParserLogs] = useState([]);
 
   useEffect(() => {
     if (!rawItems.length) {
@@ -456,6 +497,28 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
     }
     return headers;
   }, [user?.apiKey, user?.id, withAccessTokenHeader]);
+
+  const buildParserKeywordGroupsPayload = useCallback(() => {
+    const normalized = {};
+    Object.entries(parserKeywordDrafts || {}).forEach(([group, draft]) => {
+      const list = String(draft || "")
+        .split(/\r?\n/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+      if (list.length) {
+        normalized[group] = list;
+      }
+    });
+    return normalized;
+  }, [parserKeywordDrafts]);
+
+  const restoreDefaultParserSettings = useCallback(() => {
+    setParserPagesPerQuery(String(DEFAULT_PARSER_PAGES_PER_QUERY));
+    setParserKeywordDrafts({
+      sales_manager: DEFAULT_PARSER_KEYWORDS.sales_manager.join("\n"),
+      call_center_operator: DEFAULT_PARSER_KEYWORDS.call_center_operator.join("\n"),
+    });
+  }, []);
 
   const normalizeIncomingItems = useCallback((items, source = "api") => {
     if (!Array.isArray(items)) return [];
@@ -556,6 +619,35 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
     }
   }, [loadResumesFromApi, showToast]);
 
+  const fetchParserRunStatus = useCallback(async (jobId) => {
+    if (!apiBaseUrl || !jobId) return null;
+
+    const query = new URLSearchParams({ job_id: jobId });
+    const response = await fetch(`${apiBaseUrl}/api/recruiting/run/status?${query.toString()}`, {
+      method: "GET",
+      headers: buildApiHeaders(),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const errorText =
+        payload?.error ||
+        payload?.message ||
+        `Не удалось получить статус парсера (${response.status}).`;
+      throw new Error(errorText);
+    }
+
+    const job = payload?.job || null;
+    if (job) {
+      setParserJobStatus(job.status || "idle");
+      setParserLogs(Array.isArray(job.messages) ? job.messages : []);
+      if (job?.result?.run) {
+        setLastRunMeta(job.result.run);
+      }
+    }
+
+    return { payload, job };
+  }, [apiBaseUrl, buildApiHeaders]);
+
   const handleRunParserManually = useCallback(async () => {
     if (!apiBaseUrl) {
       const errorText = "API URL не настроен.";
@@ -564,18 +656,55 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
       return;
     }
 
+    const pages = Number(parserPagesPerQuery);
+    if (!Number.isFinite(pages) || pages < 1 || pages > 20) {
+      const errorText = "Количество страниц должно быть числом от 1 до 20.";
+      setImportError(errorText);
+      showToast?.(errorText, "error");
+      return;
+    }
+
+    const keywordGroups = buildParserKeywordGroupsPayload();
+    const keywordCount = Object.values(keywordGroups).reduce((sum, list) => sum + list.length, 0);
+    if (!keywordCount) {
+      const errorText = "Добавь хотя бы одно ключевое слово для запуска парсера.";
+      setImportError(errorText);
+      showToast?.(errorText, "error");
+      return;
+    }
+
     setIsRunningParser(true);
     setImportError("");
     setApiStatusMessage("");
+    setParserLogs([]);
+    setParserJobStatus("starting");
 
     try {
       const response = await fetch(`${apiBaseUrl}/api/recruiting/run`, {
         method: "POST",
         headers: buildApiHeaders({ "Content-Type": "application/json" }),
-        body: "{}",
+        body: JSON.stringify({
+          async: true,
+          pages_per_query: pages,
+          keyword_groups: keywordGroups,
+        }),
       });
 
       const payload = await response.json().catch(() => ({}));
+      if (response.status === 409) {
+        const activeJob = payload?.job || null;
+        if (activeJob?.job_id) {
+          setParserJobId(activeJob.job_id);
+          setParserJobStatus(activeJob.status || "running");
+          setParserLogs(Array.isArray(activeJob.messages) ? activeJob.messages : []);
+          setApiStatusMessage(payload?.message || "Парсер уже выполняется. Подключен live-лог текущего запуска.");
+          setIsRunningParser(true);
+          showToast?.(payload?.message || "Парсер уже выполняется.", "error");
+          return;
+        }
+        throw new Error(payload?.message || "Парсер уже выполняется. Попробуй позже.");
+      }
+
       if (!response.ok) {
         const fallback =
           response.status === 409
@@ -584,26 +713,103 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
         throw new Error(payload?.message || payload?.error || fallback);
       }
 
-      const latestRun = payload?.latest_run || payload?.result?.run || null;
-      const runUuid = latestRun?.run_uuid || null;
-      const resumesPayload = await loadResumesFromApi({ runUuid, silent: true });
-      const totalCount = Number(resumesPayload?.total ?? resumesPayload?.items?.length ?? 0);
+      const job = payload?.job || null;
+      if (!job?.job_id) {
+        throw new Error("Сервер не вернул идентификатор задачи парсинга.");
+      }
 
-      setLastRunMeta(latestRun);
-      setApiStatusMessage(
-        totalCount > 0
-          ? `Парсер завершен. Обновлено ${totalCount} резюме.`
-          : "Парсер завершен, но резюме не найдены."
-      );
-      showToast?.("Парсер успешно запущен вручную.", "success");
+      setParserJobId(job.job_id);
+      setParserJobStatus(job.status || "running");
+      setParserLogs(Array.isArray(job.messages) ? job.messages : []);
+      setApiStatusMessage("Парсер запущен. Логи обновляются в реальном времени.");
+      showToast?.("Парсер запущен в фоне.", "success");
     } catch (error) {
       const errorText = error?.message || "Ошибка ручного запуска парсера.";
       setImportError(errorText);
       showToast?.(errorText, "error");
-    } finally {
       setIsRunningParser(false);
     }
-  }, [apiBaseUrl, buildApiHeaders, loadResumesFromApi, showToast]);
+  }, [apiBaseUrl, buildApiHeaders, buildParserKeywordGroupsPayload, parserPagesPerQuery, showToast]);
+
+  useEffect(() => {
+    if (!parserJobId) {
+      return undefined;
+    }
+
+    let isCancelled = false;
+    const poll = async () => {
+      if (isCancelled || parserStatusRequestRef.current) {
+        return;
+      }
+      parserStatusRequestRef.current = true;
+      try {
+        const statusPayload = await fetchParserRunStatus(parserJobId);
+        const job = statusPayload?.job;
+        if (!job || isCancelled) {
+          return;
+        }
+
+        const status = String(job.status || "idle");
+        if (status === "running" || status === "starting") {
+          setIsRunningParser(true);
+          return;
+        }
+
+        setIsRunningParser(false);
+
+        if (parserCompletedJobsRef.current.has(parserJobId)) {
+          return;
+        }
+        parserCompletedJobsRef.current.add(parserJobId);
+
+        if (status === "success") {
+          const runUuid = job?.result?.run?.run_uuid || statusPayload?.payload?.latest_run?.run_uuid || null;
+          const resumesPayload = await loadResumesFromApi({ runUuid, silent: true });
+          const totalCount = Number(resumesPayload?.total ?? resumesPayload?.items?.length ?? 0);
+          setApiStatusMessage(
+            totalCount > 0
+              ? `Парсер завершен. Обновлено ${totalCount} резюме.`
+              : "Парсер завершен, но резюме не найдены."
+          );
+          showToast?.("Парсер завершён успешно.", "success");
+          setParserJobId("");
+          return;
+        }
+
+        if (status === "failed") {
+          const errorText = job?.error || "Парсер завершился с ошибкой.";
+          setImportError(errorText);
+          setApiStatusMessage("Парсер завершился с ошибкой.");
+          showToast?.(errorText, "error");
+          setParserJobId("");
+          return;
+        }
+
+        if (status === "skipped") {
+          const skippedText = job?.error || "Парсер не стартовал: уже есть активный запуск.";
+          setApiStatusMessage(skippedText);
+          showToast?.(skippedText, "error");
+          setParserJobId("");
+          return;
+        }
+
+        setParserJobId("");
+      } catch (error) {
+        if (!isCancelled) {
+          setImportError(error?.message || "Не удалось получить статус парсера.");
+        }
+      } finally {
+        parserStatusRequestRef.current = false;
+      }
+    };
+
+    poll();
+    const timer = setInterval(poll, 1500);
+    return () => {
+      isCancelled = true;
+      clearInterval(timer);
+    };
+  }, [fetchParserRunStatus, loadResumesFromApi, parserJobId, showToast]);
 
   useEffect(() => {
     let isCancelled = false;
@@ -643,6 +849,49 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
       isCancelled = true;
     };
   }, [apiBaseUrl, user?.id, user?.apiKey, loadResumesFromApi]);
+
+  useEffect(() => {
+    let isCancelled = false;
+    if (!apiBaseUrl || !user?.id) {
+      return undefined;
+    }
+
+    const attachActiveJobIfAny = async () => {
+      try {
+        const response = await fetch(`${apiBaseUrl}/api/recruiting/run/status`, {
+          method: "GET",
+          headers: buildApiHeaders(),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || isCancelled) {
+          return;
+        }
+
+        const job = payload?.job || null;
+        if (!job?.job_id) {
+          return;
+        }
+
+        setParserJobStatus(job.status || "idle");
+        setParserLogs(Array.isArray(job.messages) ? job.messages : []);
+        if (job?.result?.run) {
+          setLastRunMeta(job.result.run);
+        }
+        if (job.status === "running" || job.status === "starting") {
+          setParserJobId(job.job_id);
+          setIsRunningParser(true);
+          setApiStatusMessage("Подключен к активному запуску парсера.");
+        }
+      } catch (_error) {
+        // Silent by design: section should still work without runtime job snapshot.
+      }
+    };
+
+    attachActiveJobIfAny();
+    return () => {
+      isCancelled = true;
+    };
+  }, [apiBaseUrl, buildApiHeaders, user?.id]);
 
   const hydratedItems = useMemo(() => {
     return rawItems.map((item, index) => {
@@ -779,6 +1028,31 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
       .sort((a, b) => b.value - a.value)
       .slice(0, 6);
   }, [filteredItems]);
+
+  const parserKeywordStats = useMemo(() => {
+    const groups = buildParserKeywordGroupsPayload();
+    const groupCount = Object.keys(groups).length;
+    const keywordCount = Object.values(groups).reduce((sum, list) => sum + list.length, 0);
+    return { groupCount, keywordCount };
+  }, [buildParserKeywordGroupsPayload]);
+
+  const parserStatusLabel = useMemo(() => {
+    const status = String(parserJobStatus || "idle");
+    if (status === "running" || status === "starting") return "Выполняется";
+    if (status === "success") return "Успешно";
+    if (status === "failed") return "Ошибка";
+    if (status === "skipped") return "Пропущен";
+    return "Ожидание";
+  }, [parserJobStatus]);
+
+  const parserStatusClass = useMemo(() => {
+    const status = String(parserJobStatus || "idle");
+    if (status === "running" || status === "starting") return "border-blue-200 bg-blue-50 text-blue-700";
+    if (status === "success") return "border-emerald-200 bg-emerald-50 text-emerald-700";
+    if (status === "failed") return "border-red-200 bg-red-50 text-red-700";
+    if (status === "skipped") return "border-amber-200 bg-amber-50 text-amber-700";
+    return "border-slate-200 bg-slate-50 text-slate-600";
+  }, [parserJobStatus]);
 
   const handleUseSample = () => {
     setRawItems(SAMPLE_DATA.map((item, index) => ({ ...item, __id: `sample-${index}` })));
@@ -1012,6 +1286,104 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                     <RefreshCw className="mr-2 h-4 w-4" />
                     Сбросить
                   </Button>
+                </div>
+
+                <Separator />
+
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <Label>Ручной запуск парсера</Label>
+                    <Badge className={`rounded-full border ${parserStatusClass}`}>{parserStatusLabel}</Badge>
+                  </div>
+                  <p className="text-xs text-slate-500">
+                    Настрой ключевые слова и глубину парсинга. В логе ниже будет виден прогресс в реальном времени.
+                  </p>
+
+                  <div className="space-y-2">
+                    <Label>Страниц на каждый запрос</Label>
+                    <Input
+                      type="number"
+                      min="1"
+                      max="20"
+                      value={parserPagesPerQuery}
+                      onChange={(e) => setParserPagesPerQuery(e.target.value)}
+                      placeholder="От 1 до 20"
+                      className="rounded-2xl"
+                    />
+                  </div>
+
+                  <div className="space-y-3">
+                    {Object.entries(parserKeywordDrafts).map(([group, draft]) => (
+                      <div key={group} className="space-y-2">
+                        <Label>{GROUP_LABELS[group] || group}: ключевые слова (по одному на строку)</Label>
+                        <Textarea
+                          value={draft}
+                          onChange={(e) => setParserKeywordDrafts((prev) => ({ ...prev, [group]: e.target.value }))}
+                          className="min-h-[120px] rounded-2xl text-sm"
+                          placeholder="Например: менеджер по продажам"
+                        />
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant="secondary" className="rounded-full">
+                      Групп: {parserKeywordStats.groupCount}
+                    </Badge>
+                    <Badge variant="secondary" className="rounded-full">
+                      Ключевых слов: {parserKeywordStats.keywordCount}
+                    </Badge>
+                    {parserJobId ? (
+                      <Badge variant="outline" className="rounded-full">
+                        job: {parserJobId.slice(0, 8)}
+                      </Badge>
+                    ) : null}
+                  </div>
+
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      onClick={handleRunParserManually}
+                      className="rounded-2xl"
+                      disabled={isRunningParser || isLoadingFromApi}
+                    >
+                      <RefreshCw className={`mr-2 h-4 w-4 ${isRunningParser ? "animate-spin" : ""}`} />
+                      {isRunningParser ? "Парсер выполняется..." : "Запустить парсер с настройками"}
+                    </Button>
+                    <Button type="button" variant="outline" className="rounded-2xl" onClick={restoreDefaultParserSettings}>
+                      Вернуть настройки по умолчанию
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      className="rounded-2xl"
+                      onClick={() => setParserLogs([])}
+                      disabled={!parserLogs.length}
+                    >
+                      Очистить лог
+                    </Button>
+                  </div>
+
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                    <div className="mb-2 text-xs font-medium text-slate-600">Лог парсера</div>
+                    <ScrollArea className="h-[180px] pr-2">
+                      <div className="space-y-2">
+                        {parserLogs.length ? (
+                          parserLogs.map((log, index) => (
+                            <div key={`${log.ts || "log"}-${index}`} className="rounded-xl bg-white px-3 py-2 text-xs text-slate-700">
+                              <span className="text-slate-500">
+                                [{formatDateTime(log.ts)}]
+                              </span>{" "}
+                              {log.text || "—"}
+                            </div>
+                          ))
+                        ) : (
+                          <div className="rounded-xl bg-white px-3 py-2 text-xs text-slate-500">
+                            Лог пуст. Запусти парсер, чтобы увидеть сообщения.
+                          </div>
+                        )}
+                      </div>
+                    </ScrollArea>
+                  </div>
                 </div>
 
                 <Separator />
@@ -1278,10 +1650,10 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                                   <CardTitle className="text-base">Что можно улучшить дальше</CardTitle>
                                 </CardHeader>
                                 <CardContent className="space-y-3 text-sm leading-6 text-slate-600">
-                                  <p>1. Подключить прямой запуск Python-парсера с backend API.</p>
+                                  <p>1. Добавить сохранение пресетов ключевых слов для разных сценариев найма.</p>
                                   <p>2. Добавить сохранение заметок по кандидатам.</p>
                                   <p>3. Сделать сравнение зарплат по группам и свежести.</p>
-                                  <p>4. Добавить автозагрузку файла результатов после каждого запуска.</p>
+                                  <p>4. Добавить экспорт live-лога запуска парсера в текстовый файл.</p>
                                 </CardContent>
                               </Card>
                             </div>
