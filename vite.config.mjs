@@ -7,6 +7,11 @@ const rootDir = process.cwd();
 
 export default defineConfig({
   base,
+  resolve: {
+    alias: {
+      '@': resolve(rootDir, 'src')
+    }
+  },
   plugins: [react()],
   build: {
     chunkSizeWarningLimit: 1500,

@@ -42,6 +42,7 @@ import math
 from urllib.parse import quote, urlparse, parse_qs
 from zoneinfo import ZoneInfo
 from ai_feed_back_service import generate_monthly_feedback_with_ai, generate_birthday_greeting_with_ai
+from recruiting_parser import crawl_resumes_as_dicts
 try:
     from PIL import Image, ImageOps
 except Exception:
@@ -73,6 +74,7 @@ dp = Dispatcher(bot=bot, storage=storage)
 
 # === Блокировки ==================================================================================================
 report_lock = threading.Lock()
+recruiting_parse_lock = threading.Lock()
 executor_pool = ThreadPoolExecutor(max_workers=4)
 
 # === Flask-сервер ================================================================================================
@@ -97,6 +99,11 @@ LMS_COMPLETION_THRESHOLD = float(os.getenv('LMS_COMPLETION_THRESHOLD', '95'))
 LMS_DEFAULT_PASS_THRESHOLD = float(os.getenv('LMS_DEFAULT_PASS_THRESHOLD', '80'))
 LMS_DEFAULT_ATTEMPT_LIMIT = int(os.getenv('LMS_DEFAULT_ATTEMPT_LIMIT', '3'))
 LMS_CERTIFICATE_STORAGE = (os.getenv('LMS_CERTIFICATE_STORAGE') or 'db').strip().lower()
+try:
+    RECRUITING_PAGES_PER_QUERY = int(os.getenv('RECRUITING_PAGES_PER_QUERY', '5'))
+except Exception:
+    RECRUITING_PAGES_PER_QUERY = 5
+RECRUITING_PAGES_PER_QUERY = max(1, min(RECRUITING_PAGES_PER_QUERY, 20))
 
 ALLOWED_ORIGINS = {
     "https://alfa330.github.io",
@@ -9053,6 +9060,53 @@ def delete_technical_issue(issue_id):
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 
+@app.route('/api/recruiting/resumes', methods=['GET'])
+@require_api_key
+def list_recruiting_resumes():
+    try:
+        requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+        requester_id = int(requester_id)
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "User not found"}), 404
+
+        requester_role = _normalize_management_role(requester[3])
+        if not _is_admin_role(requester_role):
+            return jsonify({"error": "Forbidden"}), 403
+
+        limit = request.args.get('limit', 500)
+        offset = request.args.get('offset', 0)
+        search = (request.args.get('search') or '').strip() or None
+        keyword_group = (request.args.get('keyword_group') or '').strip() or None
+        run_uuid = (request.args.get('run_uuid') or '').strip() or None
+
+        result = db.get_recruiting_resumes(
+            run_uuid=run_uuid,
+            limit=limit,
+            offset=offset,
+            search=search,
+            keyword_group=keyword_group
+        )
+        run_info = result.get("run")
+        latest_run = db.get_latest_recruiting_parse_run(status=None) if not run_info else run_info
+
+        return jsonify({
+            "status": "success",
+            "total": int(result.get("total") or 0),
+            "run": run_info,
+            "latest_run": latest_run,
+            "items": result.get("items") or []
+        }), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error listing recruiting resumes: {e}", exc_info=True)
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
 @app.route('/api/offline_activities', methods=['POST'])
 @require_api_key
 def create_offline_activity():
@@ -17422,6 +17476,52 @@ def sync_schedule_statuses_to_user_statuses_job():
     except Exception as e:
         logging.exception("Error in auto status sync job: %s", e)
 
+
+def sync_recruiting_resumes_job(triggered_by='scheduler'):
+    """Background job: collect recruiting resumes from Enbek and persist snapshot into DB."""
+    if not recruiting_parse_lock.acquire(blocking=False):
+        logging.warning("Recruiting parser job skipped: previous run is still in progress")
+        return {"status": "skipped", "reason": "locked"}
+
+    started = time.time()
+    try:
+        items = crawl_resumes_as_dicts(pages_per_query=RECRUITING_PAGES_PER_QUERY)
+        save_result = db.save_recruiting_parse_success(
+            items=items,
+            source='enbek',
+            triggered_by=triggered_by
+        )
+        elapsed = time.time() - started
+        logging.info(
+            "Recruiting parser completed: %s items saved, duplicates dropped=%s, elapsed=%.2fs (run=%s)",
+            int(save_result.get('inserted') or 0),
+            int(save_result.get('duplicates_dropped') or 0),
+            elapsed,
+            (save_result.get('run') or {}).get('run_uuid')
+        )
+        return save_result
+    except Exception as e:
+        logging.exception("Recruiting parser job failed: %s", e)
+        try:
+            db.save_recruiting_parse_failure(
+                error_message=str(e),
+                source='enbek',
+                triggered_by=triggered_by
+            )
+        except Exception:
+            logging.exception("Failed to persist recruiting parser failure into DB")
+        return {"status": "failed", "error": str(e)}
+    finally:
+        try:
+            recruiting_parse_lock.release()
+        except Exception:
+            pass
+
+
+async def run_recruiting_resumes_job_async(triggered_by='scheduler'):
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(executor_pool, sync_recruiting_resumes_job, triggered_by)
+
 # === Главный запуск =============================================================================================
 if __name__ == '__main__':
     
@@ -17460,6 +17560,16 @@ if __name__ == '__main__':
         CronTrigger(hour=0, minute=0),
         id='sync_schedule_statuses_to_user_statuses',
         misfire_grace_time=120,
+        max_instances=1,
+        coalesce=True
+    )
+
+    # Парсинг рекрутинга ежедневно в 00:10 (Asia/Almaty) с сохранением снапшота в БД
+    scheduler.add_job(
+        run_recruiting_resumes_job_async,
+        CronTrigger(hour=0, minute=10, timezone=ZoneInfo('Asia/Almaty')),
+        id='recruiting_parser_daily',
+        misfire_grace_time=3600,
         max_instances=1,
         coalesce=True
     )
