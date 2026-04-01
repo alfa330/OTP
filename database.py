@@ -1263,6 +1263,62 @@ class Database:
                 ON ai_birthday_greeting_cache(user_id, greeting_date);
             """)
 
+            # Recruiting parser runs + snapshots
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS recruiting_parse_runs (
+                    id SERIAL PRIMARY KEY,
+                    run_uuid UUID UNIQUE NOT NULL,
+                    source VARCHAR(64) NOT NULL DEFAULT 'enbek',
+                    triggered_by VARCHAR(32) NOT NULL DEFAULT 'scheduler',
+                    status VARCHAR(16) NOT NULL CHECK (status IN ('success', 'failed')),
+                    total_items INTEGER NOT NULL DEFAULT 0,
+                    error_message TEXT,
+                    started_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    finished_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS recruiting_resumes (
+                    id SERIAL PRIMARY KEY,
+                    run_uuid UUID NOT NULL REFERENCES recruiting_parse_runs(run_uuid) ON DELETE CASCADE,
+                    keyword_group VARCHAR(128),
+                    keyword_query TEXT,
+                    page_found INTEGER,
+                    title TEXT,
+                    category TEXT,
+                    experience TEXT,
+                    location TEXT,
+                    salary TEXT,
+                    education TEXT,
+                    published_at TEXT,
+                    detail_url TEXT,
+                    scraped_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+            """)
+            cursor.execute("""
+                DELETE FROM recruiting_resumes newer
+                USING recruiting_resumes older
+                WHERE newer.id > older.id
+                  AND newer.run_uuid = older.run_uuid
+                  AND newer.detail_url IS NOT NULL
+                  AND newer.detail_url = older.detail_url;
+            """)
+            cursor.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1
+                        FROM pg_constraint
+                        WHERE conname = 'uq_recruiting_resumes_run_detail_url'
+                          AND conrelid = 'recruiting_resumes'::regclass
+                    ) THEN
+                        ALTER TABLE recruiting_resumes
+                            ADD CONSTRAINT uq_recruiting_resumes_run_detail_url
+                            UNIQUE (run_uuid, detail_url);
+                    END IF;
+                END $$;
+            """)
+
             # Surveys tables
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS surveys (
@@ -1536,6 +1592,12 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_work_shift_swap_requests_period
                 ON work_shift_swap_requests(start_date, end_date);
                 CREATE INDEX IF NOT EXISTS idx_ai_feedback_cache_operator_month ON ai_feedback_cache(operator_id, month);
+                CREATE INDEX IF NOT EXISTS idx_recruiting_parse_runs_status_finished
+                ON recruiting_parse_runs(status, finished_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_recruiting_resumes_run_uuid ON recruiting_resumes(run_uuid);
+                CREATE INDEX IF NOT EXISTS idx_recruiting_resumes_group ON recruiting_resumes(keyword_group);
+                CREATE INDEX IF NOT EXISTS idx_recruiting_resumes_page ON recruiting_resumes(page_found);
+                CREATE INDEX IF NOT EXISTS idx_recruiting_resumes_detail_url ON recruiting_resumes(detail_url);
                 CREATE INDEX IF NOT EXISTS idx_surveys_created_by ON surveys(created_by, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_surveys_repeat_root_iteration ON surveys(repeat_root_id, repeat_iteration);
                 CREATE INDEX IF NOT EXISTS idx_survey_questions_survey_position ON survey_questions(survey_id, position);
@@ -13607,6 +13669,291 @@ class Database:
                 )
 
         return result_ids
+
+    def _serialize_recruiting_run_row(self, row):
+        if not row:
+            return None
+        return {
+            "run_uuid": row[0],
+            "source": row[1],
+            "triggered_by": row[2],
+            "status": row[3],
+            "total_items": int(row[4] or 0),
+            "error_message": row[5],
+            "started_at": row[6].isoformat() if hasattr(row[6], "isoformat") else row[6],
+            "finished_at": row[7].isoformat() if hasattr(row[7], "isoformat") else row[7],
+        }
+
+    def _normalize_recruiting_item(self, item):
+        payload = item or {}
+
+        def to_text(value):
+            if value is None:
+                return None
+            text = str(value).strip()
+            return text or None
+
+        page_found = None
+        raw_page = payload.get("page_found")
+        if raw_page is not None and str(raw_page).strip() != "":
+            try:
+                page_found = int(raw_page)
+            except Exception:
+                page_found = None
+
+        return {
+            "keyword_group": to_text(payload.get("keyword_group")),
+            "keyword_query": to_text(payload.get("keyword_query")),
+            "page_found": page_found,
+            "title": to_text(payload.get("title")),
+            "category": to_text(payload.get("category")),
+            "experience": to_text(payload.get("experience")),
+            "location": to_text(payload.get("location")),
+            "salary": to_text(payload.get("salary")),
+            "education": to_text(payload.get("education")),
+            "published_at": to_text(payload.get("published_at")),
+            "detail_url": to_text(payload.get("detail_url")),
+        }
+
+    def save_recruiting_parse_success(self, items, source='enbek', triggered_by='scheduler'):
+        source_norm = (str(source or 'enbek').strip().lower() or 'enbek')[:64]
+        trigger_norm = (str(triggered_by or 'scheduler').strip().lower() or 'scheduler')[:32]
+        run_uuid = str(uuid.uuid4())
+        normalized_rows = []
+        for raw in (items or []):
+            if isinstance(raw, dict):
+                normalized_rows.append(self._normalize_recruiting_item(raw))
+        deduped_rows = []
+        seen_links = set()
+        for row in normalized_rows:
+            detail_url = row.get("detail_url")
+            if detail_url:
+                detail_key = str(detail_url).strip().lower()
+                if detail_key in seen_links:
+                    continue
+                seen_links.add(detail_key)
+            deduped_rows.append(row)
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO recruiting_parse_runs (
+                    run_uuid, source, triggered_by, status, total_items, error_message, started_at, finished_at
+                )
+                VALUES (%s::uuid, %s, %s, 'success', %s, NULL, CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+            """, (run_uuid, source_norm, trigger_norm, len(deduped_rows)))
+
+            if deduped_rows:
+                values = [
+                    (
+                        run_uuid,
+                        row["keyword_group"],
+                        row["keyword_query"],
+                        row["page_found"],
+                        row["title"],
+                        row["category"],
+                        row["experience"],
+                        row["location"],
+                        row["salary"],
+                        row["education"],
+                        row["published_at"],
+                        row["detail_url"],
+                    )
+                    for row in deduped_rows
+                ]
+                execute_values(
+                    cursor,
+                    """
+                    INSERT INTO recruiting_resumes (
+                        run_uuid, keyword_group, keyword_query, page_found,
+                        title, category, experience, location, salary,
+                        education, published_at, detail_url
+                    )
+                    VALUES %s
+                    ON CONFLICT (run_uuid, detail_url) DO NOTHING
+                    """,
+                    values,
+                    page_size=1000
+                )
+
+            cursor.execute("""
+                SELECT run_uuid::text, source, triggered_by, status, total_items, error_message, started_at, finished_at
+                FROM recruiting_parse_runs
+                WHERE run_uuid = %s::uuid
+                LIMIT 1
+            """, (run_uuid,))
+            run_row = cursor.fetchone()
+
+        return {
+            "run": self._serialize_recruiting_run_row(run_row),
+            "inserted": len(deduped_rows),
+            "duplicates_dropped": max(0, len(normalized_rows) - len(deduped_rows))
+        }
+
+    def save_recruiting_parse_failure(self, error_message, source='enbek', triggered_by='scheduler'):
+        source_norm = (str(source or 'enbek').strip().lower() or 'enbek')[:64]
+        trigger_norm = (str(triggered_by or 'scheduler').strip().lower() or 'scheduler')[:32]
+        run_uuid = str(uuid.uuid4())
+        error_text = (str(error_message or '').strip() or 'Parser execution failed')[:4000]
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO recruiting_parse_runs (
+                    run_uuid, source, triggered_by, status, total_items, error_message, started_at, finished_at
+                )
+                VALUES (%s::uuid, %s, %s, 'failed', 0, %s, CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+            """, (run_uuid, source_norm, trigger_norm, error_text))
+
+            cursor.execute("""
+                SELECT run_uuid::text, source, triggered_by, status, total_items, error_message, started_at, finished_at
+                FROM recruiting_parse_runs
+                WHERE run_uuid = %s::uuid
+                LIMIT 1
+            """, (run_uuid,))
+            run_row = cursor.fetchone()
+
+        return {"run": self._serialize_recruiting_run_row(run_row)}
+
+    def get_latest_recruiting_parse_run(self, status='success'):
+        status_norm = (str(status or '').strip().lower() or None)
+        with self._get_cursor() as cursor:
+            if status_norm:
+                cursor.execute("""
+                    SELECT run_uuid::text, source, triggered_by, status, total_items, error_message, started_at, finished_at
+                    FROM recruiting_parse_runs
+                    WHERE status = %s
+                    ORDER BY finished_at DESC, id DESC
+                    LIMIT 1
+                """, (status_norm,))
+            else:
+                cursor.execute("""
+                    SELECT run_uuid::text, source, triggered_by, status, total_items, error_message, started_at, finished_at
+                    FROM recruiting_parse_runs
+                    ORDER BY finished_at DESC, id DESC
+                    LIMIT 1
+                """)
+            row = cursor.fetchone()
+        return self._serialize_recruiting_run_row(row)
+
+    def get_recruiting_resumes(self, run_uuid=None, limit=500, offset=0, search=None, keyword_group=None):
+        try:
+            limit_val = int(limit)
+        except Exception:
+            limit_val = 500
+        limit_val = max(1, min(limit_val, 5000))
+
+        try:
+            offset_val = int(offset)
+        except Exception:
+            offset_val = 0
+        offset_val = max(0, offset_val)
+
+        run_uuid_text = (str(run_uuid or '').strip() or None)
+        with self._get_cursor() as cursor:
+            if not run_uuid_text:
+                cursor.execute("""
+                    SELECT run_uuid::text, source, triggered_by, status, total_items, error_message, started_at, finished_at
+                    FROM recruiting_parse_runs
+                    WHERE status = 'success'
+                    ORDER BY finished_at DESC, id DESC
+                    LIMIT 1
+                """)
+                run_row = cursor.fetchone()
+                if not run_row:
+                    return {"run": None, "total": 0, "items": []}
+                run_uuid_text = str(run_row[0])
+            else:
+                cursor.execute("""
+                    SELECT run_uuid::text, source, triggered_by, status, total_items, error_message, started_at, finished_at
+                    FROM recruiting_parse_runs
+                    WHERE run_uuid = %s::uuid
+                    LIMIT 1
+                """, (run_uuid_text,))
+                run_row = cursor.fetchone()
+                if not run_row:
+                    return {"run": None, "total": 0, "items": []}
+
+            where_clauses = ["run_uuid = %s::uuid"]
+            params = [run_uuid_text]
+
+            keyword_group_norm = (str(keyword_group or '').strip() or None)
+            if keyword_group_norm:
+                where_clauses.append("keyword_group = %s")
+                params.append(keyword_group_norm)
+
+            search_text = (str(search or '').strip() or None)
+            if search_text:
+                like = f"%{search_text}%"
+                where_clauses.append("""
+                    (
+                        COALESCE(title, '') ILIKE %s
+                        OR COALESCE(category, '') ILIKE %s
+                        OR COALESCE(location, '') ILIKE %s
+                        OR COALESCE(experience, '') ILIKE %s
+                        OR COALESCE(keyword_query, '') ILIKE %s
+                        OR COALESCE(education, '') ILIKE %s
+                    )
+                """)
+                params.extend([like, like, like, like, like, like])
+
+            where_sql = " AND ".join(where_clauses)
+
+            cursor.execute(f"""
+                SELECT COUNT(*)
+                FROM recruiting_resumes
+                WHERE {where_sql}
+            """, tuple(params))
+            total_count = int(cursor.fetchone()[0] or 0)
+
+            cursor.execute(
+                f"""
+                SELECT
+                    id,
+                    run_uuid::text,
+                    keyword_group,
+                    keyword_query,
+                    page_found,
+                    title,
+                    category,
+                    experience,
+                    location,
+                    salary,
+                    education,
+                    published_at,
+                    detail_url,
+                    scraped_at
+                FROM recruiting_resumes
+                WHERE {where_sql}
+                ORDER BY COALESCE(page_found, 999999), id DESC
+                LIMIT %s OFFSET %s
+                """,
+                tuple(params) + (limit_val, offset_val),
+            )
+            rows = cursor.fetchall()
+
+        items = []
+        for row in rows:
+            items.append({
+                "id": int(row[0]),
+                "run_uuid": row[1],
+                "keyword_group": row[2],
+                "keyword_query": row[3],
+                "page_found": row[4],
+                "title": row[5],
+                "category": row[6],
+                "experience": row[7],
+                "location": row[8],
+                "salary": row[9],
+                "education": row[10],
+                "published_at": row[11],
+                "detail_url": row[12],
+                "scraped_at": row[13].isoformat() if hasattr(row[13], "isoformat") else row[13],
+            })
+
+        return {
+            "run": self._serialize_recruiting_run_row(run_row),
+            "total": total_count,
+            "items": items,
+        }
 
     def get_ai_feedback_cache(self, operator_id: int, month: str):
         """Получить кэшированный AI фидбэк для оператора за месяц"""

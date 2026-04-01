@@ -31064,7 +31064,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {( view === "technical_issues" && (<TechnicalIssuesView user={user} operators={users} directions={directions} showToast={showToast} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} />))}
                                 {( view === "tasks" && (<TasksView user={user} showToast={showToast} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} />))}
                                 {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
-                                {( view === "recruiting" && (<RecruitingView showToast={showToast} />))}
+                                {( view === "recruiting" && (
+                                    <RecruitingView
+                                        user={user}
+                                        showToast={showToast}
+                                        apiBaseUrl={API_BASE_URL}
+                                        withAccessTokenHeader={withAccessTokenHeader}
+                                    />
+                                ))}
                                 {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
                                 {( view === "call_division" && (<AdminCallsUploadView user={user}/>))}
                                 {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
