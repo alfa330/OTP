@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import {
   Search,
@@ -236,6 +236,13 @@ const DEFAULT_PARSER_KEYWORDS = {
 };
 
 const RECRUITING_STATS_HIDDEN_STORAGE_KEY = "recruiting.stats.hidden";
+const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
+const REFERENCE_TODAY = new Date("2026-04-01T00:00:00");
+const FRESH_THRESHOLD_TS = REFERENCE_TODAY.getTime() - THREE_DAYS_MS;
+const RESUME_ROW_RENDER_OPTIMIZATION_STYLE = {
+  contentVisibility: "auto",
+  containIntrinsicSize: "180px",
+};
 
 function normalizeText(value) {
   return String(value ?? "")
@@ -715,17 +722,21 @@ function EmptyState({ onRefresh, isRefreshing = false }) {
   );
 }
 
-function ResumeRow({ item, active, onClick }) {
+const ResumeRow = memo(function ResumeRow({ item, active, onSelect }) {
   const salaryNum = extractSalaryNumber(item.salary);
+  const handleClick = useCallback(() => {
+    onSelect(item.__id);
+  }, [item.__id, onSelect]);
 
   return (
-    <motion.button
-      whileHover={{ y: -1 }}
-      onClick={onClick}
+    <button
+      type="button"
+      onClick={handleClick}
+      style={RESUME_ROW_RENDER_OPTIMIZATION_STYLE}
       className={`w-full rounded-2xl border p-4 text-left transition ${
         active
           ? "border-blue-200 bg-blue-100 text-slate-900 shadow-sm"
-          : "border-slate-200 bg-white hover:border-blue-300 hover:shadow-sm"
+          : "border-slate-200 bg-white hover:-translate-y-0.5 hover:border-blue-300 hover:shadow-sm"
       }`}
     >
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
@@ -755,9 +766,9 @@ function ResumeRow({ item, active, onClick }) {
           <ChevronRight className="h-4 w-4" />
         </div>
       </div>
-    </motion.button>
+    </button>
   );
-}
+});
 
 export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, withAccessTokenHeader }) {
   const bootstrapKeyRef = useRef("");
@@ -765,6 +776,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
   const [rawItems, setRawItems] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
   const [search, setSearch] = useState("");
+  const deferredSearch = useDeferredValue(search);
   const [groupFilter, setGroupFilter] = useState("all");
   const [priorityFilter, setPriorityFilter] = useState("medium_plus");
   const [sortBy, setSortBy] = useState("priority_desc");
@@ -1186,22 +1198,31 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
   const hydratedItems = useMemo(() => {
     return rawItems.map((item, index) => {
       const priority = getResumePriority(item);
+      const publishedDate = extractPublishedDate(item.published_at);
       return {
         ...item,
         ...priority,
         __id: item.__id || `${item.detail_url || item.title || "resume"}-${index}`,
         salaryNum: extractSalaryNumber(item.salary),
-        publishedDate: extractPublishedDate(item.published_at),
+        publishedDate,
+        publishedDateTs: publishedDate ? publishedDate.getTime() : 0,
         groupLabel: GROUP_LABELS[item.keyword_group] || item.keyword_group || "Другое",
+        searchIndex: normalizeText([
+          item.title,
+          item.category,
+          item.location,
+          item.experience,
+          item.education,
+          item.keyword_query,
+        ].join(" ")),
       };
     });
   }, [rawItems]);
 
   const filteredItems = useMemo(() => {
     let list = [...hydratedItems];
-    const searchText = normalizeText(search);
+    const searchText = normalizeText(deferredSearch);
     const minSalaryValue = Number(minSalary || 0);
-    const today = new Date("2026-04-01T00:00:00");
 
     if (groupFilter !== "all") {
       list = list.filter((item) => item.keyword_group === groupFilter);
@@ -1216,17 +1237,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
     }
 
     if (searchText) {
-      list = list.filter((item) => {
-        const haystack = normalizeText([
-          item.title,
-          item.category,
-          item.location,
-          item.experience,
-          item.education,
-          item.keyword_query,
-        ].join(" "));
-        return haystack.includes(searchText);
-      });
+      list = list.filter((item) => item.searchIndex.includes(searchText));
     }
 
     if (onlyWithSalary) {
@@ -1234,7 +1245,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
     }
 
     if (onlyFresh) {
-      list = list.filter((item) => item.publishedDate && item.publishedDate >= new Date(today.getTime() - 3 * 24 * 60 * 60 * 1000));
+      list = list.filter((item) => item.publishedDateTs >= FRESH_THRESHOLD_TS);
     }
 
     if (minSalaryValue > 0) {
@@ -1254,15 +1265,15 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
         case "title_asc":
           return String(a.title || "").localeCompare(String(b.title || ""), "ru");
         case "published_asc":
-          return (a.publishedDate?.getTime() || 0) - (b.publishedDate?.getTime() || 0);
+          return (a.publishedDateTs || 0) - (b.publishedDateTs || 0);
         case "published_desc":
         default:
-          return (b.publishedDate?.getTime() || 0) - (a.publishedDate?.getTime() || 0);
+          return (b.publishedDateTs || 0) - (a.publishedDateTs || 0);
       }
     });
 
     return list;
-  }, [hydratedItems, search, groupFilter, priorityFilter, sortBy, onlyWithSalary, onlyFresh, minSalary]);
+  }, [hydratedItems, deferredSearch, groupFilter, priorityFilter, sortBy, onlyWithSalary, onlyFresh, minSalary]);
 
   const selectedItem = useMemo(() => {
     return filteredItems.find((item) => item.__id === selectedId) || filteredItems[0] || null;
@@ -1274,13 +1285,17 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
     const avgSalary = withSalary.length
       ? Math.round(withSalary.reduce((sum, item) => sum + item.salaryNum, 0) / withSalary.length)
       : 0;
-    const freshCount = filteredItems.filter((item) => item.publishedDate && item.publishedDate >= new Date("2026-03-29T00:00:00")).length;
+    const freshCount = filteredItems.filter((item) => item.publishedDateTs >= FRESH_THRESHOLD_TS).length;
     const highPriorityCount = filteredItems.filter((item) => item.priorityLabel === "high").length;
     const avgRelevance = filteredItems.length
       ? Math.round(filteredItems.reduce((sum, item) => sum + (item.relevanceScore || 0), 0) / filteredItems.length)
       : 0;
     return { total, avgSalary, freshCount, highPriorityCount, avgRelevance };
   }, [filteredItems]);
+
+  const handleSelectResume = useCallback((id) => {
+    setSelectedId(id);
+  }, []);
 
   const groupChartData = useMemo(() => {
     const counts = filteredItems.reduce((acc, item) => {
@@ -1348,6 +1363,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
     const normalized = normalizePercent(parserProgressPercent);
     return normalized === null ? 0 : normalized;
   }, [normalizePercent, parserProgressPercent]);
+  const selectedItemId = selectedItem?.__id || null;
 
   const resetFilters = () => {
     setSearch("");
@@ -1714,8 +1730,8 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                                 <ResumeRow
                                   key={item.__id}
                                   item={item}
-                                  active={selectedItem?.__id === item.__id}
-                                  onClick={() => setSelectedId(item.__id)}
+                                  active={selectedItemId === item.__id}
+                                  onSelect={handleSelectResume}
                                 />
                               ))}
                             </div>
