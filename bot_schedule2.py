@@ -9107,6 +9107,53 @@ def list_recruiting_resumes():
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 
+@app.route('/api/recruiting/run', methods=['POST'])
+@require_api_key
+def run_recruiting_parser_manually():
+    try:
+        requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+        requester_id = int(requester_id)
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "User not found"}), 404
+
+        requester_role = _normalize_management_role(requester[3])
+        if not _is_admin_role(requester_role):
+            return jsonify({"error": "Forbidden"}), 403
+
+        run_result = sync_recruiting_resumes_job(triggered_by='manual')
+
+        if (run_result or {}).get('status') == 'skipped':
+            return jsonify({
+                "status": "skipped",
+                "message": "Парсер уже выполняется, повторите позже.",
+                "result": run_result
+            }), 409
+
+        if (run_result or {}).get('status') == 'failed':
+            return jsonify({
+                "status": "failed",
+                "message": "Ошибка ручного запуска парсера",
+                "result": run_result
+            }), 500
+
+        latest_run = db.get_latest_recruiting_parse_run(status=None)
+        return jsonify({
+            "status": "success",
+            "message": "Парсер успешно запущен вручную и завершен",
+            "result": run_result,
+            "latest_run": latest_run
+        }), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error in manual recruiting parser run: {e}", exc_info=True)
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
 @app.route('/api/offline_activities', methods=['POST'])
 @require_api_key
 def create_offline_activity():

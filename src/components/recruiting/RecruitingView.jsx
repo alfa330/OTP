@@ -265,6 +265,19 @@ function formatMoney(num) {
   return new Intl.NumberFormat("ru-RU").format(num) + " тг";
 }
 
+function formatDateTime(value) {
+  if (!value) return "—";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return String(value);
+  return parsed.toLocaleString("ru-RU", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 function downloadTextFile(filename, content, mimeType = "application/json;charset=utf-8") {
   const blob = new Blob([content], { type: mimeType });
   const url = URL.createObjectURL(blob);
@@ -398,6 +411,8 @@ function ResumeRow({ item, active, onClick }) {
 
 export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, withAccessTokenHeader }) {
   const fileInputRef = useRef(null);
+  const bootstrapKeyRef = useRef("");
+  const loadRequestRef = useRef(null);
   const [rawItems, setRawItems] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
   const [search, setSearch] = useState("");
@@ -409,60 +424,10 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
   const [minSalary, setMinSalary] = useState("");
   const [jsonDraft, setJsonDraft] = useState("");
   const [importError, setImportError] = useState("");
-  const [lastRunInfo, setLastRunInfo] = useState(null);
-  const [isRemoteLoading, setIsRemoteLoading] = useState(false);
-
-  const loadFromDb = useCallback(async (silent = true) => {
-    if (!apiBaseUrl || !user?.id) return;
-
-    if (!silent) setIsRemoteLoading(true);
-    try {
-      const baseHeaders = {
-        "Content-Type": "application/json",
-        "X-User-Id": String(user.id),
-      };
-      const headers = typeof withAccessTokenHeader === "function"
-        ? withAccessTokenHeader(baseHeaders)
-        : baseHeaders;
-
-      const params = new URLSearchParams({
-        limit: "5000",
-        offset: "0",
-      });
-
-      const response = await fetch(`${apiBaseUrl}/api/recruiting/resumes?${params.toString()}`, {
-        method: "GET",
-        headers,
-        credentials: "include",
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(String(payload?.error || "Не удалось загрузить данные рекрутинга"));
-      }
-
-      const items = Array.isArray(payload?.items) ? payload.items : [];
-      if (items.length > 0) {
-        setRawItems(items.map((item, index) => ({ ...item, __id: item.__id || item.id || `db-${index}` })));
-        setImportError("");
-      }
-      setLastRunInfo(payload?.run || payload?.latest_run || null);
-      if (!silent && typeof showToast === "function") {
-        showToast(`Загружено резюме из БД: ${items.length}`, "success");
-      }
-    } catch (error) {
-      const message = String(error?.message || "Не удалось загрузить данные рекрутинга");
-      if (!silent) setImportError(message);
-      if (!silent && typeof showToast === "function") {
-        showToast(message, "error");
-      }
-    } finally {
-      if (!silent) setIsRemoteLoading(false);
-    }
-  }, [apiBaseUrl, user?.id, withAccessTokenHeader, showToast]);
-
-  useEffect(() => {
-    loadFromDb(true);
-  }, [loadFromDb]);
+  const [isRunningParser, setIsRunningParser] = useState(false);
+  const [isLoadingFromApi, setIsLoadingFromApi] = useState(false);
+  const [lastRunMeta, setLastRunMeta] = useState(null);
+  const [apiStatusMessage, setApiStatusMessage] = useState("");
 
   useEffect(() => {
     if (!rawItems.length) {
@@ -473,6 +438,211 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
       setSelectedId(rawItems[0].__id);
     }
   }, [rawItems, selectedId]);
+
+  const buildApiHeaders = useCallback((extraHeaders = {}) => {
+    let headers = {
+      Accept: "application/json",
+      ...extraHeaders,
+    };
+
+    if (user?.apiKey) {
+      headers["X-API-Key"] = user.apiKey;
+    }
+    if (user?.id) {
+      headers["X-User-Id"] = String(user.id);
+    }
+    if (typeof withAccessTokenHeader === "function") {
+      headers = withAccessTokenHeader(headers) || headers;
+    }
+    return headers;
+  }, [user?.apiKey, user?.id, withAccessTokenHeader]);
+
+  const normalizeIncomingItems = useCallback((items, source = "api") => {
+    if (!Array.isArray(items)) return [];
+    return items.map((item, index) => ({
+      ...item,
+      __id:
+        item.__id ||
+        (item.id
+          ? `${source}-${item.id}`
+          : `${source}-${item.detail_url || item.title || "resume"}-${index}`),
+    }));
+  }, []);
+
+  const loadResumesFromApi = useCallback(async ({ runUuid = null, silent = false } = {}) => {
+    if (!apiBaseUrl) {
+      throw new Error("API URL не настроен.");
+    }
+
+    const requestKey = runUuid ? `run:${runUuid}` : "latest";
+    if (loadRequestRef.current?.key === requestKey) {
+      if (!silent) {
+        setIsLoadingFromApi(true);
+      }
+      try {
+        return await loadRequestRef.current.promise;
+      } finally {
+        if (!silent) {
+          setIsLoadingFromApi(false);
+        }
+      }
+    }
+
+    const requestPromise = (async () => {
+      if (!silent) {
+        setIsLoadingFromApi(true);
+        setApiStatusMessage("");
+      }
+
+      try {
+        const query = new URLSearchParams({ limit: "5000" });
+        if (runUuid) {
+          query.set("run_uuid", runUuid);
+        }
+
+        const response = await fetch(`${apiBaseUrl}/api/recruiting/resumes?${query.toString()}`, {
+          method: "GET",
+          headers: buildApiHeaders(),
+        });
+
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          const errorText =
+            payload?.error ||
+            payload?.message ||
+            `Не удалось загрузить резюме (${response.status})`;
+          throw new Error(errorText);
+        }
+
+        const items = normalizeIncomingItems(payload?.items, "db");
+        setRawItems(items);
+        setLastRunMeta(payload?.run || payload?.latest_run || null);
+        setImportError("");
+
+        if (!silent) {
+          const totalCount = Number(payload?.total ?? items.length ?? 0);
+          setApiStatusMessage(
+            totalCount > 0
+              ? `Загружено ${totalCount} резюме из backend.`
+              : "Последний запуск найден, но резюме пока нет."
+          );
+        }
+
+        return payload;
+      } finally {
+        if (!silent) {
+          setIsLoadingFromApi(false);
+        }
+      }
+    })();
+
+    loadRequestRef.current = { key: requestKey, promise: requestPromise };
+    try {
+      return await requestPromise;
+    } finally {
+      if (loadRequestRef.current?.promise === requestPromise) {
+        loadRequestRef.current = null;
+      }
+    }
+  }, [apiBaseUrl, buildApiHeaders, normalizeIncomingItems]);
+
+  const handleRefreshFromApi = useCallback(async () => {
+    try {
+      await loadResumesFromApi();
+    } catch (error) {
+      const errorText = error?.message || "Не удалось обновить данные из API.";
+      setImportError(errorText);
+      showToast?.(errorText, "error");
+    }
+  }, [loadResumesFromApi, showToast]);
+
+  const handleRunParserManually = useCallback(async () => {
+    if (!apiBaseUrl) {
+      const errorText = "API URL не настроен.";
+      setImportError(errorText);
+      showToast?.(errorText, "error");
+      return;
+    }
+
+    setIsRunningParser(true);
+    setImportError("");
+    setApiStatusMessage("");
+
+    try {
+      const response = await fetch(`${apiBaseUrl}/api/recruiting/run`, {
+        method: "POST",
+        headers: buildApiHeaders({ "Content-Type": "application/json" }),
+        body: "{}",
+      });
+
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const fallback =
+          response.status === 409
+            ? "Парсер уже выполняется. Попробуй запустить чуть позже."
+            : `Не удалось запустить парсер (${response.status}).`;
+        throw new Error(payload?.message || payload?.error || fallback);
+      }
+
+      const latestRun = payload?.latest_run || payload?.result?.run || null;
+      const runUuid = latestRun?.run_uuid || null;
+      const resumesPayload = await loadResumesFromApi({ runUuid, silent: true });
+      const totalCount = Number(resumesPayload?.total ?? resumesPayload?.items?.length ?? 0);
+
+      setLastRunMeta(latestRun);
+      setApiStatusMessage(
+        totalCount > 0
+          ? `Парсер завершен. Обновлено ${totalCount} резюме.`
+          : "Парсер завершен, но резюме не найдены."
+      );
+      showToast?.("Парсер успешно запущен вручную.", "success");
+    } catch (error) {
+      const errorText = error?.message || "Ошибка ручного запуска парсера.";
+      setImportError(errorText);
+      showToast?.(errorText, "error");
+    } finally {
+      setIsRunningParser(false);
+    }
+  }, [apiBaseUrl, buildApiHeaders, loadResumesFromApi, showToast]);
+
+  useEffect(() => {
+    let isCancelled = false;
+    const bootstrapKey = `${apiBaseUrl || ""}|${user?.id || ""}|${user?.apiKey || ""}`;
+
+    if (!apiBaseUrl || !user?.id || bootstrapKeyRef.current === bootstrapKey) {
+      return undefined;
+    }
+    bootstrapKeyRef.current = bootstrapKey;
+
+    const bootstrapFromApi = async () => {
+      setIsLoadingFromApi(true);
+      try {
+        const payload = await loadResumesFromApi({ silent: true });
+        if (isCancelled || !payload) return;
+
+        const totalCount = Number(payload?.total ?? payload?.items?.length ?? 0);
+        if (totalCount > 0) {
+          setApiStatusMessage(`Загружено ${totalCount} резюме из последнего запуска.`);
+        } else if (payload?.latest_run || payload?.run) {
+          setApiStatusMessage("Последний запуск найден, но выдача пока пустая.");
+        }
+      } catch (error) {
+        if (!isCancelled) {
+          setApiStatusMessage("");
+        }
+      } finally {
+        if (!isCancelled) {
+          setIsLoadingFromApi(false);
+        }
+      }
+    };
+
+    bootstrapFromApi();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [apiBaseUrl, user?.id, user?.apiKey, loadResumesFromApi]);
 
   const hydratedItems = useMemo(() => {
     return rawItems.map((item, index) => {
@@ -699,12 +869,41 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                   <FileJson className="mr-2 h-4 w-4" />
                   Демо-данные
                 </Button>
+                <Button
+                  variant="outline"
+                  className="rounded-2xl"
+                  onClick={handleRefreshFromApi}
+                  disabled={isLoadingFromApi || isRunningParser}
+                >
+                  <RefreshCw className={`mr-2 h-4 w-4 ${isLoadingFromApi ? "animate-spin" : ""}`} />
+                  Обновить из API
+                </Button>
+                <Button
+                  variant="outline"
+                  className="rounded-2xl"
+                  onClick={handleRunParserManually}
+                  disabled={isRunningParser || isLoadingFromApi}
+                >
+                  <RefreshCw className={`mr-2 h-4 w-4 ${isRunningParser ? "animate-spin" : ""}`} />
+                  {isRunningParser ? "Парсер выполняется..." : "Запустить парсер"}
+                </Button>
                 <Button className="rounded-2xl" onClick={exportFilteredJson} disabled={!filteredItems.length}>
                   <Download className="mr-2 h-4 w-4" />
                   Export JSON
                 </Button>
               </div>
             </div>
+            {(apiStatusMessage || lastRunMeta) ? (
+              <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+                {apiStatusMessage ? <p>{apiStatusMessage}</p> : null}
+                {lastRunMeta ? (
+                  <p className="mt-1 text-xs text-slate-500">
+                    Последний запуск: {formatDateTime(lastRunMeta.finished_at || lastRunMeta.started_at)} · статус {lastRunMeta.status || "unknown"} ·
+                    записей {Number(lastRunMeta.total_items || 0)}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
           </div>
         </motion.div>
 
