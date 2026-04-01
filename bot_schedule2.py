@@ -77,6 +77,13 @@ report_lock = threading.Lock()
 recruiting_parse_lock = threading.Lock()
 executor_pool = ThreadPoolExecutor(max_workers=4)
 
+# Runtime status for manual recruiting parser runs (for live logs in UI).
+recruiting_runtime_lock = threading.Lock()
+recruiting_runtime_jobs = {}
+recruiting_runtime_active_job_id = None
+RECRUITING_RUNTIME_MAX_MESSAGES = 500
+RECRUITING_RUNTIME_MAX_JOBS = 20
+
 # === Flask-сервер ================================================================================================
 app = Flask(__name__)
 JWT_SECRET = os.getenv('JWT_SECRET') or FLASK_API_KEY
@@ -9060,6 +9067,215 @@ def delete_technical_issue(issue_id):
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 
+def _recruiting_now_iso():
+    try:
+        return datetime.now(ZoneInfo('Asia/Almaty')).isoformat()
+    except Exception:
+        return datetime.now().isoformat()
+
+
+def _normalize_recruiting_pages_per_query(raw_value, default_value=None):
+    fallback = RECRUITING_PAGES_PER_QUERY if default_value is None else default_value
+    if raw_value is None or str(raw_value).strip() == '':
+        return fallback
+    try:
+        pages = int(raw_value)
+    except Exception:
+        raise ValueError("Количество страниц должно быть целым числом.")
+    return max(1, min(pages, 20))
+
+
+def _normalize_recruiting_keyword_groups(raw_groups):
+    if raw_groups is None:
+        return None
+    if not isinstance(raw_groups, dict):
+        raise ValueError("keyword_groups должен быть объектом формата {group: [keywords]}.")
+
+    normalized = {}
+    total_keywords = 0
+    for group_name, raw_keywords in raw_groups.items():
+        group_text = str(group_name or '').strip()
+        if not group_text:
+            continue
+
+        if isinstance(raw_keywords, str):
+            raw_list = [raw_keywords]
+        elif isinstance(raw_keywords, list):
+            raw_list = raw_keywords
+        else:
+            continue
+
+        dedup = []
+        seen = set()
+        for raw_kw in raw_list:
+            kw = str(raw_kw or '').strip()
+            if not kw:
+                continue
+            key = kw.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            dedup.append(kw[:200])
+
+        if dedup:
+            normalized[group_text[:80]] = dedup
+            total_keywords += len(dedup)
+
+    if not normalized:
+        raise ValueError("Нужно указать хотя бы одно ключевое слово.")
+    if total_keywords > 300:
+        raise ValueError("Слишком много ключевых слов (максимум 300).")
+    return normalized
+
+
+def _recruiting_runtime_cleanup_locked():
+    global recruiting_runtime_jobs
+    if len(recruiting_runtime_jobs) <= RECRUITING_RUNTIME_MAX_JOBS:
+        return
+
+    ordered = sorted(
+        recruiting_runtime_jobs.items(),
+        key=lambda x: float((x[1] or {}).get("_updated_ts") or 0.0),
+        reverse=True
+    )
+    keep_ids = {job_id for job_id, _ in ordered[:RECRUITING_RUNTIME_MAX_JOBS]}
+    recruiting_runtime_jobs = {job_id: job for job_id, job in recruiting_runtime_jobs.items() if job_id in keep_ids}
+
+
+def _recruiting_runtime_job_snapshot(job):
+    if not job:
+        return None
+    return {
+        "job_id": job.get("job_id"),
+        "status": job.get("status"),
+        "started_at": job.get("started_at"),
+        "finished_at": job.get("finished_at"),
+        "updated_at": job.get("updated_at"),
+        "messages": list(job.get("messages") or []),
+        "result": job.get("result"),
+        "error": job.get("error"),
+        "settings": job.get("settings") or {},
+    }
+
+
+def _recruiting_runtime_start_job(settings):
+    global recruiting_runtime_active_job_id
+    now_iso = _recruiting_now_iso()
+    now_ts = time.time()
+    job_id = uuid.uuid4().hex
+    job = {
+        "job_id": job_id,
+        "status": "running",
+        "started_at": now_iso,
+        "finished_at": None,
+        "updated_at": now_iso,
+        "messages": [],
+        "result": None,
+        "error": None,
+        "settings": settings or {},
+        "_updated_ts": now_ts,
+    }
+    with recruiting_runtime_lock:
+        recruiting_runtime_jobs[job_id] = job
+        recruiting_runtime_active_job_id = job_id
+        _recruiting_runtime_cleanup_locked()
+    return job_id
+
+
+def _recruiting_runtime_append_message(job_id, message, level='info'):
+    now_iso = _recruiting_now_iso()
+    now_ts = time.time()
+    msg = {
+        "ts": now_iso,
+        "level": str(level or 'info'),
+        "text": str(message or ''),
+    }
+    with recruiting_runtime_lock:
+        job = recruiting_runtime_jobs.get(job_id)
+        if not job:
+            return
+        messages = job.get("messages") or []
+        messages.append(msg)
+        if len(messages) > RECRUITING_RUNTIME_MAX_MESSAGES:
+            messages = messages[-RECRUITING_RUNTIME_MAX_MESSAGES:]
+        job["messages"] = messages
+        job["updated_at"] = now_iso
+        job["_updated_ts"] = now_ts
+
+
+def _recruiting_runtime_finish_job(job_id, status, result=None, error=None):
+    global recruiting_runtime_active_job_id
+    now_iso = _recruiting_now_iso()
+    now_ts = time.time()
+    with recruiting_runtime_lock:
+        job = recruiting_runtime_jobs.get(job_id)
+        if not job:
+            return
+        job["status"] = str(status or "finished")
+        job["result"] = result
+        job["error"] = str(error) if error else None
+        job["finished_at"] = now_iso
+        job["updated_at"] = now_iso
+        job["_updated_ts"] = now_ts
+        if recruiting_runtime_active_job_id == job_id:
+            recruiting_runtime_active_job_id = None
+        _recruiting_runtime_cleanup_locked()
+
+
+def _recruiting_runtime_get_job(job_id=None):
+    with recruiting_runtime_lock:
+        if job_id:
+            return _recruiting_runtime_job_snapshot(recruiting_runtime_jobs.get(job_id))
+
+        if recruiting_runtime_active_job_id and recruiting_runtime_active_job_id in recruiting_runtime_jobs:
+            return _recruiting_runtime_job_snapshot(recruiting_runtime_jobs.get(recruiting_runtime_active_job_id))
+
+        if not recruiting_runtime_jobs:
+            return None
+
+        latest_job = max(
+            recruiting_runtime_jobs.values(),
+            key=lambda item: float((item or {}).get("_updated_ts") or 0.0)
+        )
+        return _recruiting_runtime_job_snapshot(latest_job)
+
+
+def _run_recruiting_job_in_background(job_id, pages_per_query, keyword_groups):
+    def emit(message):
+        _recruiting_runtime_append_message(job_id, message, level='info')
+        logging.info("[recruiting job %s] %s", job_id, message)
+
+    try:
+        emit("Запуск ручного парсинга...")
+        result = sync_recruiting_resumes_job(
+            triggered_by='manual',
+            pages_per_query=pages_per_query,
+            keyword_groups=keyword_groups,
+            progress_callback=emit
+        )
+        status = (result or {}).get("status")
+
+        if status == "failed":
+            error_text = (result or {}).get("error") or "Ошибка парсинга"
+            _recruiting_runtime_append_message(job_id, f"Ошибка: {error_text}", level='error')
+            _recruiting_runtime_finish_job(job_id, status="failed", result=result, error=error_text)
+            return
+
+        if status == "skipped":
+            error_text = "Парсер уже выполняется в другом процессе."
+            _recruiting_runtime_append_message(job_id, error_text, level='warning')
+            _recruiting_runtime_finish_job(job_id, status="skipped", result=result, error=error_text)
+            return
+
+        inserted = int((result or {}).get("inserted") or 0)
+        _recruiting_runtime_append_message(job_id, f"Готово. Сохранено резюме: {inserted}", level='info')
+        _recruiting_runtime_finish_job(job_id, status="success", result=result)
+    except Exception as e:
+        logging.exception("Background recruiting parser job failed: %s", e)
+        _recruiting_runtime_append_message(job_id, f"Критическая ошибка: {e}", level='error')
+        _recruiting_runtime_finish_job(job_id, status="failed", error=str(e))
+
+
 @app.route('/api/recruiting/resumes', methods=['GET'])
 @require_api_key
 def list_recruiting_resumes():
@@ -9124,7 +9340,62 @@ def run_recruiting_parser_manually():
         if not _is_admin_role(requester_role):
             return jsonify({"error": "Forbidden"}), 403
 
-        run_result = sync_recruiting_resumes_job(triggered_by='manual')
+        payload = request.get_json(silent=True) or {}
+        async_mode = bool(payload.get('async'))
+        pages_per_query = _normalize_recruiting_pages_per_query(
+            payload.get('pages_per_query'),
+            default_value=RECRUITING_PAGES_PER_QUERY
+        )
+        keyword_groups = _normalize_recruiting_keyword_groups(payload.get('keyword_groups'))
+        settings_payload = {
+            "pages_per_query": pages_per_query,
+            "keyword_groups": keyword_groups,
+        }
+
+        if async_mode:
+            active_job = _recruiting_runtime_get_job()
+            if active_job and active_job.get("status") == "running":
+                return jsonify({
+                    "status": "running",
+                    "message": "Парсер уже выполняется, дождитесь завершения.",
+                    "job": active_job
+                }), 409
+            if recruiting_parse_lock.locked():
+                return jsonify({
+                    "status": "running",
+                    "message": "Парсер уже выполняется (фоновый запуск). Дождитесь завершения.",
+                    "job": active_job
+                }), 409
+
+            job_id = _recruiting_runtime_start_job(settings=settings_payload)
+            _recruiting_runtime_append_message(
+                job_id,
+                (
+                    "Параметры запуска: "
+                    f"pages_per_query={pages_per_query}, "
+                    f"groups={len(keyword_groups or {})}, "
+                    f"keywords={sum(len(v or []) for v in (keyword_groups or {}).values())}"
+                ),
+                level='info'
+            )
+            worker = threading.Thread(
+                target=_run_recruiting_job_in_background,
+                args=(job_id, pages_per_query, keyword_groups),
+                daemon=True
+            )
+            worker.start()
+
+            return jsonify({
+                "status": "accepted",
+                "message": "Парсер запущен в фоне.",
+                "job": _recruiting_runtime_get_job(job_id)
+            }), 202
+
+        run_result = sync_recruiting_resumes_job(
+            triggered_by='manual',
+            pages_per_query=pages_per_query,
+            keyword_groups=keyword_groups
+        )
 
         if (run_result or {}).get('status') == 'skipped':
             return jsonify({
@@ -9144,6 +9415,7 @@ def run_recruiting_parser_manually():
         return jsonify({
             "status": "success",
             "message": "Парсер успешно запущен вручную и завершен",
+            "settings": settings_payload,
             "result": run_result,
             "latest_run": latest_run
         }), 200
@@ -9151,6 +9423,40 @@ def run_recruiting_parser_manually():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error in manual recruiting parser run: {e}", exc_info=True)
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
+@app.route('/api/recruiting/run/status', methods=['GET'])
+@require_api_key
+def get_recruiting_parser_run_status():
+    try:
+        requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+        requester_id = int(requester_id)
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "User not found"}), 404
+
+        requester_role = _normalize_management_role(requester[3])
+        if not _is_admin_role(requester_role):
+            return jsonify({"error": "Forbidden"}), 403
+
+        job_id = (request.args.get('job_id') or '').strip() or None
+        job = _recruiting_runtime_get_job(job_id=job_id)
+        if job_id and not job:
+            return jsonify({"error": "Job not found"}), 404
+
+        latest_run = db.get_latest_recruiting_parse_run(status=None)
+        return jsonify({
+            "status": "success" if job else "idle",
+            "job": job,
+            "latest_run": latest_run,
+            "is_busy": bool(job and job.get("status") == "running")
+        }), 200
+    except Exception as e:
+        logging.error(f"Error getting recruiting parser status: {e}", exc_info=True)
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 
@@ -17524,15 +17830,46 @@ def sync_schedule_statuses_to_user_statuses_job():
         logging.exception("Error in auto status sync job: %s", e)
 
 
-def sync_recruiting_resumes_job(triggered_by='scheduler'):
+def sync_recruiting_resumes_job(
+    triggered_by='scheduler',
+    pages_per_query=None,
+    keyword_groups=None,
+    progress_callback=None
+):
     """Background job: collect recruiting resumes from Enbek and persist snapshot into DB."""
+    pages_to_fetch = _normalize_recruiting_pages_per_query(
+        pages_per_query,
+        default_value=RECRUITING_PAGES_PER_QUERY
+    )
+    normalized_groups = _normalize_recruiting_keyword_groups(keyword_groups)
+    groups_to_use = normalized_groups or None
+
+    def emit(message):
+        try:
+            if progress_callback:
+                progress_callback(str(message))
+        except Exception:
+            pass
+
     if not recruiting_parse_lock.acquire(blocking=False):
         logging.warning("Recruiting parser job skipped: previous run is still in progress")
+        emit("Пропуск запуска: предыдущий запуск ещё выполняется.")
         return {"status": "skipped", "reason": "locked"}
 
     started = time.time()
     try:
-        items = crawl_resumes_as_dicts(pages_per_query=RECRUITING_PAGES_PER_QUERY)
+        total_keywords = sum(len(v or []) for v in (groups_to_use or {}).values()) if groups_to_use else 0
+        emit(
+            "Старт парсинга: "
+            f"pages_per_query={pages_to_fetch}, "
+            f"custom_keywords={'yes' if groups_to_use else 'no'}, "
+            f"keywords_count={total_keywords if groups_to_use else 'default'}"
+        )
+        items = crawl_resumes_as_dicts(
+            pages_per_query=pages_to_fetch,
+            keyword_groups=groups_to_use,
+            progress_cb=emit
+        )
         save_result = db.save_recruiting_parse_success(
             items=items,
             source='enbek',
@@ -17546,9 +17883,20 @@ def sync_recruiting_resumes_job(triggered_by='scheduler'):
             elapsed,
             (save_result.get('run') or {}).get('run_uuid')
         )
+        emit(
+            "Парсинг завершён: "
+            f"сохранено={int(save_result.get('inserted') or 0)}, "
+            f"дубликаты={int(save_result.get('duplicates_dropped') or 0)}, "
+            f"время={elapsed:.2f}s"
+        )
+        save_result["settings"] = {
+            "pages_per_query": pages_to_fetch,
+            "keyword_groups": groups_to_use
+        }
         return save_result
     except Exception as e:
         logging.exception("Recruiting parser job failed: %s", e)
+        emit(f"Ошибка парсинга: {e}")
         try:
             db.save_recruiting_parse_failure(
                 error_message=str(e),

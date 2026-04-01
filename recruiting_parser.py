@@ -4,7 +4,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 from urllib.parse import urljoin
 
 import requests
@@ -63,6 +63,8 @@ USE_LXML = True
 
 _thread_local = threading.local()
 _ws_re = re.compile(r"\s+")
+
+ProgressCallback = Optional[Callable[[str], None]]
 
 
 @dataclass
@@ -300,13 +302,30 @@ def deduplicate(items: List[ResumeCard]) -> List[ResumeCard]:
     return deduped
 
 
-def crawl_keyword(executor: ThreadPoolExecutor, keyword_group: str, keyword: str, pages_per_query: int) -> List[ResumeCard]:
+def _emit_progress(progress_cb: ProgressCallback, message: str) -> None:
+    if not progress_cb:
+        return
+    try:
+        progress_cb(str(message))
+    except Exception:
+        pass
+
+
+def crawl_keyword(
+    executor: ThreadPoolExecutor,
+    keyword_group: str,
+    keyword: str,
+    pages_per_query: int,
+    progress_cb: ProgressCallback = None,
+) -> List[ResumeCard]:
     collected: List[ResumeCard] = []
     page = 1
     empty_streak = 0
+    _emit_progress(progress_cb, f"[{keyword_group}] \"{keyword}\": старт (до {pages_per_query} стр.)")
 
     while page <= pages_per_query:
         batch_pages = list(range(page, min(page + MAX_WORKERS - 1, pages_per_query) + 1))
+        _emit_progress(progress_cb, f"[{keyword_group}] \"{keyword}\": загружаю стр. {batch_pages[0]}-{batch_pages[-1]}")
         futures = {executor.submit(search_resumes_once, keyword_group, keyword, p): p for p in batch_pages}
 
         batch_results = {}
@@ -316,41 +335,83 @@ def crawl_keyword(executor: ThreadPoolExecutor, keyword_group: str, keyword: str
                 batch_results[p] = future.result()
             except requests.HTTPError:
                 batch_results[p] = []
+                _emit_progress(progress_cb, f"[{keyword_group}] \"{keyword}\": HTTP ошибка на стр. {p}")
             except Exception:
                 batch_results[p] = []
+                _emit_progress(progress_cb, f"[{keyword_group}] \"{keyword}\": ошибка на стр. {p}")
 
         for p in sorted(batch_results):
             page_items = batch_results[p]
             collected.extend(page_items)
+            _emit_progress(progress_cb, f"[{keyword_group}] \"{keyword}\": стр. {p}, найдено {len(page_items)}")
             if not page_items:
                 empty_streak += 1
             else:
                 empty_streak = 0
 
         if empty_streak >= 2:
+            _emit_progress(progress_cb, f"[{keyword_group}] \"{keyword}\": 2 пустые страницы подряд, остановка")
             break
 
         page = batch_pages[-1] + 1
         if page <= pages_per_query:
             time.sleep(random.uniform(BATCH_PAUSE_MIN, BATCH_PAUSE_MAX))
 
+    _emit_progress(progress_cb, f"[{keyword_group}] \"{keyword}\": завершено, всего {len(collected)} карточек")
     return collected
 
 
-def crawl_all(pages_per_query: int = 5) -> List[ResumeCard]:
+def crawl_all(
+    pages_per_query: int = 5,
+    keyword_groups: Optional[Dict[str, List[str]]] = None,
+    progress_cb: ProgressCallback = None,
+) -> List[ResumeCard]:
+    effective_groups = keyword_groups or KEYWORD_GROUPS
+    total_queries = sum(len(v or []) for v in effective_groups.values())
+    _emit_progress(
+        progress_cb,
+        f"Запуск парсинга: групп={len(effective_groups)}, запросов={total_queries}, страниц на запрос={pages_per_query}",
+    )
+
     collected: List[ResumeCard] = []
+    query_index = 0
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        for keyword_group, keywords in KEYWORD_GROUPS.items():
-            for keyword in keywords:
+        for keyword_group, keywords in effective_groups.items():
+            group_keywords = list(keywords or [])
+            if not group_keywords:
+                _emit_progress(progress_cb, f"[{keyword_group}] нет ключевых слов, пропуск")
+                continue
+
+            _emit_progress(progress_cb, f"[{keyword_group}] ключевых слов: {len(group_keywords)}")
+            for keyword in group_keywords:
+                query_index += 1
+                _emit_progress(progress_cb, f"Запрос {query_index}/{total_queries}: [{keyword_group}] \"{keyword}\"")
                 items = crawl_keyword(
                     executor=executor,
                     keyword_group=keyword_group,
                     keyword=keyword,
                     pages_per_query=pages_per_query,
+                    progress_cb=progress_cb,
                 )
                 collected.extend(items)
-    return deduplicate(collected)
+    deduped = deduplicate(collected)
+    _emit_progress(
+        progress_cb,
+        f"Парсинг завершён: собрано {len(collected)} карточек, после дедупликации {len(deduped)}",
+    )
+    return deduped
 
 
-def crawl_resumes_as_dicts(pages_per_query: int = 5) -> List[dict]:
-    return [asdict(item) for item in crawl_all(pages_per_query=pages_per_query)]
+def crawl_resumes_as_dicts(
+    pages_per_query: int = 5,
+    keyword_groups: Optional[Dict[str, List[str]]] = None,
+    progress_cb: ProgressCallback = None,
+) -> List[dict]:
+    return [
+        asdict(item)
+        for item in crawl_all(
+            pages_per_query=pages_per_query,
+            keyword_groups=keyword_groups,
+            progress_cb=progress_cb,
+        )
+    ]
