@@ -7091,13 +7091,29 @@ class Database:
         wb.remove(default)
 
         FLOAT_DISPLAY_FORMAT = '0.##'
+        INTEGER_DISPLAY_FORMAT = '0'
+
+        def _normalize_excel_number(value: Any):
+            """
+            Avoid showing a dangling decimal separator in Excel for values like 10.0.
+            We keep non-integer floats as-is (shown with max 2 fraction digits),
+            but convert integer-like floats to int for cleaner display.
+            """
+            if isinstance(value, float):
+                rounded = round(value)
+                if abs(value - rounded) < 1e-9:
+                    return int(rounded)
+            return value
 
         def set_cell(ws, r, c, value, align_center=True, fill=None):
             cell = ws.cell(r, c)
-            cell.value = value
+            normalized_value = _normalize_excel_number(value)
+            cell.value = normalized_value
             # Визуально показываем максимум 2 знака после запятой без фактического округления значения.
-            if isinstance(value, float):
+            if isinstance(normalized_value, float):
                 cell.number_format = FLOAT_DISPLAY_FORMAT
+            elif isinstance(normalized_value, int) and not isinstance(normalized_value, bool):
+                cell.number_format = INTEGER_DISPLAY_FORMAT
             if align_center:
                 cell.alignment = Alignment(horizontal='center', vertical='center')
             cell.border = BORDER_ALL
