@@ -659,7 +659,7 @@ function toExcelHtml(rows) {
 function InfoTooltip({ text, className = "" }) {
   if (!text) return null;
   return (
-    <div className={`group relative inline-flex z-0 hover:z-[2147483646] focus-within:z-[2147483646] ${className}`}>
+    <div className={`group relative inline-flex z-0 hover:z-[9999] focus-within:z-[9999] ${className}`}>
       <button
         type="button"
         aria-label="Показать подсказку"
@@ -667,7 +667,7 @@ function InfoTooltip({ text, className = "" }) {
       >
         i
       </button>
-      <div className="pointer-events-none absolute left-1/2 top-full z-[2147483647] mt-2 w-72 -translate-x-1/2 rounded-xl border border-slate-200 bg-white/95 p-3 text-xs leading-5 text-slate-600 shadow-lg opacity-0 transition duration-150 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
+      <div className="pointer-events-none absolute left-1/2 top-full z-[10000] mt-2 w-72 -translate-x-1/2 rounded-xl border border-slate-200 bg-white/95 p-3 text-xs leading-5 text-slate-600 shadow-lg opacity-0 transition duration-150 group-hover:opacity-100 group-focus-within:opacity-100">
         <p className="whitespace-pre-line">{text}</p>
       </div>
     </div>
