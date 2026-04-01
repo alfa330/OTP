@@ -156,22 +156,39 @@ function extractPublishedDate(value) {
   return new Date(`${yyyy}-${mm}-${dd}T00:00:00`);
 }
 
-function scorePatternMatches(text, patterns, weight, hits, sourceLabel) {
-  if (!text) return 0;
-  let score = 0;
+function clampNumber(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function matchPatterns(text, patterns, limit = Infinity) {
+  if (!text || !Array.isArray(patterns) || !patterns.length) return [];
+
+  const matches = [];
+  const seen = new Set();
+
   patterns.forEach((pattern) => {
+    if (matches.length >= limit) return;
     const normalizedPattern = normalizeText(pattern);
-    if (normalizedPattern && text.includes(normalizedPattern)) {
-      score += weight;
-      hits.push(sourceLabel + ": " + pattern);
+    if (!normalizedPattern || seen.has(normalizedPattern)) return;
+    if (text.includes(normalizedPattern)) {
+      matches.push(pattern);
+      seen.add(normalizedPattern);
     }
   });
-  return score;
+
+  return matches;
+}
+
+function formatPatternsForReason(patterns, limit = 2) {
+  if (!patterns.length) return "";
+  const visible = patterns.slice(0, limit).map((pattern) => `«${pattern}»`);
+  const moreCount = patterns.length - visible.length;
+  return visible.join(", ") + (moreCount > 0 ? ` и ещё ${moreCount}` : "");
 }
 
 function getPriorityLabel(score) {
-  if (score >= 70) return "high";
-  if (score >= 40) return "medium";
+  if (score >= 72) return "high";
+  if (score >= 45) return "medium";
   return "low";
 }
 
@@ -182,30 +199,81 @@ function getResumePriority(item) {
   const experience = normalizeText(item.experience);
   const all = normalizeText([item.title, item.category, item.keyword_query, item.experience].join(" "));
   const rules = PRIORITY_RULES[item.keyword_group] || PRIORITY_RULES.sales_manager;
-  const hits = [];
+
+  const strongTitleMatches = matchPatterns(title, rules.strongTitle, 3);
+  const strongCategoryMatches = matchPatterns(category, rules.strongCategory, 2);
+  const mediumMatches = matchPatterns(all, rules.mediumAll, 4);
+  const weakMatches = matchPatterns(all, rules.weakAll, 5);
+  const negativeMatches = matchPatterns(all, rules.negativeAll, 4);
+
+  const hasStrongSignals = strongTitleMatches.length > 0 || strongCategoryMatches.length > 0;
+  const queryAligned = Boolean(query && title && (title.includes(query) || query.includes(title)));
 
   let score = 0;
-  score += scorePatternMatches(title, rules.strongTitle, 34, hits, "title");
-  score += scorePatternMatches(category, rules.strongCategory, 18, hits, "category");
-  score += scorePatternMatches(all, rules.mediumAll, 10, hits, "text");
-  score += scorePatternMatches(all, rules.weakAll, 4, hits, "weak");
-  score -= scorePatternMatches(all, rules.negativeAll, 18, hits, "negative");
 
-  if (query && title && (title.includes(query) || query.includes(title))) {
-    score += 14;
-    hits.push("query/title alignment");
+  if (strongTitleMatches.length > 0) {
+    score += 40 + Math.min(22, (strongTitleMatches.length - 1) * 10);
   }
+  if (strongCategoryMatches.length > 0) {
+    score += 16 + Math.min(10, (strongCategoryMatches.length - 1) * 5);
+  }
+  score += Math.min(18, mediumMatches.length * 6);
+  score += Math.min(8, weakMatches.length * 2);
 
+  if (strongTitleMatches.length > 0 && strongCategoryMatches.length > 0) {
+    score += 8;
+  }
+  if (strongTitleMatches.length > 0 && mediumMatches.length > 0) {
+    score += 4;
+  }
+  if (queryAligned) {
+    score += 8;
+  }
   if (experience.includes("без опыта")) {
-    score += 2;
+    score += 1;
   }
 
-  if (!title) score -= 20;
-  if (!category) score -= 6;
+  score -= Math.min(30, negativeMatches.length * 12);
 
-  score = Math.max(0, Math.min(100, score));
+  if (!title) score -= 18;
+  if (!category) score -= 8;
+
+  if (!hasStrongSignals && weakMatches.length > 0) {
+    score = Math.min(score, 46);
+  }
+  if (!hasStrongSignals && negativeMatches.length >= 2) {
+    score = Math.min(score, 30);
+  }
+
+  score = clampNumber(score, 0, 100);
   const priorityLabel = getPriorityLabel(score);
-  const reason = [...new Set(hits)].slice(0, 4).join(" · ") || "Мало релевантных совпадений";
+
+  const reasonParts = [];
+  if (strongTitleMatches.length) {
+    reasonParts.push(`Сильное совпадение по названию: ${formatPatternsForReason(strongTitleMatches)}.`);
+  }
+  if (strongCategoryMatches.length) {
+    reasonParts.push(`Категория подтверждает профиль: ${formatPatternsForReason(strongCategoryMatches)}.`);
+  }
+  if (mediumMatches.length) {
+    reasonParts.push(`В тексте есть релевантные признаки: ${formatPatternsForReason(mediumMatches)}.`);
+  } else if (!hasStrongSignals && weakMatches.length) {
+    reasonParts.push(`Найдены только общие маркеры: ${formatPatternsForReason(weakMatches)}.`);
+  }
+  if (queryAligned) {
+    reasonParts.push("Название согласуется с поисковым запросом.");
+  }
+  if (negativeMatches.length) {
+    reasonParts.push(`Есть нерелевантные маркеры: ${formatPatternsForReason(negativeMatches)} — это снизило оценку.`);
+  }
+  if (!title) {
+    reasonParts.push("Не указано название позиции, поэтому оценка снижена.");
+  }
+  if (!category) {
+    reasonParts.push("Категория не указана, уверенность ниже.");
+  }
+
+  const reason = reasonParts.slice(0, 4).join(" ") || "Недостаточно явных совпадений с целевой ролью.";
 
   return {
     relevanceScore: score,
@@ -1463,7 +1531,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
 
                               <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
                                 <div className="text-xs text-slate-500">Обоснование приоритета</div>
-                                <div className="mt-1 font-medium text-slate-900">{selectedItem.priorityReason || "Мало релевантных совпадений"}</div>
+                                <div className="mt-1 font-medium text-slate-900">{selectedItem.priorityReason || "Недостаточно явных совпадений с целевой ролью."}</div>
                               </div>
 
                               <div className="grid gap-4 sm:grid-cols-2">
