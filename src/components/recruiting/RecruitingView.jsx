@@ -461,6 +461,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
   const [isLoadingFromApi, setIsLoadingFromApi] = useState(false);
   const [lastRunMeta, setLastRunMeta] = useState(null);
   const [apiStatusMessage, setApiStatusMessage] = useState("");
+  const [isParserModalOpen, setIsParserModalOpen] = useState(false);
   const [parserPagesPerQuery, setParserPagesPerQuery] = useState(String(DEFAULT_PARSER_PAGES_PER_QUERY));
   const [parserKeywordDrafts, setParserKeywordDrafts] = useState({
     sales_manager: DEFAULT_PARSER_KEYWORDS.sales_manager.join("\n"),
@@ -893,6 +894,21 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
     };
   }, [apiBaseUrl, buildApiHeaders, user?.id]);
 
+  useEffect(() => {
+    if (!isParserModalOpen) {
+      return undefined;
+    }
+
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") {
+        setIsParserModalOpen(false);
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isParserModalOpen]);
+
   const hydratedItems = useMemo(() => {
     return rawItems.map((item, index) => {
       const priority = getResumePriority(item);
@@ -1155,11 +1171,10 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                 <Button
                   variant="outline"
                   className="rounded-2xl"
-                  onClick={handleRunParserManually}
-                  disabled={isRunningParser || isLoadingFromApi}
+                  onClick={() => setIsParserModalOpen(true)}
                 >
                   <RefreshCw className={`mr-2 h-4 w-4 ${isRunningParser ? "animate-spin" : ""}`} />
-                  {isRunningParser ? "Парсер выполняется..." : "Запустить парсер"}
+                  Запустить парсер
                 </Button>
                 <Button className="rounded-2xl" onClick={exportFilteredJson} disabled={!filteredItems.length}>
                   <Download className="mr-2 h-4 w-4" />
@@ -1286,104 +1301,6 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                     <RefreshCw className="mr-2 h-4 w-4" />
                     Сбросить
                   </Button>
-                </div>
-
-                <Separator />
-
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <Label>Ручной запуск парсера</Label>
-                    <Badge className={`rounded-full border ${parserStatusClass}`}>{parserStatusLabel}</Badge>
-                  </div>
-                  <p className="text-xs text-slate-500">
-                    Настрой ключевые слова и глубину парсинга. В логе ниже будет виден прогресс в реальном времени.
-                  </p>
-
-                  <div className="space-y-2">
-                    <Label>Страниц на каждый запрос</Label>
-                    <Input
-                      type="number"
-                      min="1"
-                      max="20"
-                      value={parserPagesPerQuery}
-                      onChange={(e) => setParserPagesPerQuery(e.target.value)}
-                      placeholder="От 1 до 20"
-                      className="rounded-2xl"
-                    />
-                  </div>
-
-                  <div className="space-y-3">
-                    {Object.entries(parserKeywordDrafts).map(([group, draft]) => (
-                      <div key={group} className="space-y-2">
-                        <Label>{GROUP_LABELS[group] || group}: ключевые слова (по одному на строку)</Label>
-                        <Textarea
-                          value={draft}
-                          onChange={(e) => setParserKeywordDrafts((prev) => ({ ...prev, [group]: e.target.value }))}
-                          className="min-h-[120px] rounded-2xl text-sm"
-                          placeholder="Например: менеджер по продажам"
-                        />
-                      </div>
-                    ))}
-                  </div>
-
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Badge variant="secondary" className="rounded-full">
-                      Групп: {parserKeywordStats.groupCount}
-                    </Badge>
-                    <Badge variant="secondary" className="rounded-full">
-                      Ключевых слов: {parserKeywordStats.keywordCount}
-                    </Badge>
-                    {parserJobId ? (
-                      <Badge variant="outline" className="rounded-full">
-                        job: {parserJobId.slice(0, 8)}
-                      </Badge>
-                    ) : null}
-                  </div>
-
-                  <div className="flex flex-wrap gap-2">
-                    <Button
-                      onClick={handleRunParserManually}
-                      className="rounded-2xl"
-                      disabled={isRunningParser || isLoadingFromApi}
-                    >
-                      <RefreshCw className={`mr-2 h-4 w-4 ${isRunningParser ? "animate-spin" : ""}`} />
-                      {isRunningParser ? "Парсер выполняется..." : "Запустить парсер с настройками"}
-                    </Button>
-                    <Button type="button" variant="outline" className="rounded-2xl" onClick={restoreDefaultParserSettings}>
-                      Вернуть настройки по умолчанию
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      className="rounded-2xl"
-                      onClick={() => setParserLogs([])}
-                      disabled={!parserLogs.length}
-                    >
-                      Очистить лог
-                    </Button>
-                  </div>
-
-                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
-                    <div className="mb-2 text-xs font-medium text-slate-600">Лог парсера</div>
-                    <ScrollArea className="h-[180px] pr-2">
-                      <div className="space-y-2">
-                        {parserLogs.length ? (
-                          parserLogs.map((log, index) => (
-                            <div key={`${log.ts || "log"}-${index}`} className="rounded-xl bg-white px-3 py-2 text-xs text-slate-700">
-                              <span className="text-slate-500">
-                                [{formatDateTime(log.ts)}]
-                              </span>{" "}
-                              {log.text || "—"}
-                            </div>
-                          ))
-                        ) : (
-                          <div className="rounded-xl bg-white px-3 py-2 text-xs text-slate-500">
-                            Лог пуст. Запусти парсер, чтобы увидеть сообщения.
-                          </div>
-                        )}
-                      </div>
-                    </ScrollArea>
-                  </div>
                 </div>
 
                 <Separator />
@@ -1670,6 +1587,117 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
           </div>
         </div>
       </div>
+
+      {isParserModalOpen ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4"
+          onClick={() => setIsParserModalOpen(false)}
+        >
+          <div
+            className="w-full max-w-5xl overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
+              <div>
+                <h3 className="text-lg font-semibold text-slate-900">Ручной запуск парсера</h3>
+                <p className="mt-1 text-xs text-slate-500">
+                  Настрой ключевые слова и количество страниц, затем запусти парсинг.
+                </p>
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                className="rounded-full p-2"
+                onClick={() => setIsParserModalOpen(false)}
+                aria-label="Закрыть"
+              >
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+
+            <div className="max-h-[85vh] overflow-y-auto p-5">
+              <div className="space-y-4">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge className={`rounded-full border ${parserStatusClass}`}>{parserStatusLabel}</Badge>
+                  <Badge variant="secondary" className="rounded-full">Групп: {parserKeywordStats.groupCount}</Badge>
+                  <Badge variant="secondary" className="rounded-full">Ключевых слов: {parserKeywordStats.keywordCount}</Badge>
+                  {parserJobId ? <Badge variant="outline" className="rounded-full">job: {parserJobId.slice(0, 8)}</Badge> : null}
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Страниц на каждый запрос</Label>
+                  <Input
+                    type="number"
+                    min="1"
+                    max="20"
+                    value={parserPagesPerQuery}
+                    onChange={(e) => setParserPagesPerQuery(e.target.value)}
+                    placeholder="От 1 до 20"
+                    className="rounded-2xl"
+                  />
+                </div>
+
+                <div className="grid gap-4 lg:grid-cols-2">
+                  {Object.entries(parserKeywordDrafts).map(([group, draft]) => (
+                    <div key={group} className="space-y-2">
+                      <Label>{GROUP_LABELS[group] || group}: ключевые слова (по одному на строку)</Label>
+                      <Textarea
+                        value={draft}
+                        onChange={(e) => setParserKeywordDrafts((prev) => ({ ...prev, [group]: e.target.value }))}
+                        className="min-h-[180px] rounded-2xl text-sm"
+                        placeholder="Например: менеджер по продажам"
+                      />
+                    </div>
+                  ))}
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    onClick={handleRunParserManually}
+                    className="rounded-2xl"
+                    disabled={isRunningParser || isLoadingFromApi}
+                  >
+                    <RefreshCw className={`mr-2 h-4 w-4 ${isRunningParser ? "animate-spin" : ""}`} />
+                    {isRunningParser ? "Парсер выполняется..." : "Запустить парсер с настройками"}
+                  </Button>
+                  <Button type="button" variant="outline" className="rounded-2xl" onClick={restoreDefaultParserSettings}>
+                    Вернуть настройки по умолчанию
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    className="rounded-2xl"
+                    onClick={() => setParserLogs([])}
+                    disabled={!parserLogs.length}
+                  >
+                    Очистить лог
+                  </Button>
+                </div>
+
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                  <div className="mb-2 text-xs font-medium text-slate-600">Лог парсера</div>
+                  <ScrollArea className="h-[220px] pr-2">
+                    <div className="space-y-2">
+                      {parserLogs.length ? (
+                        parserLogs.map((log, index) => (
+                          <div key={`${log.ts || "log"}-${index}`} className="rounded-xl bg-white px-3 py-2 text-xs text-slate-700">
+                            <span className="text-slate-500">[{formatDateTime(log.ts)}]</span>{" "}
+                            {log.text || "—"}
+                          </div>
+                        ))
+                      ) : (
+                        <div className="rounded-xl bg-white px-3 py-2 text-xs text-slate-500">
+                          Лог пуст. Запусти парсер, чтобы увидеть сообщения.
+                        </div>
+                      )}
+                    </div>
+                  </ScrollArea>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
