@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import {
-  Upload,
   Search,
   Filter,
   Download,
@@ -9,9 +8,7 @@ import {
   MapPin,
   Briefcase,
   Wallet,
-  GraduationCap,
   CalendarDays,
-  FileJson,
   X,
   ChevronRight,
   Database,
@@ -49,74 +46,6 @@ import {
   Pie,
   Cell,
 } from "recharts";
-
-const SAMPLE_DATA = [
-  {
-    keyword_group: "sales_manager",
-    keyword_query: "менеджер по продажам",
-    page_found: 1,
-    title: "Менеджер по продажам",
-    category: "Продажи и обслуживание клиентов",
-    experience: "Опыт работы 1 год",
-    location: "г. Алматы, Бостандыкский район",
-    salary: "350 000 тг.",
-    education: "высшее",
-    published_at: "Опубликовано 01.04.2026",
-    detail_url: "https://www.enbek.kz/ru/resume/menedzher-po-prodazham~1000001",
-  },
-  {
-    keyword_group: "sales_manager",
-    keyword_query: "специалист по продажам",
-    page_found: 2,
-    title: "Специалист по продажам",
-    category: "Продажи и маркетинг",
-    experience: "Без опыта работы",
-    location: "г. Алматы, Ауэзовский район",
-    salary: "280 000 тг.",
-    education: "среднее специальное",
-    published_at: "Опубликовано 31.03.2026",
-    detail_url: "https://www.enbek.kz/ru/resume/spetsialist-po-prodazham~1000002",
-  },
-  {
-    keyword_group: "call_center_operator",
-    keyword_query: "оператор call-центра",
-    page_found: 1,
-    title: "Оператор call-центра",
-    category: "Контакт-центр",
-    experience: "Опыт работы 6 месяцев",
-    location: "г. Алматы, Алмалинский район",
-    salary: "250 000 тг.",
-    education: "высшее",
-    published_at: "Опубликовано 01.04.2026",
-    detail_url: "https://www.enbek.kz/ru/resume/operator-call-centra~1000003",
-  },
-  {
-    keyword_group: "call_center_operator",
-    keyword_query: "оператор контакт-центра",
-    page_found: 3,
-    title: "Специалист контакт-центра",
-    category: "Клиентский сервис",
-    experience: "Без опыта работы",
-    location: "г. Алматы, Медеуский район",
-    salary: "220 000 тг.",
-    education: "среднее",
-    published_at: "Опубликовано 30.03.2026",
-    detail_url: "https://www.enbek.kz/ru/resume/spetsialist-kontakt-centra~1000004",
-  },
-  {
-    keyword_group: "sales_manager",
-    keyword_query: "sales manager",
-    page_found: 4,
-    title: "Sales manager",
-    category: "B2B продажи",
-    experience: "Опыт работы 3 года",
-    location: "г. Алматы, Наурызбайский район",
-    salary: "500 000 тг.",
-    education: "высшее",
-    published_at: "Опубликовано 28.03.2026",
-    detail_url: "https://www.enbek.kz/ru/resume/sales-manager~1000005",
-  },
-];
 
 const GROUP_LABELS = {
   sales_manager: "Продажи",
@@ -348,6 +277,53 @@ function toCsv(rows) {
   ].join("\n");
 }
 
+function toExcelHtml(rows) {
+  const columns = [
+    { key: "keyword_group", label: "Группа" },
+    { key: "keyword_query", label: "Запрос" },
+    { key: "page_found", label: "Страница" },
+    { key: "title", label: "Должность" },
+    { key: "category", label: "Категория" },
+    { key: "experience", label: "Опыт" },
+    { key: "location", label: "Локация" },
+    { key: "salary", label: "Зарплата" },
+    { key: "education", label: "Образование" },
+    { key: "published_at", label: "Дата публикации" },
+    { key: "relevanceScore", label: "Score" },
+    { key: "priorityLabelRu", label: "Приоритет" },
+    { key: "priorityReason", label: "Причина приоритета" },
+    { key: "detail_url", label: "Ссылка" },
+  ];
+
+  const escapeHtml = (value) =>
+    String(value ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/\"/g, "&quot;");
+
+  const tableHeader = columns.map((col) => `<th>${escapeHtml(col.label)}</th>`).join("");
+  const tableRows = rows
+    .map((row) => {
+      const cells = columns.map((col) => `<td>${escapeHtml(row[col.key])}</td>`).join("");
+      return `<tr>${cells}</tr>`;
+    })
+    .join("");
+
+  return [
+    "<!DOCTYPE html>",
+    '<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">',
+    "<head>",
+    '<meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />',
+    "<style>table{border-collapse:collapse}th,td{border:1px solid #d1d5db;padding:6px 8px;font-family:Arial,sans-serif;font-size:12px;}th{background:#f8fafc;font-weight:700;}</style>",
+    "</head>",
+    "<body>",
+    `<table><thead><tr>${tableHeader}</tr></thead><tbody>${tableRows}</tbody></table>`,
+    "</body>",
+    "</html>",
+  ].join("");
+}
+
 function StatCard({ title, value, hint, icon: Icon }) {
   return (
     <Card className="rounded-2xl border-slate-200/70 shadow-sm">
@@ -367,28 +343,21 @@ function StatCard({ title, value, hint, icon: Icon }) {
   );
 }
 
-function EmptyState({ onUseSample }) {
+function EmptyState({ onRefresh, isRefreshing = false }) {
   return (
     <Card className="rounded-3xl border-dashed border-slate-300 bg-white/80 shadow-sm">
       <CardContent className="flex flex-col items-center justify-center px-6 py-16 text-center">
         <div className="rounded-3xl bg-slate-100 p-4">
           <Database className="h-8 w-8 text-slate-700" />
         </div>
-        <h3 className="mt-5 text-xl font-semibold text-slate-900">Загрузи JSON с результатами парсинга</h3>
+        <h3 className="mt-5 text-xl font-semibold text-slate-900">Нет данных для отображения</h3>
         <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">
-          Подходит файл формата <span className="font-medium text-slate-700">enbek_almaty_resumes_fast.json</span>. После загрузки
-          появятся фильтры, аналитика, таблица и карточка резюме.
+          Обновите данные из API или запустите парсер, чтобы загрузить резюме и увидеть аналитику.
         </p>
-        <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
-          <Badge className="rounded-full bg-slate-900 px-3 py-1 text-white hover:bg-slate-900">Алматы</Badge>
-          <Badge variant="secondary" className="rounded-full px-3 py-1">Продажи</Badge>
-          <Badge variant="secondary" className="rounded-full px-3 py-1">Call-центр</Badge>
-          <Badge variant="secondary" className="rounded-full px-3 py-1">Поиск и анализ</Badge>
-        </div>
         <div className="mt-8 flex flex-wrap justify-center gap-3">
-          <Button onClick={onUseSample} className="rounded-2xl px-5">
-            <Sparkles className="mr-2 h-4 w-4" />
-            Загрузить демо-данные
+          <Button onClick={onRefresh} disabled={isRefreshing} className="rounded-2xl px-5">
+            <RefreshCw className={`mr-2 h-4 w-4 ${isRefreshing ? "animate-spin" : ""}`} />
+            {isRefreshing ? "Обновление..." : "Обновить из API"}
           </Button>
         </div>
       </CardContent>
@@ -441,7 +410,6 @@ function ResumeRow({ item, active, onClick }) {
 }
 
 export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, withAccessTokenHeader }) {
-  const fileInputRef = useRef(null);
   const bootstrapKeyRef = useRef("");
   const loadRequestRef = useRef(null);
   const [rawItems, setRawItems] = useState([]);
@@ -453,7 +421,6 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
   const [onlyWithSalary, setOnlyWithSalary] = useState(false);
   const [onlyFresh, setOnlyFresh] = useState(false);
   const [minSalary, setMinSalary] = useState("");
-  const [jsonDraft, setJsonDraft] = useState("");
   const [importError, setImportError] = useState("");
   const [isRunningParser, setIsRunningParser] = useState(false);
   const [isLoadingFromApi, setIsLoadingFromApi] = useState(false);
@@ -1012,44 +979,6 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
     return normalized === null ? 0 : normalized;
   }, [normalizePercent, parserProgressPercent]);
 
-  const handleUseSample = () => {
-    setRawItems(SAMPLE_DATA.map((item, index) => ({ ...item, __id: `sample-${index}` })));
-    setImportError("");
-  };
-
-  const handleFileUpload = async (event) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-
-    try {
-      const text = await file.text();
-      const parsed = JSON.parse(text);
-      if (!Array.isArray(parsed)) {
-        throw new Error("JSON должен содержать массив объектов.");
-      }
-      setRawItems(parsed.map((item, index) => ({ ...item, __id: item.__id || `file-${index}` })));
-      setImportError("");
-    } catch (error) {
-      setImportError(error.message || "Не удалось прочитать JSON файл.");
-    } finally {
-      event.target.value = "";
-    }
-  };
-
-  const handlePasteImport = () => {
-    try {
-      const parsed = JSON.parse(jsonDraft);
-      if (!Array.isArray(parsed)) {
-        throw new Error("JSON должен содержать массив объектов.");
-      }
-      setRawItems(parsed.map((item, index) => ({ ...item, __id: item.__id || `paste-${index}` })));
-      setImportError("");
-      setJsonDraft("");
-    } catch (error) {
-      setImportError(error.message || "Неверный JSON.");
-    }
-  };
-
   const resetFilters = () => {
     setSearch("");
     setGroupFilter("all");
@@ -1060,8 +989,12 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
     setMinSalary("");
   };
 
-  const exportFilteredJson = () => {
-    downloadTextFile("enbek_filtered_resumes.json", JSON.stringify(filteredItems, null, 2));
+  const exportFilteredExcel = () => {
+    downloadTextFile(
+      "enbek_filtered_resumes.xls",
+      toExcelHtml(filteredItems),
+      "application/vnd.ms-excel;charset=utf-8"
+    );
   };
 
   const exportFilteredCsv = () => {
@@ -1086,21 +1019,12 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                 </div>
                 <h1 className="mt-3 text-3xl font-semibold tracking-tight text-slate-950">Удобный просмотр и анализ результатов парсинга</h1>
                 <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-500">
-                  Загружай JSON, фильтруй по ролям, зарплате и свежести, просматривай карточки кандидатов и быстро выгружай
-                  очищенную выборку для дальнейшей обработки.
+                  Обновляй данные из API, применяй фильтры по ролям, зарплате и свежести, анализируй карточки кандидатов
+                  и выгружай готовую выборку в Excel или CSV.
                 </p>
               </div>
 
               <div className="flex flex-wrap gap-3">
-                <input ref={fileInputRef} type="file" accept="application/json" className="hidden" onChange={handleFileUpload} />
-                <Button variant="outline" className="rounded-2xl" onClick={() => fileInputRef.current?.click()}>
-                  <Upload className="mr-2 h-4 w-4" />
-                  Загрузить JSON
-                </Button>
-                <Button variant="outline" className="rounded-2xl" onClick={handleUseSample}>
-                  <FileJson className="mr-2 h-4 w-4" />
-                  Демо-данные
-                </Button>
                 <Button
                   variant="outline"
                   className="rounded-2xl"
@@ -1118,9 +1042,9 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                   <RefreshCw className={`mr-2 h-4 w-4 ${isRunningParser ? "animate-spin" : ""}`} />
                   Запустить парсер
                 </Button>
-                <Button className="rounded-2xl" onClick={exportFilteredJson} disabled={!filteredItems.length}>
+                <Button className="rounded-2xl" onClick={exportFilteredExcel} disabled={!filteredItems.length}>
                   <Download className="mr-2 h-4 w-4" />
-                  Export JSON
+                  Export Excel
                 </Button>
               </div>
             </div>
@@ -1142,8 +1066,8 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
           <div className="flex flex-col gap-6">
             <Card className="order-2 rounded-3xl border-slate-200/70 shadow-sm">
               <CardHeader>
-                <CardTitle className="flex items-center gap-2 text-lg"><SlidersHorizontal className="h-5 w-5" /> Фильтры и импорт</CardTitle>
-                <CardDescription>Поддерживает JSON-массив объектов из твоего парсера.</CardDescription>
+                <CardTitle className="flex items-center gap-2 text-lg"><SlidersHorizontal className="h-5 w-5" /> Фильтры и экспорт</CardTitle>
+                <CardDescription>Фильтруйте выдачу и выгружайте результат в Excel или CSV.</CardDescription>
               </CardHeader>
               <CardContent className="space-y-5">
                 <div className="space-y-2">
@@ -1248,15 +1172,12 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                 <Separator />
 
                 <div className="space-y-2">
-                  <Label>Импорт из вставленного JSON</Label>
-                  <Textarea
-                    value={jsonDraft}
-                    onChange={(e) => setJsonDraft(e.target.value)}
-                    className="min-h-[140px] rounded-2xl"
-                    placeholder='[{"title":"Менеджер по продажам", ...}]'
-                  />
-                  <div className="flex gap-2">
-                    <Button onClick={handlePasteImport} className="rounded-2xl">Импортировать</Button>
+                  <Label>Экспорт текущей выборки</Label>
+                  <div className="flex flex-wrap gap-2">
+                    <Button onClick={exportFilteredExcel} disabled={!filteredItems.length} className="rounded-2xl">
+                      <Download className="mr-2 h-4 w-4" />
+                      Export Excel
+                    </Button>
                     <Button variant="outline" onClick={exportFilteredCsv} disabled={!filteredItems.length} className="rounded-2xl">
                       <Download className="mr-2 h-4 w-4" />
                       Export CSV
@@ -1287,7 +1208,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
 
           <div className="space-y-6">
             {!hydratedItems.length ? (
-              <EmptyState onUseSample={handleUseSample} />
+              <EmptyState onRefresh={handleRefreshFromApi} isRefreshing={isLoadingFromApi} />
             ) : (
               <>
                 <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr] 2xl:grid-cols-[1fr_1fr]">
@@ -1494,7 +1415,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                                   <CardTitle className="text-base">Быстрые действия</CardTitle>
                                 </CardHeader>
                                 <CardContent className="space-y-3">
-                                  <Button onClick={exportFilteredJson} className="w-full rounded-2xl">Экспорт текущей выборки в JSON</Button>
+                                  <Button onClick={exportFilteredExcel} className="w-full rounded-2xl">Экспорт текущей выборки в Excel</Button>
                                   <Button variant="outline" onClick={exportFilteredCsv} className="w-full rounded-2xl">Экспорт текущей выборки в CSV</Button>
                                   {selectedItem.detail_url ? (
                                     <Button asChild variant="outline" className="w-full rounded-2xl">
