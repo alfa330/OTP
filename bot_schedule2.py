@@ -9142,6 +9142,18 @@ def _recruiting_runtime_cleanup_locked():
     recruiting_runtime_jobs = {job_id: job for job_id, job in recruiting_runtime_jobs.items() if job_id in keep_ids}
 
 
+def _normalize_recruiting_progress_percent(value):
+    try:
+        number = float(value)
+    except Exception:
+        return None
+    if number < 0:
+        return 0.0
+    if number > 100:
+        return 100.0
+    return round(number, 2)
+
+
 def _recruiting_runtime_job_snapshot(job):
     if not job:
         return None
@@ -9155,6 +9167,7 @@ def _recruiting_runtime_job_snapshot(job):
         "result": job.get("result"),
         "error": job.get("error"),
         "settings": job.get("settings") or {},
+        "progress_percent": _normalize_recruiting_progress_percent(job.get("progress_percent")) or 0.0,
     }
 
 
@@ -9173,6 +9186,7 @@ def _recruiting_runtime_start_job(settings):
         "result": None,
         "error": None,
         "settings": settings or {},
+        "progress_percent": 0.0,
         "_updated_ts": now_ts,
     }
     with recruiting_runtime_lock:
@@ -9182,7 +9196,7 @@ def _recruiting_runtime_start_job(settings):
     return job_id
 
 
-def _recruiting_runtime_append_message(job_id, message, level='info'):
+def _recruiting_runtime_append_message(job_id, message, level='info', progress_percent=None):
     now_iso = _recruiting_now_iso()
     now_ts = time.time()
     msg = {
@@ -9190,15 +9204,19 @@ def _recruiting_runtime_append_message(job_id, message, level='info'):
         "level": str(level or 'info'),
         "text": str(message or ''),
     }
+    normalized_progress = _normalize_recruiting_progress_percent(progress_percent)
     with recruiting_runtime_lock:
         job = recruiting_runtime_jobs.get(job_id)
         if not job:
             return
         messages = job.get("messages") or []
-        messages.append(msg)
+        if msg["text"]:
+            messages.append(msg)
         if len(messages) > RECRUITING_RUNTIME_MAX_MESSAGES:
             messages = messages[-RECRUITING_RUNTIME_MAX_MESSAGES:]
         job["messages"] = messages
+        if normalized_progress is not None:
+            job["progress_percent"] = normalized_progress
         job["updated_at"] = now_iso
         job["_updated_ts"] = now_ts
 
@@ -9215,6 +9233,8 @@ def _recruiting_runtime_finish_job(job_id, status, result=None, error=None):
         job["result"] = result
         job["error"] = str(error) if error else None
         job["finished_at"] = now_iso
+        if str(status or "finished") == "success":
+            job["progress_percent"] = 100.0
         job["updated_at"] = now_iso
         job["_updated_ts"] = now_ts
         if recruiting_runtime_active_job_id == job_id:
@@ -9241,9 +9261,22 @@ def _recruiting_runtime_get_job(job_id=None):
 
 
 def _run_recruiting_job_in_background(job_id, pages_per_query, keyword_groups):
-    def emit(message):
-        _recruiting_runtime_append_message(job_id, message, level='info')
-        logging.info("[recruiting job %s] %s", job_id, message)
+    def emit(event):
+        message = ''
+        progress_percent = None
+        if isinstance(event, dict):
+            message = str(event.get("message") or event.get("text") or '').strip()
+            progress_percent = event.get("progress_percent")
+        else:
+            message = str(event or '').strip()
+        _recruiting_runtime_append_message(
+            job_id,
+            message,
+            level='info',
+            progress_percent=progress_percent
+        )
+        if message:
+            logging.info("[recruiting job %s] %s", job_id, message)
 
     try:
         emit("Запуск ручного парсинга...")
@@ -17844,16 +17877,22 @@ def sync_recruiting_resumes_job(
     normalized_groups = _normalize_recruiting_keyword_groups(keyword_groups)
     groups_to_use = normalized_groups or None
 
-    def emit(message):
+    def emit(message, progress_percent=None):
         try:
             if progress_callback:
-                progress_callback(str(message))
+                payload = {
+                    "message": str(message or '')
+                }
+                normalized_progress = _normalize_recruiting_progress_percent(progress_percent)
+                if normalized_progress is not None:
+                    payload["progress_percent"] = normalized_progress
+                progress_callback(payload)
         except Exception:
             pass
 
     if not recruiting_parse_lock.acquire(blocking=False):
         logging.warning("Recruiting parser job skipped: previous run is still in progress")
-        emit("Пропуск запуска: предыдущий запуск ещё выполняется.")
+        emit("Пропуск запуска: предыдущий запуск ещё выполняется.", progress_percent=100)
         return {"status": "skipped", "reason": "locked"}
 
     started = time.time()
@@ -17863,13 +17902,32 @@ def sync_recruiting_resumes_job(
             "Старт парсинга: "
             f"pages_per_query={pages_to_fetch}, "
             f"custom_keywords={'yes' if groups_to_use else 'no'}, "
-            f"keywords_count={total_keywords if groups_to_use else 'default'}"
+            f"keywords_count={total_keywords if groups_to_use else 'default'}",
+            progress_percent=1
         )
+
+        def emit_parser_progress(event):
+            message = ''
+            progress_percent = None
+            if isinstance(event, dict):
+                message = str(event.get("message") or event.get("text") or '')
+                progress_percent = event.get("progress_percent")
+            else:
+                message = str(event or '')
+
+            mapped_percent = None
+            normalized_progress = _normalize_recruiting_progress_percent(progress_percent)
+            if normalized_progress is not None:
+                # Reserve the tail for DB save/finish phase.
+                mapped_percent = round(5.0 + (normalized_progress * 0.9), 2)
+            emit(message, progress_percent=mapped_percent)
+
         items = crawl_resumes_as_dicts(
             pages_per_query=pages_to_fetch,
             keyword_groups=groups_to_use,
-            progress_cb=emit
+            progress_cb=emit_parser_progress
         )
+        emit("Сохранение результатов...", progress_percent=96)
         save_result = db.save_recruiting_parse_success(
             items=items,
             source='enbek',
@@ -17887,7 +17945,8 @@ def sync_recruiting_resumes_job(
             "Парсинг завершён: "
             f"сохранено={int(save_result.get('inserted') or 0)}, "
             f"дубликаты={int(save_result.get('duplicates_dropped') or 0)}, "
-            f"время={elapsed:.2f}s"
+            f"время={elapsed:.2f}s",
+            progress_percent=100
         )
         save_result["settings"] = {
             "pages_per_query": pages_to_fetch,
@@ -17896,7 +17955,7 @@ def sync_recruiting_resumes_job(
         return save_result
     except Exception as e:
         logging.exception("Recruiting parser job failed: %s", e)
-        emit(f"Ошибка парсинга: {e}")
+        emit(f"Ошибка парсинга: {e}", progress_percent=100)
         try:
             db.save_recruiting_parse_failure(
                 error_message=str(e),
