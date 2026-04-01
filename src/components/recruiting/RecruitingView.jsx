@@ -62,17 +62,75 @@ const PRIORITY_RULES = {
       "менеджер продаж",
       "специалист по продажам",
       "sales manager",
+      "торговый представитель",
+      "коммерческий директор",
+      "руководитель отдела продаж",
+      "старший менеджер по продажам",
+      "ведущий специалист по продажам",
+      "эксперт по продажам",
       "менеджер по работе с клиентами",
+      "менеджер по развитию бизнеса",
       "менеджер по развитию продаж",
       "аккаунт-менеджер",
       "account manager",
+      "client manager",
       "менеджер b2b",
       "менеджер b2c",
+      "менеджер корпоративных продаж",
+      "менеджер розничных продаж",
     ],
-    strongCategory: ["продажи", "b2b продажи", "b2c продажи", "клиентский сервис", "обслуживание клиентов"],
-    mediumAll: ["работа с клиентами", "привлечение клиентов", "активные продажи", "холодные продажи", "телефонные продажи"],
-    weakAll: ["менеджер", "sales", "аккаунт", "продаж"],
-    negativeAll: ["бухгалтер", "водитель", "кладовщик", "повар", "охранник", "юрист", "дизайнер"],
+    moderateTitle: [
+      "менеджер по работе",
+      "коммерческий менеджер",
+      "менеджер проектов с клиентами",
+      "бизнес-консультант",
+      "консультант по продажам",
+      "специалист по работе с клиентами",
+    ],
+    strongCategory: [
+      "продажи",
+      "b2b продажи",
+      "b2c продажи",
+      "клиентский сервис",
+      "обслуживание клиентов",
+      "коммерция",
+      "развитие бизнеса",
+      "работа с клиентами",
+      "корпоративные продажи",
+    ],
+    mediumAll: [
+      "работа с клиентами",
+      "привлечение клиентов",
+      "активные продажи",
+      "холодные продажи",
+      "телефонные продажи",
+      "развитие клиентской базы",
+      "переговоры",
+      "заключение сделок",
+    ],
+    weakAll: ["менеджер", "sales", "аккаунт", "продаж", "клиент"],
+    negativeInTitle: [
+      "бухгалтер",
+      "водитель",
+      "кладовщик",
+      "повар",
+      "охранник",
+      "юрист",
+      "дизайнер",
+      "программист",
+      "разработчик",
+      "врач",
+      "администратор баз данных",
+      "системный администратор",
+    ],
+    negativeOverride: [
+      "менеджер по работе",
+      "продаж",
+      "клиент",
+      "b2b",
+      "b2c",
+      "развитие бизнеса",
+    ],
   },
   call_center_operator: {
     strongTitle: [
@@ -86,11 +144,57 @@ const PRIORITY_RULES = {
       "специалист контакт центра",
       "оператор на телефоне",
       "телемаркетолог",
+      "специалист call центра",
+      "консультант call центра",
+      "агент call центра",
     ],
-    strongCategory: ["контакт-центр", "контакт центр", "call-центр", "call центр", "колл-центр", "колл центр", "клиентский сервис"],
-    mediumAll: ["входящие звонки", "исходящие звонки", "консультирование клиентов", "обработка обращений", "телефонные переговоры"],
-    weakAll: ["оператор", "call", "колл", "контакт", "телефон"],
-    negativeAll: ["бухгалтер", "водитель", "кладовщик", "повар", "охранник", "юрист", "дизайнер"],
+    moderateTitle: [
+      "оператор",
+      "специалист по работе с клиентами",
+      "консультант по телефону",
+      "специалист клиентского сервиса",
+    ],
+    strongCategory: [
+      "контакт-центр",
+      "контакт центр",
+      "call-центр",
+      "call центр",
+      "колл-центр",
+      "колл центр",
+      "клиентский сервис",
+      "обслуживание клиентов",
+      "горячая линия",
+    ],
+    mediumAll: [
+      "входящие звонки",
+      "исходящие звонки",
+      "консультирование клиентов",
+      "обработка обращений",
+      "телефонные переговоры",
+      "прием звонков",
+      "обработка заявок",
+    ],
+    weakAll: ["оператор", "call", "колл", "контакт", "телефон", "звонки"],
+    negativeInTitle: [
+      "бухгалтер",
+      "водитель",
+      "кладовщик",
+      "повар",
+      "охранник",
+      "юрист",
+      "дизайнер",
+      "программист",
+      "разработчик",
+      "врач",
+    ],
+    negativeOverride: [
+      "оператор",
+      "call",
+      "контакт",
+      "клиент",
+      "сервис",
+      "телефон",
+    ],
   },
 };
 
@@ -193,88 +297,245 @@ function getPriorityLabel(score) {
   return "low";
 }
 
+function getContextBonus(item) {
+  let bonus = 0;
+
+  const exp = normalizeText(item.experience);
+  if (exp.includes("более 3 лет") || exp.includes("более 5 лет") || exp.includes("от 3 лет")) {
+    bonus += 5;
+  } else if (exp.includes("1-3 года") || exp.includes("от 1 года")) {
+    bonus += 3;
+  } else if (exp.includes("без опыта") || exp.includes("менее 1 года")) {
+    bonus += 2;
+  }
+
+  const salaryNum = extractSalaryNumber(item.salary);
+  if (salaryNum) {
+    bonus += 3;
+
+    if (item.keyword_group === "sales_manager") {
+      if (salaryNum >= 200000 && salaryNum <= 600000) {
+        bonus += 4;
+      } else if (salaryNum >= 150000 && salaryNum < 200000) {
+        bonus += 2;
+      }
+    } else if (item.keyword_group === "call_center_operator") {
+      if (salaryNum >= 150000 && salaryNum <= 350000) {
+        bonus += 4;
+      } else if (salaryNum >= 100000 && salaryNum < 150000) {
+        bonus += 2;
+      }
+    }
+  }
+
+  const publishedDate = extractPublishedDate(item.published_at);
+  if (publishedDate) {
+    const now = new Date("2026-04-01T00:00:00");
+    const daysAgo = (now - publishedDate) / (1000 * 60 * 60 * 24);
+    if (daysAgo <= 3) {
+      bonus += 5;
+    } else if (daysAgo <= 7) {
+      bonus += 3;
+    } else if (daysAgo <= 14) {
+      bonus += 1;
+    }
+  }
+
+  const edu = normalizeText(item.education);
+  if (edu.includes("высшее")) {
+    bonus += 2;
+  } else if (edu.includes("неполное высшее") || edu.includes("среднее специальное")) {
+    bonus += 1;
+  }
+
+  const loc = normalizeText(item.location);
+  if (loc.includes("алматы") || loc.includes("астана")) {
+    bonus += 2;
+  }
+
+  return bonus;
+}
+
+function applySmartCaps(score, signals, hasStrongSignals) {
+  if (!hasStrongSignals) {
+    if (signals.weak.length > 0) {
+      const weakCap = 58 + Math.min(15, signals.weak.length * 3);
+      score = Math.min(score, weakCap);
+    }
+
+    if (signals.moderateTitle && signals.moderateTitle.length > 0) {
+      const moderateCap = 70 + Math.min(10, signals.moderateTitle.length * 5);
+      score = Math.min(score, moderateCap);
+    }
+  }
+
+  if (signals.negativeInTitle && signals.negativeInTitle.length >= 2) {
+    if (!signals.negativeOverride || signals.negativeOverride.length === 0) {
+      const negativeCap = 42 - signals.negativeInTitle.length * 4;
+      score = Math.min(score, Math.max(25, negativeCap));
+    }
+  }
+
+  return score;
+}
+
+function buildSmartReason(signals, _score, item) {
+  const reasonParts = [];
+
+  if (signals.strongTitle && signals.strongTitle.length > 0) {
+    reasonParts.push(
+      `Сильное совпадение по названию: ${formatPatternsForReason(signals.strongTitle, 2)}.`
+    );
+  } else if (signals.moderateTitle && signals.moderateTitle.length > 0) {
+    reasonParts.push(
+      `Умеренное совпадение по названию: ${formatPatternsForReason(signals.moderateTitle, 2)}.`
+    );
+  }
+
+  if (signals.strongCategory && signals.strongCategory.length > 0) {
+    reasonParts.push(
+      `Категория подтверждает профиль: ${formatPatternsForReason(signals.strongCategory, 2)}.`
+    );
+  }
+
+  if (signals.medium && signals.medium.length > 0) {
+    reasonParts.push(
+      `В тексте есть релевантные признаки: ${formatPatternsForReason(signals.medium, 2)}.`
+    );
+  } else if (
+    (!signals.strongTitle || signals.strongTitle.length === 0) &&
+    (!signals.moderateTitle || signals.moderateTitle.length === 0) &&
+    signals.weak &&
+    signals.weak.length > 0
+  ) {
+    reasonParts.push(
+      `Найдены только общие маркеры: ${formatPatternsForReason(signals.weak, 2)}.`
+    );
+  }
+
+  const contextBonus = getContextBonus(item);
+  if (contextBonus > 0) {
+    const bonusReasons = [];
+
+    const exp = normalizeText(item.experience);
+    if (exp.includes("более 3 лет") || exp.includes("более 5 лет")) {
+      bonusReasons.push("большой опыт работы");
+    }
+
+    const salaryNum = extractSalaryNumber(item.salary);
+    if (salaryNum) {
+      bonusReasons.push("указана зарплата");
+    }
+
+    const publishedDate = extractPublishedDate(item.published_at);
+    if (publishedDate) {
+      const now = new Date("2026-04-01T00:00:00");
+      const daysAgo = (now - publishedDate) / (1000 * 60 * 60 * 24);
+      if (daysAgo <= 7) {
+        bonusReasons.push("свежее резюме");
+      }
+    }
+
+    if (bonusReasons.length > 0) {
+      reasonParts.push(`Бонусы за: ${bonusReasons.join(", ")}.`);
+    }
+  }
+
+  if (signals.negativeInTitle && signals.negativeInTitle.length > 0) {
+    if (signals.negativeOverride && signals.negativeOverride.length > 0) {
+      reasonParts.push(
+        `Есть нерелевантные маркеры (${formatPatternsForReason(signals.negativeInTitle, 1)}), но они компенсируются позитивными сигналами.`
+      );
+    } else {
+      reasonParts.push(
+        `Есть нерелевантные маркеры: ${formatPatternsForReason(signals.negativeInTitle, 2)} — это снизило оценку.`
+      );
+    }
+  }
+
+  const missingData = [];
+  if (!item.title) missingData.push("название позиции");
+  if (!item.category) missingData.push("категория");
+  if (missingData.length > 0) {
+    reasonParts.push(`Не указано: ${missingData.join(", ")} — оценка снижена.`);
+  }
+
+  const finalReason =
+    reasonParts.slice(0, 4).join(" ") ||
+    "Недостаточно явных совпадений с целевой ролью.";
+
+  return finalReason;
+}
+
 function getResumePriority(item) {
   const title = normalizeText(item.title);
   const category = normalizeText(item.category);
   const query = normalizeText(item.keyword_query);
-  const experience = normalizeText(item.experience);
   const all = normalizeText([item.title, item.category, item.keyword_query, item.experience].join(" "));
   const rules = PRIORITY_RULES[item.keyword_group] || PRIORITY_RULES.sales_manager;
 
-  const strongTitleMatches = matchPatterns(title, rules.strongTitle, 3);
-  const strongCategoryMatches = matchPatterns(category, rules.strongCategory, 2);
-  const mediumMatches = matchPatterns(all, rules.mediumAll, 4);
-  const weakMatches = matchPatterns(all, rules.weakAll, 5);
-  const negativeMatches = matchPatterns(all, rules.negativeAll, 4);
+  const signals = {
+    strongTitle: matchPatterns(title, rules.strongTitle, 3),
+    moderateTitle: matchPatterns(title, rules.moderateTitle || [], 2),
+    strongCategory: matchPatterns(category, rules.strongCategory, 2),
+    medium: matchPatterns(all, rules.mediumAll, 4),
+    weak: matchPatterns(all, rules.weakAll, 5),
+    negativeInTitle: matchPatterns(title, rules.negativeInTitle || [], 4),
+    negativeOverride: matchPatterns(all, rules.negativeOverride || [], 3),
+  };
 
-  const hasStrongSignals = strongTitleMatches.length > 0 || strongCategoryMatches.length > 0;
-  const queryAligned = Boolean(query && title && (title.includes(query) || query.includes(title)));
+  const hasStrongSignals =
+    signals.strongTitle.length > 0 || signals.moderateTitle.length > 0;
+  const queryAligned = Boolean(
+    query && title && (title.includes(query) || query.includes(title))
+  );
 
-  let score = 0;
+  let score = 50;
 
-  if (strongTitleMatches.length > 0) {
-    score += 40 + Math.min(22, (strongTitleMatches.length - 1) * 10);
+  if (signals.strongTitle.length > 0) {
+    score += 30 + Math.min(20, signals.strongTitle.length * 8);
+  } else if (signals.moderateTitle.length > 0) {
+    score += 20 + Math.min(15, signals.moderateTitle.length * 5);
   }
-  if (strongCategoryMatches.length > 0) {
-    score += 16 + Math.min(10, (strongCategoryMatches.length - 1) * 5);
-  }
-  score += Math.min(18, mediumMatches.length * 6);
-  score += Math.min(8, weakMatches.length * 2);
 
-  if (strongTitleMatches.length > 0 && strongCategoryMatches.length > 0) {
-    score += 8;
+  if (signals.strongCategory.length > 0) {
+    score += 18 + Math.min(12, signals.strongCategory.length * 6);
   }
-  if (strongTitleMatches.length > 0 && mediumMatches.length > 0) {
-    score += 4;
+
+  score += Math.min(18, signals.medium.length * 4);
+  score += Math.min(12, signals.weak.length * 2);
+
+  if (signals.strongTitle.length > 0 && signals.strongCategory.length > 0) {
+    score += 10;
+  }
+  if (signals.strongTitle.length > 0 && signals.medium.length > 0) {
+    score += 6;
+  }
+  if (signals.moderateTitle.length > 0 && signals.strongCategory.length > 0) {
+    score += 7;
   }
   if (queryAligned) {
     score += 8;
   }
-  if (experience.includes("без опыта")) {
-    score += 1;
+
+  score += getContextBonus(item);
+
+  if (signals.negativeInTitle.length > 0) {
+    if (signals.negativeOverride.length > 0 || hasStrongSignals) {
+      score -= Math.min(12, signals.negativeInTitle.length * 4);
+    } else {
+      score -= Math.min(30, signals.negativeInTitle.length * 12);
+    }
   }
 
-  score -= Math.min(30, negativeMatches.length * 12);
+  if (!title) score -= 12;
+  if (!category) score -= 6;
 
-  if (!title) score -= 18;
-  if (!category) score -= 8;
-
-  if (!hasStrongSignals && weakMatches.length > 0) {
-    score = Math.min(score, 46);
-  }
-  if (!hasStrongSignals && negativeMatches.length >= 2) {
-    score = Math.min(score, 30);
-  }
-
+  score = applySmartCaps(score, signals, hasStrongSignals);
   score = clampNumber(score, 0, 100);
+
   const priorityLabel = getPriorityLabel(score);
-
-  const reasonParts = [];
-  if (strongTitleMatches.length) {
-    reasonParts.push(`Сильное совпадение по названию: ${formatPatternsForReason(strongTitleMatches)}.`);
-  }
-  if (strongCategoryMatches.length) {
-    reasonParts.push(`Категория подтверждает профиль: ${formatPatternsForReason(strongCategoryMatches)}.`);
-  }
-  if (mediumMatches.length) {
-    reasonParts.push(`В тексте есть релевантные признаки: ${formatPatternsForReason(mediumMatches)}.`);
-  } else if (!hasStrongSignals && weakMatches.length) {
-    reasonParts.push(`Найдены только общие маркеры: ${formatPatternsForReason(weakMatches)}.`);
-  }
-  if (queryAligned) {
-    reasonParts.push("Название согласуется с поисковым запросом.");
-  }
-  if (negativeMatches.length) {
-    reasonParts.push(`Есть нерелевантные маркеры: ${formatPatternsForReason(negativeMatches)} — это снизило оценку.`);
-  }
-  if (!title) {
-    reasonParts.push("Не указано название позиции, поэтому оценка снижена.");
-  }
-  if (!category) {
-    reasonParts.push("Категория не указана, уверенность ниже.");
-  }
-
-  const reason = reasonParts.slice(0, 4).join(" ") || "Недостаточно явных совпадений с целевой ролью.";
+  const reason = buildSmartReason(signals, score, item);
 
   return {
     relevanceScore: score,
@@ -285,7 +546,7 @@ function getResumePriority(item) {
 }
 
 function getPriorityBadgeClass(label, active = false) {
-  if (active) return "border-blue-200 bg-white text-blue-700";
+  if (active) return "border-slate-300 bg-white text-slate-800";
   if (label === "high") return "border-rose-200 bg-rose-50 text-rose-700";
   if (label === "medium") return "border-emerald-200 bg-emerald-50 text-emerald-700";
   return "border-sky-200 bg-sky-50 text-sky-700";
@@ -398,7 +659,7 @@ function toExcelHtml(rows) {
 function InfoTooltip({ text, className = "" }) {
   if (!text) return null;
   return (
-    <div className={`group relative inline-flex ${className}`}>
+    <div className={`group relative inline-flex z-0 hover:z-[9999] focus-within:z-[9999] ${className}`}>
       <button
         type="button"
         aria-label="Показать подсказку"
@@ -406,7 +667,7 @@ function InfoTooltip({ text, className = "" }) {
       >
         i
       </button>
-      <div className="pointer-events-none absolute left-1/2 top-full z-30 mt-2 w-72 -translate-x-1/2 rounded-xl border border-slate-200 bg-white/95 p-3 text-xs leading-5 text-slate-600 shadow-lg opacity-0 transition duration-150 group-hover:opacity-100 group-focus-within:opacity-100">
+      <div className="pointer-events-none absolute left-1/2 top-full z-[10000] mt-2 w-72 -translate-x-1/2 rounded-xl border border-slate-200 bg-white/95 p-3 text-xs leading-5 text-slate-600 shadow-lg opacity-0 transition duration-150 group-hover:opacity-100 group-focus-within:opacity-100">
         <p className="whitespace-pre-line">{text}</p>
       </div>
     </div>
@@ -463,7 +724,7 @@ function ResumeRow({ item, active, onClick }) {
       onClick={onClick}
       className={`w-full rounded-2xl border p-4 text-left transition ${
         active
-          ? "border-blue-300 bg-gradient-to-r from-blue-100 to-indigo-100 text-slate-900 shadow-md"
+          ? "border-blue-200 bg-blue-100 text-slate-900 shadow-sm"
           : "border-slate-200 bg-white hover:border-blue-300 hover:shadow-sm"
       }`}
     >
@@ -1543,11 +1804,11 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                         {selectedItem ? (
                           <div className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr] 2xl:grid-cols-[1.35fr_0.65fr]">
                             <div className="space-y-6">
-                              <div className="rounded-3xl bg-gradient-to-r from-indigo-700 via-blue-700 to-cyan-600 p-6 text-white shadow-lg">
+                              <div className="rounded-3xl bg-blue-700 p-6 text-white shadow-lg">
                                 <div className="flex flex-wrap items-center gap-2">
-                                  <Badge className="rounded-full bg-white/15 text-white hover:bg-white/15">{selectedItem.groupLabel}</Badge>
-                                  <Badge className="rounded-full bg-white/15 text-white hover:bg-white/15">{selectedItem.keyword_query || "Без запроса"}</Badge>
-                                  <Badge className="rounded-full bg-white/15 text-white hover:bg-white/15">{selectedItem.priorityLabelRu} · {selectedItem.relevanceScore}</Badge>
+                                  <Badge className="rounded-full border border-white/30 bg-white/20 text-white hover:bg-white/20">{selectedItem.groupLabel}</Badge>
+                                  <Badge className="rounded-full border border-white/30 bg-white/20 text-white hover:bg-white/20">{selectedItem.keyword_query || "Без запроса"}</Badge>
+                                  <Badge className="rounded-full border border-white/30 bg-white/20 text-white hover:bg-white/20">{selectedItem.priorityLabelRu} · {selectedItem.relevanceScore}</Badge>
                                 </div>
                                 <h2 className="mt-4 text-3xl font-semibold">{selectedItem.title || "Без названия"}</h2>
                                 <p className="mt-2 text-sm text-slate-300">{selectedItem.category || "Категория не указана"}</p>
