@@ -216,10 +216,10 @@ function getResumePriority(item) {
 }
 
 function getPriorityBadgeClass(label, active = false) {
-  if (active) return "border-white/20 bg-white/15 text-white";
-  if (label === "high") return "border-emerald-200 bg-emerald-50 text-emerald-700";
-  if (label === "medium") return "border-amber-200 bg-amber-50 text-amber-700";
-  return "border-slate-200 bg-slate-100 text-slate-600";
+  if (active) return "border-white/30 bg-white/20 text-white";
+  if (label === "high") return "border-rose-200 bg-rose-50 text-rose-700";
+  if (label === "medium") return "border-emerald-200 bg-emerald-50 text-emerald-700";
+  return "border-sky-200 bg-sky-50 text-sky-700";
 }
 
 function formatMoney(num) {
@@ -336,7 +336,7 @@ function StatCard({ title, value, hint, icon: Icon }) {
             <div className="mt-2 text-2xl font-semibold text-slate-900">{value}</div>
             <p className="mt-2 text-xs text-slate-500">{hint}</p>
           </div>
-          <div className="rounded-2xl bg-slate-100 p-3 text-slate-700">
+          <div className="rounded-2xl bg-gradient-to-br from-blue-500 to-indigo-500 p-3 text-white shadow-sm">
             <Icon className="h-5 w-5" />
           </div>
         </div>
@@ -357,7 +357,7 @@ function EmptyState({ onRefresh, isRefreshing = false }) {
           Обновите данные из API или запустите парсер, чтобы загрузить резюме и увидеть аналитику.
         </p>
         <div className="mt-8 flex flex-wrap justify-center gap-3">
-          <Button onClick={onRefresh} disabled={isRefreshing} className="rounded-2xl px-5">
+          <Button onClick={onRefresh} disabled={isRefreshing} className="rounded-2xl bg-blue-600 px-5 text-white hover:bg-blue-700">
             <RefreshCw className={`mr-2 h-4 w-4 ${isRefreshing ? "animate-spin" : ""}`} />
             {isRefreshing ? "Обновление..." : "Обновить из API"}
           </Button>
@@ -376,8 +376,8 @@ function ResumeRow({ item, active, onClick }) {
       onClick={onClick}
       className={`w-full rounded-2xl border p-4 text-left transition ${
         active
-          ? "border-slate-900 bg-slate-900 text-white shadow-lg"
-          : "border-slate-200 bg-white hover:border-slate-300 hover:shadow-sm"
+          ? "border-blue-600 bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-lg"
+          : "border-slate-200 bg-white hover:border-blue-300 hover:shadow-sm"
       }`}
     >
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
@@ -1024,7 +1024,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-slate-50 via-white to-slate-100 text-slate-900">
+    <div className="min-h-screen bg-gradient-to-b from-sky-50 via-white to-indigo-50 text-slate-900">
       <div className="mx-auto max-w-[1700px] px-4 py-6 sm:px-6 lg:px-8 2xl:max-w-[1900px]">
         <motion.div
           initial={{ opacity: 0, y: 12 }}
@@ -1032,10 +1032,10 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
           transition={{ duration: 0.4 }}
           className="mb-6"
         >
-          <div className="rounded-3xl border border-slate-200/70 bg-white/85 p-6 shadow-sm backdrop-blur">
+          <div className="rounded-3xl border border-blue-100/80 bg-white/90 p-6 shadow-sm backdrop-blur">
             <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
               <div>
-                <div className="inline-flex items-center gap-2 rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600">
+                <div className="inline-flex items-center gap-2 rounded-full bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700">
                   <Sparkles className="h-3.5 w-3.5" />
                   Панель анализа резюме Enbek
                 </div>
@@ -1049,7 +1049,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
               <div className="flex flex-wrap gap-3">
                 <Button
                   variant="outline"
-                  className="rounded-2xl"
+                  className="rounded-2xl border-blue-200 text-blue-700 hover:bg-blue-50"
                   onClick={handleRefreshFromApi}
                   disabled={isLoadingFromApi || isRunningParser}
                 >
@@ -1058,7 +1058,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                 </Button>
                 <Button
                   variant="outline"
-                  className="rounded-2xl"
+                  className="rounded-2xl border-emerald-200 text-emerald-700 hover:bg-emerald-50"
                   onClick={() => setIsParserModalOpen(true)}
                 >
                   <RefreshCw className={`mr-2 h-4 w-4 ${isRunningParser ? "animate-spin" : ""}`} />
@@ -1067,20 +1067,20 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                 <Button
                   type="button"
                   variant="outline"
-                  className="rounded-2xl"
+                  className="rounded-2xl border-violet-200 text-violet-700 hover:bg-violet-50"
                   onClick={() => setIsStatsHidden((prev) => !prev)}
                 >
                   <BarChart3 className="mr-2 h-4 w-4" />
                   {isStatsHidden ? "Показать статистику" : "Скрыть статистику"}
                 </Button>
-                <Button className="rounded-2xl" onClick={exportFilteredExcel} disabled={!filteredItems.length}>
+                <Button className="rounded-2xl bg-indigo-600 text-white hover:bg-indigo-700" onClick={exportFilteredExcel} disabled={!filteredItems.length}>
                   <Download className="mr-2 h-4 w-4" />
                   Export Excel
                 </Button>
               </div>
             </div>
             {(apiStatusMessage || lastRunMeta) ? (
-              <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+              <div className="mt-4 rounded-2xl border border-blue-100 bg-blue-50/60 px-4 py-3 text-sm text-slate-700">
                 {apiStatusMessage ? <p>{apiStatusMessage}</p> : null}
                 {lastRunMeta ? (
                   <p className="mt-1 text-xs text-slate-500">
@@ -1179,7 +1179,11 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                   <Button
                     type="button"
                     variant={onlyWithSalary ? "default" : "outline"}
-                    className="rounded-2xl"
+                    className={`rounded-2xl ${
+                      onlyWithSalary
+                        ? "bg-emerald-600 text-white hover:bg-emerald-700"
+                        : "border-emerald-200 text-emerald-700 hover:bg-emerald-50"
+                    }`}
                     onClick={() => setOnlyWithSalary((v) => !v)}
                   >
                     <Wallet className="mr-2 h-4 w-4" />
@@ -1188,13 +1192,22 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                   <Button
                     type="button"
                     variant={onlyFresh ? "default" : "outline"}
-                    className="rounded-2xl"
+                    className={`rounded-2xl ${
+                      onlyFresh
+                        ? "bg-sky-600 text-white hover:bg-sky-700"
+                        : "border-sky-200 text-sky-700 hover:bg-sky-50"
+                    }`}
                     onClick={() => setOnlyFresh((v) => !v)}
                   >
                     <Clock3 className="mr-2 h-4 w-4" />
                     Свежие за 3 дня
                   </Button>
-                  <Button type="button" variant="ghost" className="rounded-2xl" onClick={resetFilters}>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    className="rounded-2xl text-amber-700 hover:bg-amber-50 hover:text-amber-800"
+                    onClick={resetFilters}
+                  >
                     <RefreshCw className="mr-2 h-4 w-4" />
                     Сбросить
                   </Button>
@@ -1205,11 +1218,20 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                 <div className="space-y-2">
                   <Label>Экспорт текущей выборки</Label>
                   <div className="flex flex-wrap gap-2">
-                    <Button onClick={exportFilteredExcel} disabled={!filteredItems.length} className="rounded-2xl">
+                    <Button
+                      onClick={exportFilteredExcel}
+                      disabled={!filteredItems.length}
+                      className="rounded-2xl bg-indigo-600 text-white hover:bg-indigo-700"
+                    >
                       <Download className="mr-2 h-4 w-4" />
                       Export Excel
                     </Button>
-                    <Button variant="outline" onClick={exportFilteredCsv} disabled={!filteredItems.length} className="rounded-2xl">
+                    <Button
+                      variant="outline"
+                      onClick={exportFilteredCsv}
+                      disabled={!filteredItems.length}
+                      className="rounded-2xl border-cyan-200 text-cyan-700 hover:bg-cyan-50"
+                    >
                       <Download className="mr-2 h-4 w-4" />
                       Export CSV
                     </Button>
@@ -1304,9 +1326,19 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                 ) : null}
 
                 <Tabs defaultValue="list" className="space-y-6">
-                  <TabsList className="grid w-full grid-cols-2 rounded-2xl bg-slate-100 p-1">
-                    <TabsTrigger value="list" className="rounded-2xl">Список резюме</TabsTrigger>
-                    <TabsTrigger value="detail" className="rounded-2xl">Карточка резюме</TabsTrigger>
+                  <TabsList className="grid w-full grid-cols-2 rounded-2xl bg-blue-50 p-1">
+                    <TabsTrigger
+                      value="list"
+                      className="rounded-2xl text-slate-600 data-[state=active]:bg-white data-[state=active]:text-blue-700 data-[state=active]:shadow-sm"
+                    >
+                      Список резюме
+                    </TabsTrigger>
+                    <TabsTrigger
+                      value="detail"
+                      className="rounded-2xl text-slate-600 data-[state=active]:bg-white data-[state=active]:text-blue-700 data-[state=active]:shadow-sm"
+                    >
+                      Карточка резюме
+                    </TabsTrigger>
                   </TabsList>
 
                   <TabsContent value="list" className="mt-0">
@@ -1342,7 +1374,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                             <div className="space-y-5">
                               <div>
                                 <div className="flex flex-wrap items-center gap-2">
-                                  <Badge className="rounded-full bg-slate-900 text-white hover:bg-slate-900">{selectedItem.groupLabel}</Badge>
+                                  <Badge className="rounded-full bg-indigo-600 text-white hover:bg-indigo-600">{selectedItem.groupLabel}</Badge>
                                   <Badge className={`rounded-full border ${getPriorityBadgeClass(selectedItem.priorityLabel)}`}>{selectedItem.priorityLabelRu} · {selectedItem.relevanceScore}</Badge>
                                   <Badge variant="outline" className="rounded-full">стр. {selectedItem.page_found || "—"}</Badge>
                                 </div>
@@ -1413,7 +1445,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                         {selectedItem ? (
                           <div className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr] 2xl:grid-cols-[1.35fr_0.65fr]">
                             <div className="space-y-6">
-                              <div className="rounded-3xl bg-slate-950 p-6 text-white shadow-lg">
+                              <div className="rounded-3xl bg-gradient-to-r from-indigo-700 via-blue-700 to-cyan-600 p-6 text-white shadow-lg">
                                 <div className="flex flex-wrap items-center gap-2">
                                   <Badge className="rounded-full bg-white/15 text-white hover:bg-white/15">{selectedItem.groupLabel}</Badge>
                                   <Badge className="rounded-full bg-white/15 text-white hover:bg-white/15">{selectedItem.keyword_query || "Без запроса"}</Badge>
@@ -1452,10 +1484,25 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                                   <CardTitle className="text-base">Быстрые действия</CardTitle>
                                 </CardHeader>
                                 <CardContent className="space-y-3">
-                                  <Button onClick={exportFilteredExcel} className="w-full rounded-2xl">Экспорт текущей выборки в Excel</Button>
-                                  <Button variant="outline" onClick={exportFilteredCsv} className="w-full rounded-2xl">Экспорт текущей выборки в CSV</Button>
+                                  <Button
+                                    onClick={exportFilteredExcel}
+                                    className="w-full rounded-2xl bg-indigo-600 text-white hover:bg-indigo-700"
+                                  >
+                                    Экспорт текущей выборки в Excel
+                                  </Button>
+                                  <Button
+                                    variant="outline"
+                                    onClick={exportFilteredCsv}
+                                    className="w-full rounded-2xl border-cyan-200 text-cyan-700 hover:bg-cyan-50"
+                                  >
+                                    Экспорт текущей выборки в CSV
+                                  </Button>
                                   {selectedItem.detail_url ? (
-                                    <Button asChild variant="outline" className="w-full rounded-2xl">
+                                    <Button
+                                      asChild
+                                      variant="outline"
+                                      className="w-full rounded-2xl border-blue-200 text-blue-700 hover:bg-blue-50"
+                                    >
                                       <a href={selectedItem.detail_url} target="_blank" rel="noreferrer">Открыть исходную карточку</a>
                                     </Button>
                                   ) : null}
@@ -1554,25 +1601,30 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                 <div className="flex flex-wrap gap-2">
                   <Button
                     onClick={handleRunParserManually}
-                    className="rounded-2xl"
+                    className="rounded-2xl bg-emerald-600 text-white hover:bg-emerald-700"
                     disabled={isRunningParser || isLoadingFromApi}
                   >
                     <RefreshCw className={`mr-2 h-4 w-4 ${isRunningParser ? "animate-spin" : ""}`} />
                     {isRunningParser ? "Парсер выполняется..." : "Запустить парсер с настройками"}
                   </Button>
-                  <Button type="button" variant="outline" className="rounded-2xl" onClick={restoreDefaultParserSettings}>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="rounded-2xl border-blue-200 text-blue-700 hover:bg-blue-50"
+                    onClick={restoreDefaultParserSettings}
+                  >
                     Вернуть настройки по умолчанию
                   </Button>
                 </div>
 
-                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                <div className="rounded-2xl border border-blue-100 bg-blue-50/60 p-3">
                   <div className="mb-2 flex items-center justify-between text-sm">
-                    <span className="font-medium text-slate-700">Прогресс выполнения</span>
-                    <span className="font-semibold text-slate-900">{parserProgressValue}%</span>
+                    <span className="font-medium text-blue-800">Прогресс выполнения</span>
+                    <span className="font-semibold text-blue-900">{parserProgressValue}%</span>
                   </div>
-                  <div className="h-3 overflow-hidden rounded-full bg-slate-200">
+                  <div className="h-3 overflow-hidden rounded-full bg-blue-100">
                     <div
-                      className="h-full rounded-full bg-blue-500 transition-all duration-300"
+                      className="h-full rounded-full bg-gradient-to-r from-blue-500 to-indigo-500 transition-all duration-300"
                       style={{ width: `${parserProgressValue}%` }}
                     />
                   </div>
