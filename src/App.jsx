@@ -8,6 +8,7 @@ import SalaryCalculationResult from './components/salary/SalaryCalculationResult
 import TasksView from './components/tasks/TasksView';
 import SurveysView from './components/surveys/SurveysView';
 import TechnicalIssuesView from './components/technical/TechnicalIssuesView';
+import RecruitingView from './components/recruiting/RecruitingView';
 import LmsView from './components/lms/LmsView';
 import FaIcon from './components/common/FaIcon';
 import AuthEntranceSplash from './components/common/AuthEntranceSplash';
@@ -29218,6 +29219,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarCompactBadge()} {renderSurveysSidebarLabel()}
                                             </button>
                                         </li>
+                                        <li>
+                                            <button onClick={() => { setView('recruiting'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'recruiting' ? 'bg-blue-700' : ''}`}>
+                                                <FaIcon className="fas fa-user-tie"></FaIcon> <span className="sidebar-text">Рекрутинг</span>
+                                            </button>
+                                        </li>
 
                                         <hr className="border-t border-white-700 my-2 opacity-40" />
 
@@ -31058,6 +31064,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {( view === "technical_issues" && (<TechnicalIssuesView user={user} operators={users} directions={directions} showToast={showToast} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} />))}
                                 {( view === "tasks" && (<TasksView user={user} showToast={showToast} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} />))}
                                 {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
+                                {( view === "recruiting" && (<RecruitingView showToast={showToast} />))}
                                 {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
                                 {( view === "call_division" && (<AdminCallsUploadView user={user}/>))}
                                 {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
