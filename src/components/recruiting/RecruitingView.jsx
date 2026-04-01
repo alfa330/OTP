@@ -838,7 +838,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-slate-50 via-white to-slate-100 text-slate-900">
-      <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+      <div className="mx-auto max-w-[1700px] px-4 py-6 sm:px-6 lg:px-8 2xl:max-w-[1900px]">
         <motion.div
           initial={{ opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}
@@ -907,9 +907,9 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
           </div>
         </motion.div>
 
-        <div className="grid gap-6 xl:grid-cols-[360px_minmax(0,1fr)]">
-          <div className="space-y-6">
-            <Card className="rounded-3xl border-slate-200/70 shadow-sm">
+        <div className="grid gap-6 xl:grid-cols-[360px_minmax(0,1fr)] 2xl:grid-cols-[420px_minmax(0,1fr)]">
+          <div className="flex flex-col gap-6">
+            <Card className="order-2 rounded-3xl border-slate-200/70 shadow-sm">
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-lg"><SlidersHorizontal className="h-5 w-5" /> Фильтры и импорт</CardTitle>
                 <CardDescription>Поддерживает JSON-массив объектов из твоего парсера.</CardDescription>
@@ -928,7 +928,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                   </div>
                 </div>
 
-                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-1">
+                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
                   <div className="space-y-2">
                     <Label>Группа</Label>
                     <Select value={groupFilter} onValueChange={setGroupFilter}>
@@ -1039,12 +1039,12 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
               </CardContent>
             </Card>
 
-            <Card className="rounded-3xl border-slate-200/70 shadow-sm">
+            <Card className="order-1 rounded-3xl border-slate-200/70 shadow-sm">
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-lg"><BarChart3 className="h-5 w-5" /> Краткая сводка</CardTitle>
                 <CardDescription>Срез по текущим фильтрам.</CardDescription>
               </CardHeader>
-              <CardContent className="grid gap-4 sm:grid-cols-2 xl:grid-cols-1">
+              <CardContent className="grid gap-4 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
                 <StatCard title="Резюме" value={stats.total} hint="После применения фильтров" icon={Users} />
                 <StatCard title="Средняя зарплата" value={formatMoney(stats.avgSalary)} hint="Среди записей, где зарплата указана" icon={Wallet} />
                 <StatCard title="Свежие" value={stats.freshCount} hint="Опубликовано примерно за последние 3 дня" icon={CalendarDays} />
@@ -1059,13 +1059,13 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
               <EmptyState onUseSample={handleUseSample} />
             ) : (
               <>
-                <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
+                <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr] 2xl:grid-cols-[1fr_1fr]">
                   <Card className="rounded-3xl border-slate-200/70 shadow-sm">
                     <CardHeader>
                       <CardTitle>Распределение по группам</CardTitle>
                       <CardDescription>Что преобладает в текущей выборке.</CardDescription>
                     </CardHeader>
-                    <CardContent className="h-[280px]">
+                    <CardContent className="h-[280px] 2xl:h-[320px]">
                       <ResponsiveContainer width="100%" height="100%">
                         <BarChart data={groupChartData}>
                           <XAxis dataKey="name" tickLine={false} axisLine={false} />
@@ -1082,7 +1082,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                       <CardTitle>Топ районов / локаций</CardTitle>
                       <CardDescription>Сгруппировано по первому блоку в поле location.</CardDescription>
                     </CardHeader>
-                    <CardContent className="h-[280px]">
+                    <CardContent className="h-[280px] 2xl:h-[320px]">
                       <ResponsiveContainer width="100%" height="100%">
                         <PieChart>
                           <Pie data={locationsData} dataKey="value" nameKey="name" innerRadius={58} outerRadius={88} paddingAngle={3}>
@@ -1102,7 +1102,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                     <CardTitle>Топ поисковых запросов</CardTitle>
                     <CardDescription>Какие формулировки дали больше резюме в текущем наборе.</CardDescription>
                   </CardHeader>
-                  <CardContent className="h-[260px]">
+                  <CardContent className="h-[260px] 2xl:h-[320px]">
                     <ResponsiveContainer width="100%" height="100%">
                       <BarChart data={queryChartData} layout="vertical" margin={{ left: 24 }}>
                         <XAxis type="number" allowDecimals={false} tickLine={false} axisLine={false} />
@@ -1121,14 +1121,14 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                   </TabsList>
 
                   <TabsContent value="list" className="mt-0">
-                    <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
+                    <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr] 2xl:grid-cols-[1.2fr_0.8fr]">
                       <Card className="rounded-3xl border-slate-200/70 shadow-sm">
                         <CardHeader>
                           <CardTitle>Найденные резюме</CardTitle>
                           <CardDescription>{filteredItems.length} записей после фильтрации.</CardDescription>
                         </CardHeader>
                         <CardContent>
-                          <ScrollArea className="h-[720px] pr-3">
+                          <ScrollArea className="h-[720px] pr-3 2xl:h-[820px]">
                             <div className="space-y-3">
                               {filteredItems.map((item) => (
                                 <ResumeRow
@@ -1222,7 +1222,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                       </CardHeader>
                       <CardContent>
                         {selectedItem ? (
-                          <div className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
+                          <div className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr] 2xl:grid-cols-[1.35fr_0.65fr]">
                             <div className="space-y-6">
                               <div className="rounded-3xl bg-slate-950 p-6 text-white shadow-lg">
                                 <div className="flex flex-wrap items-center gap-2">
