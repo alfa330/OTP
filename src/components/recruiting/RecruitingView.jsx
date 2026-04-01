@@ -13,6 +13,7 @@ import {
   ChevronRight,
   Database,
   Users,
+  User,
   BarChart3,
   Sparkles,
   Clock3,
@@ -392,6 +393,24 @@ function toExcelHtml(rows) {
     "</body>",
     "</html>",
   ].join("");
+}
+
+function InfoTooltip({ text, className = "" }) {
+  if (!text) return null;
+  return (
+    <div className={`group relative inline-flex ${className}`}>
+      <button
+        type="button"
+        aria-label="Показать подсказку"
+        className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-slate-300 bg-white text-[11px] font-semibold leading-none text-slate-500 transition hover:border-blue-300 hover:text-blue-700"
+      >
+        i
+      </button>
+      <div className="pointer-events-none absolute left-1/2 top-full z-30 mt-2 w-72 -translate-x-1/2 rounded-xl border border-slate-200 bg-white/95 p-3 text-xs leading-5 text-slate-600 shadow-lg opacity-0 transition duration-150 group-hover:opacity-100 group-focus-within:opacity-100">
+        <p className="whitespace-pre-line">{text}</p>
+      </div>
+    </div>
+  );
 }
 
 function StatCard({ title, value, hint, icon: Icon }) {
@@ -1091,6 +1110,22 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
     downloadTextFile("enbek_filtered_resumes.csv", toCsv(filteredItems), "text/csv;charset=utf-8");
   };
 
+  const apiRefreshTooltipText = useMemo(() => {
+    const parts = [];
+    if (apiStatusMessage) {
+      parts.push(apiStatusMessage);
+    }
+    if (lastRunMeta) {
+      parts.push(
+        `Последний запуск: ${formatDateTime(lastRunMeta.finished_at || lastRunMeta.started_at)} · статус ${lastRunMeta.status || "unknown"} · записей ${Number(lastRunMeta.total_items || 0)}`
+      );
+    }
+    if (!parts.length) {
+      parts.push("Нажмите «Обновить из API», чтобы подтянуть данные из backend.");
+    }
+    return parts.join("\n");
+  }, [apiStatusMessage, lastRunMeta]);
+
   return (
     <div className="min-h-screen bg-gradient-to-b from-sky-50 via-white to-indigo-50 text-slate-900">
       <div className="mx-auto max-w-[1700px] px-4 py-6 sm:px-6 lg:px-8 2xl:max-w-[1900px]">
@@ -1103,27 +1138,30 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
           <div className="rounded-3xl border border-blue-100/80 bg-white/90 p-6 shadow-sm backdrop-blur">
             <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
               <div>
-                <div className="inline-flex items-center gap-2 rounded-full bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700">
-                  <Sparkles className="h-3.5 w-3.5" />
-                  Панель анализа резюме Enbek
+                <div className="inline-flex items-center gap-2">
+                  <div className="inline-flex items-center gap-2 rounded-full bg-blue-50 px-3 py-1 text-sm font-semibold text-blue-700">
+                    <User className="h-4 w-4" />
+                    Панель анализа резюме Enbek
+                  </div>
+                  <InfoTooltip
+                    text="Обновляй данные из API, применяй фильтры по ролям, зарплате и свежести, анализируй карточки кандидатов и выгружай готовую выборку в Excel или CSV."
+                  />
                 </div>
-                <h1 className="mt-3 text-3xl font-semibold tracking-tight text-slate-950">Удобный просмотр и анализ результатов парсинга</h1>
-                <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-500">
-                  Обновляй данные из API, применяй фильтры по ролям, зарплате и свежести, анализируй карточки кандидатов
-                  и выгружай готовую выборку в Excel или CSV.
-                </p>
               </div>
 
               <div className="flex flex-wrap gap-3">
-                <Button
-                  variant="outline"
-                  className="rounded-2xl border-blue-200 text-blue-700 hover:bg-blue-50"
-                  onClick={handleRefreshFromApi}
-                  disabled={isLoadingFromApi || isRunningParser}
-                >
-                  <RefreshCw className={`mr-2 h-4 w-4 ${isLoadingFromApi ? "animate-spin" : ""}`} />
-                  Обновить из API
-                </Button>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    className="rounded-2xl border-blue-200 text-blue-700 hover:bg-blue-50"
+                    onClick={handleRefreshFromApi}
+                    disabled={isLoadingFromApi || isRunningParser}
+                  >
+                    <RefreshCw className={`mr-2 h-4 w-4 ${isLoadingFromApi ? "animate-spin" : ""}`} />
+                    Обновить из API
+                  </Button>
+                  <InfoTooltip text={apiRefreshTooltipText} />
+                </div>
                 <Button
                   variant="outline"
                   className="rounded-2xl border-emerald-200 text-emerald-700 hover:bg-emerald-50"
@@ -1147,17 +1185,6 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                 </Button>
               </div>
             </div>
-            {(apiStatusMessage || lastRunMeta) ? (
-              <div className="mt-4 rounded-2xl border border-blue-100 bg-blue-50/60 px-4 py-3 text-sm text-slate-700">
-                {apiStatusMessage ? <p>{apiStatusMessage}</p> : null}
-                {lastRunMeta ? (
-                  <p className="mt-1 text-xs text-slate-500">
-                    Последний запуск: {formatDateTime(lastRunMeta.finished_at || lastRunMeta.started_at)} · статус {lastRunMeta.status || "unknown"} ·
-                    записей {Number(lastRunMeta.total_items || 0)}
-                  </p>
-                ) : null}
-              </div>
-            ) : null}
           </div>
         </motion.div>
 
@@ -1165,8 +1192,11 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
           <div className="flex flex-col gap-6">
             <Card className="order-2 rounded-3xl border-slate-200/70 shadow-sm">
               <CardHeader>
-                <CardTitle className="flex items-center gap-2 text-lg"><SlidersHorizontal className="h-5 w-5" /> Фильтры и экспорт</CardTitle>
-                <CardDescription>Фильтруйте выдачу и выгружайте результат в Excel или CSV.</CardDescription>
+                <CardTitle className="flex items-center gap-2 text-lg">
+                  <SlidersHorizontal className="h-5 w-5" />
+                  Фильтры и экспорт
+                  <InfoTooltip text="Фильтруйте выдачу и выгружайте результат в Excel или CSV." />
+                </CardTitle>
               </CardHeader>
               <CardContent className="space-y-5">
                 <div className="space-y-2">
