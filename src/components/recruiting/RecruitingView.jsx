@@ -546,10 +546,10 @@ function getResumePriority(item) {
 }
 
 function getPriorityBadgeClass(label, active = false) {
-  if (active) return "border-slate-300 bg-white text-slate-800";
-  if (label === "high") return "border-rose-200 bg-rose-50 text-rose-700";
-  if (label === "medium") return "border-emerald-200 bg-emerald-50 text-emerald-700";
-  return "border-sky-200 bg-sky-50 text-sky-700";
+  if (active) return "!border-slate-300 !bg-white !text-slate-900";
+  if (label === "high") return "!border-rose-200 !bg-rose-50 !text-rose-700";
+  if (label === "medium") return "!border-emerald-200 !bg-emerald-50 !text-emerald-700";
+  return "!border-sky-200 !bg-sky-50 !text-sky-700";
 }
 
 function formatMoney(num) {
@@ -659,7 +659,7 @@ function toExcelHtml(rows) {
 function InfoTooltip({ text, className = "" }) {
   if (!text) return null;
   return (
-    <div className={`group relative inline-flex z-0 hover:z-[9999] focus-within:z-[9999] ${className}`}>
+    <div className={`group relative inline-flex z-0 hover:z-[2147483646] focus-within:z-[2147483646] ${className}`}>
       <button
         type="button"
         aria-label="Показать подсказку"
@@ -667,7 +667,7 @@ function InfoTooltip({ text, className = "" }) {
       >
         i
       </button>
-      <div className="pointer-events-none absolute left-1/2 top-full z-[10000] mt-2 w-72 -translate-x-1/2 rounded-xl border border-slate-200 bg-white/95 p-3 text-xs leading-5 text-slate-600 shadow-lg opacity-0 transition duration-150 group-hover:opacity-100 group-focus-within:opacity-100">
+      <div className="pointer-events-none absolute left-1/2 top-full z-[2147483647] mt-2 w-72 -translate-x-1/2 rounded-xl border border-slate-200 bg-white/95 p-3 text-xs leading-5 text-slate-600 shadow-lg opacity-0 transition duration-150 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
         <p className="whitespace-pre-line">{text}</p>
       </div>
     </div>
@@ -735,7 +735,7 @@ function ResumeRow({ item, active, onClick }) {
             <Badge variant={active ? "secondary" : "outline"} className="rounded-full">
               {GROUP_LABELS[item.keyword_group] || item.keyword_group || "Группа"}
             </Badge>
-            <Badge className={`rounded-full border ${getPriorityBadgeClass(item.priorityLabel, active)}`}>
+            <Badge variant="outline" className={`rounded-full ${getPriorityBadgeClass(item.priorityLabel, active)}`}>
               {item.priorityLabelRu} · {item.relevanceScore}
             </Badge>
           </div>
@@ -1734,7 +1734,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                               <div>
                                 <div className="flex flex-wrap items-center gap-2">
                                   <Badge className="rounded-full bg-indigo-600 text-white hover:bg-indigo-600">{selectedItem.groupLabel}</Badge>
-                                  <Badge className={`rounded-full border ${getPriorityBadgeClass(selectedItem.priorityLabel)}`}>{selectedItem.priorityLabelRu} · {selectedItem.relevanceScore}</Badge>
+                                  <Badge variant="outline" className={`rounded-full ${getPriorityBadgeClass(selectedItem.priorityLabel)}`}>{selectedItem.priorityLabelRu} · {selectedItem.relevanceScore}</Badge>
                                   <Badge variant="outline" className="rounded-full">стр. {selectedItem.page_found || "—"}</Badge>
                                 </div>
                                 <h3 className="mt-3 text-2xl font-semibold text-slate-900">{selectedItem.title || "Без названия"}</h3>
