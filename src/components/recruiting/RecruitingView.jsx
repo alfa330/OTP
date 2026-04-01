@@ -444,8 +444,6 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
   const fileInputRef = useRef(null);
   const bootstrapKeyRef = useRef("");
   const loadRequestRef = useRef(null);
-  const parserStatusRequestRef = useRef(false);
-  const parserCompletedJobsRef = useRef(new Set());
   const [rawItems, setRawItems] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
   const [search, setSearch] = useState("");
@@ -469,7 +467,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
   });
   const [parserJobId, setParserJobId] = useState("");
   const [parserJobStatus, setParserJobStatus] = useState("idle");
-  const [parserLogs, setParserLogs] = useState([]);
+  const [parserProgressPercent, setParserProgressPercent] = useState(0);
 
   useEffect(() => {
     if (!rawItems.length) {
@@ -620,34 +618,50 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
     }
   }, [loadResumesFromApi, showToast]);
 
-  const fetchParserRunStatus = useCallback(async (jobId) => {
-    if (!apiBaseUrl || !jobId) return null;
+  const normalizePercent = useCallback((value) => {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return null;
+    return Math.max(0, Math.min(100, Math.round(numeric)));
+  }, []);
 
-    const query = new URLSearchParams({ job_id: jobId });
-    const response = await fetch(`${apiBaseUrl}/api/recruiting/run/status?${query.toString()}`, {
-      method: "GET",
-      headers: buildApiHeaders(),
-    });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const errorText =
-        payload?.error ||
-        payload?.message ||
-        `Не удалось получить статус парсера (${response.status}).`;
-      throw new Error(errorText);
-    }
+  const inferProgressFromMessages = useCallback((messages) => {
+    if (!Array.isArray(messages) || !messages.length) return null;
 
-    const job = payload?.job || null;
-    if (job) {
-      setParserJobStatus(job.status || "idle");
-      setParserLogs(Array.isArray(job.messages) ? job.messages : []);
-      if (job?.result?.run) {
-        setLastRunMeta(job.result.run);
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const text = String(messages[i]?.text || "");
+
+      const queryMatch = text.match(/(?:Query|\u0417\u0430\u043F\u0440\u043E\u0441)\s+(\d+)\s*\/\s*(\d+)/i);
+      if (queryMatch) {
+        const current = Number(queryMatch[1]);
+        const total = Number(queryMatch[2]);
+        if (Number.isFinite(current) && Number.isFinite(total) && total > 0) {
+          return normalizePercent((current / total) * 100);
+        }
+      }
+
+      const progressMatch = text.match(/(?:Progress|\u041F\u0440\u043E\u0433\u0440\u0435\u0441\u0441):\s*(\d+)\s*\/\s*(\d+)/i);
+      if (progressMatch) {
+        const current = Number(progressMatch[1]);
+        const total = Number(progressMatch[2]);
+        if (Number.isFinite(current) && Number.isFinite(total) && total > 0) {
+          return normalizePercent((current / total) * 100);
+        }
       }
     }
 
-    return { payload, job };
-  }, [apiBaseUrl, buildApiHeaders]);
+    return null;
+  }, [normalizePercent]);
+
+  const getJobProgressPercent = useCallback((job) => {
+    const status = String(job?.status || "idle");
+    if (status === "success") return 100;
+    const direct = normalizePercent(job?.progress_percent);
+    if (direct !== null) return direct;
+    const inferred = inferProgressFromMessages(job?.messages);
+    if (inferred !== null) return inferred;
+    if (status === "running" || status === "starting") return 1;
+    return 0;
+  }, [inferProgressFromMessages, normalizePercent]);
 
   const handleRunParserManually = useCallback(async () => {
     if (!apiBaseUrl) {
@@ -677,7 +691,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
     setIsRunningParser(true);
     setImportError("");
     setApiStatusMessage("");
-    setParserLogs([]);
+    setParserProgressPercent(0);
     setParserJobStatus("starting");
 
     try {
@@ -697,8 +711,8 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
         if (activeJob?.job_id) {
           setParserJobId(activeJob.job_id);
           setParserJobStatus(activeJob.status || "running");
-          setParserLogs(Array.isArray(activeJob.messages) ? activeJob.messages : []);
-          setApiStatusMessage(payload?.message || "Парсер уже выполняется. Подключен live-лог текущего запуска.");
+          setParserProgressPercent(getJobProgressPercent(activeJob));
+          setApiStatusMessage(payload?.message || "Парсер уже выполняется. Процент обновится после перезагрузки страницы.");
           setIsRunningParser(true);
           showToast?.(payload?.message || "Парсер уже выполняется.", "error");
           return;
@@ -721,8 +735,8 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
 
       setParserJobId(job.job_id);
       setParserJobStatus(job.status || "running");
-      setParserLogs(Array.isArray(job.messages) ? job.messages : []);
-      setApiStatusMessage("Парсер запущен. Логи обновляются в реальном времени.");
+      setParserProgressPercent(getJobProgressPercent(job));
+      setApiStatusMessage("Парсер запущен. Процент обновится после перезагрузки страницы.");
       showToast?.("Парсер запущен в фоне.", "success");
     } catch (error) {
       const errorText = error?.message || "Ошибка ручного запуска парсера.";
@@ -730,87 +744,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
       showToast?.(errorText, "error");
       setIsRunningParser(false);
     }
-  }, [apiBaseUrl, buildApiHeaders, buildParserKeywordGroupsPayload, parserPagesPerQuery, showToast]);
-
-  useEffect(() => {
-    if (!parserJobId) {
-      return undefined;
-    }
-
-    let isCancelled = false;
-    const poll = async () => {
-      if (isCancelled || parserStatusRequestRef.current) {
-        return;
-      }
-      parserStatusRequestRef.current = true;
-      try {
-        const statusPayload = await fetchParserRunStatus(parserJobId);
-        const job = statusPayload?.job;
-        if (!job || isCancelled) {
-          return;
-        }
-
-        const status = String(job.status || "idle");
-        if (status === "running" || status === "starting") {
-          setIsRunningParser(true);
-          return;
-        }
-
-        setIsRunningParser(false);
-
-        if (parserCompletedJobsRef.current.has(parserJobId)) {
-          return;
-        }
-        parserCompletedJobsRef.current.add(parserJobId);
-
-        if (status === "success") {
-          const runUuid = job?.result?.run?.run_uuid || statusPayload?.payload?.latest_run?.run_uuid || null;
-          const resumesPayload = await loadResumesFromApi({ runUuid, silent: true });
-          const totalCount = Number(resumesPayload?.total ?? resumesPayload?.items?.length ?? 0);
-          setApiStatusMessage(
-            totalCount > 0
-              ? `Парсер завершен. Обновлено ${totalCount} резюме.`
-              : "Парсер завершен, но резюме не найдены."
-          );
-          showToast?.("Парсер завершён успешно.", "success");
-          setParserJobId("");
-          return;
-        }
-
-        if (status === "failed") {
-          const errorText = job?.error || "Парсер завершился с ошибкой.";
-          setImportError(errorText);
-          setApiStatusMessage("Парсер завершился с ошибкой.");
-          showToast?.(errorText, "error");
-          setParserJobId("");
-          return;
-        }
-
-        if (status === "skipped") {
-          const skippedText = job?.error || "Парсер не стартовал: уже есть активный запуск.";
-          setApiStatusMessage(skippedText);
-          showToast?.(skippedText, "error");
-          setParserJobId("");
-          return;
-        }
-
-        setParserJobId("");
-      } catch (error) {
-        if (!isCancelled) {
-          setImportError(error?.message || "Не удалось получить статус парсера.");
-        }
-      } finally {
-        parserStatusRequestRef.current = false;
-      }
-    };
-
-    poll();
-    const timer = setInterval(poll, 1500);
-    return () => {
-      isCancelled = true;
-      clearInterval(timer);
-    };
-  }, [fetchParserRunStatus, loadResumesFromApi, parserJobId, showToast]);
+  }, [apiBaseUrl, buildApiHeaders, buildParserKeywordGroupsPayload, getJobProgressPercent, parserPagesPerQuery, showToast]);
 
   useEffect(() => {
     let isCancelled = false;
@@ -874,14 +808,17 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
         }
 
         setParserJobStatus(job.status || "idle");
-        setParserLogs(Array.isArray(job.messages) ? job.messages : []);
+        setParserProgressPercent(getJobProgressPercent(job));
         if (job?.result?.run) {
           setLastRunMeta(job.result.run);
         }
         if (job.status === "running" || job.status === "starting") {
           setParserJobId(job.job_id);
           setIsRunningParser(true);
-          setApiStatusMessage("Подключен к активному запуску парсера.");
+          setApiStatusMessage("Подключен к активному запуску парсера. Процент показан на момент последней перезагрузки.");
+        } else {
+          setParserJobId("");
+          setIsRunningParser(false);
         }
       } catch (_error) {
         // Silent by design: section should still work without runtime job snapshot.
@@ -892,7 +829,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
     return () => {
       isCancelled = true;
     };
-  }, [apiBaseUrl, buildApiHeaders, user?.id]);
+  }, [apiBaseUrl, buildApiHeaders, getJobProgressPercent, user?.id]);
 
   useEffect(() => {
     if (!isParserModalOpen) {
@@ -1069,6 +1006,11 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
     if (status === "skipped") return "border-amber-200 bg-amber-50 text-amber-700";
     return "border-slate-200 bg-slate-50 text-slate-600";
   }, [parserJobStatus]);
+
+  const parserProgressValue = useMemo(() => {
+    const normalized = normalizePercent(parserProgressPercent);
+    return normalized === null ? 0 : normalized;
+  }, [normalizePercent, parserProgressPercent]);
 
   const handleUseSample = () => {
     setRawItems(SAMPLE_DATA.map((item, index) => ({ ...item, __id: `sample-${index}` })));
@@ -1663,35 +1605,22 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                   <Button type="button" variant="outline" className="rounded-2xl" onClick={restoreDefaultParserSettings}>
                     Вернуть настройки по умолчанию
                   </Button>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    className="rounded-2xl"
-                    onClick={() => setParserLogs([])}
-                    disabled={!parserLogs.length}
-                  >
-                    Очистить лог
-                  </Button>
                 </div>
 
                 <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
-                  <div className="mb-2 text-xs font-medium text-slate-600">Лог парсера</div>
-                  <ScrollArea className="h-[220px] pr-2">
-                    <div className="space-y-2">
-                      {parserLogs.length ? (
-                        parserLogs.map((log, index) => (
-                          <div key={`${log.ts || "log"}-${index}`} className="rounded-xl bg-white px-3 py-2 text-xs text-slate-700">
-                            <span className="text-slate-500">[{formatDateTime(log.ts)}]</span>{" "}
-                            {log.text || "—"}
-                          </div>
-                        ))
-                      ) : (
-                        <div className="rounded-xl bg-white px-3 py-2 text-xs text-slate-500">
-                          Лог пуст. Запусти парсер, чтобы увидеть сообщения.
-                        </div>
-                      )}
-                    </div>
-                  </ScrollArea>
+                  <div className="mb-2 flex items-center justify-between text-sm">
+                    <span className="font-medium text-slate-700">Прогресс выполнения</span>
+                    <span className="font-semibold text-slate-900">{parserProgressValue}%</span>
+                  </div>
+                  <div className="h-3 overflow-hidden rounded-full bg-slate-200">
+                    <div
+                      className="h-full rounded-full bg-blue-500 transition-all duration-300"
+                      style={{ width: `${parserProgressValue}%` }}
+                    />
+                  </div>
+                  <p className="mt-2 text-xs text-slate-500">
+                    Процент обновляется после перезагрузки страницы.
+                  </p>
                 </div>
               </div>
             </div>
@@ -1701,3 +1630,4 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
     </div>
   );
 }
+

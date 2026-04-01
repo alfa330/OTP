@@ -4,7 +4,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
 from urllib.parse import urljoin
 
 import requests
@@ -64,7 +64,8 @@ USE_LXML = True
 _thread_local = threading.local()
 _ws_re = re.compile(r"\s+")
 
-ProgressCallback = Optional[Callable[[str], None]]
+ProgressPayload = Union[str, Dict[str, Any]]
+ProgressCallback = Optional[Callable[[ProgressPayload], None]]
 
 
 @dataclass
@@ -302,10 +303,35 @@ def deduplicate(items: List[ResumeCard]) -> List[ResumeCard]:
     return deduped
 
 
-def _emit_progress(progress_cb: ProgressCallback, message: str) -> None:
+def _normalize_progress_percent(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        normalized = float(value)
+    except Exception:
+        return None
+    if normalized < 0:
+        return 0.0
+    if normalized > 100:
+        return 100.0
+    return normalized
+
+
+def _emit_progress(
+    progress_cb: ProgressCallback,
+    message: str,
+    progress_percent: Optional[float] = None,
+) -> None:
     if not progress_cb:
         return
+    payload = {"message": str(message)}
+    normalized_progress = _normalize_progress_percent(progress_percent)
+    if normalized_progress is not None:
+        payload["progress_percent"] = normalized_progress
     try:
+        progress_cb(payload)
+    except TypeError:
+        # Backward compatibility for callbacks that expect plain string.
         progress_cb(str(message))
     except Exception:
         pass
@@ -371,6 +397,7 @@ def crawl_all(
     _emit_progress(
         progress_cb,
         f"Запуск парсинга: групп={len(effective_groups)}, запросов={total_queries}, страниц на запрос={pages_per_query}",
+        progress_percent=0,
     )
 
     collected: List[ResumeCard] = []
@@ -394,10 +421,18 @@ def crawl_all(
                     progress_cb=progress_cb,
                 )
                 collected.extend(items)
+                query_progress = round((query_index / max(total_queries, 1)) * 100.0, 2)
+                _emit_progress(
+                    progress_cb,
+                    f"Прогресс: {query_index}/{total_queries} запросов",
+                    progress_percent=query_progress,
+                )
+
     deduped = deduplicate(collected)
     _emit_progress(
         progress_cb,
         f"Парсинг завершён: собрано {len(collected)} карточек, после дедупликации {len(deduped)}",
+        progress_percent=100,
     )
     return deduped
 
@@ -415,3 +450,4 @@ def crawl_resumes_as_dicts(
             progress_cb=progress_cb,
         )
     ]
+
