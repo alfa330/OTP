@@ -284,7 +284,7 @@ function getResumePriority(item) {
 }
 
 function getPriorityBadgeClass(label, active = false) {
-  if (active) return "border-white/30 bg-white/20 text-white";
+  if (active) return "border-blue-200 bg-white text-blue-700";
   if (label === "high") return "border-rose-200 bg-rose-50 text-rose-700";
   if (label === "medium") return "border-emerald-200 bg-emerald-50 text-emerald-700";
   return "border-sky-200 bg-sky-50 text-sky-700";
@@ -444,14 +444,14 @@ function ResumeRow({ item, active, onClick }) {
       onClick={onClick}
       className={`w-full rounded-2xl border p-4 text-left transition ${
         active
-          ? "border-blue-600 bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-lg"
+          ? "border-blue-300 bg-gradient-to-r from-blue-100 to-indigo-100 text-slate-900 shadow-md"
           : "border-slate-200 bg-white hover:border-blue-300 hover:shadow-sm"
       }`}
     >
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <h4 className={`truncate text-base font-semibold ${active ? "text-white" : "text-slate-900"}`}>{item.title || "Без названия"}</h4>
+            <h4 className="truncate text-base font-semibold text-slate-900">{item.title || "Без названия"}</h4>
             <Badge variant={active ? "secondary" : "outline"} className="rounded-full">
               {GROUP_LABELS[item.keyword_group] || item.keyword_group || "Группа"}
             </Badge>
@@ -460,17 +460,17 @@ function ResumeRow({ item, active, onClick }) {
             </Badge>
           </div>
 
-          <p className={`mt-1 text-sm ${active ? "text-slate-200" : "text-slate-500"}`}>{item.category || "Категория не указана"}</p>
-          <p className={`mt-2 line-clamp-2 text-xs ${active ? "text-slate-300" : "text-slate-500"}`}>{item.priorityReason}</p>
+          <p className={`mt-1 text-sm ${active ? "text-slate-600" : "text-slate-500"}`}>{item.category || "Категория не указана"}</p>
+          <p className={`mt-2 line-clamp-2 text-xs ${active ? "text-slate-600" : "text-slate-500"}`}>{item.priorityReason}</p>
 
-          <div className={`mt-3 flex flex-wrap gap-3 text-xs ${active ? "text-slate-200" : "text-slate-600"}`}>
+          <div className="mt-3 flex flex-wrap gap-3 text-xs text-slate-600">
             <span className="inline-flex items-center gap-1.5"><MapPin className="h-3.5 w-3.5" /> {item.location || "Локация не указана"}</span>
             <span className="inline-flex items-center gap-1.5"><Briefcase className="h-3.5 w-3.5" /> {item.experience || "Опыт не указан"}</span>
             <span className="inline-flex items-center gap-1.5"><Wallet className="h-3.5 w-3.5" /> {salaryNum ? formatMoney(salaryNum) : item.salary || "Зарплата не указана"}</span>
           </div>
         </div>
 
-        <div className={`flex items-center gap-3 text-sm ${active ? "text-slate-200" : "text-slate-500"}`}>
+        <div className="flex items-center gap-3 text-sm text-slate-500">
           <span>{item.published_at || "Без даты"}</span>
           <ChevronRight className="h-4 w-4" />
         </div>
