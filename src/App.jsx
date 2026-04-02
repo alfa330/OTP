@@ -31373,6 +31373,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             );
                                             });
 
+                                            const requesterSupervisorId = Number(user?.id);
+                                            const requesterSupervisorName = String(user?.name || '').trim().toLowerCase();
+                                            const myOperators = matched.filter((op) => {
+                                                const opSupervisorId = Number(op?.supervisor_id);
+                                                if (Number.isFinite(requesterSupervisorId) && Number.isFinite(opSupervisorId)) {
+                                                    return opSupervisorId === requesterSupervisorId;
+                                                }
+                                                const opSupervisorName = String(op?.supervisor_name || '').trim().toLowerCase();
+                                                return !!requesterSupervisorName && opSupervisorName === requesterSupervisorName;
+                                            });
+
                                             // Группируем по направлению (оставляем группировку, но убираем колонку направления)
                                             const grouped = matched.reduce((acc, op) => {
                                             const dirName = directions.find(d => d.id === op.direction_id)?.name || "Без направления";
@@ -31414,6 +31425,72 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     onChange={(e) => setSearchQuery(e.target.value)}
                                                     className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                                 />
+                                                </div>
+
+                                                <div className="mx-4 mb-4 rounded-xl border border-blue-200 bg-blue-50/70 p-4">
+                                                    <div className="flex items-center justify-between gap-3 mb-3">
+                                                        <h3 className="text-sm font-semibold text-blue-900 uppercase tracking-wide">Мои операторы</h3>
+                                                        <span className="inline-flex items-center justify-center px-2.5 py-1 rounded-full bg-white border border-blue-200 text-xs font-semibold text-blue-700">
+                                                            {myOperators.length}
+                                                        </span>
+                                                    </div>
+
+                                                    {myOperators.length === 0 ? (
+                                                        <p className="text-sm text-blue-800/80">Операторы этого супервайзера не найдены.</p>
+                                                    ) : (
+                                                        <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                                                            {myOperators.map((op) => {
+                                                                const directionLabel = (
+                                                                    op?.direction ||
+                                                                    directions.find((d) => Number(d?.id) === Number(op?.direction_id))?.name ||
+                                                                    'Без направления'
+                                                                );
+                                                                return (
+                                                                    <div
+                                                                        key={`my-op-${op.id}`}
+                                                                        className="rounded-lg border border-blue-200 bg-white px-3 py-2 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2"
+                                                                    >
+                                                                        <div className="min-w-0">
+                                                                            <div className="font-medium text-slate-900 truncate">{op?.name || '-'}</div>
+                                                                            <div className="text-xs text-slate-500 truncate">{directionLabel}</div>
+                                                                        </div>
+                                                                        <div className="flex items-center gap-2 flex-wrap">
+                                                                            <span className="text-xs">{renderEmployeeStatusBadge(op?.status, op)}</span>
+                                                                            <button
+                                                                                onClick={() => {
+                                                                                    setUserToEdit({ ...op, supervisor_id: op?.supervisor_id ?? user?.id });
+                                                                                    setShowUserEditModal(true);
+                                                                                }}
+                                                                                className="bg-blue-600 text-white px-2.5 py-1 rounded-lg hover:bg-blue-700 text-xs transition-all duration-200 flex items-center gap-1"
+                                                                            >
+                                                                                <FaIcon className="fas fa-edit"></FaIcon> Править
+                                                                            </button>
+                                                                            <button
+                                                                                onClick={() => {
+                                                                                    setSelectedUserForHistory(op);
+                                                                                    fetchUserHistory(op.id);
+                                                                                }}
+                                                                                disabled={loadingHistoryId === op.id}
+                                                                                className={`bg-green-600 text-white px-2.5 py-1 rounded-lg hover:bg-green-700 text-xs transition-all duration-200 flex items-center gap-1 ${
+                                                                                    loadingHistoryId === op.id ? 'opacity-50 cursor-not-allowed' : ''
+                                                                                }`}
+                                                                            >
+                                                                                {loadingHistoryId === op.id ? (
+                                                                                    <>
+                                                                                        <FaIcon className="fas fa-spinner fa-spin"></FaIcon> Загрузка...
+                                                                                    </>
+                                                                                ) : (
+                                                                                    <>
+                                                                                        <FaIcon className="fas fa-history"></FaIcon> История
+                                                                                    </>
+                                                                                )}
+                                                                            </button>
+                                                                        </div>
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    )}
                                                 </div>
 
                                                 <table className="min-w-full border rounded-lg w-full">

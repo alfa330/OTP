@@ -1544,6 +1544,7 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_calls_month ON calls(month);
                 CREATE INDEX IF NOT EXISTS idx_calls_operator_id ON calls(operator_id);
                 CREATE INDEX IF NOT EXISTS idx_calls_operator_month ON calls(operator_id, month);
+                CREATE INDEX IF NOT EXISTS idx_calls_op_month_phone_created ON calls(operator_id, month, phone_number, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_calls_phone_number ON calls(phone_number);
                 CREATE INDEX IF NOT EXISTS idx_calls_created_at ON calls(created_at);
                 CREATE INDEX IF NOT EXISTS idx_calls_evaluator_id ON calls(evaluator_id);
@@ -4611,6 +4612,83 @@ class Database:
                 }
                 for row in rows
             ]
+
+    def get_operator_score_aggregates_for_month(self, month, operator_ids: Optional[List[int]] = None):
+        """
+        Быстрые агрегаты по операторам за месяц:
+        - call_count: количество оцененных звонков (score IS NOT NULL)
+        - avg_score: средний балл
+
+        Логика "последней версии" соответствует get_call_evaluations:
+        берем MAX(created_at) для пары (operator_id, phone_number, month).
+        """
+        if not month:
+            return {}
+
+        normalized_ids = None
+        if operator_ids is not None:
+            normalized_ids = []
+            seen_ids = set()
+            for raw_id in operator_ids:
+                try:
+                    op_id = int(raw_id)
+                except (TypeError, ValueError):
+                    continue
+                if op_id in seen_ids:
+                    continue
+                seen_ids.add(op_id)
+                normalized_ids.append(op_id)
+            if not normalized_ids:
+                return {}
+
+        params = [month]
+        filter_clause = "month = %s"
+        if normalized_ids is not None:
+            filter_clause += " AND operator_id = ANY(%s)"
+            params.append(normalized_ids)
+
+        query = f"""
+            WITH latest_versions AS (
+                SELECT
+                    operator_id,
+                    phone_number,
+                    month,
+                    MAX(created_at) AS latest_date
+                FROM calls
+                WHERE {filter_clause}
+                GROUP BY operator_id, phone_number, month
+            ),
+            latest_calls AS (
+                SELECT
+                    c.operator_id,
+                    c.score
+                FROM calls c
+                JOIN latest_versions lv
+                  ON c.operator_id = lv.operator_id
+                 AND c.phone_number = lv.phone_number
+                 AND c.month = lv.month
+                 AND c.created_at = lv.latest_date
+            )
+            SELECT
+                operator_id,
+                COUNT(*) FILTER (WHERE score IS NOT NULL) AS call_count,
+                AVG(score)::float AS avg_score
+            FROM latest_calls
+            GROUP BY operator_id
+        """
+
+        with self._get_cursor() as cursor:
+            cursor.execute(query, tuple(params))
+            rows = cursor.fetchall()
+
+        result = {}
+        for operator_id, call_count, avg_score in rows:
+            op_id = int(operator_id)
+            result[op_id] = {
+                "call_count": int(call_count or 0),
+                "avg_score": round(float(avg_score), 2) if avg_score is not None else None
+            }
+        return result
 
         
     def get_operators_summary_for_month(self, month, supervisor_id=None):
