@@ -6208,43 +6208,22 @@ def get_sv_data():
         except Exception:
             operators = []
 
-        def _extract_score_and_imported(ev):
-            """
-            Возвращает (score_or_None, is_imported_bool).
-            Поддерживает dict, sequence (tuple/list) и objects with attributes.
-            For tuple/list we assume score index 4, is_imported last index (if present).
-            """
-            # dict-like
+        operator_ids = []
+        for op in operators:
+            raw_operator_id = None
+            if isinstance(op, dict):
+                raw_operator_id = op.get("id") or op.get("operator_id") or op.get("user_id")
+            elif isinstance(op, (list, tuple)) and len(op) > 0:
+                raw_operator_id = op[0]
             try:
-                if isinstance(ev, dict):
-                    score = ev.get("score")
-                    is_imported = bool(ev.get("is_imported")) if "is_imported" in ev else False
-                    return (None if score is None else float(score), is_imported)
-                # object with attributes
-                if hasattr(ev, "__dict__") and not isinstance(ev, (list, tuple)):
-                    score = getattr(ev, "score", None)
-                    is_imported = bool(getattr(ev, "is_imported", False))
-                    return (None if score is None else float(score), is_imported)
-                # sequence-like
-                if isinstance(ev, (list, tuple)):
-                    # common positions from get_call_evaluations: score at index 4; is_imported at index 27 (if exists)
-                    score = None
-                    is_imported = False
-                    if len(ev) > 4:
-                        score = ev[4]
-                    # try last position for is_imported
-                    if len(ev) > 27:
-                        is_imported = bool(ev[27])
-                    else:
-                        # fallback: if last element is bool, consider it
-                        last = ev[-1]
-                        if isinstance(last, bool):
-                            is_imported = bool(last)
-                    return (None if score is None else float(score), is_imported)
-            except Exception:
-                pass
-            # cannot parse
-            return (None, False)
+                operator_ids.append(int(raw_operator_id))
+            except (TypeError, ValueError):
+                continue
+
+        try:
+            operator_metrics = db.get_operator_score_aggregates_for_month(month=month, operator_ids=operator_ids)
+        except Exception:
+            operator_metrics = {}
 
         for op in operators:
             # flexible unpacking: support dict or sequence rows
@@ -6293,23 +6272,13 @@ def get_sv_data():
             if not operator_id:
                 continue
 
-            # get evaluations for requested month (be tolerant to db method return shape)
             try:
-                evaluations = db.get_call_evaluations(operator_id, month=month) or []
-            except Exception:
-                evaluations = []
-
-            # compute count and average only for реально оценённых записей
-            scores = []
-            eval_count = 0
-            for ev in evaluations:
-                score_val, is_imported = _extract_score_and_imported(ev)
-                # count only non-imported and with a numeric score
-                if not is_imported and score_val is not None:
-                    scores.append(score_val)
-                    eval_count += 1
-
-            avg_score = round(sum(scores) / len(scores), 2) if len(scores) > 0 else None
+                operator_id_int = int(operator_id)
+            except (TypeError, ValueError):
+                operator_id_int = None
+            metrics = operator_metrics.get(operator_id_int, {}) if operator_id_int is not None else {}
+            eval_count = int(metrics.get("call_count") or 0)
+            avg_score = metrics.get("avg_score")
 
             # ensure rate is numeric and reasonable
             try:
