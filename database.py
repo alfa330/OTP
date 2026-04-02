@@ -3740,6 +3740,7 @@ class Database:
                     u.id,
                     u.name,
                     u.direction_id,
+                    u.supervisor_id,
                     u.hire_date,
                     u.hours_table_url,
                     u.scores_table_url,
@@ -3796,23 +3797,24 @@ class Database:
                     'id': row[0],
                     'name': row[1],
                     'direction_id': row[2],
-                    'hire_date': row[3].strftime('%d-%m-%Y') if row[3] else None,
-                    'hours_table_url': row[4],
-                    'scores_table_url': row[5],
-                    'supervisor_name': row[6],
-                    'status': row[7],
-                    'rate': row[8],
-                    'gender': row[9],
-                    'birth_date': row[10].strftime('%d-%m-%Y') if row[10] else None,
-                    'avatar_bucket': row[11],
-                    'avatar_blob_path': row[12],
-                    'avatar_updated_at': row[13].isoformat() if row[13] else None,
-                    'status_period_status_code': row[14],
-                    'status_period_start_date': row[15].strftime('%Y-%m-%d') if row[15] else None,
-                    'status_period_end_date': row[16].strftime('%Y-%m-%d') if row[16] else None,
-                    'status_period_dismissal_reason': row[17] or '',
-                    'status_period_is_blacklist': bool(row[18]) if row[18] is not None else False,
-                    'status_period_comment': row[19] or ''
+                    'supervisor_id': row[3],
+                    'hire_date': row[4].strftime('%d-%m-%Y') if row[4] else None,
+                    'hours_table_url': row[5],
+                    'scores_table_url': row[6],
+                    'supervisor_name': row[7],
+                    'status': row[8],
+                    'rate': row[9],
+                    'gender': row[10],
+                    'birth_date': row[11].strftime('%d-%m-%Y') if row[11] else None,
+                    'avatar_bucket': row[12],
+                    'avatar_blob_path': row[13],
+                    'avatar_updated_at': row[14].isoformat() if row[14] else None,
+                    'status_period_status_code': row[15],
+                    'status_period_start_date': row[16].strftime('%Y-%m-%d') if row[16] else None,
+                    'status_period_end_date': row[17].strftime('%Y-%m-%d') if row[17] else None,
+                    'status_period_dismissal_reason': row[18] or '',
+                    'status_period_is_blacklist': bool(row[19]) if row[19] is not None else False,
+                    'status_period_comment': row[20] or ''
                 } for row in cursor.fetchall()
             ]
 
@@ -3823,6 +3825,7 @@ class Database:
                     u.id,
                     u.name,
                     u.direction_id,
+                    u.supervisor_id,
                     u.hire_date,
                     u.hours_table_url,
                     u.scores_table_url,
@@ -3879,23 +3882,24 @@ class Database:
                     'id': row[0],
                     'name': row[1],
                     'direction_id': row[2],
-                    'hire_date': row[3].strftime('%d-%m-%Y') if row[3] else None,
-                    'hours_table_url': row[4],
-                    'scores_table_url': row[5],
-                    'supervisor_name': row[6],
-                    'status': row[7],
-                    'rate': row[8],
-                    'gender': row[9],
-                    'birth_date': row[10].strftime('%d-%m-%Y') if row[10] else None,
-                    'avatar_bucket': row[11],
-                    'avatar_blob_path': row[12],
-                    'avatar_updated_at': row[13].isoformat() if row[13] else None,
-                    'status_period_status_code': row[14],
-                    'status_period_start_date': row[15].strftime('%Y-%m-%d') if row[15] else None,
-                    'status_period_end_date': row[16].strftime('%Y-%m-%d') if row[16] else None,
-                    'status_period_dismissal_reason': row[17] or '',
-                    'status_period_is_blacklist': bool(row[18]) if row[18] is not None else False,
-                    'status_period_comment': row[19] or ''
+                    'supervisor_id': row[3],
+                    'hire_date': row[4].strftime('%d-%m-%Y') if row[4] else None,
+                    'hours_table_url': row[5],
+                    'scores_table_url': row[6],
+                    'supervisor_name': row[7],
+                    'status': row[8],
+                    'rate': row[9],
+                    'gender': row[10],
+                    'birth_date': row[11].strftime('%d-%m-%Y') if row[11] else None,
+                    'avatar_bucket': row[12],
+                    'avatar_blob_path': row[13],
+                    'avatar_updated_at': row[14].isoformat() if row[14] else None,
+                    'status_period_status_code': row[15],
+                    'status_period_start_date': row[16].strftime('%Y-%m-%d') if row[16] else None,
+                    'status_period_end_date': row[17].strftime('%Y-%m-%d') if row[17] else None,
+                    'status_period_dismissal_reason': row[18] or '',
+                    'status_period_is_blacklist': bool(row[19]) if row[19] is not None else False,
+                    'status_period_comment': row[20] or ''
                 } for row in cursor.fetchall()
             ]
 
@@ -4693,10 +4697,14 @@ class Database:
         
     def get_operators_summary_for_month(self, month, supervisor_id=None):
         """
-        Возвращает список операторов с количеством последних версий звонков за месяц.
+        Возвращает список сотрудников с количеством последних версий звонков за месяц.
+        Включает:
+        - операторов;
+        - супервайзеров, если у них есть оценки за месяц.
+
         Последние версии определяются как MAX(created_at) для каждой комбинации:
         (phone_number, operator_id, month, appeal_date)
-        Если supervisor_id задан — фильтрует операторов по этому SV.
+        Если supervisor_id задан — фильтрует операторов по этому SV и включает самого SV.
         """
         query = """
         WITH latest_versions AS (
@@ -4725,7 +4733,10 @@ class Database:
         ),
         counts AS (
             -- считаем количество последних версий звонков по оператору
-            SELECT operator_id, COUNT(*) AS call_count
+            SELECT
+                operator_id,
+                COUNT(*) FILTER (WHERE score IS NOT NULL) AS call_count,
+                AVG(score)::float AS avg_score
             FROM latest_calls
             GROUP BY operator_id
         )
@@ -4738,38 +4749,64 @@ class Database:
             u.supervisor_id,
             su.name AS supervisor_name,
             u.hire_date,
-            COALESCE(c.call_count, 0) AS call_count
+            COALESCE(c.call_count, 0) AS call_count,
+            c.avg_score,
+            LOWER(COALESCE(u.role, '')) AS role_norm
         FROM users u
         LEFT JOIN directions d ON u.direction_id = d.id
         LEFT JOIN users su ON u.supervisor_id = su.id
         LEFT JOIN counts c ON c.operator_id = u.id
-        WHERE u.role = 'operator'
+        WHERE (
+            LOWER(COALESCE(u.role, '')) = 'operator'
+            OR (
+                LOWER(COALESCE(u.role, '')) IN ('sv', 'supervisor')
+                AND COALESCE(c.call_count, 0) > 0
+            )
+        )
         """
         params = [month, month]
 
         if supervisor_id is not None:
-            query += " AND u.supervisor_id = %s"
-            params.append(supervisor_id)
+            query += """
+                AND (
+                    u.supervisor_id = %s
+                    OR (
+                        LOWER(COALESCE(u.role, '')) IN ('sv', 'supervisor')
+                        AND u.id = %s
+                    )
+                )
+            """
+            params.extend([supervisor_id, supervisor_id])
 
         query += " ORDER BY u.name"
 
         with self._get_cursor() as cursor:
             cursor.execute(query, params)
             rows = cursor.fetchall()
-            return [
-                {
+            result = []
+            for row in rows:
+                role_norm = str(row[10] or '').strip().lower()
+                is_supervisor_row = role_norm in ('sv', 'supervisor')
+                effective_supervisor_id = row[5]
+                effective_supervisor_name = row[6]
+                if is_supervisor_row:
+                    effective_supervisor_id = row[0]
+                    effective_supervisor_name = row[1]
+
+                result.append({
                     "id": row[0],
                     "name": row[1],
                     "status": row[2],
                     "direction_id": row[3],
                     "direction_name": row[4],
-                    "supervisor_id": row[5],
-                    "supervisor_name": row[6],
+                    "supervisor_id": effective_supervisor_id,
+                    "supervisor_name": effective_supervisor_name,
                     "hire_date": row[7].strftime('%d-%m-%Y') if row[7] else None,
-                    "call_count": int(row[8])
-                }
-                for row in rows
-            ]
+                    "call_count": int(row[8] or 0),
+                    "avg_score": round(float(row[9]), 2) if row[9] is not None else None,
+                    "role": role_norm
+                })
+            return result
 
     def update_user(self, user_id, field, value, changed_by=None):
         allowed_fields = [

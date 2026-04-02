@@ -3880,16 +3880,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 filteredSvOperators.forEach(op => {
                 const displayName = op.name || op.login || op.operator_name || String(op.id || '—');
                 if (insufficientNames.has(String(displayName).trim().toLowerCase())) return;
-                const sv = op.supervisor_name || op.sv_name || op.supervisor || 'Без SV';
-                if (!map[sv]) map[sv] = {};
+                const svId = (op.supervisor_id ?? op.sv_id ?? op.id ?? 'without-sv');
+                const svName = op.supervisor_name || op.sv_name || op.supervisor || op.name || 'Без SV';
+                const svKey = `${svId}::${svName}`;
+                if (!map[svKey]) map[svKey] = { id: svId, name: svName, dirs: {} };
                 const dir = op.direction_name || op.direction || 'Без направления';
-                if (!map[sv][dir]) map[sv][dir] = [];
-                map[sv][dir].push(op);
+                if (!map[svKey].dirs[dir]) map[svKey].dirs[dir] = [];
+                map[svKey].dirs[dir].push(op);
                 });
 
-                Object.keys(map).forEach(sv => {
-                Object.keys(map[sv]).forEach(dir => {
-                    map[sv][dir].sort((a,b) => {
+                Object.keys(map).forEach(svKey => {
+                Object.keys(map[svKey].dirs).forEach(dir => {
+                    map[svKey].dirs[dir].sort((a,b) => {
                     const aHire = parseHireDateToDate(a?.hire_date || a?.hireDate);
                     const bHire = parseHireDateToDate(b?.hire_date || b?.hireDate);
                     const aTs = aHire ? aHire.getTime() : null;
@@ -4621,12 +4623,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     <div className="text-sm text-gray-500">Нет данных операторов за выбранный месяц и нет совпадений в CSV.</div>
                     ) : (
                     <div className="space-y-3">
-                        {Object.entries(groupedBySvThenDir).map(([svName, dirs]) => (
-                        <details key={svName} className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+                        {Object.entries(groupedBySvThenDir).map(([svKey, svGroup]) => {
+                        const dirs = svGroup?.dirs || {};
+                        const svLabel = svGroup?.name || 'Без SV';
+                        return (
+                        <details key={svKey} className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
                             <summary className="flex items-center justify-between px-5 py-3.5 cursor-pointer select-none hover:bg-gray-50 transition-colors list-none">
                             <div className="flex items-center gap-2">
                                 <FaIcon className="fa-solid fa-user-tie text-gray-400 text-sm" />
-                                <span className="text-sm font-semibold text-gray-800">{svName}</span>
+                                <span className="text-sm font-semibold text-gray-800">{svLabel}</span>
                             </div>
                             <span className="text-xs text-gray-500 bg-gray-100 px-2.5 py-0.5 rounded-full">{Object.values(dirs).reduce((s,arr)=>s+arr.length,0)} оп.</span>
                             </summary>
@@ -4726,7 +4731,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             ))}
                             </div>
                         </details>
-                        ))}
+                        );
+                        })}
 
                         {unmatchedCsvOperators.length > 0 && selectedDirections.includes('all') && (
                         <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
@@ -31383,9 +31389,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 const opSupervisorName = String(op?.supervisor_name || '').trim().toLowerCase();
                                                 return !!requesterSupervisorName && opSupervisorName === requesterSupervisorName;
                                             });
+                                            const myOperatorIds = new Set(
+                                                myOperators
+                                                    .map((op) => Number(op?.id))
+                                                    .filter((id) => Number.isFinite(id))
+                                            );
+                                            const myOperatorsSorted = [...myOperators];
+                                            if (sortField === 'direction') {
+                                                myOperatorsSorted.sort((x, y) => (x.name || '').localeCompare(y.name || '', 'ru', { sensitivity: 'base' }) * (sortDirection === 'asc' ? 1 : -1));
+                                            } else {
+                                                myOperatorsSorted.sort((x, y) => compareByField(x, y, sortField));
+                                            }
 
                                             // Группируем по направлению (оставляем группировку, но убираем колонку направления)
                                             const grouped = matched.reduce((acc, op) => {
+                                            const opId = Number(op?.id);
+                                            if (Number.isFinite(opId) && myOperatorIds.has(opId)) return acc;
                                             const dirName = directions.find(d => d.id === op.direction_id)?.name || "Без направления";
                                             if (!acc[dirName]) acc[dirName] = [];
                                             acc[dirName].push(op);
@@ -31427,72 +31446,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 />
                                                 </div>
 
-                                                <div className="mx-4 mb-4 rounded-xl border border-blue-200 bg-blue-50/70 p-4">
-                                                    <div className="flex items-center justify-between gap-3 mb-3">
-                                                        <h3 className="text-sm font-semibold text-blue-900 uppercase tracking-wide">Мои операторы</h3>
-                                                        <span className="inline-flex items-center justify-center px-2.5 py-1 rounded-full bg-white border border-blue-200 text-xs font-semibold text-blue-700">
-                                                            {myOperators.length}
-                                                        </span>
-                                                    </div>
-
-                                                    {myOperators.length === 0 ? (
-                                                        <p className="text-sm text-blue-800/80">Операторы этого супервайзера не найдены.</p>
-                                                    ) : (
-                                                        <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
-                                                            {myOperators.map((op) => {
-                                                                const directionLabel = (
-                                                                    op?.direction ||
-                                                                    directions.find((d) => Number(d?.id) === Number(op?.direction_id))?.name ||
-                                                                    'Без направления'
-                                                                );
-                                                                return (
-                                                                    <div
-                                                                        key={`my-op-${op.id}`}
-                                                                        className="rounded-lg border border-blue-200 bg-white px-3 py-2 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2"
-                                                                    >
-                                                                        <div className="min-w-0">
-                                                                            <div className="font-medium text-slate-900 truncate">{op?.name || '-'}</div>
-                                                                            <div className="text-xs text-slate-500 truncate">{directionLabel}</div>
-                                                                        </div>
-                                                                        <div className="flex items-center gap-2 flex-wrap">
-                                                                            <span className="text-xs">{renderEmployeeStatusBadge(op?.status, op)}</span>
-                                                                            <button
-                                                                                onClick={() => {
-                                                                                    setUserToEdit({ ...op, supervisor_id: op?.supervisor_id ?? user?.id });
-                                                                                    setShowUserEditModal(true);
-                                                                                }}
-                                                                                className="bg-blue-600 text-white px-2.5 py-1 rounded-lg hover:bg-blue-700 text-xs transition-all duration-200 flex items-center gap-1"
-                                                                            >
-                                                                                <FaIcon className="fas fa-edit"></FaIcon> Править
-                                                                            </button>
-                                                                            <button
-                                                                                onClick={() => {
-                                                                                    setSelectedUserForHistory(op);
-                                                                                    fetchUserHistory(op.id);
-                                                                                }}
-                                                                                disabled={loadingHistoryId === op.id}
-                                                                                className={`bg-green-600 text-white px-2.5 py-1 rounded-lg hover:bg-green-700 text-xs transition-all duration-200 flex items-center gap-1 ${
-                                                                                    loadingHistoryId === op.id ? 'opacity-50 cursor-not-allowed' : ''
-                                                                                }`}
-                                                                            >
-                                                                                {loadingHistoryId === op.id ? (
-                                                                                    <>
-                                                                                        <FaIcon className="fas fa-spinner fa-spin"></FaIcon> Загрузка...
-                                                                                    </>
-                                                                                ) : (
-                                                                                    <>
-                                                                                        <FaIcon className="fas fa-history"></FaIcon> История
-                                                                                    </>
-                                                                                )}
-                                                                            </button>
-                                                                        </div>
-                                                                    </div>
-                                                                );
-                                                            })}
-                                                        </div>
-                                                    )}
-                                                </div>
-
                                                 <table className="min-w-full border rounded-lg w-full">
                                                 <thead className="bg-gray-50">
                                                     <tr>
@@ -31516,6 +31469,64 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </thead>
 
                                                 <tbody className="bg-white divide-y divide-gray-200">
+                                                    {myOperatorsSorted.length > 0 && (
+                                                    <React.Fragment>
+                                                        <tr className="bg-gray-100">
+                                                        <td colSpan={employeeSectionColumns.length + 1} className="px-6 py-3 text-sm font-semibold text-gray-700">
+                                                            Мои операторы <span className="ml-2 text-xs text-gray-500">({myOperatorsSorted.length})</span>
+                                                        </td>
+                                                        </tr>
+
+                                                        {myOperatorsSorted.map((op) => (
+                                                        <tr key={`my-op-${op.id}`} className="hover:bg-gray-50 transition-colors duration-200">
+                                                            {employeeSectionColumns.map((column) => (
+                                                                <td
+                                                                    key={`my-op-${op.id}-${column.key}`}
+                                                                    className={`px-6 py-4 text-sm text-gray-900 align-top break-words ${column.cellClassName || ''}`}
+                                                                >
+                                                                    {column.render(op)}
+                                                                </td>
+                                                            ))}
+
+                                                            <td className="px-6 py-4 text-left">
+                                                            <div className="flex space-x-2">
+                                                                <button
+                                                                onClick={() => {
+                                                                    setUserToEdit({ ...op, supervisor_id: op?.supervisor_id ?? user?.id });
+                                                                    setShowUserEditModal(true);
+                                                                }}
+                                                                className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition-all duration-200 flex items-center gap-1"
+                                                                >
+                                                                <FaIcon className="fas fa-edit"></FaIcon> Править
+                                                                </button>
+
+                                                                <button
+                                                                onClick={() => {
+                                                                    setSelectedUserForHistory(op);
+                                                                    fetchUserHistory(op.id);
+                                                                }}
+                                                                disabled={loadingHistoryId === op.id}
+                                                                className={`bg-green-600 text-white px-3 py-1 rounded-lg hover:bg-green-700 text-sm transition-all duration-200 flex items-center gap-1 ${
+                                                                    loadingHistoryId === op.id ? "opacity-50 cursor-not-allowed" : ""
+                                                                }`}
+                                                                >
+                                                                {loadingHistoryId === op.id ? (
+                                                                    <>
+                                                                    <FaIcon className="fas fa-spinner fa-spin"></FaIcon> Загрузка...
+                                                                    </>
+                                                                ) : (
+                                                                    <>
+                                                                    <FaIcon className="fas fa-history"></FaIcon> История
+                                                                    </>
+                                                                )}
+                                                                </button>
+                                                            </div>
+                                                            </td>
+                                                        </tr>
+                                                        ))}
+                                                    </React.Fragment>
+                                                    )}
+
                                                     {sortedDirectionNames.map((dirName) => (
                                                     <React.Fragment key={dirName}>
                                                         <tr className="bg-gray-100">
