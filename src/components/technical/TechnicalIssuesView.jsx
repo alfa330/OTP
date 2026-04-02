@@ -119,7 +119,7 @@ const TechnicalIssuesView = ({
         const result = list.filter((direction) => {
             const directionId = Number(direction?.id);
             if (!Number.isFinite(directionId) || directionId <= 0) return false;
-            if (isAdminLikeRole(role)) return true;
+            if (isAdminLikeRole(role) || isSupervisorRole(role)) return true;
             return allowedDirectionIds.has(directionId);
         });
         return result.sort((a, b) =>
