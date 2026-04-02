@@ -31691,8 +31691,32 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         return <p className="text-center text-gray-600 py-8">Операторы не найдены.</p>;
                                         }
 
+                                        const requesterSupervisorId = Number(user?.id);
+                                        const requesterSupervisorName = String(user?.name || '').trim().toLowerCase();
+                                        const myOperators = filteredOperators.filter((op) => {
+                                        const opSupervisorId = Number(op?.supervisor_id);
+                                        if (Number.isFinite(requesterSupervisorId) && Number.isFinite(opSupervisorId)) {
+                                            return opSupervisorId === requesterSupervisorId;
+                                        }
+                                        const opSupervisorName = String(op?.supervisor_name || '').trim().toLowerCase();
+                                        return !!requesterSupervisorName && opSupervisorName === requesterSupervisorName;
+                                        });
+                                        const myOperatorIds = new Set(
+                                        myOperators
+                                            .map((op) => Number(op?.id))
+                                            .filter((id) => Number.isFinite(id))
+                                        );
+                                        const myOperatorsSorted = [...myOperators];
+                                        if (opsSortField === 'direction') {
+                                        myOperatorsSorted.sort((x, y) => (x.name || '').localeCompare(y.name || '', 'ru', { sensitivity: 'base' }) * (opsSortDirection === 'asc' ? 1 : -1));
+                                        } else {
+                                        myOperatorsSorted.sort((x, y) => compareOpsByField(x, y, opsSortField));
+                                        }
+
                                         // Группируем по направлению (показываем заголовки групп, но колонку направления убираем)
                                         const grouped = filteredOperators.reduce((acc, op) => {
+                                        const opId = Number(op?.id);
+                                        if (Number.isFinite(opId) && myOperatorIds.has(opId)) return acc;
                                         const dirName = directions.find(d => d.id === op.direction_id)?.name || "Без направления";
                                         if (!acc[dirName]) acc[dirName] = [];
                                         acc[dirName].push(op);
@@ -31748,6 +31772,63 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </thead>
 
                                             <tbody className="bg-white divide-y divide-gray-200">
+                                                {myOperatorsSorted.length > 0 && (
+                                                <React.Fragment>
+                                                    <tr className="bg-gray-100">
+                                                    <td colSpan={4} className="px-6 py-3 text-sm font-semibold text-gray-700">
+                                                        Мои операторы <span className="ml-2 text-xs text-gray-500">({myOperatorsSorted.length})</span>
+                                                    </td>
+                                                    </tr>
+
+                                                    {myOperatorsSorted.map((op, idx) => {
+                                                    const callCount = parseInt(op.call_count) || 0;
+                                                    return (
+                                                        <tr key={`my-op-${op.id ?? idx}`} className="hover:bg-gray-50 transition-colors duration-200">
+                                                        <td className="px-6 py-4 text-sm text-gray-900">
+                                                            <div className="flex items-center gap-3 min-w-0">
+                                                                <div className="h-9 w-9 rounded-full overflow-hidden border border-slate-200 bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-xs font-semibold text-white shrink-0">
+                                                                    {op.avatar_url ? (
+                                                                        <AvatarImage src={op.avatar_url} alt={op.name || 'avatar'} className="h-full w-full object-cover" />
+                                                                    ) : (
+                                                                        (op.name || 'U').charAt(0).toUpperCase()
+                                                                    )}
+                                                                </div>
+                                                                <span className="truncate">{op.name}</span>
+                                                            </div>
+                                                        </td>
+
+                                                        <td className={`px-6 py-4 whitespace-nowrap text-sm ${getCallCountColor(callCount, svData.expected_calls || 5)}`}>
+                                                            {callCount}
+                                                        </td>
+
+                                                        <td className="px-6 py-4 whitespace-nowrap text-sm">
+                                                            <span className={getScoreColor(op.avg_score)}>
+                                                            {op.avg_score ? Number(op.avg_score).toFixed(2) : '-'}
+                                                            </span>
+                                                        </td>
+
+                                                        <td className="px-6 py-4 whitespace-nowrap text-sm">
+                                                            <div className="flex items-center gap-2">
+                                                            <button
+                                                                onClick={(e) => openCallEvaluationSection({
+                                                                    operatorId: op.id,
+                                                                    operatorName: op.name,
+                                                                    month: selectedReportMonth || selectedMonth,
+                                                                    openInNewTab: Boolean(e?.ctrlKey || e?.metaKey)
+                                                                })}
+                                                                className="inline-flex items-center gap-2 bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition"
+                                                                title={`Оценить оператора ${op.name}`}
+                                                            >
+                                                                <FaIcon className="fas fa-play-circle" /> Оценить
+                                                            </button>
+                                                            </div>
+                                                        </td>
+                                                        </tr>
+                                                    );
+                                                    })}
+                                                </React.Fragment>
+                                                )}
+
                                                 {sortedDirectionNames.map((dirName) => (
                                                 <React.Fragment key={dirName}>
                                                     {/* Заголовок группы направления */}
@@ -31810,8 +31891,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             {/* FOOTER: total calls + overall average score (weighted by call count) */}
                                             <tfoot className="bg-gray-50">
                                                 {(() => {
-                                                const totalCalls = Object.values(grouped).flat().reduce((sum, o) => sum + (parseInt(o.call_count) || 0), 0);
-                                                const scores = Object.values(grouped).flat().map(o => parseFloat(o.avg_score)).filter(v => !isNaN(v));
+                                                const totalCalls = filteredOperators.reduce((sum, o) => sum + (parseInt(o.call_count) || 0), 0);
+                                                const scores = filteredOperators.map(o => parseFloat(o.avg_score)).filter(v => !isNaN(v));
                                                 const overallAvg = scores.length > 0 ? (scores.reduce((a, b) => a + b, 0) / scores.length) : null;
                                                 const overallAvgStr = overallAvg == null ? '-' : Number(overallAvg).toFixed(2);
 
