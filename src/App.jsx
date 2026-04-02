@@ -7244,7 +7244,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             }),
                             fetch(`${API_BASE_URL}/api/admin/directions`, {
                                 credentials: 'include',
-                                headers: withAccessTokenHeader()
+                                headers: withAccessTokenHeader({
+                                    'X-API-Key': user?.apiKey || '',
+                                    'X-User-Id': user?.id || ''
+                                })
                             })
                         ]);
                         if (cancelled) return;
