@@ -7543,15 +7543,16 @@ def handle_monthly_report():
         
         user_id = int(request.headers.get('X-User-Id'))
         user = db.get_user(id=user_id)
-        if user[3]=="sv":
+        role = _normalize_user_role(user[3]) if user else ''
+        if role == "sv":
             # get_user returns tuple: (id, telegram_id, name, role, ... , status)
             if user[5] == "fired":
                 return jsonify({"error": "Your status is fired. No report available."}), 403
             svs=[(user[0], user[2], "", "", "", user[5])]
-        elif user[3]=="admin":
+        elif _is_admin_role(role):
             svs = [sv for sv in db.get_supervisors() if len(sv) > 5 and sv[5] != "fired"]
         else:
-            return jsonify({"error": "Only admin or SV can access to this report"}), 404
+            return jsonify({"error": "Only admin, super admin or SV can access to this report"}), 404
 
         if not svs:
             return jsonify({"error": "No supervisors found"}), 404
@@ -7583,33 +7584,14 @@ def handle_monthly_report():
             if len(sv) > 5 and sv[5] == "fired":
                 continue
             operators = db.get_operators_by_supervisor(sv_id)
-            # Exclude operators with status 'fired'
-            operators = [op for op in operators if op.get('status', '').lower() != 'fired']
-
-            safe_sheet_name = sv_name[:31].replace('/', '_').replace('\\', '_').replace('?', '_').replace('*', '_').replace('[', '_').replace(']', '_')
-            worksheet = workbook.add_worksheet(safe_sheet_name)
-
             special_evaluator_id = 169
-            special_table_header_row = len(operators) + 2
+            report_rows = []
 
-            # Headers
-            headers = ['ФИО']
-            for i in range(1, 21):
-                headers.append(f'{i}')
-            headers.append('Средний балл')
-            headers.append('Кол-во оцененных звонков')
-
-            for col, header in enumerate(headers):
-                worksheet.write(0, col, header, header_format)
-
-            for col, header in enumerate(headers):
-                worksheet.write(special_table_header_row, col, header, header_format)
-
-            for row_idx, op in enumerate(operators, start=1):
+            for op in operators:
                 op_id = op['id']
                 op_name = op['name']
+                op_status = str(op.get('status') or '').strip().lower()
 
-                # Get scores
                 with db._get_cursor() as cursor:
                     cursor.execute("""
                         SELECT c.score
@@ -7639,6 +7621,41 @@ def handle_monthly_report():
                         ORDER BY c.created_at ASC
                     """, (op_id, month, special_evaluator_id, op_id, month, special_evaluator_id))
                     special_scores = [row[0] for row in cursor.fetchall()]
+
+                is_dismissed_operator = op_status in ('fired', 'dismissal')
+                # Keep dismissed operators in export only when they have monthly scores.
+                if is_dismissed_operator and not scores and not special_scores:
+                    continue
+
+                report_rows.append({
+                    'name': op_name,
+                    'scores': scores,
+                    'special_scores': special_scores
+                })
+            report_rows.sort(key=lambda row: str(row.get('name') or '').strip().casefold())
+
+            safe_sheet_name = sv_name[:31].replace('/', '_').replace('\\', '_').replace('?', '_').replace('*', '_').replace('[', '_').replace(']', '_')
+            worksheet = workbook.add_worksheet(safe_sheet_name)
+
+            special_table_header_row = len(report_rows) + 2
+
+            # Headers
+            headers = ['ФИО']
+            for i in range(1, 21):
+                headers.append(f'{i}')
+            headers.append('Средний балл')
+            headers.append('Кол-во оцененных звонков')
+
+            for col, header in enumerate(headers):
+                worksheet.write(0, col, header, header_format)
+
+            for col, header in enumerate(headers):
+                worksheet.write(special_table_header_row, col, header, header_format)
+
+            for row_idx, op_row in enumerate(report_rows, start=1):
+                op_name = op_row['name']
+                scores = op_row['scores']
+                special_scores = op_row['special_scores']
 
                 count = len(scores)
                 avg_score = sum(scores) / count if count > 0 else 0.0
