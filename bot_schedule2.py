@@ -6208,6 +6208,56 @@ def get_sv_data():
         except Exception:
             operators = []
 
+        target_user_role = ''
+        if isinstance(user, dict):
+            target_user_role = _normalize_user_role(user.get("role"))
+        elif isinstance(user, (list, tuple)) and len(user) > 3:
+            target_user_role = _normalize_user_role(user[3])
+
+        supervisor_rows = []
+        try:
+            with db._get_cursor() as cursor:
+                if requester_role == 'sv':
+                    cursor.execute("""
+                        SELECT
+                            u.id,
+                            u.name,
+                            u.direction_id,
+                            u.hire_date,
+                            u.scores_table_url,
+                            u.status,
+                            u.rate,
+                            u.gender,
+                            u.birth_date,
+                            u.avatar_bucket,
+                            u.avatar_blob_path
+                        FROM users u
+                        WHERE LOWER(COALESCE(u.role, '')) IN ('sv', 'supervisor')
+                    """)
+                    supervisor_rows = cursor.fetchall()
+                elif target_user_role == 'sv':
+                    cursor.execute("""
+                        SELECT
+                            u.id,
+                            u.name,
+                            u.direction_id,
+                            u.hire_date,
+                            u.scores_table_url,
+                            u.status,
+                            u.rate,
+                            u.gender,
+                            u.birth_date,
+                            u.avatar_bucket,
+                            u.avatar_blob_path
+                        FROM users u
+                        WHERE u.id = %s
+                          AND LOWER(COALESCE(u.role, '')) IN ('sv', 'supervisor')
+                        LIMIT 1
+                    """, (user_id,))
+                    supervisor_rows = cursor.fetchall()
+        except Exception:
+            supervisor_rows = []
+
         operator_ids = []
         for op in operators:
             raw_operator_id = None
@@ -6220,17 +6270,29 @@ def get_sv_data():
             except (TypeError, ValueError):
                 continue
 
+        supervisor_ids = []
+        for sv_row in supervisor_rows:
+            try:
+                supervisor_ids.append(int(sv_row[0]))
+            except (TypeError, ValueError, IndexError):
+                continue
+
+        metric_ids = operator_ids + supervisor_ids
+
         try:
-            operator_metrics = db.get_operator_score_aggregates_for_month(month=month, operator_ids=operator_ids)
+            operator_metrics = db.get_operator_score_aggregates_for_month(month=month, operator_ids=metric_ids)
         except Exception:
             operator_metrics = {}
 
+        seen_response_ids = set()
         for op in operators:
             # flexible unpacking: support dict or sequence rows
             if isinstance(op, dict):
                 operator_id = op.get("id") or op.get("operator_id") or op.get("user_id")
                 operator_name = op.get("name") or op.get("operator_name")
                 direction_id = op.get("direction_id")
+                operator_supervisor_id = op.get("supervisor_id")
+                operator_supervisor_name = op.get("supervisor_name")
                 hire_date = op.get("hire_date")
                 birth_date = op.get("birth_date")
                 hours_table_url = op.get("hours_table_url")
@@ -6238,6 +6300,7 @@ def get_sv_data():
                 status = op.get("status")
                 rate = op.get("rate")
                 gender = op.get("gender")
+                role_value = _normalize_user_role(op.get("role") or "operator")
                 avatar_url = op.get("avatar_url")
                 avatar_bucket = op.get("avatar_bucket")
                 avatar_blob_path = op.get("avatar_blob_path")
@@ -6251,22 +6314,25 @@ def get_sv_data():
                 operator_id = op[0] if len(op) > 0 else None
                 operator_name = op[1] if len(op) > 1 else None
                 direction_id = op[2] if len(op) > 2 else None
-                hire_date = op[3] if len(op) > 3 else None
-                birth_date = op[10] if len(op) > 10 else None
-                hours_table_url = op[4] if len(op) > 4 else None
-                scores_table_url = op[5] if len(op) > 5 else None
-                status = op[7] if len(op) > 7 else None
-                rate = op[8] if len(op) > 8 else None
-                gender = op[9] if len(op) > 9 else None
+                operator_supervisor_id = op[3] if len(op) > 3 else None
+                hire_date = op[4] if len(op) > 4 else None
+                birth_date = op[11] if len(op) > 11 else None
+                hours_table_url = op[5] if len(op) > 5 else None
+                scores_table_url = op[6] if len(op) > 6 else None
+                operator_supervisor_name = op[7] if len(op) > 7 else None
+                status = op[8] if len(op) > 8 else None
+                rate = op[9] if len(op) > 9 else None
+                gender = op[10] if len(op) > 10 else None
+                role_value = "operator"
                 avatar_url = None
-                avatar_bucket = op[11] if len(op) > 11 else None
-                avatar_blob_path = op[12] if len(op) > 12 else None
-                status_period_status_code = None
-                status_period_start_date = None
-                status_period_end_date = None
-                status_period_dismissal_reason = ""
-                status_period_is_blacklist = False
-                status_period_comment = ""
+                avatar_bucket = op[12] if len(op) > 12 else None
+                avatar_blob_path = op[13] if len(op) > 13 else None
+                status_period_status_code = op[15] if len(op) > 15 else None
+                status_period_start_date = op[16] if len(op) > 16 else None
+                status_period_end_date = op[17] if len(op) > 17 else None
+                status_period_dismissal_reason = op[18] if len(op) > 18 else ""
+                status_period_is_blacklist = bool(op[19]) if len(op) > 19 and op[19] is not None else False
+                status_period_comment = op[20] if len(op) > 20 else ""
 
             # skip invalid rows
             if not operator_id:
@@ -6279,6 +6345,8 @@ def get_sv_data():
             metrics = operator_metrics.get(operator_id_int, {}) if operator_id_int is not None else {}
             eval_count = int(metrics.get("call_count") or 0)
             avg_score = metrics.get("avg_score")
+            if operator_id_int is not None:
+                seen_response_ids.add(operator_id_int)
 
             # ensure rate is numeric and reasonable
             try:
@@ -6292,6 +6360,9 @@ def get_sv_data():
                 "hire_date": hire_date,
                 "birth_date": (birth_date.strftime('%d-%m-%Y') if hasattr(birth_date, 'strftime') else birth_date),
                 "direction_id": direction_id,
+                "supervisor_id": operator_supervisor_id,
+                "supervisor_name": operator_supervisor_name,
+                "role": role_value or "operator",
                 # number of actual evaluated calls (with scores)
                 "call_count": eval_count,
                 "avg_score": avg_score,
@@ -6306,6 +6377,59 @@ def get_sv_data():
                 "status_period_dismissal_reason": status_period_dismissal_reason or "",
                 "status_period_is_blacklist": bool(status_period_is_blacklist),
                 "status_period_comment": status_period_comment or ""
+            })
+
+        for sv_row in supervisor_rows:
+            try:
+                supervisor_id_int = int(sv_row[0])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if supervisor_id_int in seen_response_ids:
+                continue
+
+            sv_metrics = operator_metrics.get(supervisor_id_int, {})
+            sv_call_count = int(sv_metrics.get("call_count") or 0)
+            if sv_call_count <= 0:
+                continue
+
+            sv_name = sv_row[1]
+            sv_direction_id = sv_row[2]
+            sv_hire_date = sv_row[3]
+            sv_scores_table_url = sv_row[4]
+            sv_status = sv_row[5]
+            sv_rate = sv_row[6]
+            sv_gender = sv_row[7]
+            sv_birth_date = sv_row[8]
+            sv_avatar_bucket = sv_row[9]
+            sv_avatar_blob_path = sv_row[10]
+
+            try:
+                sv_rate_val = float(sv_rate) if sv_rate is not None else 1.0
+            except Exception:
+                sv_rate_val = 1.0
+
+            response_data["operators"].append({
+                "id": supervisor_id_int,
+                "name": sv_name,
+                "hire_date": sv_hire_date.strftime('%d-%m-%Y') if hasattr(sv_hire_date, 'strftime') else sv_hire_date,
+                "birth_date": sv_birth_date.strftime('%d-%m-%Y') if hasattr(sv_birth_date, 'strftime') else sv_birth_date,
+                "direction_id": sv_direction_id,
+                "supervisor_id": supervisor_id_int,
+                "supervisor_name": sv_name,
+                "role": "sv",
+                "call_count": sv_call_count,
+                "avg_score": sv_metrics.get("avg_score"),
+                "scores_table_url": sv_scores_table_url,
+                "status": sv_status,
+                "rate": sv_rate_val,
+                "gender": sv_gender,
+                "avatar_url": _build_avatar_signed_url(sv_avatar_bucket, sv_avatar_blob_path),
+                "status_period_status_code": None,
+                "status_period_start_date": None,
+                "status_period_end_date": None,
+                "status_period_dismissal_reason": "",
+                "status_period_is_blacklist": False,
+                "status_period_comment": ""
             })
 
         return jsonify(response_data), 200
@@ -7561,6 +7685,36 @@ def handle_monthly_report():
         total_format = workbook.add_format({'border': 1, 'bold': True, 'bg_color': '#E2EFDA', 'num_format': '0.00', 'align': 'center'})
         total_int_format = workbook.add_format({'border': 1, 'bold': True, 'bg_color': '#E2EFDA', 'num_format': '0', 'align': 'center'})
 
+        def _fetch_latest_scores_for_user(target_user_id, target_month, evaluator_id=None):
+            with db._get_cursor() as cursor:
+                if evaluator_id is None:
+                    cursor.execute("""
+                        SELECT c.score
+                        FROM calls c
+                        JOIN (
+                            SELECT phone_number, MAX(created_at) as max_date
+                            FROM calls
+                            WHERE operator_id = %s AND month = %s AND is_draft = FALSE
+                            GROUP BY phone_number
+                        ) lv ON c.phone_number = lv.phone_number AND c.created_at = lv.max_date
+                        WHERE c.is_draft = FALSE
+                        ORDER BY c.created_at ASC
+                    """, (target_user_id, target_month))
+                else:
+                    cursor.execute("""
+                        SELECT c.score
+                        FROM calls c
+                        JOIN (
+                            SELECT phone_number, MAX(created_at) as max_date
+                            FROM calls
+                            WHERE operator_id = %s AND month = %s AND is_draft = FALSE AND evaluator_id = %s
+                            GROUP BY phone_number
+                        ) lv ON c.phone_number = lv.phone_number AND c.created_at = lv.max_date
+                        WHERE c.is_draft = FALSE AND c.operator_id = %s AND c.month = %s AND c.evaluator_id = %s
+                        ORDER BY c.created_at ASC
+                    """, (target_user_id, target_month, evaluator_id, target_user_id, target_month, evaluator_id))
+                return [row[0] for row in cursor.fetchall()]
+
         for sv in svs:
             sv_id, sv_name = sv[0], sv[1]
             # Exclude supervisors with status 'fired' (should already be filtered above, but double check)
@@ -7575,35 +7729,8 @@ def handle_monthly_report():
                 op_name = op['name']
                 op_status = str(op.get('status') or '').strip().lower()
 
-                with db._get_cursor() as cursor:
-                    cursor.execute("""
-                        SELECT c.score
-                        FROM calls c
-                        JOIN (
-                            SELECT phone_number, MAX(created_at) as max_date
-                            FROM calls 
-                            WHERE operator_id = %s AND month = %s AND is_draft = FALSE 
-                            GROUP BY phone_number
-                        ) lv ON c.phone_number = lv.phone_number AND c.created_at = lv.max_date
-                        WHERE c.is_draft = FALSE
-                        ORDER BY c.created_at ASC
-                    """, (op_id, month))
-                    scores = [row[0] for row in cursor.fetchall()]
-
-                with db._get_cursor() as cursor:
-                    cursor.execute("""
-                        SELECT c.score
-                        FROM calls c
-                        JOIN (
-                            SELECT phone_number, MAX(created_at) as max_date
-                            FROM calls
-                            WHERE operator_id = %s AND month = %s AND is_draft = FALSE AND evaluator_id = %s
-                            GROUP BY phone_number
-                        ) lv ON c.phone_number = lv.phone_number AND c.created_at = lv.max_date
-                        WHERE c.is_draft = FALSE AND c.operator_id = %s AND c.month = %s AND c.evaluator_id = %s
-                        ORDER BY c.created_at ASC
-                    """, (op_id, month, special_evaluator_id, op_id, month, special_evaluator_id))
-                    special_scores = [row[0] for row in cursor.fetchall()]
+                scores = _fetch_latest_scores_for_user(op_id, month, evaluator_id=None)
+                special_scores = _fetch_latest_scores_for_user(op_id, month, evaluator_id=special_evaluator_id)
 
                 is_dismissed_operator = op_status in ('fired', 'dismissal')
                 # Keep dismissed operators in export only when they have monthly scores.
@@ -7615,6 +7742,17 @@ def handle_monthly_report():
                     'scores': scores,
                     'special_scores': special_scores
                 })
+
+            # Добавляем самого супервайзера в его группу, если за месяц есть оценки.
+            sv_scores = _fetch_latest_scores_for_user(sv_id, month, evaluator_id=None)
+            sv_special_scores = _fetch_latest_scores_for_user(sv_id, month, evaluator_id=special_evaluator_id)
+            if sv_scores or sv_special_scores:
+                report_rows.append({
+                    'name': f"{sv_name} (СВ)",
+                    'scores': sv_scores,
+                    'special_scores': sv_special_scores
+                })
+
             report_rows.sort(key=lambda row: str(row.get('name') or '').strip().casefold())
 
             safe_sheet_name = sv_name[:31].replace('/', '_').replace('\\', '_').replace('?', '_').replace('*', '_').replace('[', '_').replace(']', '_')
