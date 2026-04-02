@@ -26373,15 +26373,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 : (createdRole === 'sv' || createdRole === 'supervisor' ? 'Супервайзер' : 'Оператор');
                         const duplicateUsersPool = (adminUsers && adminUsers.length > 0) ? adminUsers : users;
                         if (!newName) {
-                            showToast('Имя обязательно.', 'error');
-                            setIsLoading(false);
-                            return;
+                            throw new Error('Имя обязательно.');
                         }
                         const exists = (duplicateUsersPool || []).some(u => u.id !== editedUser.id && (u.name || '').toLowerCase() === newName.toLowerCase());
                         if (exists) {
-                            showToast('Пользователь с таким именем уже существует.', 'error');
-                            setIsLoading(false);
-                            return;
+                            throw new Error('Пользователь с таким именем уже существует.');
                         }
                         // payload минимальный — дополни по API сервера
                         const payload = {
@@ -26471,11 +26467,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 showToast(`Сотрудник создан, но аватар не сохранён: ${avatarWarning}`, 'error');
                             }
                             await fetchUsers(); // обновим список операторов на клиенте
-                            setShowUserEditModal(false);
+                            return data;
                         } else {
-                            showToast(data.error || 'Не удалось создать сотрудника', 'error');
+                            throw new Error(data?.error || 'Не удалось создать сотрудника');
                         }
-                        return;
                         }
                     // If editing existing user, handle name change first (validate duplicate locally and request to server)
                     if (editedUser.id && editedUser.name && editedUser.name.trim() !== userToEdit?.name) {
@@ -26483,9 +26478,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         const duplicateUsersPool = (adminUsers && adminUsers.length > 0) ? adminUsers : users;
                         const exists = (duplicateUsersPool || []).some(u => u.id !== editedUser.id && (u.name || '').toLowerCase() === newName.toLowerCase());
                         if (exists) {
-                            showToast('Пользователь с таким именем уже существует.', 'error');
-                            setIsLoading(false);
-                            return;
+                            throw new Error('Пользователь с таким именем уже существует.');
                         }
                         await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
                             user_id: editedUser.id,
@@ -26869,7 +26862,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setShowUserEditModal(false);
                 } catch (err) {
                     console.error('Update user error:', err);
-                    showToast(err.response?.data?.error || 'Failed to update user', 'error');
+                    const errorMessage = err?.response?.data?.error || err?.message || 'Failed to update user';
+                    showToast(errorMessage, 'error');
+                    throw err;
                 } finally {
                     setIsLoading(false);
                 }
@@ -31312,15 +31307,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                         <button
                                             onClick={() => {
-                                            setUserToEdit({
-                                                name: "",
-                                                rate: 1.0,
-                                                direction_id: "",
-                                                hire_date: "",
-                                                supervisor_id: user?.id || "",
-                                                status: "working",
-                                            });
-                                            setShowUserEditModal(true);
+                                                setUserToEdit({
+                                                    name: "",
+                                                    rate: 1.0,
+                                                    direction_id: "",
+                                                    hire_date: "",
+                                                    supervisor_id: user?.id || "",
+                                                    status: "working",
+                                                    role: "operator",
+                                                });
+                                                setShowUserEditModal(true);
                                             }}
                                             className="inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium bg-green-600 text-white hover:bg-green-700 transition"
                                         >
