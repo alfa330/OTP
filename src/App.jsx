@@ -1397,46 +1397,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
         }, [operators, operatorsViewTab, selectedDirections, trainingsMap, technicalIssuesMap, offlineActivitiesMap]);
 
-        // Group rows by supervisor_id -> direction to keep supervisor context in hours table.
-        const groupedBySupervisorThenDirection = useMemo(() => {
+        // Group operators by direction (key fallbacks: direction, direction_name, direction_id)
+        const groupedByDirection = useMemo(() => {
             const map = {};
             for (const op of (Array.isArray(filteredOperators) ? filteredOperators : [])) {
-            const roleNorm = String(op?.role || '').trim().toLowerCase();
-            const isSupervisorRow = roleNorm === 'sv' || roleNorm === 'supervisor';
-            const ownId = op?.operator_id ?? op?.id ?? null;
-            const rawSupervisorId = op?.supervisor_id ?? op?.sv_id ?? (isSupervisorRow ? ownId : null) ?? 'without-sv';
-            const supervisorId = String(rawSupervisorId);
-            const supervisorName = op?.supervisor_name || op?.sv_name || (isSupervisorRow ? (op?.name || 'Супервайзер') : null) || 'Без супервайзера';
-            const svKey = `${supervisorId}::${supervisorName}`;
-
-            if (!map[svKey]) {
-                map[svKey] = {
-                id: rawSupervisorId,
-                name: supervisorName,
-                dirs: {}
-                };
+            const key = op.direction || op.direction_name || (op.direction_id ? String(op.direction_id) : 'Без направления');
+            if (!map[key]) map[key] = [];
+            map[key].push(op);
             }
-
-            const dirKey = op.direction || op.direction_name || (op.direction_id ? String(op.direction_id) : 'Без направления');
-            if (!map[svKey].dirs[dirKey]) map[svKey].dirs[dirKey] = [];
-            map[svKey].dirs[dirKey].push(op);
-            }
-
-            Object.keys(map).forEach((svKey) => {
-            const svGroup = map[svKey];
-            Object.keys(svGroup.dirs).forEach((dirKey) => {
-                svGroup.dirs[dirKey].sort((a, b) => String(a?.name || '').localeCompare(String(b?.name || ''), 'ru', { sensitivity: 'base' }));
-            });
-            });
-
             return map;
         }, [filteredOperators]);
-
-        const groupedHourSupervisorEntries = useMemo(() => {
-            return Object.entries(groupedBySupervisorThenDirection || {}).sort(([, a], [, b]) => {
-            return String(a?.name || '').localeCompare(String(b?.name || ''), 'ru', { sensitivity: 'base' });
-            });
-        }, [groupedBySupervisorThenDirection]);
 
         const selectedHourCellKeySet = useMemo(() => {
             return new Set((selectedHourCells || []).map(cell => makeSelectedHourCellKey(cell.operator_id, cell.day)));
@@ -1444,15 +1414,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         const renderedHourOperators = useMemo(() => {
             const ordered = [];
-            for (const [, svGroup] of groupedHourSupervisorEntries) {
-            const dirs = svGroup?.dirs || {};
-            for (const dirKey of Object.keys(dirs)) {
-                const groupOps = dirs[dirKey] || [];
-                for (const op of groupOps) ordered.push(op);
-            }
+            for (const dirKey of Object.keys(groupedByDirection || {})) {
+            const groupOps = groupedByDirection[dirKey] || [];
+            for (const op of groupOps) ordered.push(op);
             }
             return ordered;
-        }, [groupedHourSupervisorEntries]);
+        }, [groupedByDirection]);
 
         const renderedHourOperatorIndexMap = useMemo(() => {
             const map = new Map();
@@ -2294,22 +2261,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     ) : isAdminWithoutSupervisorSelected ? (
                     <div className="p-4 text-gray-600">Супервайзер не выбран.</div>
                     ) : filteredOperators.length === 0 ? (
-                    <div className="p-4 text-gray-600">Сотрудники не найдены.</div>
+                    <div className="p-4 text-gray-600">Операторы не найдены.</div>
                     ) : (
-                    groupedHourSupervisorEntries.map(([svKey, svGroup]) => {
-                        const dirs = svGroup?.dirs || {};
-                        const supervisorLabel = svGroup?.name || 'Без супервайзера';
-                        const supervisorCount = Object.values(dirs).reduce((sum, arr) => sum + (Array.isArray(arr) ? arr.length : 0), 0);
-                        return (
-                        <div key={`sv-group-${svKey}`} className="w-full">
-                        <div className="w-full p-2 bg-slate-50 text-sm font-semibold border-b">
-                            {supervisorLabel}
-                            <span className="ml-2 text-xs text-slate-500">({supervisorCount})</span>
-                        </div>
-                        {Object.keys(dirs).map(dirKey => (
-                        <div key={`group-${svKey}-${dirKey}`} className="w-full">
-                        <div className="w-full p-2 bg-gray-100 text-sm font-semibold border-b">{dirKey} <span className="ml-2 text-xs text-gray-500">({dirs[dirKey].length})</span></div>
-                        {dirs[dirKey].map(op => {
+                    Object.keys(groupedByDirection).map(dirKey => (
+                        <div key={`group-${dirKey}`} className="w-full">
+                        <div className="w-full p-2 bg-gray-100 text-sm font-semibold border-b">{dirKey} <span className="ml-2 text-xs text-gray-500">({groupedByDirection[dirKey].length})</span></div>
+                        {groupedByDirection[dirKey].map(op => {
                             const aggr = op.aggregates || {};
                             const regular = Number(aggr.regular_hours || 0);
                             const norm = Number(op.norm_hours || 0);
@@ -2473,10 +2430,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             );
                         })}
                         </div>
-                    ))}
-                        </div>
-                        );
-                    })
+                    ))
                     )}
 
                     {/* FOOTER: итоговые строки */}
