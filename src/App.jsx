@@ -27894,7 +27894,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         if (!user || !user.id) return;
                         const url = svDataUrl(user.id, month);
                         const response = await axios.get(url, {
-                        headers: { 'X-API-Key': user.apiKey }
+                        headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
                         });
                         const data = response.data;
                         if (data.status === 'success' && isMounted.current) {
@@ -28213,7 +28213,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 try {
                     const url = svDataUrl(svId, month);
                     const response = await axios.get(url, {
-                    headers: { 'X-API-Key': user.apiKey }
+                    headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
@@ -28983,7 +28983,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const birthdayBannerText = birthdaysToday.length === 1
                 ? `Сегодня день рождения у ${birthdayBannerNames[0]}!`
                 : `Сегодня день рождения у: ${birthdayBannerNames.join(', ')}.`;
-            const manageOperatorsBirthdaysCaption = isSupervisorRole ? 'Все операторы' : 'Мои сотрудники';
+            const manageOperatorsBirthdaysCaption = isSupervisorRole(user?.role) ? 'Все операторы' : 'Мои сотрудники';
 
             const renderUpcomingBirthdaysCard = (items, caption) => {
                 const list = Array.isArray(items) ? items : [];
@@ -29269,7 +29269,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </li>
                                         <li>
                                             <button onClick={() => { setView('manage_operators'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_operators' ? 'bg-blue-700' : ''}`}>
-                                                <FaIcon className="fas fa-user-edit"></FaIcon> <span className="sidebar-text">Мои сотрудники</span>
+                                                <FaIcon className="fas fa-user-edit"></FaIcon> <span className="sidebar-text">Сотрудники</span>
                                             </button>
                                         </li>
                                         <li>
@@ -31299,7 +31299,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {view === 'manage_operators' && (
                                     <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                         <div className="flex justify-between items-center mb-6">
-                                        <h2 className="text-2xl font-semibold text-gray-800">Мои сотрудники</h2>
+                                        <h2 className="text-2xl font-semibold text-gray-800">Сотрудники</h2>
 
                                         <button
                                             onClick={() => {
@@ -31324,7 +31324,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         {/* Tabs */}
                                         <div className="flex flex-wrap gap-3 mb-6">
                                         {(() => {
-                                            const allOps = Array.isArray(svData?.operators) ? svData.operators : [];
+                                            const allOps = (Array.isArray(users) && users.length > 0)
+                                                ? users
+                                                : (Array.isArray(svData?.operators) ? svData.operators : []);
                                             return USER_STATUS_FILTER_TABS.map((tab) => {
                                                 const count = allOps.filter((op) => isEmployeeVisibleByStatusTab(op?.status, tab.key)).length;
                                                 const isActive = activeTab === tab.key;
@@ -31346,11 +31348,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         })()}
                                         </div>
 
-                                        {isLoading ? (
+                                        {(isLoading || isAdminDataLoading) ? (
                                         <p className="text-center text-gray-600">Загрузка...</p>
                                         ) : (
                                         (() => {
-                                            const operators = svData?.operators ?? [];
+                                            const operators = (Array.isArray(users) && users.length > 0)
+                                                ? users
+                                                : (Array.isArray(svData?.operators) ? svData.operators : []);
                                             const filteredByStatus = operators.filter((op) => isEmployeeVisibleByStatusTab(op?.status, activeTab));
 
                                             if (!filteredByStatus || filteredByStatus.length === 0) {
@@ -31458,7 +31462,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             <div className="flex space-x-2">
                                                                 <button
                                                                 onClick={() => {
-                                                                    setUserToEdit({ ...op, supervisor_id: user?.id });
+                                                                    setUserToEdit({ ...op, supervisor_id: op?.supervisor_id ?? user?.id });
                                                                     setShowUserEditModal(true);
                                                                 }}
                                                                 className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition-all duration-200 flex items-center gap-1"

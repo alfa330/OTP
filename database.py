@@ -3815,6 +3815,89 @@ class Database:
                 } for row in cursor.fetchall()
             ]
 
+    def get_all_operators_with_details(self):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    u.id,
+                    u.name,
+                    u.direction_id,
+                    u.hire_date,
+                    u.hours_table_url,
+                    u.scores_table_url,
+                    s.name as supervisor_name,
+                    u.status,
+                    u.rate,
+                    u.gender,
+                    u.birth_date,
+                    u.avatar_bucket,
+                    u.avatar_blob_path,
+                    u.avatar_updated_at,
+                    sp.status_code as status_period_status_code,
+                    sp.start_date as status_period_start_date,
+                    sp.end_date as status_period_end_date,
+                    sp.dismissal_reason as status_period_dismissal_reason,
+                    COALESCE(sp.is_blacklist, FALSE) as status_period_is_blacklist,
+                    sp.comment as status_period_comment
+                FROM users u
+                LEFT JOIN directions d ON u.direction_id = d.id
+                LEFT JOIN users s ON u.supervisor_id = s.id
+                LEFT JOIN LATERAL (
+                    SELECT
+                        p.status_code,
+                        p.start_date,
+                        p.end_date,
+                        p.dismissal_reason,
+                        p.is_blacklist,
+                        p.comment
+                    FROM operator_schedule_status_periods p
+                    WHERE p.operator_id = u.id
+                      AND p.status_code = (
+                          CASE
+                              WHEN u.status = 'fired' THEN 'dismissal'
+                              WHEN u.status = 'dismissal' THEN 'dismissal'
+                              WHEN u.status = 'unpaid_leave' THEN 'bs'
+                              ELSE u.status
+                          END
+                      )
+                    ORDER BY
+                        CASE
+                            WHEN p.start_date <= CURRENT_DATE
+                             AND COALESCE(p.end_date, DATE '9999-12-31') >= CURRENT_DATE
+                            THEN 0
+                            ELSE 1
+                        END,
+                        p.start_date DESC,
+                        p.id DESC
+                    LIMIT 1
+                ) sp ON TRUE
+                WHERE u.role = 'operator'
+            """)
+            return [
+                {
+                    'id': row[0],
+                    'name': row[1],
+                    'direction_id': row[2],
+                    'hire_date': row[3].strftime('%d-%m-%Y') if row[3] else None,
+                    'hours_table_url': row[4],
+                    'scores_table_url': row[5],
+                    'supervisor_name': row[6],
+                    'status': row[7],
+                    'rate': row[8],
+                    'gender': row[9],
+                    'birth_date': row[10].strftime('%d-%m-%Y') if row[10] else None,
+                    'avatar_bucket': row[11],
+                    'avatar_blob_path': row[12],
+                    'avatar_updated_at': row[13].isoformat() if row[13] else None,
+                    'status_period_status_code': row[14],
+                    'status_period_start_date': row[15].strftime('%Y-%m-%d') if row[15] else None,
+                    'status_period_end_date': row[16].strftime('%Y-%m-%d') if row[16] else None,
+                    'status_period_dismissal_reason': row[17] or '',
+                    'status_period_is_blacklist': bool(row[18]) if row[18] is not None else False,
+                    'status_period_comment': row[19] or ''
+                } for row in cursor.fetchall()
+            ]
+
     def get_activity_logs(self, operator_id, date_str=None):
         # Если date_str не указан, используем текущую дату
         if date_str is None:

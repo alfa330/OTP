@@ -6130,10 +6130,11 @@ def get_sv_operators_moderka():
     try:
         supervisor_id = int(request.headers.get('X-User-Id'))
         requester = db.get_user(id=supervisor_id)
-        if not requester or requester[3] != 'sv':
+        if not requester or not _is_supervisor_role(requester[3]):
             return jsonify({"error": "Unauthorized: Only supervisors can access this"}), 403
         
-        operators = db.get_operators_by_supervisor(supervisor_id)
+        # Для супервайзеров отдаём полный список операторов, как в админском режиме.
+        operators = db.get_all_operators_with_details()
         for operator in operators:
             operator['avatar_url'] = _build_avatar_signed_url(
                 operator.get('avatar_bucket'),
@@ -6169,6 +6170,16 @@ def get_sv_data():
         else:
             month = datetime.now().strftime("%Y-%m")
 
+        requester_role = ""
+        requester_id_raw = request.headers.get('X-User-Id')
+        if requester_id_raw:
+            try:
+                requester_id = int(requester_id_raw)
+                requester = db.get_user(id=requester_id)
+                requester_role = _normalize_user_role(requester[3]) if requester else ""
+            except (TypeError, ValueError):
+                requester_role = ""
+
         # fetch user (accept any caller role; admin can call this endpoint)
         user = db.get_user(id=user_id)
         if not user:
@@ -6188,9 +6199,12 @@ def get_sv_data():
             "operators": []
         }
 
-        # try to get operators for this supervisor id (works when admin requests data for some sv)
+        # Для sv отдаём полный список операторов, для admin/super_admin сохраняем выборку по конкретному SV.
         try:
-            operators = db.get_operators_by_supervisor(user_id) or []
+            if requester_role == 'sv':
+                operators = db.get_all_operators_with_details() or []
+            else:
+                operators = db.get_operators_by_supervisor(user_id) or []
         except Exception:
             operators = []
 
