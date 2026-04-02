@@ -230,7 +230,12 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         return status === 'dismissal' || status === 'fired';
     };
     const usesScheduleStatusPeriodForm = (value) => isPeriodStatus(value) || String(value || '').trim() === 'fired';
-    const getRoleValue = (draft) => String(draft?.role || userToEdit?.role || '').trim().toLowerCase();
+    const getRoleValue = (draft) => {
+        const resolvedRole = String(draft?.role || userToEdit?.role || '').trim().toLowerCase();
+        if (resolvedRole) return resolvedRole;
+        const isCreateDraft = !draft?.id && !userToEdit?.id;
+        return isCreateDraft ? 'operator' : '';
+    };
     const isTrainerDraft = (draft) => getRoleValue(draft) === 'trainer';
     const isOperatorDraft = (draft) => getRoleValue(draft) === 'operator';
     const isAdminLikeRequester = isAdminLikeRoleFn(user?.role);
@@ -270,7 +275,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     useEffect(() => {
         // Устанавливаем defaults при открытии для режима создания
         const base = userToEdit || {};
-        const baseRole = String(base.role || '').trim().toLowerCase();
+        const baseRole = String(base.role || (!base.id ? 'operator' : '')).trim().toLowerCase();
         const isTrainerBase = baseRole === 'trainer';
         const isOperatorBase = baseRole === 'operator';
         const initialStatus = normalizeModalStatusValue(base.status);
@@ -310,6 +315,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         sip_number: base.sip_number ?? "",
         use_schedule_status_period: false,
         ...base,
+        role: baseRole || String(base.role || '').trim().toLowerCase(),
         };
         if (isTrainerBase) {
             defaults.direction_id = "";
