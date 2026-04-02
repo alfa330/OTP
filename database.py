@@ -2591,35 +2591,7 @@ class Database:
         with self._get_cursor() as cursor:
             # Получаем операторов + ставка + norm_hours + агрегаты work_hours (включая fines)
             cursor.execute("""
-                WITH promoted_sv AS (
-                    SELECT DISTINCT ON (role_hist.user_id)
-                        role_hist.user_id,
-                        DATE_TRUNC('month', role_hist.changed_at)::date AS promoted_month_start,
-                        (
-                            SELECT
-                                CASE
-                                    WHEN NULLIF(TRIM(sup_hist.old_value), '') ~ '^[0-9]+$'
-                                    THEN NULLIF(TRIM(sup_hist.old_value), '')::int
-                                    ELSE NULL
-                                END
-                            FROM user_history sup_hist
-                            WHERE sup_hist.user_id = role_hist.user_id
-                              AND sup_hist.field_changed = 'supervisor_id'
-                              AND sup_hist.new_value IS NULL
-                            ORDER BY
-                                ABS(EXTRACT(EPOCH FROM (sup_hist.changed_at - role_hist.changed_at))) ASC,
-                                sup_hist.changed_at DESC,
-                                sup_hist.id DESC
-                            LIMIT 1
-                        ) AS historical_supervisor_id
-                    FROM user_history role_hist
-                    WHERE role_hist.field_changed = 'role'
-                      AND LOWER(COALESCE(role_hist.old_value, '')) = 'operator'
-                      AND LOWER(COALESCE(role_hist.new_value, '')) = 'sv'
-                    ORDER BY role_hist.user_id, role_hist.changed_at DESC, role_hist.id DESC
-                )
-                SELECT u.id, u.name, u.rate, u.status,
-                    COALESCE(u.supervisor_id, p.historical_supervisor_id) AS effective_supervisor_id,
+                SELECT u.id, u.name, u.rate, u.status, u.supervisor_id,
                     d.name as direction_name,
                     COALESCE(w.norm_hours, 0) as norm_hours,
                     COALESCE(w.regular_hours, 0) as regular_hours,
@@ -2628,25 +2600,14 @@ class Database:
                     COALESCE(w.total_calls, 0) as total_calls,
                     COALESCE(w.total_efficiency_hours, 0) as total_efficiency_hours,
                     COALESCE(w.calls_per_hour, 0) as calls_per_hour,
-                    COALESCE(w.fines, 0) as fines,
-                    u.role,
-                    p.promoted_month_start
+                    COALESCE(w.fines, 0) as fines
                 FROM users u
-                LEFT JOIN promoted_sv p ON p.user_id = u.id
                 LEFT JOIN work_hours w
                 ON w.operator_id = u.id AND w.month = %s
                 LEFT JOIN directions d ON u.direction_id = d.id
-                WHERE (
-                    (u.role = 'operator' AND u.supervisor_id = %s)
-                    OR (
-                        u.role = 'sv'
-                        AND p.promoted_month_start IS NOT NULL
-                        AND %s <= p.promoted_month_start
-                        AND p.historical_supervisor_id = %s
-                    )
-                )
+                WHERE u.role = 'operator' AND u.supervisor_id = %s
                 ORDER BY u.name
-            """, (month, supervisor_id, start, supervisor_id))
+            """, (month, supervisor_id))
             operator_rows = cursor.fetchall()  # list of tuples
 
             if not operator_rows:
@@ -2721,24 +2682,15 @@ class Database:
             for row in operator_rows:
                 (op_id, op_name, rate, status, sup_id, direction_name, norm_hours, 
                 regular_hours, total_break_time, total_talk_time,
-                total_calls, total_efficiency_hours, calls_per_hour, fines,
-                role_value, promoted_month_start) = row
-                role_norm = str(role_value or '').strip().lower()
-                is_promoted_supervisor_history = bool(
-                    role_norm == 'sv'
-                    and promoted_month_start is not None
-                    and start <= promoted_month_start
-                )
-                display_name = f"{op_name} (СВ)" if (is_promoted_supervisor_history and op_name) else op_name
+                total_calls, total_efficiency_hours, calls_per_hour, fines) = row
 
                 operators.append({
                     "operator_id": op_id,
-                    "name": display_name,
+                    "name": op_name,
                     "direction": direction_name,
                     "supervisor_id": sup_id,
                     "rate": float(rate) if rate is not None else 0.0,
                     "status": status,
-                    "is_promoted_supervisor_history": is_promoted_supervisor_history,
                     "norm_hours": float(norm_hours) if norm_hours is not None else 0.0,
                     "daily": daily_map.get(op_id, {}),
                     "technical_issues_by_day": technical_map_by_operator.get(op_id, {}) if isinstance(technical_map_by_operator, dict) else {},
@@ -2776,35 +2728,7 @@ class Database:
 
         with self._get_cursor() as cursor:
             cursor.execute("""
-                WITH promoted_sv AS (
-                    SELECT DISTINCT ON (role_hist.user_id)
-                        role_hist.user_id,
-                        DATE_TRUNC('month', role_hist.changed_at)::date AS promoted_month_start,
-                        (
-                            SELECT
-                                CASE
-                                    WHEN NULLIF(TRIM(sup_hist.old_value), '') ~ '^[0-9]+$'
-                                    THEN NULLIF(TRIM(sup_hist.old_value), '')::int
-                                    ELSE NULL
-                                END
-                            FROM user_history sup_hist
-                            WHERE sup_hist.user_id = role_hist.user_id
-                              AND sup_hist.field_changed = 'supervisor_id'
-                              AND sup_hist.new_value IS NULL
-                            ORDER BY
-                                ABS(EXTRACT(EPOCH FROM (sup_hist.changed_at - role_hist.changed_at))) ASC,
-                                sup_hist.changed_at DESC,
-                                sup_hist.id DESC
-                            LIMIT 1
-                        ) AS historical_supervisor_id
-                    FROM user_history role_hist
-                    WHERE role_hist.field_changed = 'role'
-                      AND LOWER(COALESCE(role_hist.old_value, '')) = 'operator'
-                      AND LOWER(COALESCE(role_hist.new_value, '')) = 'sv'
-                    ORDER BY role_hist.user_id, role_hist.changed_at DESC, role_hist.id DESC
-                )
-                SELECT u.id, u.name, u.rate, u.status,
-                    COALESCE(u.supervisor_id, p.historical_supervisor_id) AS effective_supervisor_id,
+                SELECT u.id, u.name, u.rate, u.status, u.supervisor_id,
                     d.name as direction_name,
                     COALESCE(w.norm_hours, 0) as norm_hours,
                     COALESCE(w.regular_hours, 0) as regular_hours,
@@ -2813,24 +2737,14 @@ class Database:
                     COALESCE(w.total_calls, 0) as total_calls,
                     COALESCE(w.total_efficiency_hours, 0) as total_efficiency_hours,
                     COALESCE(w.calls_per_hour, 0) as calls_per_hour,
-                    COALESCE(w.fines, 0) as fines,
-                    u.role,
-                    p.promoted_month_start
+                    COALESCE(w.fines, 0) as fines
                 FROM users u
-                LEFT JOIN promoted_sv p ON p.user_id = u.id
                 LEFT JOIN work_hours w
                 ON w.operator_id = u.id AND w.month = %s
                 LEFT JOIN directions d ON u.direction_id = d.id
-                WHERE (
-                    u.role = 'operator'
-                    OR (
-                        u.role = 'sv'
-                        AND p.promoted_month_start IS NOT NULL
-                        AND %s <= p.promoted_month_start
-                    )
-                )
+                WHERE u.role = 'operator'
                 ORDER BY u.name
-            """, (month, start))
+            """, (month,))
             operator_rows = cursor.fetchall()
 
             if not operator_rows:
@@ -2901,24 +2815,15 @@ class Database:
             for row in operator_rows:
                 (op_id, op_name, rate, status, sup_id, direction_name, norm_hours,
                 regular_hours, total_break_time, total_talk_time,
-                total_calls, total_efficiency_hours, calls_per_hour, fines,
-                role_value, promoted_month_start) = row
-                role_norm = str(role_value or '').strip().lower()
-                is_promoted_supervisor_history = bool(
-                    role_norm == 'sv'
-                    and promoted_month_start is not None
-                    and start <= promoted_month_start
-                )
-                display_name = f"{op_name} (СВ)" if (is_promoted_supervisor_history and op_name) else op_name
+                total_calls, total_efficiency_hours, calls_per_hour, fines) = row
 
                 operators.append({
                     "operator_id": op_id,
-                    "name": display_name,
+                    "name": op_name,
                     "direction": direction_name,
                     "supervisor_id": sup_id,
                     "rate": float(rate) if rate is not None else 0.0,
                     "status": status,
-                    "is_promoted_supervisor_history": is_promoted_supervisor_history,
                     "norm_hours": float(norm_hours) if norm_hours is not None else 0.0,
                     "daily": daily_map.get(op_id, {}),
                     "technical_issues_by_day": technical_map_by_operator.get(op_id, {}) if isinstance(technical_map_by_operator, dict) else {},
@@ -3827,188 +3732,68 @@ class Database:
             }
 
 
-    def get_operators_by_supervisor(self, supervisor_id, month=None):
-        month_start = None
-        if month:
-            try:
-                year, mon = map(int, str(month).split('-'))
-                month_start = date(year, mon, 1)
-            except Exception as e:
-                raise ValueError("Invalid month format, expected YYYY-MM") from e
-
+    def get_operators_by_supervisor(self, supervisor_id):
         with self._get_cursor() as cursor:
-            if month_start is None:
-                cursor.execute("""
+            cursor.execute("""
+                SELECT
+                    u.id,
+                    u.name,
+                    u.direction_id,
+                    u.hire_date,
+                    u.hours_table_url,
+                    u.scores_table_url,
+                    s.name as supervisor_name,
+                    u.status,
+                    u.rate,
+                    u.gender,
+                    u.birth_date,
+                    u.avatar_bucket,
+                    u.avatar_blob_path,
+                    u.avatar_updated_at,
+                    sp.status_code as status_period_status_code,
+                    sp.start_date as status_period_start_date,
+                    sp.end_date as status_period_end_date,
+                    sp.dismissal_reason as status_period_dismissal_reason,
+                    COALESCE(sp.is_blacklist, FALSE) as status_period_is_blacklist,
+                    sp.comment as status_period_comment
+                FROM users u
+                LEFT JOIN directions d ON u.direction_id = d.id
+                LEFT JOIN users s ON u.supervisor_id = s.id
+                LEFT JOIN LATERAL (
                     SELECT
-                        u.id,
-                        u.name,
-                        u.direction_id,
-                        u.hire_date,
-                        u.hours_table_url,
-                        u.scores_table_url,
-                        s.name as supervisor_name,
-                        u.status,
-                        u.rate,
-                        u.gender,
-                        u.birth_date,
-                        u.avatar_bucket,
-                        u.avatar_blob_path,
-                        u.avatar_updated_at,
-                        sp.status_code as status_period_status_code,
-                        sp.start_date as status_period_start_date,
-                        sp.end_date as status_period_end_date,
-                        sp.dismissal_reason as status_period_dismissal_reason,
-                        COALESCE(sp.is_blacklist, FALSE) as status_period_is_blacklist,
-                        sp.comment as status_period_comment,
-                        u.role,
-                        NULL::date as promoted_month_start
-                    FROM users u
-                    LEFT JOIN directions d ON u.direction_id = d.id
-                    LEFT JOIN users s ON u.supervisor_id = s.id
-                    LEFT JOIN LATERAL (
-                        SELECT
-                            p.status_code,
-                            p.start_date,
-                            p.end_date,
-                            p.dismissal_reason,
-                            p.is_blacklist,
-                            p.comment
-                        FROM operator_schedule_status_periods p
-                        WHERE p.operator_id = u.id
-                          AND p.status_code = (
-                              CASE
-                                  WHEN u.status = 'fired' THEN 'dismissal'
-                                  WHEN u.status = 'dismissal' THEN 'dismissal'
-                                  WHEN u.status = 'unpaid_leave' THEN 'bs'
-                                  ELSE u.status
-                              END
-                          )
-                        ORDER BY
-                            CASE
-                                WHEN p.start_date <= CURRENT_DATE
-                                 AND COALESCE(p.end_date, DATE '9999-12-31') >= CURRENT_DATE
-                                THEN 0
-                                ELSE 1
-                            END,
-                            p.start_date DESC,
-                            p.id DESC
-                        LIMIT 1
-                    ) sp ON TRUE
-                    WHERE u.supervisor_id = %s AND u.role = 'operator'
-                    ORDER BY u.name
-                """, (supervisor_id,))
-            else:
-                cursor.execute("""
-                    WITH promoted_sv AS (
-                        SELECT DISTINCT ON (role_hist.user_id)
-                            role_hist.user_id,
-                            DATE_TRUNC('month', role_hist.changed_at)::date AS promoted_month_start,
-                            (
-                                SELECT
-                                    CASE
-                                        WHEN NULLIF(TRIM(sup_hist.old_value), '') ~ '^[0-9]+$'
-                                        THEN NULLIF(TRIM(sup_hist.old_value), '')::int
-                                        ELSE NULL
-                                    END
-                                FROM user_history sup_hist
-                                WHERE sup_hist.user_id = role_hist.user_id
-                                  AND sup_hist.field_changed = 'supervisor_id'
-                                  AND sup_hist.new_value IS NULL
-                                ORDER BY
-                                    ABS(EXTRACT(EPOCH FROM (sup_hist.changed_at - role_hist.changed_at))) ASC,
-                                    sup_hist.changed_at DESC,
-                                    sup_hist.id DESC
-                                LIMIT 1
-                            ) AS historical_supervisor_id
-                        FROM user_history role_hist
-                        WHERE role_hist.field_changed = 'role'
-                          AND LOWER(COALESCE(role_hist.old_value, '')) = 'operator'
-                          AND LOWER(COALESCE(role_hist.new_value, '')) = 'sv'
-                        ORDER BY role_hist.user_id, role_hist.changed_at DESC, role_hist.id DESC
-                    )
-                    SELECT
-                        u.id,
-                        u.name,
-                        u.direction_id,
-                        u.hire_date,
-                        u.hours_table_url,
-                        u.scores_table_url,
-                        s.name as supervisor_name,
-                        u.status,
-                        u.rate,
-                        u.gender,
-                        u.birth_date,
-                        u.avatar_bucket,
-                        u.avatar_blob_path,
-                        u.avatar_updated_at,
-                        sp.status_code as status_period_status_code,
-                        sp.start_date as status_period_start_date,
-                        sp.end_date as status_period_end_date,
-                        sp.dismissal_reason as status_period_dismissal_reason,
-                        COALESCE(sp.is_blacklist, FALSE) as status_period_is_blacklist,
-                        sp.comment as status_period_comment,
-                        u.role,
-                        p.promoted_month_start
-                    FROM users u
-                    LEFT JOIN promoted_sv p ON p.user_id = u.id
-                    LEFT JOIN directions d ON u.direction_id = d.id
-                    LEFT JOIN users s ON s.id = COALESCE(u.supervisor_id, p.historical_supervisor_id)
-                    LEFT JOIN LATERAL (
-                        SELECT
-                            status_code,
-                            start_date,
-                            end_date,
-                            dismissal_reason,
-                            is_blacklist,
-                            comment
-                        FROM operator_schedule_status_periods p_status
-                        WHERE p_status.operator_id = u.id
-                          AND p_status.status_code = (
-                              CASE
-                                  WHEN u.status = 'fired' THEN 'dismissal'
-                                  WHEN u.status = 'dismissal' THEN 'dismissal'
-                                  WHEN u.status = 'unpaid_leave' THEN 'bs'
-                                  ELSE u.status
-                              END
-                          )
-                        ORDER BY
-                            CASE
-                                WHEN p_status.start_date <= CURRENT_DATE
-                                 AND COALESCE(p_status.end_date, DATE '9999-12-31') >= CURRENT_DATE
-                                THEN 0
-                                ELSE 1
-                            END,
-                            p_status.start_date DESC,
-                            p_status.id DESC
-                        LIMIT 1
-                    ) sp ON TRUE
-                    WHERE (
-                        (u.role = 'operator' AND u.supervisor_id = %s)
-                        OR (
-                            u.role = 'sv'
-                            AND p.promoted_month_start IS NOT NULL
-                            AND %s <= p.promoted_month_start
-                            AND p.historical_supervisor_id = %s
-                        )
-                    )
-                    ORDER BY u.name
-                """, (supervisor_id, month_start, supervisor_id))
-
-            rows = cursor.fetchall()
-            result = []
-            for row in rows:
-                role_norm = str(row[20] or '').strip().lower()
-                promoted_month_start = row[21]
-                is_promoted_supervisor_history = bool(
-                    month_start is not None
-                    and role_norm == 'sv'
-                    and promoted_month_start is not None
-                    and month_start <= promoted_month_start
-                )
-                display_name = f"{row[1]} (СВ)" if (is_promoted_supervisor_history and row[1]) else row[1]
-                result.append({
+                        p.status_code,
+                        p.start_date,
+                        p.end_date,
+                        p.dismissal_reason,
+                        p.is_blacklist,
+                        p.comment
+                    FROM operator_schedule_status_periods p
+                    WHERE p.operator_id = u.id
+                      AND p.status_code = (
+                          CASE
+                              WHEN u.status = 'fired' THEN 'dismissal'
+                              WHEN u.status = 'dismissal' THEN 'dismissal'
+                              WHEN u.status = 'unpaid_leave' THEN 'bs'
+                              ELSE u.status
+                          END
+                      )
+                    ORDER BY
+                        CASE
+                            WHEN p.start_date <= CURRENT_DATE
+                             AND COALESCE(p.end_date, DATE '9999-12-31') >= CURRENT_DATE
+                            THEN 0
+                            ELSE 1
+                        END,
+                        p.start_date DESC,
+                        p.id DESC
+                    LIMIT 1
+                ) sp ON TRUE
+                WHERE u.supervisor_id = %s AND u.role = 'operator'
+            """, (supervisor_id,))
+            return [
+                {
                     'id': row[0],
-                    'name': display_name,
+                    'name': row[1],
                     'direction_id': row[2],
                     'hire_date': row[3].strftime('%d-%m-%Y') if row[3] else None,
                     'hours_table_url': row[4],
@@ -4026,10 +3811,9 @@ class Database:
                     'status_period_end_date': row[16].strftime('%Y-%m-%d') if row[16] else None,
                     'status_period_dismissal_reason': row[17] or '',
                     'status_period_is_blacklist': bool(row[18]) if row[18] is not None else False,
-                    'status_period_comment': row[19] or '',
-                    'is_promoted_supervisor_history': is_promoted_supervisor_history
-                })
-            return result
+                    'status_period_comment': row[19] or ''
+                } for row in cursor.fetchall()
+            ]
 
     def get_all_operators_with_details(self):
         with self._get_cursor() as cursor:
@@ -4836,41 +4620,8 @@ class Database:
         (phone_number, operator_id, month, appeal_date)
         Если supervisor_id задан — фильтрует операторов по этому SV.
         """
-        try:
-            year, mon = map(int, str(month).split('-'))
-            month_start = date(year, mon, 1)
-        except Exception as e:
-            raise ValueError("Invalid month format, expected YYYY-MM") from e
-
         query = """
-        WITH promoted_sv AS (
-            SELECT DISTINCT ON (role_hist.user_id)
-                role_hist.user_id,
-                DATE_TRUNC('month', role_hist.changed_at)::date AS promoted_month_start,
-                (
-                    SELECT
-                        CASE
-                            WHEN NULLIF(TRIM(sup_hist.old_value), '') ~ '^[0-9]+$'
-                            THEN NULLIF(TRIM(sup_hist.old_value), '')::int
-                            ELSE NULL
-                        END
-                    FROM user_history sup_hist
-                    WHERE sup_hist.user_id = role_hist.user_id
-                      AND sup_hist.field_changed = 'supervisor_id'
-                      AND sup_hist.new_value IS NULL
-                    ORDER BY
-                        ABS(EXTRACT(EPOCH FROM (sup_hist.changed_at - role_hist.changed_at))) ASC,
-                        sup_hist.changed_at DESC,
-                        sup_hist.id DESC
-                    LIMIT 1
-                ) AS historical_supervisor_id
-            FROM user_history role_hist
-            WHERE role_hist.field_changed = 'role'
-              AND LOWER(COALESCE(role_hist.old_value, '')) = 'operator'
-              AND LOWER(COALESCE(role_hist.new_value, '')) = 'sv'
-            ORDER BY role_hist.user_id, role_hist.changed_at DESC, role_hist.id DESC
-        ),
-        latest_versions AS (
+        WITH latest_versions AS (
             -- для каждой пары (phone_number, operator_id, month, appeal_date) берем последний created_at
             SELECT
                 phone_number,
@@ -4906,30 +4657,20 @@ class Database:
             u.status,
             u.direction_id,
             d.name AS direction_name,
-            COALESCE(u.supervisor_id, p.historical_supervisor_id) AS supervisor_id,
+            u.supervisor_id,
             su.name AS supervisor_name,
             u.hire_date,
-            COALESCE(c.call_count, 0) AS call_count,
-            u.role,
-            p.promoted_month_start
+            COALESCE(c.call_count, 0) AS call_count
         FROM users u
-        LEFT JOIN promoted_sv p ON p.user_id = u.id
         LEFT JOIN directions d ON u.direction_id = d.id
-        LEFT JOIN users su ON su.id = COALESCE(u.supervisor_id, p.historical_supervisor_id)
+        LEFT JOIN users su ON u.supervisor_id = su.id
         LEFT JOIN counts c ON c.operator_id = u.id
-        WHERE (
-            u.role = 'operator'
-            OR (
-                u.role = 'sv'
-                AND p.promoted_month_start IS NOT NULL
-                AND %s <= p.promoted_month_start
-            )
-        )
+        WHERE u.role = 'operator'
         """
-        params = [month, month, month_start]
+        params = [month, month]
 
         if supervisor_id is not None:
-            query += " AND COALESCE(u.supervisor_id, p.historical_supervisor_id) = %s"
+            query += " AND u.supervisor_id = %s"
             params.append(supervisor_id)
 
         query += " ORDER BY u.name"
@@ -4940,24 +4681,14 @@ class Database:
             return [
                 {
                     "id": row[0],
-                    "name": (f"{row[1]} (СВ)" if (
-                        str(row[9] or '').strip().lower() == 'sv'
-                        and row[10] is not None
-                        and month_start <= row[10]
-                        and row[1]
-                    ) else row[1]),
+                    "name": row[1],
                     "status": row[2],
                     "direction_id": row[3],
                     "direction_name": row[4],
                     "supervisor_id": row[5],
                     "supervisor_name": row[6],
                     "hire_date": row[7].strftime('%d-%m-%Y') if row[7] else None,
-                    "call_count": int(row[8]),
-                    "is_promoted_supervisor_history": bool(
-                        str(row[9] or '').strip().lower() == 'sv'
-                        and row[10] is not None
-                        and month_start <= row[10]
-                    )
+                    "call_count": int(row[8])
                 }
                 for row in rows
             ]
@@ -5007,20 +4738,6 @@ class Database:
             old_field_value = row[1]
             if current_role == 'trainer' and field in ('direction_id', 'supervisor_id'):
                 value = None
-            if field == 'status':
-                status_value = str(value or '').strip().lower()
-                if status_value not in set(USER_STATUS_ALLOWED_VALUES):
-                    raise ValueError("Invalid status value")
-                value = status_value
-                # При ручном возврате оператора в "working" обрываем активный
-                # периодный статус на текущую дату, чтобы ночная синхронизация
-                # не откатывала статус обратно.
-                if current_role == 'operator' and value == 'working':
-                    self._interrupt_active_schedule_status_periods_by_work_day_tx(
-                        cursor=cursor,
-                        operator_id=user_id,
-                        work_date=datetime.now().date()
-                    )
             old_value = str(old_field_value) if old_field_value is not None else None
             
             # Update
@@ -13951,44 +13668,6 @@ class Database:
 
         for period_id, start_date_value, end_date_value, is_blacklist_value in rows:
             if bool(is_blacklist_value):
-                raise ValueError("ЧС-увольнение нельзя прервать сменой")
-            if start_date_value >= work_date_obj:
-                cursor.execute("""
-                    DELETE FROM operator_schedule_status_periods
-                    WHERE id = %s
-                """, (period_id,))
-                continue
-
-            new_end_date = work_date_obj - timedelta(days=1)
-            cursor.execute("""
-                UPDATE operator_schedule_status_periods
-                SET end_date = %s, updated_at = CURRENT_TIMESTAMP
-                WHERE id = %s
-            """, (new_end_date, period_id))
-
-    def _interrupt_active_schedule_status_periods_by_work_day_tx(self, cursor, operator_id, work_date):
-        """
-        Если на рабочую дату у оператора активен периодный статус,
-        считаем его прерванным:
-        - если период начинается в этот день -> удаляем;
-        - если начался раньше -> ставим конец на день раньше.
-        """
-        operator_id = int(operator_id)
-        work_date_obj = self._normalize_schedule_date(work_date)
-
-        cursor.execute("""
-            SELECT id, status_code, start_date, COALESCE(is_blacklist, FALSE)
-            FROM operator_schedule_status_periods
-            WHERE operator_id = %s
-              AND status_code IN ('bs', 'sick_leave', 'annual_leave', 'dismissal')
-              AND start_date <= %s
-              AND COALESCE(end_date, DATE '9999-12-31') >= %s
-            ORDER BY start_date, id
-        """, (operator_id, work_date_obj, work_date_obj))
-        rows = cursor.fetchall()
-
-        for period_id, status_code, start_date_value, is_blacklist_value in rows:
-            if str(status_code or '') == 'dismissal' and bool(is_blacklist_value):
                 raise ValueError("ЧС-увольнение нельзя прервать сменой")
             if start_date_value >= work_date_obj:
                 cursor.execute("""
