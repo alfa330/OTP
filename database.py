@@ -42,7 +42,10 @@ POOL = None
 STATUS_IMPORT_INSERT_PAGE_SIZE = max(200, int(os.getenv('STATUS_IMPORT_INSERT_PAGE_SIZE', '2000')))
 
 ROLE_ALIASES = {
-    'supervisor': 'sv'
+    'supervisor': 'sv',
+    'superadmin': 'super_admin',
+    'super-admin': 'super_admin',
+    'super admin': 'super_admin'
 }
 
 ROLE_HIERARCHY = {

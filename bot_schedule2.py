@@ -528,6 +528,8 @@ def _normalize_user_role(role) -> str:
     role_norm = str(role or '').strip().lower()
     if role_norm == 'supervisor':
         return 'sv'
+    if role_norm in ('superadmin', 'super-admin', 'super admin'):
+        return 'super_admin'
     return role_norm
 
 

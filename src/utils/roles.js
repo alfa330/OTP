@@ -10,6 +10,7 @@ export const ROLE_HIERARCHY = Object.freeze({
 export const normalizeRole = (role) => {
     const normalized = String(role || '').trim().toLowerCase();
     if (normalized === 'supervisor') return 'sv';
+    if (normalized === 'superadmin' || normalized === 'super-admin' || normalized === 'super admin') return 'super_admin';
     return normalized;
 };
 
