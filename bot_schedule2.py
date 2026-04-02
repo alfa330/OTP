@@ -7541,15 +7541,16 @@ def handle_monthly_report():
         
         user_id = int(request.headers.get('X-User-Id'))
         user = db.get_user(id=user_id)
-        if user[3]=="sv":
+        role = _normalize_user_role(user[3]) if user else ''
+        if role == "sv":
             # get_user returns tuple: (id, telegram_id, name, role, ... , status)
             if user[5] == "fired":
                 return jsonify({"error": "Your status is fired. No report available."}), 403
             svs=[(user[0], user[2], "", "", "", user[5])]
-        elif user[3]=="admin":
+        elif _is_admin_role(role):
             svs = [sv for sv in db.get_supervisors() if len(sv) > 5 and sv[5] != "fired"]
         else:
-            return jsonify({"error": "Only admin or SV can access to this report"}), 404
+            return jsonify({"error": "Only admin, super admin or SV can access to this report"}), 404
 
         if not svs:
             return jsonify({"error": "No supervisors found"}), 404
