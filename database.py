@@ -2589,10 +2589,63 @@ class Database:
         except Exception as e:
             raise ValueError("Invalid month format, expected YYYY-MM") from e
 
+        def _to_float(value, default=0.0):
+            try:
+                return float(value)
+            except Exception:
+                return float(default)
+
+        def _to_int(value, default=0):
+            try:
+                return int(value)
+            except Exception:
+                return int(default)
+
+        def _has_any_hours_indicators(payload):
+            if not isinstance(payload, dict):
+                return False
+
+            def _has_non_zero(value):
+                try:
+                    return abs(float(value)) > 0
+                except Exception:
+                    return False
+
+            aggr = payload.get("aggregates") if isinstance(payload.get("aggregates"), dict) else {}
+            for key in (
+                "regular_hours",
+                "total_break_time",
+                "total_talk_time",
+                "total_calls",
+                "total_efficiency_hours",
+                "calls_per_hour"
+            ):
+                if _has_non_zero(aggr.get(key)):
+                    return True
+
+            if _has_non_zero(payload.get("technical_issue_hours")) or _has_non_zero(payload.get("offline_activity_hours")):
+                return True
+
+            daily_payload = payload.get("daily") if isinstance(payload.get("daily"), dict) else {}
+            for day_value in daily_payload.values():
+                if not isinstance(day_value, dict):
+                    continue
+                for key in ("work_time", "break_time", "talk_time", "calls", "efficiency"):
+                    if _has_non_zero(day_value.get(key)):
+                        return True
+
+            return False
+
         with self._get_cursor() as cursor:
-            # Получаем операторов + ставка + norm_hours + агрегаты work_hours (включая fines)
+            # Получаем операторов выбранного супервайзера + агрегаты work_hours.
             cursor.execute("""
-                SELECT u.id, u.name, u.rate, u.status, u.supervisor_id,
+                SELECT
+                    u.id,
+                    u.name,
+                    u.rate,
+                    u.status,
+                    u.supervisor_id,
+                    COALESCE(s.name, '') as supervisor_name,
                     d.name as direction_name,
                     COALESCE(w.norm_hours, 0) as norm_hours,
                     COALESCE(w.regular_hours, 0) as regular_hours,
@@ -2601,22 +2654,66 @@ class Database:
                     COALESCE(w.total_calls, 0) as total_calls,
                     COALESCE(w.total_efficiency_hours, 0) as total_efficiency_hours,
                     COALESCE(w.calls_per_hour, 0) as calls_per_hour,
-                    COALESCE(w.fines, 0) as fines
+                    COALESCE(w.fines, 0) as fines,
+                    LOWER(COALESCE(u.role, '')) as role_norm
                 FROM users u
+                LEFT JOIN users s ON s.id = u.supervisor_id
                 LEFT JOIN work_hours w
                 ON w.operator_id = u.id AND w.month = %s
                 LEFT JOIN directions d ON u.direction_id = d.id
-                WHERE u.role = 'operator' AND u.supervisor_id = %s
+                WHERE LOWER(COALESCE(u.role, '')) = 'operator'
+                  AND u.supervisor_id = %s
                 ORDER BY u.name
             """, (month, supervisor_id))
             operator_rows = cursor.fetchall()  # list of tuples
 
-            if not operator_rows:
+            # Берем целевого супервайзера как потенциальную строку отчета.
+            cursor.execute("""
+                SELECT
+                    u.id,
+                    u.name,
+                    u.rate,
+                    u.status,
+                    u.id as supervisor_id,
+                    u.name as supervisor_name,
+                    d.name as direction_name,
+                    COALESCE(w.norm_hours, 0) as norm_hours,
+                    COALESCE(w.regular_hours, 0) as regular_hours,
+                    COALESCE(w.total_break_time, 0) as total_break_time,
+                    COALESCE(w.total_talk_time, 0) as total_talk_time,
+                    COALESCE(w.total_calls, 0) as total_calls,
+                    COALESCE(w.total_efficiency_hours, 0) as total_efficiency_hours,
+                    COALESCE(w.calls_per_hour, 0) as calls_per_hour,
+                    COALESCE(w.fines, 0) as fines,
+                    LOWER(COALESCE(u.role, '')) as role_norm
+                FROM users u
+                LEFT JOIN work_hours w
+                ON w.operator_id = u.id AND w.month = %s
+                LEFT JOIN directions d ON u.direction_id = d.id
+                WHERE u.id = %s
+                  AND LOWER(COALESCE(u.role, '')) IN ('sv', 'supervisor')
+                LIMIT 1
+            """, (month, supervisor_id))
+            supervisor_row = cursor.fetchone()
+
+            op_ids = []
+            for row in operator_rows:
+                try:
+                    op_ids.append(int(row[0]))
+                except Exception:
+                    continue
+            if supervisor_row:
+                try:
+                    sv_id_int = int(supervisor_row[0])
+                    if sv_id_int not in op_ids:
+                        op_ids.append(sv_id_int)
+                except Exception:
+                    pass
+
+            if not op_ids:
                 return {"month": month, "days_in_month": days, "operators": []}
 
-            op_ids = [row[0] for row in operator_rows]
-
-            # Получаем daily_hours для этих операторов за месяц (с информацией о штрафах)
+            # Получаем daily_hours для операторов и целевого супервайзера за месяц (с информацией о штрафах)
             cursor.execute("""
                 SELECT d.operator_id, d.day, d.work_time, d.break_time, d.talk_time, d.calls, d.efficiency,
                     d.fine_amount, d.fine_reason, d.fine_comment
@@ -2678,36 +2775,69 @@ class Database:
                 end_date=end
             )
 
-            # Сбор финального списка операторов
-            operators = []
-            for row in operator_rows:
-                (op_id, op_name, rate, status, sup_id, direction_name, norm_hours, 
-                regular_hours, total_break_time, total_talk_time,
-                total_calls, total_efficiency_hours, calls_per_hour, fines) = row
+            def _build_row_payload(row):
+                if not row or len(row) < 16:
+                    return None
+                (
+                    op_id,
+                    op_name,
+                    rate,
+                    status,
+                    sup_id,
+                    supervisor_name,
+                    direction_name,
+                    norm_hours,
+                    regular_hours,
+                    total_break_time,
+                    total_talk_time,
+                    total_calls,
+                    total_efficiency_hours,
+                    calls_per_hour,
+                    fines,
+                    role_norm
+                ) = row
 
-                operators.append({
-                    "operator_id": op_id,
+                role_out = "sv" if str(role_norm or "").strip().lower() in ("sv", "supervisor") else "operator"
+                op_id_int = _to_int(op_id, 0)
+                if op_id_int <= 0:
+                    return None
+
+                return {
+                    "operator_id": op_id_int,
                     "name": op_name,
                     "direction": direction_name,
-                    "supervisor_id": sup_id,
-                    "rate": float(rate) if rate is not None else 0.0,
+                    "supervisor_id": _to_int(sup_id, op_id_int if role_out == "sv" else 0) or (op_id_int if role_out == "sv" else None),
+                    "supervisor_name": supervisor_name or (op_name if role_out == "sv" else None),
+                    "role": role_out,
+                    "rate": _to_float(rate, 0.0),
                     "status": status,
-                    "norm_hours": float(norm_hours) if norm_hours is not None else 0.0,
-                    "daily": daily_map.get(op_id, {}),
-                    "technical_issues_by_day": technical_map_by_operator.get(op_id, {}) if isinstance(technical_map_by_operator, dict) else {},
-                    "technical_issue_hours": round(float(technical_totals_by_operator.get(op_id, 0.0)), 2) if isinstance(technical_totals_by_operator, dict) else 0.0,
-                    "offline_activities_by_day": offline_map_by_operator.get(op_id, {}) if isinstance(offline_map_by_operator, dict) else {},
-                    "offline_activity_hours": round(float(offline_totals_by_operator.get(op_id, 0.0)), 2) if isinstance(offline_totals_by_operator, dict) else 0.0,
+                    "norm_hours": _to_float(norm_hours, 0.0),
+                    "daily": daily_map.get(op_id_int, {}),
+                    "technical_issues_by_day": technical_map_by_operator.get(op_id_int, {}) if isinstance(technical_map_by_operator, dict) else {},
+                    "technical_issue_hours": round(_to_float(technical_totals_by_operator.get(op_id_int, 0.0), 0.0), 2) if isinstance(technical_totals_by_operator, dict) else 0.0,
+                    "offline_activities_by_day": offline_map_by_operator.get(op_id_int, {}) if isinstance(offline_map_by_operator, dict) else {},
+                    "offline_activity_hours": round(_to_float(offline_totals_by_operator.get(op_id_int, 0.0), 0.0), 2) if isinstance(offline_totals_by_operator, dict) else 0.0,
                     "aggregates": {
-                        "regular_hours": float(regular_hours),
-                        "total_break_time": float(total_break_time),
-                        "total_talk_time": float(total_talk_time),
-                        "total_calls": int(total_calls),
-                        "total_efficiency_hours": float(total_efficiency_hours),
-                        "calls_per_hour": float(calls_per_hour),
-                        "fines": float(fines)
+                        "regular_hours": _to_float(regular_hours, 0.0),
+                        "total_break_time": _to_float(total_break_time, 0.0),
+                        "total_talk_time": _to_float(total_talk_time, 0.0),
+                        "total_calls": _to_int(total_calls, 0),
+                        "total_efficiency_hours": _to_float(total_efficiency_hours, 0.0),
+                        "calls_per_hour": _to_float(calls_per_hour, 0.0),
+                        "fines": _to_float(fines, 0.0)
                     }
-                })
+                }
+
+            # Сбор финального списка: операторы + (опционально) целевой СВ, если по нему есть часы.
+            operators = []
+            for row in operator_rows:
+                payload = _build_row_payload(row)
+                if payload:
+                    operators.append(payload)
+
+            sv_payload = _build_row_payload(supervisor_row) if supervisor_row else None
+            if sv_payload and _has_any_hours_indicators(sv_payload):
+                operators.append(sv_payload)
 
         return {"month": month, "days_in_month": days, "operators": operators}
 
@@ -2727,9 +2857,62 @@ class Database:
         except Exception as e:
             raise ValueError("Invalid month format, expected YYYY-MM") from e
 
+        def _to_float(value, default=0.0):
+            try:
+                return float(value)
+            except Exception:
+                return float(default)
+
+        def _to_int(value, default=0):
+            try:
+                return int(value)
+            except Exception:
+                return int(default)
+
+        def _has_any_hours_indicators(payload):
+            if not isinstance(payload, dict):
+                return False
+
+            def _has_non_zero(value):
+                try:
+                    return abs(float(value)) > 0
+                except Exception:
+                    return False
+
+            aggr = payload.get("aggregates") if isinstance(payload.get("aggregates"), dict) else {}
+            for key in (
+                "regular_hours",
+                "total_break_time",
+                "total_talk_time",
+                "total_calls",
+                "total_efficiency_hours",
+                "calls_per_hour"
+            ):
+                if _has_non_zero(aggr.get(key)):
+                    return True
+
+            if _has_non_zero(payload.get("technical_issue_hours")) or _has_non_zero(payload.get("offline_activity_hours")):
+                return True
+
+            daily_payload = payload.get("daily") if isinstance(payload.get("daily"), dict) else {}
+            for day_value in daily_payload.values():
+                if not isinstance(day_value, dict):
+                    continue
+                for key in ("work_time", "break_time", "talk_time", "calls", "efficiency"):
+                    if _has_non_zero(day_value.get(key)):
+                        return True
+
+            return False
+
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT u.id, u.name, u.rate, u.status, u.supervisor_id,
+                SELECT
+                    u.id,
+                    u.name,
+                    u.rate,
+                    u.status,
+                    u.supervisor_id,
+                    COALESCE(s.name, '') as supervisor_name,
                     d.name as direction_name,
                     COALESCE(w.norm_hours, 0) as norm_hours,
                     COALESCE(w.regular_hours, 0) as regular_hours,
@@ -2738,20 +2921,62 @@ class Database:
                     COALESCE(w.total_calls, 0) as total_calls,
                     COALESCE(w.total_efficiency_hours, 0) as total_efficiency_hours,
                     COALESCE(w.calls_per_hour, 0) as calls_per_hour,
-                    COALESCE(w.fines, 0) as fines
+                    COALESCE(w.fines, 0) as fines,
+                    LOWER(COALESCE(u.role, '')) as role_norm
                 FROM users u
+                LEFT JOIN users s ON s.id = u.supervisor_id
                 LEFT JOIN work_hours w
                 ON w.operator_id = u.id AND w.month = %s
                 LEFT JOIN directions d ON u.direction_id = d.id
-                WHERE u.role = 'operator'
+                WHERE LOWER(COALESCE(u.role, '')) = 'operator'
                 ORDER BY u.name
             """, (month,))
             operator_rows = cursor.fetchall()
 
-            if not operator_rows:
-                return {"month": month, "days_in_month": days, "operators": []}
+            # Потенциальные строки супервайзеров.
+            cursor.execute("""
+                SELECT
+                    u.id,
+                    u.name,
+                    u.rate,
+                    u.status,
+                    u.id as supervisor_id,
+                    u.name as supervisor_name,
+                    d.name as direction_name,
+                    COALESCE(w.norm_hours, 0) as norm_hours,
+                    COALESCE(w.regular_hours, 0) as regular_hours,
+                    COALESCE(w.total_break_time, 0) as total_break_time,
+                    COALESCE(w.total_talk_time, 0) as total_talk_time,
+                    COALESCE(w.total_calls, 0) as total_calls,
+                    COALESCE(w.total_efficiency_hours, 0) as total_efficiency_hours,
+                    COALESCE(w.calls_per_hour, 0) as calls_per_hour,
+                    COALESCE(w.fines, 0) as fines,
+                    LOWER(COALESCE(u.role, '')) as role_norm
+                FROM users u
+                LEFT JOIN work_hours w
+                ON w.operator_id = u.id AND w.month = %s
+                LEFT JOIN directions d ON u.direction_id = d.id
+                WHERE LOWER(COALESCE(u.role, '')) IN ('sv', 'supervisor')
+                ORDER BY u.name
+            """, (month,))
+            supervisor_rows = cursor.fetchall()
 
-            op_ids = [row[0] for row in operator_rows]
+            op_ids = []
+            for row in operator_rows:
+                try:
+                    op_ids.append(int(row[0]))
+                except Exception:
+                    continue
+            for row in supervisor_rows:
+                try:
+                    sid = int(row[0])
+                except Exception:
+                    continue
+                if sid not in op_ids:
+                    op_ids.append(sid)
+
+            if not op_ids:
+                return {"month": month, "days_in_month": days, "operators": []}
 
             cursor.execute("""
                 SELECT d.operator_id, d.day, d.work_time, d.break_time, d.talk_time, d.calls, d.efficiency,
@@ -2812,35 +3037,69 @@ class Database:
                 end_date=end
             )
 
-            operators = []
-            for row in operator_rows:
-                (op_id, op_name, rate, status, sup_id, direction_name, norm_hours,
-                regular_hours, total_break_time, total_talk_time,
-                total_calls, total_efficiency_hours, calls_per_hour, fines) = row
+            def _build_row_payload(row):
+                if not row or len(row) < 16:
+                    return None
+                (
+                    op_id,
+                    op_name,
+                    rate,
+                    status,
+                    sup_id,
+                    supervisor_name,
+                    direction_name,
+                    norm_hours,
+                    regular_hours,
+                    total_break_time,
+                    total_talk_time,
+                    total_calls,
+                    total_efficiency_hours,
+                    calls_per_hour,
+                    fines,
+                    role_norm
+                ) = row
 
-                operators.append({
-                    "operator_id": op_id,
+                role_out = "sv" if str(role_norm or "").strip().lower() in ("sv", "supervisor") else "operator"
+                op_id_int = _to_int(op_id, 0)
+                if op_id_int <= 0:
+                    return None
+
+                return {
+                    "operator_id": op_id_int,
                     "name": op_name,
                     "direction": direction_name,
-                    "supervisor_id": sup_id,
-                    "rate": float(rate) if rate is not None else 0.0,
+                    "supervisor_id": _to_int(sup_id, op_id_int if role_out == "sv" else 0) or (op_id_int if role_out == "sv" else None),
+                    "supervisor_name": supervisor_name or (op_name if role_out == "sv" else None),
+                    "role": role_out,
+                    "rate": _to_float(rate, 0.0),
                     "status": status,
-                    "norm_hours": float(norm_hours) if norm_hours is not None else 0.0,
-                    "daily": daily_map.get(op_id, {}),
-                    "technical_issues_by_day": technical_map_by_operator.get(op_id, {}) if isinstance(technical_map_by_operator, dict) else {},
-                    "technical_issue_hours": round(float(technical_totals_by_operator.get(op_id, 0.0)), 2) if isinstance(technical_totals_by_operator, dict) else 0.0,
-                    "offline_activities_by_day": offline_map_by_operator.get(op_id, {}) if isinstance(offline_map_by_operator, dict) else {},
-                    "offline_activity_hours": round(float(offline_totals_by_operator.get(op_id, 0.0)), 2) if isinstance(offline_totals_by_operator, dict) else 0.0,
+                    "norm_hours": _to_float(norm_hours, 0.0),
+                    "daily": daily_map.get(op_id_int, {}),
+                    "technical_issues_by_day": technical_map_by_operator.get(op_id_int, {}) if isinstance(technical_map_by_operator, dict) else {},
+                    "technical_issue_hours": round(_to_float(technical_totals_by_operator.get(op_id_int, 0.0), 0.0), 2) if isinstance(technical_totals_by_operator, dict) else 0.0,
+                    "offline_activities_by_day": offline_map_by_operator.get(op_id_int, {}) if isinstance(offline_map_by_operator, dict) else {},
+                    "offline_activity_hours": round(_to_float(offline_totals_by_operator.get(op_id_int, 0.0), 0.0), 2) if isinstance(offline_totals_by_operator, dict) else 0.0,
                     "aggregates": {
-                        "regular_hours": float(regular_hours),
-                        "total_break_time": float(total_break_time),
-                        "total_talk_time": float(total_talk_time),
-                        "total_calls": int(total_calls),
-                        "total_efficiency_hours": float(total_efficiency_hours),
-                        "calls_per_hour": float(calls_per_hour),
-                        "fines": float(fines)
+                        "regular_hours": _to_float(regular_hours, 0.0),
+                        "total_break_time": _to_float(total_break_time, 0.0),
+                        "total_talk_time": _to_float(total_talk_time, 0.0),
+                        "total_calls": _to_int(total_calls, 0),
+                        "total_efficiency_hours": _to_float(total_efficiency_hours, 0.0),
+                        "calls_per_hour": _to_float(calls_per_hour, 0.0),
+                        "fines": _to_float(fines, 0.0)
                     }
-                })
+                }
+
+            operators = []
+            for row in operator_rows:
+                payload = _build_row_payload(row)
+                if payload:
+                    operators.append(payload)
+
+            for row in supervisor_rows:
+                payload = _build_row_payload(row)
+                if payload and _has_any_hours_indicators(payload):
+                    operators.append(payload)
 
         return {"month": month, "days_in_month": days, "operators": operators}
 
