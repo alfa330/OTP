@@ -7630,6 +7630,7 @@ def handle_monthly_report():
                     'scores': scores,
                     'special_scores': special_scores
                 })
+            report_rows.sort(key=lambda row: str(row.get('name') or '').strip().casefold())
 
             safe_sheet_name = sv_name[:31].replace('/', '_').replace('\\', '_').replace('?', '_').replace('*', '_').replace('[', '_').replace(']', '_')
             worksheet = workbook.add_worksheet(safe_sheet_name)
