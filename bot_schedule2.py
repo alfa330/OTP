@@ -2893,6 +2893,8 @@ def admin_update_user():
             return jsonify({"error": "Failed to update user"}), 500
 
         return jsonify({"status": "success", "message": "User updated"}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error updating user: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
@@ -6204,7 +6206,7 @@ def get_sv_data():
             if requester_role == 'sv':
                 operators = db.get_all_operators_with_details() or []
             else:
-                operators = db.get_operators_by_supervisor(user_id) or []
+                operators = db.get_operators_by_supervisor(user_id, month=month) or []
         except Exception:
             operators = []
 
@@ -7597,7 +7599,7 @@ def handle_monthly_report():
             # Exclude supervisors with status 'fired' (should already be filtered above, but double check)
             if len(sv) > 5 and sv[5] == "fired":
                 continue
-            operators = db.get_operators_by_supervisor(sv_id)
+            operators = db.get_operators_by_supervisor(sv_id, month=month)
             special_evaluator_id = 169
             report_rows = []
 
