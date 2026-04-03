@@ -4453,7 +4453,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
       {/* STRUCTURE TAB */}
       {tab === "structure" && (
         <div className="grid grid-cols-1 xl:grid-cols-5 2xl:grid-cols-12 gap-6">
-          <div className={`${builderLessonPanelMode === "operator" ? "xl:col-span-2 2xl:col-span-4" : "xl:col-span-3 2xl:col-span-8"} space-y-4`}>
+          <div className="xl:col-span-2 2xl:col-span-4 space-y-4">
             {modules.map(mod => (
               <div key={mod.id} className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
                 <div className="flex items-center gap-3 px-5 py-4 bg-slate-50 border-b border-slate-100">
@@ -4491,7 +4491,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
             ))}
             <button onClick={addModule} className="w-full border-2 border-dashed border-slate-200 hover:border-indigo-300 rounded-2xl py-4 text-sm text-slate-500 hover:text-indigo-600 flex items-center justify-center gap-2 transition-all font-medium"><Plus size={16} /> Добавить модуль</button>
           </div>
-          <div className={`${builderLessonPanelMode === "operator" ? "xl:col-span-3 2xl:col-span-8" : "xl:col-span-2 2xl:col-span-4"}`}>
+          <div className="xl:col-span-3 2xl:col-span-8">
             <div className={`bg-white rounded-2xl border border-slate-200 ${builderLessonPanelMode === "operator" ? "p-0 overflow-hidden" : "p-5 sticky top-24"}`}>
               {selectedLessonModel ? (
                 <>
