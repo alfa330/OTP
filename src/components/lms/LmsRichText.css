@@ -84,7 +84,25 @@
 
 .lms-rich-content ul,
 .lms-rich-content ol {
-  margin: 0.5rem 0 0.75rem 1.25rem;
+  margin: 0.5rem 0 0.75rem 0;
+  padding-left: 1.35rem;
+  list-style-position: outside;
+}
+
+.lms-rich-content ul {
+  list-style-type: disc;
+}
+
+.lms-rich-content ol {
+  list-style-type: decimal;
+}
+
+.lms-rich-content ol li[data-list="bullet"] {
+  list-style-type: disc;
+}
+
+.lms-rich-content ol li[data-list="ordered"] {
+  list-style-type: decimal;
 }
 
 .lms-rich-content li {
