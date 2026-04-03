@@ -1337,6 +1337,17 @@ const App = ({ user, initialSelection }) => {
     }, [initialSelection]);
 
     useEffect(() => {
+        if (!isSupervisorRole || !userId || !Array.isArray(supervisors) || supervisors.length === 0) return;
+        const hasSelected = selectedSupervisor && supervisors.some((sv) => Number(sv.id) === Number(selectedSupervisor));
+        if (hasSelected) return;
+        const hasSelfInList = supervisors.some((sv) => Number(sv.id) === Number(userId));
+        const fallbackSupervisorId = hasSelfInList
+            ? Number(userId)
+            : (Number(supervisors?.[0]?.id) || null);
+        if (fallbackSupervisorId) setSelectedSupervisor(fallbackSupervisorId);
+    }, [isSupervisorRole, userId, supervisors, selectedSupervisor]);
+
+    useEffect(() => {
         if (!userId) return;
         writeEmbedState({
             user: { id: userId, role: userRole, name: userName },
@@ -1368,7 +1379,7 @@ const App = ({ user, initialSelection }) => {
     // Operators
     useEffect(() => {
         if (!userId) return;
-        const scopeId = isAdminRole ? selectedSupervisor : userId;
+        const scopeId = (isAdminRole || isSupervisorRole) ? selectedSupervisor : userId;
         if (!scopeId) {
             setOperators([]);
             return;
@@ -1406,7 +1417,7 @@ const App = ({ user, initialSelection }) => {
             });
 
         return () => { isCancelled = true; };
-    }, [userId, isAdminRole, selectedSupervisor, getOperatorsCacheKey]);
+    }, [userId, isAdminRole, isSupervisorRole, selectedSupervisor, getOperatorsCacheKey]);
 
     // Evaluations fetch
     const fetchEvaluations = useCallback(async ({ force = false } = {}) => {
@@ -2079,7 +2090,7 @@ const App = ({ user, initialSelection }) => {
                         )}
                     </div>
                     <div className="filters">
-                        {isAdminRole && (
+                        {(isAdminRole || isSupervisorRole) && (
                             <div className="filter-group">
                                 <label className="label">Супервайзер</label>
                                 <select className="select" value={selectedSupervisor||''} style={selectedSupervisorIsFired ? { color:'var(--text-3)' } : undefined} onChange={e => { setSelectedSupervisor(parseInt(e.target.value)||null); setSelectedOperator(null); setCalls([]); setExpandedId(null); }}>
