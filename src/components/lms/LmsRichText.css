@@ -16,6 +16,7 @@
 
 .lms-rich-text-editor {
   --lms-editor-min-height: 140px;
+  position: relative;
 }
 
 .lms-rich-text-editor .ql-toolbar .ql-attachment {
@@ -86,6 +87,58 @@
 .lms-rich-text-editor .ql-editor .lms-embed-selected {
   outline: 2px solid rgb(99 102 241);
   outline-offset: 2px;
+}
+
+.lms-rich-image-controls {
+  position: absolute;
+  z-index: 25;
+  transform: translateX(-100%);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  padding: 0.32rem;
+  border-radius: 9999px;
+  border: 1px solid rgb(199 210 254 / 95%);
+  background: rgb(255 255 255 / 92%);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 12px 24px -16px rgb(15 23 42 / 45%);
+}
+
+.lms-rich-image-control-btn {
+  width: 1.7rem;
+  height: 1.7rem;
+  border-radius: 9999px;
+  border: 1px solid rgb(203 213 225);
+  background: rgb(248 250 252);
+  color: rgb(51 65 85);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.15s ease;
+}
+
+.lms-rich-image-control-btn:hover {
+  background: rgb(238 242 255);
+  border-color: rgb(165 180 252);
+  color: rgb(67 56 202);
+  transform: translateY(-1px);
+}
+
+.lms-rich-image-control-btn:focus-visible {
+  outline: 2px solid rgb(99 102 241);
+  outline-offset: 1px;
+}
+
+.lms-rich-image-control-btn-danger {
+  color: rgb(185 28 28);
+  border-color: rgb(254 202 202);
+  background: rgb(254 242 242);
+}
+
+.lms-rich-image-control-btn-danger:hover {
+  color: rgb(185 28 28);
+  border-color: rgb(252 165 165);
+  background: rgb(254 226 226);
 }
 
 .lms-rich-embed-toolbar {

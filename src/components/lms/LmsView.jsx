@@ -3,7 +3,7 @@ import ReactQuill from "react-quill";
 import DOMPurify from "dompurify";
 import {
   BookOpen, Play, CheckCircle, Clock, Award, Bell, Search, ChevronRight,
-  ChevronDown, BarChart2, Plus, Trash2, Edit, Settings, Lock, Star, Download,
+  ChevronDown, BarChart2, Plus, Minus, Trash2, Edit, Settings, Lock, Star, Download,
   X, Check, AlertCircle, ArrowLeft, Video, FileText, HelpCircle, Upload,
   Users, TrendingUp, Shield, Target, GripVertical, Filter, Calendar,
   PlayCircle, AlignLeft, Layers, ChevronLeft, Eye,
@@ -342,9 +342,11 @@ function RichTextEditor({
   onImageUpload = null,
   onFileUpload = null,
 }) {
+  const editorShellRef = useRef(null);
   const quillRef = useRef(null);
   const dragEmbedRef = useRef(null);
   const [selectedEmbed, setSelectedEmbed] = useState(null);
+  const [imageControlsPos, setImageControlsPos] = useState(null);
 
   const getEditor = useCallback(() => quillRef.current?.getEditor?.() || null, []);
 
@@ -373,6 +375,7 @@ function RichTextEditor({
   const clearSelectedEmbed = useCallback(() => {
     const quill = getEditor();
     if (quill) clearSelectedEmbedStyles(quill.root);
+    setImageControlsPos(null);
     setSelectedEmbed(null);
   }, [getEditor, clearSelectedEmbedStyles]);
 
@@ -394,6 +397,32 @@ function RichTextEditor({
     return null;
   }, [selectedEmbed, getEditor]);
 
+  const getImageControlsPosition = useCallback((node) => {
+    if (!(node instanceof HTMLImageElement)) return null;
+    const shell = editorShellRef.current;
+    if (!shell) return null;
+    const shellRect = shell.getBoundingClientRect();
+    const imageRect = node.getBoundingClientRect();
+    return {
+      top: Math.max(8, Math.round(imageRect.top - shellRect.top + 8)),
+      left: Math.max(8, Math.round(imageRect.right - shellRect.left - 8)),
+    };
+  }, []);
+
+  const syncImageControlsPosition = useCallback(() => {
+    if (!selectedEmbed || selectedEmbed.type !== "image") {
+      setImageControlsPos((prev) => (prev ? null : prev));
+      return;
+    }
+    const node = resolveSelectedNode();
+    const next = getImageControlsPosition(node);
+    setImageControlsPos((prev) => {
+      if (!next) return prev ? null : prev;
+      if (prev && prev.top === next.top && prev.left === next.left) return prev;
+      return next;
+    });
+  }, [selectedEmbed, resolveSelectedNode, getImageControlsPosition]);
+
   const selectEmbedNode = useCallback((node, type) => {
     const quill = getEditor();
     if (!quill || !node) return;
@@ -414,9 +443,17 @@ function RichTextEditor({
     if (type === "image") {
       const width = Math.max(1, Number(node.getAttribute("width") || Math.round(node.getBoundingClientRect().width || 0) || 0));
       nextState.width = width;
+      const nextPos = getImageControlsPosition(node);
+      setImageControlsPos((prev) => {
+        if (!nextPos) return prev ? null : prev;
+        if (prev && prev.top === nextPos.top && prev.left === nextPos.left) return prev;
+        return nextPos;
+      });
+    } else {
+      setImageControlsPos((prev) => (prev ? null : prev));
     }
     setSelectedEmbed(nextState);
-  }, [getEditor, ensureEmbedAttrs, clearSelectedEmbedStyles]);
+  }, [getEditor, ensureEmbedAttrs, clearSelectedEmbedStyles, getImageControlsPosition]);
 
   const removeSelectedEmbed = useCallback(() => {
     const quill = getEditor();
@@ -456,7 +493,8 @@ function RichTextEditor({
       quill.update("user");
     }
     setSelectedEmbed((prev) => (prev ? { ...prev, width: Math.round(nextWidth) } : prev));
-  }, [selectedEmbed, getEditor, resolveSelectedNode]);
+    requestAnimationFrame(() => syncImageControlsPosition());
+  }, [selectedEmbed, getEditor, resolveSelectedNode, syncImageControlsPosition]);
 
   const handleImageInsert = useCallback(() => {
     if (typeof onImageUpload !== "function") return;
@@ -542,6 +580,29 @@ function RichTextEditor({
     if (!quill) return;
     ensureEmbedAttrs(quill.root);
   }, [value, getEditor, ensureEmbedAttrs]);
+
+  useEffect(() => {
+    syncImageControlsPosition();
+  }, [syncImageControlsPosition, value]);
+
+  useEffect(() => {
+    if (!selectedEmbed || selectedEmbed.type !== "image") return undefined;
+    const quill = getEditor();
+    if (!quill) return undefined;
+    const root = quill.root;
+    const container = root.parentElement;
+    const handleReposition = () => requestAnimationFrame(() => syncImageControlsPosition());
+    window.addEventListener("resize", handleReposition);
+    window.addEventListener("scroll", handleReposition, true);
+    root.addEventListener("scroll", handleReposition);
+    container?.addEventListener("scroll", handleReposition);
+    return () => {
+      window.removeEventListener("resize", handleReposition);
+      window.removeEventListener("scroll", handleReposition, true);
+      root.removeEventListener("scroll", handleReposition);
+      container?.removeEventListener("scroll", handleReposition);
+    };
+  }, [selectedEmbed, getEditor, syncImageControlsPosition]);
 
   useEffect(() => {
     const quill = getEditor();
@@ -712,7 +773,11 @@ function RichTextEditor({
   }, [getEditor, selectEmbedNode, clearSelectedEmbed, selectedEmbed, removeSelectedEmbed, ensureEmbedAttrs]);
 
   return (
-    <div className="lms-rich-text-editor" style={{ "--lms-editor-min-height": `${Math.max(100, Number(minHeight || 140))}px` }}>
+    <div
+      ref={editorShellRef}
+      className="lms-rich-text-editor"
+      style={{ "--lms-editor-min-height": `${Math.max(100, Number(minHeight || 140))}px` }}
+    >
       <ReactQuill
         ref={quillRef}
         theme="snow"
@@ -722,16 +787,43 @@ function RichTextEditor({
         modules={richTextModules}
         formats={RICH_TEXT_FORMATS}
       />
-      {selectedEmbed && (
+      {selectedEmbed?.type === "image" && imageControlsPos && (
+        <div
+          className="lms-rich-image-controls"
+          style={{ top: `${imageControlsPos.top}px`, left: `${imageControlsPos.left}px` }}
+        >
+          <button
+            type="button"
+            className="lms-rich-image-control-btn"
+            onClick={() => resizeSelectedImage(-80)}
+            aria-label="Уменьшить изображение"
+            title="Уменьшить"
+          >
+            <Minus size={13} />
+          </button>
+          <button
+            type="button"
+            className="lms-rich-image-control-btn"
+            onClick={() => resizeSelectedImage(80)}
+            aria-label="Увеличить изображение"
+            title="Увеличить"
+          >
+            <Plus size={13} />
+          </button>
+          <button
+            type="button"
+            className="lms-rich-image-control-btn lms-rich-image-control-btn-danger"
+            onClick={removeSelectedEmbed}
+            aria-label="Удалить изображение"
+            title="Удалить"
+          >
+            <Trash2 size={13} />
+          </button>
+        </div>
+      )}
+      {selectedEmbed && selectedEmbed.type !== "image" && (
         <div className="lms-rich-embed-toolbar">
-          <span className="lms-rich-embed-badge">{selectedEmbed.type === "image" ? "Изображение" : "Файл"}</span>
-          {selectedEmbed.type === "image" && (
-            <>
-              <button type="button" className="lms-rich-embed-btn" onClick={() => resizeSelectedImage(-80)}>-</button>
-              <button type="button" className="lms-rich-embed-btn" onClick={() => resizeSelectedImage(80)}>+</button>
-              <span className="lms-rich-embed-size">{Math.max(1, Number(selectedEmbed.width || 0))}px</span>
-            </>
-          )}
+          <span className="lms-rich-embed-badge">Файл</span>
           <button type="button" className="lms-rich-embed-btn lms-rich-embed-btn-danger" onClick={removeSelectedEmbed} aria-label="Удалить элемент">
             <X size={12} />
           </button>
