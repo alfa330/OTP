@@ -18,6 +18,12 @@
   --lms-editor-min-height: 140px;
 }
 
+.lms-rich-text-editor .ql-toolbar .ql-attachment::before {
+  content: "\1F4CE";
+  font-size: 14px;
+  line-height: 1;
+}
+
 .lms-rich-text-editor .ql-toolbar.ql-snow {
   border: 1px solid rgb(226 232 240);
   border-bottom: 0;
@@ -50,6 +56,80 @@
   height: auto;
   border-radius: 0.75rem;
   margin: 0.5rem 0;
+  cursor: grab;
+}
+
+.lms-rich-text-editor .ql-editor img:active {
+  cursor: grabbing;
+}
+
+.lms-rich-text-editor .ql-editor .lms-file-embed {
+  margin: 0.5rem 0;
+  cursor: grab;
+}
+
+.lms-rich-text-editor .ql-editor .lms-file-embed:active {
+  cursor: grabbing;
+}
+
+.lms-rich-text-editor .ql-editor .lms-embed-selected {
+  outline: 2px solid rgb(99 102 241);
+  outline-offset: 2px;
+}
+
+.lms-rich-embed-toolbar {
+  margin-top: 0.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.lms-rich-embed-badge {
+  font-size: 11px;
+  line-height: 1;
+  color: rgb(67 56 202);
+  background: rgb(238 242 255);
+  border: 1px solid rgb(199 210 254);
+  border-radius: 9999px;
+  padding: 4px 8px;
+}
+
+.lms-rich-embed-btn {
+  height: 24px;
+  min-width: 24px;
+  border-radius: 6px;
+  border: 1px solid rgb(203 213 225);
+  background: white;
+  color: rgb(51 65 85);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  transition: all 0.15s ease;
+}
+
+.lms-rich-embed-btn:hover {
+  background: rgb(248 250 252);
+  border-color: rgb(148 163 184);
+}
+
+.lms-rich-embed-btn-danger {
+  color: rgb(185 28 28);
+  border-color: rgb(254 202 202);
+  background: rgb(254 242 242);
+}
+
+.lms-rich-embed-btn-danger:hover {
+  background: rgb(254 226 226);
+  border-color: rgb(252 165 165);
+}
+
+.lms-rich-embed-size {
+  font-size: 11px;
+  color: rgb(100 116 139);
+  font-variant-numeric: tabular-nums;
 }
 
 .lms-rich-content p {
@@ -119,6 +199,53 @@
 .lms-rich-content a {
   color: rgb(79 70 229);
   text-decoration: underline;
+}
+
+.lms-file-embed {
+  display: block;
+  width: 100%;
+  margin: 0.75rem 0;
+}
+
+.lms-file-link {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  width: 100%;
+  border: 1px solid rgb(226 232 240);
+  background: rgb(248 250 252);
+  border-radius: 0.75rem;
+  padding: 0.6rem 0.75rem;
+  text-decoration: none;
+  color: rgb(30 41 59);
+  transition: all 0.15s ease;
+}
+
+.lms-file-link:hover {
+  border-color: rgb(165 180 252);
+  background: rgb(238 242 255);
+}
+
+.lms-file-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: rgb(67 56 202);
+  background: rgb(224 231 255);
+  flex-shrink: 0;
+}
+
+.lms-file-title {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .lms-rich-content img {
