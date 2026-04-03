@@ -50,3 +50,11 @@
   color: rgb(79 70 229);
   text-decoration: underline;
 }
+
+.lms-rich-content .ql-align-center {
+  text-align: center;
+}
+
+.lms-rich-content .ql-align-right {
+  text-align: right;
+}
