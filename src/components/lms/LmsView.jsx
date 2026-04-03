@@ -181,6 +181,7 @@ const CERTIFICATES = [
 const RICH_TEXT_MODULES = {
   toolbar: [
     [{ header: [2, 3, false] }],
+    [{ align: ["", "center", "right"] }],
     ["bold", "italic", "underline", "strike"],
     [{ list: "ordered" }, { list: "bullet" }],
     ["blockquote", "link"],
@@ -190,6 +191,7 @@ const RICH_TEXT_MODULES = {
 
 const RICH_TEXT_FORMATS = [
   "header",
+  "align",
   "bold",
   "italic",
   "underline",
