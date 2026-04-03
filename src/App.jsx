@@ -24905,6 +24905,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                 const savedView = localStorage.getItem('currentView');
                 if (user.role === 'trainer') {
+                    const trainerAllowedViews = new Set(['surveys', 'manage_operators']);
+                    if (savedView && trainerAllowedViews.has(savedView)) {
+                        setView(savedView);
+                        return;
+                    }
                     setView('surveys');
                     return;
                 }
@@ -24920,7 +24925,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, [user?.id, user?.role, canAccessLmsSection]);
 
             useEffect(() => {
-                if (user?.role === 'trainer' && view !== 'surveys') {
+                if (user?.role === 'trainer' && !['surveys', 'manage_operators'].includes(view)) {
                     setView('surveys');
                 }
                 if (view === 'lms' && !canAccessLmsSection) {
@@ -28976,6 +28981,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const averageScore = operatorData?.evaluations?.length > 0
                     ? operatorData.evaluations.reduce((sum, eval1) => sum + (parseFloat(eval1.score) || 0), 0) / operatorData.evaluations.length
                     : 0;
+            const isManageOperatorsReadOnly = user?.role === 'trainer';
             const operatorsViewHasSupervisorFilter = Boolean(String(selectedSvId || '').trim());
             const operatorsViewData = operatorsViewHasSupervisorFilter ? selectedSvData : svData;
             const operatorsViewOperators = Array.isArray(operatorsViewData?.operators) ? operatorsViewData.operators : [];
@@ -29335,6 +29341,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 )}
                                 {user.role === 'trainer' && (
                                     <>
+                                        <li>
+                                            <button onClick={() => { setView('manage_operators'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_operators' ? 'bg-blue-700' : ''}`}>
+                                                <FaIcon className="fas fa-user-edit"></FaIcon> <span className="sidebar-text">Сотрудники</span>
+                                            </button>
+                                        </li>
                                         <li>
                                             <button onClick={() => { setView('surveys'); setMobileMenuOpen(false); }} className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarCompactBadge()} {renderSurveysSidebarLabel()}
@@ -31087,7 +31098,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
                             </>
                         )}
-                        {(user.role === 'sv' || user.role === 'supervisor') && (
+                        {(user.role === 'sv' || user.role === 'supervisor' || user.role === 'trainer') && (
                             <>
                                 {view === 'qr_access' && (
                                 <>
@@ -31311,6 +31322,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         <div className="flex justify-between items-center mb-6">
                                         <h2 className="text-2xl font-semibold text-gray-800">Сотрудники</h2>
 
+                                        {!isManageOperatorsReadOnly && (
                                         <button
                                             onClick={() => {
                                                 setUserToEdit({
@@ -31328,6 +31340,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         >
                                             <FaIcon className="fas fa-user-plus"></FaIcon> Добавить оператора
                                         </button>
+                                        )}
                                         </div>
 
                                         {renderUpcomingBirthdaysCard(upcomingManageOperatorsBirthdays, manageOperatorsBirthdaysCaption)}
@@ -31469,7 +31482,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             </th>
                                                         );
                                                     })}
-                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Действия</th>
+                                                    {!isManageOperatorsReadOnly && (
+                                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Действия</th>
+                                                    )}
                                                     </tr>
                                                 </thead>
 
@@ -31477,7 +31492,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     {myOperatorsSorted.length > 0 && (
                                                     <React.Fragment>
                                                         <tr className="bg-gray-100">
-                                                        <td colSpan={employeeSectionColumns.length + 1} className="px-6 py-3 text-sm font-semibold text-gray-700">
+                                                        <td colSpan={employeeSectionColumns.length + (isManageOperatorsReadOnly ? 0 : 1)} className="px-6 py-3 text-sm font-semibold text-gray-700">
                                                             Мои операторы <span className="ml-2 text-xs text-gray-500">({myOperatorsSorted.length})</span>
                                                         </td>
                                                         </tr>
@@ -31493,6 +31508,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 </td>
                                                             ))}
 
+                                                            {!isManageOperatorsReadOnly && (
                                                             <td className="px-6 py-4 text-left">
                                                             <div className="flex space-x-2">
                                                                 <button
@@ -31527,6 +31543,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 </button>
                                                             </div>
                                                             </td>
+                                                            )}
                                                         </tr>
                                                         ))}
                                                     </React.Fragment>
@@ -31535,7 +31552,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     {sortedDirectionNames.map((dirName) => (
                                                     <React.Fragment key={dirName}>
                                                         <tr className="bg-gray-100">
-                                                        <td colSpan={employeeSectionColumns.length + 1} className="px-6 py-3 text-sm font-semibold text-gray-700">
+                                                        <td colSpan={employeeSectionColumns.length + (isManageOperatorsReadOnly ? 0 : 1)} className="px-6 py-3 text-sm font-semibold text-gray-700">
                                                             {dirName} <span className="ml-2 text-xs text-gray-500">({grouped[dirName].length})</span>
                                                         </td>
                                                         </tr>
@@ -31551,6 +31568,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 </td>
                                                             ))}
 
+                                                            {!isManageOperatorsReadOnly && (
                                                             <td className="px-6 py-4 text-left">
                                                             <div className="flex space-x-2">
                                                                 <button
@@ -31585,6 +31603,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 </button>
                                                             </div>
                                                             </td>
+                                                            )}
                                                         </tr>
                                                         ))}
                                                     </React.Fragment>
@@ -31594,7 +31613,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <tfoot className="bg-gray-50">
                                                     <tr>
                                                     <td className="px-6 py-3 font-medium text-gray-700">{matched.length} операторов</td>
-                                                    <td colSpan={employeeSectionColumns.length} className="px-6 py-3 text-sm text-gray-600">
+                                                    <td colSpan={employeeSectionColumns.length - 1 + (isManageOperatorsReadOnly ? 0 : 1)} className="px-6 py-3 text-sm text-gray-600">
                                                         Показан раздел: {activeEmployeeTableSection.label}
                                                     </td>
                                                     </tr>
@@ -31954,11 +31973,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
                                 {( view === "call_division" && (<AdminCallsUploadView user={user}/>))}
                                 {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
-                            </>
-                        )}
-                        {user.role === 'trainer' && (
-                            <>
-                                {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
                             </>
                         )}
                         {user.role === 'operator' && (
