@@ -2505,12 +2505,6 @@ function TextLesson({ lesson, onCompleteLesson }) {
     }
   };
 
-  const handleOpenMaterial = (material) => {
-    const url = material?.url || material?.signed_url || material?.content_url;
-    if (!url) return;
-    window.open(url, "_blank", "noopener,noreferrer");
-  };
-
   return (
     <div className="space-y-6">
       <div className="bg-white rounded-2xl border border-slate-200 p-6">
@@ -2532,23 +2526,23 @@ function TextLesson({ lesson, onCompleteLesson }) {
             const name = String(material?.title || `Материал ${idx + 1}`);
             const metaName = String(material?.metadata?.uploaded_file_name || "");
             const label = metaName || name;
-            const size = material?.mime_type ? String(material.mime_type) : "Файл";
+            const fileUrl = String(material?.url || material?.signed_url || material?.content_url || "").trim();
             return (
-              <button
+              <a
                 key={`${material?.id || idx}-${label}`}
-                type="button"
-                onClick={() => handleOpenMaterial(material)}
-                className="w-full flex items-center gap-3 p-3 bg-slate-50 rounded-xl hover:bg-slate-100 transition-colors"
+                href={fileUrl || "#"}
+                target="_blank"
+                rel="noopener noreferrer"
+                download={label}
+                className="lms-file-link"
               >
-                <div className="w-9 h-9 bg-indigo-100 rounded-lg flex items-center justify-center">
-                  <FileCheck size={16} className="text-indigo-600" />
-                </div>
-                <div className="flex-1 text-left">
-                  <p className="text-xs font-medium text-slate-800">{label}</p>
-                  <p className="text-[10px] text-slate-400">{size}</p>
-                </div>
-                <Download size={14} className="text-slate-400" />
-              </button>
+                <span className="lms-file-icon" aria-hidden="true" />
+                <span className="lms-file-content">
+                  <span className="lms-file-title">{label}</span>
+                  <span className="lms-file-subtitle">Нажмите, чтобы скачать</span>
+                </span>
+                <span className="lms-file-download">Скачать</span>
+              </a>
             );
           })}
         </div>
@@ -2873,12 +2867,6 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
     handleComplete();
   }, [progress, completionThreshold, completed, completing, handleComplete]);
 
-  const handleOpenMaterial = (material) => {
-    const url = material?.url || material?.signed_url || material?.content_url;
-    if (!url) return;
-    window.open(url, "_blank", "noopener,noreferrer");
-  };
-
   return (
     <div>
       {tabHidden && (
@@ -3013,13 +3001,23 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
                 const name = String(material?.title || `Материал ${idx + 1}`);
                 const metaName = String(material?.metadata?.uploaded_file_name || "");
                 const label = metaName || name;
-                const size = material?.mime_type ? String(material.mime_type) : "Файл";
+                const fileUrl = String(material?.url || material?.signed_url || material?.content_url || "").trim();
                 return (
-                  <div key={`${material?.id || idx}-${label}`} onClick={() => handleOpenMaterial(material)} className="flex items-center gap-3 p-3 bg-slate-50 rounded-xl hover:bg-slate-100 transition-colors cursor-pointer">
-                    <div className="w-9 h-9 bg-indigo-100 rounded-lg flex items-center justify-center"><FileCheck size={16} className="text-indigo-600" /></div>
-                    <div className="flex-1"><p className="text-xs font-medium text-slate-800">{label}</p><p className="text-[10px] text-slate-400">{size}</p></div>
-                    <Download size={14} className="text-slate-400" />
-                  </div>
+                  <a
+                    key={`${material?.id || idx}-${label}`}
+                    href={fileUrl || "#"}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    download={label}
+                    className="lms-file-link"
+                  >
+                    <span className="lms-file-icon" aria-hidden="true" />
+                    <span className="lms-file-content">
+                      <span className="lms-file-title">{label}</span>
+                      <span className="lms-file-subtitle">Нажмите, чтобы скачать</span>
+                    </span>
+                    <span className="lms-file-download">Скачать</span>
+                  </a>
                 );
               })}
             </div>
@@ -5010,23 +5008,23 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                     )}
                     {selectedLessonExtraMaterials.map((material, index) => {
                       const label = String(material?.metadata?.uploaded_file_name || material?.title || `Материал ${index + 1}`);
-                      const typeLabel = material?.mime_type
-                        ? String(material.mime_type)
-                        : String(material?.material_type || material?.type || "Файл");
+                      const fileUrl = String(material?.url || material?.signed_url || material?.content_url || "").trim();
                       return (
-                        <div
+                        <a
                           key={`${material?.id || index}-${label}`}
-                          className="w-full flex items-center gap-3 p-3 bg-slate-50 rounded-xl hover:bg-slate-100 transition-colors"
+                          href={fileUrl || "#"}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          download={label}
+                          className="lms-file-link"
                         >
-                          <div className="w-9 h-9 bg-indigo-100 rounded-lg flex items-center justify-center">
-                            <FileCheck size={16} className="text-indigo-600" />
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <p className="text-xs font-medium text-slate-800 truncate">{label}</p>
-                            <p className="text-[10px] text-slate-400">{typeLabel}</p>
-                          </div>
-                          <Download size={14} className="text-slate-400" />
-                        </div>
+                          <span className="lms-file-icon" aria-hidden="true" />
+                          <span className="lms-file-content">
+                            <span className="lms-file-title">{label}</span>
+                            <span className="lms-file-subtitle">Нажмите, чтобы скачать</span>
+                          </span>
+                          <span className="lms-file-download">Скачать</span>
+                        </a>
                       );
                     })}
                   </div>
