@@ -345,8 +345,10 @@ function RichTextEditor({
   const editorShellRef = useRef(null);
   const quillRef = useRef(null);
   const dragEmbedRef = useRef(null);
+  const dragOverMetaRef = useRef(null);
   const [selectedEmbed, setSelectedEmbed] = useState(null);
   const [imageControlsPos, setImageControlsPos] = useState(null);
+  const [dropIndicator, setDropIndicator] = useState(null);
 
   const getEditor = useCallback(() => quillRef.current?.getEditor?.() || null, []);
 
@@ -608,6 +610,79 @@ function RichTextEditor({
     const quill = getEditor();
     if (!quill) return undefined;
     const root = quill.root;
+    const clearDropTargets = () => {
+      root.querySelectorAll(".lms-drop-target-before, .lms-drop-target-after").forEach((node) => {
+        node.classList.remove("lms-drop-target-before");
+        node.classList.remove("lms-drop-target-after");
+      });
+    };
+
+    const clearDropHint = () => {
+      clearDropTargets();
+      dragOverMetaRef.current = null;
+      setDropIndicator(null);
+    };
+
+    const resolveDropMeta = (event) => {
+      let dropIndex = null;
+      let dropTargetNode = null;
+      let dropPosition = "before";
+      let dropLineViewportY = null;
+      const target = event.target;
+
+      if (target instanceof HTMLElement) {
+        const targetEmbed = target.closest(".lms-file-embed, img");
+        if (targetEmbed && root.contains(targetEmbed)) {
+          const targetBlot = Quill.find(targetEmbed);
+          if (targetBlot) {
+            const targetIndex = quill.getIndex(targetBlot);
+            const targetRect = targetEmbed.getBoundingClientRect();
+            const insertBefore = event.clientY < targetRect.top + targetRect.height / 2;
+            dropIndex = targetIndex + (insertBefore ? 0 : 1);
+            dropTargetNode = targetEmbed;
+            dropPosition = insertBefore ? "before" : "after";
+            dropLineViewportY = insertBefore ? targetRect.top : targetRect.bottom;
+          }
+        } else {
+          const targetBlot = Quill.find(target, true);
+          if (targetBlot) {
+            try {
+              dropIndex = quill.getIndex(targetBlot);
+            } catch (_) {
+              dropIndex = null;
+            }
+          }
+        }
+      }
+
+      if (dropIndex == null) {
+        const range = quill.getSelection(true);
+        dropIndex = range?.index ?? quill.getLength();
+      }
+
+      dropIndex = Math.max(0, Math.min(Number(dropIndex) || 0, quill.getLength()));
+
+      if (dropLineViewportY == null) {
+        const maxIndex = Math.max(0, quill.getLength() - 1);
+        const boundsIndex = Math.max(0, Math.min(dropIndex, maxIndex));
+        const bounds = quill.getBounds(boundsIndex, 0);
+        const lineOffset = Number(bounds?.top || 0) + Number(bounds?.height || 16);
+        dropLineViewportY = root.getBoundingClientRect().top + lineOffset;
+      }
+
+      const shellRect = editorShellRef.current?.getBoundingClientRect() || root.getBoundingClientRect();
+      const rootRect = root.getBoundingClientRect();
+      return {
+        dropIndex,
+        dropTargetNode,
+        dropPosition,
+        indicator: {
+          top: Math.max(4, Math.round(dropLineViewportY - shellRect.top)),
+          left: Math.max(4, Math.round(rootRect.left - shellRect.left + 8)),
+          width: Math.max(40, Math.round(rootRect.width - 16)),
+        },
+      };
+    };
 
     const onClick = (event) => {
       const target = event.target;
@@ -624,6 +699,7 @@ function RichTextEditor({
         selectEmbedNode(imageNode, "image");
         return;
       }
+      clearDropHint();
       clearSelectedEmbed();
     };
 
@@ -638,6 +714,7 @@ function RichTextEditor({
     const onDragStart = (event) => {
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
+      clearDropHint();
 
       const fileNode = target.closest(".lms-file-embed");
       if (fileNode && root.contains(fileNode)) {
@@ -684,6 +761,24 @@ function RichTextEditor({
       if (event.dataTransfer) {
         event.dataTransfer.dropEffect = "move";
       }
+      const meta = resolveDropMeta(event);
+      if (!meta) return;
+      clearDropTargets();
+      if (meta.dropTargetNode) {
+        meta.dropTargetNode.classList.add(meta.dropPosition === "before" ? "lms-drop-target-before" : "lms-drop-target-after");
+      }
+      dragOverMetaRef.current = meta;
+      setDropIndicator((prev) => {
+        if (
+          prev
+          && prev.top === meta.indicator.top
+          && prev.left === meta.indicator.left
+          && prev.width === meta.indicator.width
+        ) {
+          return prev;
+        }
+        return meta.indicator;
+      });
     };
 
     const onDrop = (event) => {
@@ -691,35 +786,13 @@ function RichTextEditor({
       event.preventDefault();
       const dragged = dragEmbedRef.current;
       dragEmbedRef.current = null;
+      const dropMeta = dragOverMetaRef.current || resolveDropMeta(event);
+      clearDropHint();
 
       const sourceIndex = Number(dragged?.sourceIndex);
       if (!Number.isFinite(sourceIndex)) return;
-
-      let dropIndex = null;
-      const target = event.target;
-      if (target instanceof HTMLElement) {
-        const targetEmbed = target.closest(".lms-file-embed, img");
-        if (targetEmbed && root.contains(targetEmbed)) {
-          const targetBlot = Quill.find(targetEmbed);
-          if (targetBlot) {
-            dropIndex = quill.getIndex(targetBlot);
-          }
-        } else {
-          const targetBlot = Quill.find(target, true);
-          if (targetBlot) {
-            try {
-              dropIndex = quill.getIndex(targetBlot);
-            } catch (_) {
-              dropIndex = null;
-            }
-          }
-        }
-      }
-
-      if (dropIndex == null) {
-        const range = quill.getSelection(true);
-        dropIndex = range?.index ?? quill.getLength();
-      }
+      let dropIndex = Number(dropMeta?.dropIndex);
+      if (!Number.isFinite(dropIndex)) dropIndex = quill.getLength();
 
       if (dropIndex > sourceIndex) dropIndex -= 1;
       dropIndex = Math.max(0, dropIndex);
@@ -751,8 +824,16 @@ function RichTextEditor({
       quill.setSelection(Math.min(dropIndex + 1, quill.getLength()), 0, "user");
     };
 
+    const onDragLeave = (event) => {
+      if (!dragEmbedRef.current) return;
+      const relatedTarget = event.relatedTarget;
+      if (relatedTarget instanceof Node && root.contains(relatedTarget)) return;
+      clearDropHint();
+    };
+
     const onDragEnd = () => {
       dragEmbedRef.current = null;
+      clearDropHint();
     };
 
     root.addEventListener("click", onClick);
@@ -760,14 +841,17 @@ function RichTextEditor({
     root.addEventListener("dragstart", onDragStart);
     root.addEventListener("dragover", onDragOver);
     root.addEventListener("drop", onDrop);
+    root.addEventListener("dragleave", onDragLeave);
     root.addEventListener("dragend", onDragEnd);
 
     return () => {
+      clearDropHint();
       root.removeEventListener("click", onClick);
       root.removeEventListener("keydown", onKeyDown);
       root.removeEventListener("dragstart", onDragStart);
       root.removeEventListener("dragover", onDragOver);
       root.removeEventListener("drop", onDrop);
+      root.removeEventListener("dragleave", onDragLeave);
       root.removeEventListener("dragend", onDragEnd);
     };
   }, [getEditor, selectEmbedNode, clearSelectedEmbed, selectedEmbed, removeSelectedEmbed, ensureEmbedAttrs]);
@@ -787,6 +871,19 @@ function RichTextEditor({
         modules={richTextModules}
         formats={RICH_TEXT_FORMATS}
       />
+      {dropIndicator && (
+        <div
+          className="lms-rich-drop-indicator"
+          style={{
+            top: `${dropIndicator.top}px`,
+            left: `${dropIndicator.left}px`,
+            width: `${dropIndicator.width}px`,
+          }}
+        >
+          <span className="lms-rich-drop-indicator-dot" />
+          <span className="lms-rich-drop-indicator-dot lms-rich-drop-indicator-dot-end" />
+        </div>
+      )}
       {selectedEmbed?.type === "image" && imageControlsPos && (
         <div
           className="lms-rich-image-controls"
