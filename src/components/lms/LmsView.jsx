@@ -183,7 +183,7 @@ const RICH_TEXT_TOOLBAR = [
   [{ align: ["", "center", "right"] }],
   ["bold", "italic", "underline", "strike"],
   [{ list: "ordered" }, { list: "bullet" }],
-  ["blockquote", "link", "image"],
+  ["blockquote", "link", "image", "attachment"],
   ["clean"],
 ];
 
@@ -199,6 +199,8 @@ const RICH_TEXT_FORMATS = [
   "blockquote",
   "link",
   "image",
+  "attachment",
+  "width",
 ];
 
 const RICH_TEXT_SANITIZE_OPTIONS = {
@@ -210,10 +212,77 @@ const RICH_TEXT_SANITIZE_OPTIONS = {
     "blockquote",
     "a",
     "img",
+    "div",
     "span",
   ],
-  ALLOWED_ATTR: ["href", "target", "rel", "class", "data-list", "data-checked", "src", "alt", "title"],
+  ALLOWED_ATTR: [
+    "href", "target", "rel", "class",
+    "data-list", "data-checked",
+    "data-url", "data-name", "data-mime", "data-size", "data-embed-id",
+    "src", "alt", "title", "download", "width",
+  ],
 };
+
+const Quill = ReactQuill.Quill;
+const BlockEmbed = Quill.import("blots/block/embed");
+
+const createRichEmbedId = () => `lms-${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36).slice(-4)}`;
+
+class AttachmentBlot extends BlockEmbed {
+  static create(value) {
+    const node = super.create();
+    const payload = value && typeof value === "object" ? value : { url: String(value || "") };
+    const url = String(payload.url || payload.href || "").trim();
+    const name = String(payload.name || payload.fileName || "Файл").trim() || "Файл";
+    const mime = String(payload.mimeType || payload.mime || "").trim();
+    const size = Number(payload.size || 0) || 0;
+
+    node.setAttribute("contenteditable", "false");
+    node.setAttribute("draggable", "true");
+    node.setAttribute("data-embed-id", createRichEmbedId());
+    node.setAttribute("data-url", url);
+    node.setAttribute("data-name", name);
+    if (mime) node.setAttribute("data-mime", mime);
+    if (size > 0) node.setAttribute("data-size", String(size));
+
+    const link = document.createElement("a");
+    link.className = "lms-file-link";
+    link.href = url || "#";
+    link.setAttribute("target", "_blank");
+    link.setAttribute("rel", "noopener noreferrer");
+    link.setAttribute("download", name);
+
+    const badge = document.createElement("span");
+    badge.className = "lms-file-badge";
+    badge.textContent = "FILE";
+
+    const title = document.createElement("span");
+    title.className = "lms-file-title";
+    title.textContent = name;
+
+    link.appendChild(badge);
+    link.appendChild(title);
+    node.appendChild(link);
+    return node;
+  }
+
+  static value(node) {
+    return {
+      url: String(node?.getAttribute("data-url") || "").trim(),
+      name: String(node?.getAttribute("data-name") || "Файл").trim() || "Файл",
+      mimeType: String(node?.getAttribute("data-mime") || "").trim(),
+      size: Number(node?.getAttribute("data-size") || 0) || 0,
+    };
+  }
+}
+
+AttachmentBlot.blotName = "attachment";
+AttachmentBlot.tagName = "div";
+AttachmentBlot.className = "lms-file-embed";
+
+if (!Quill.imports["formats/attachment"]) {
+  Quill.register(AttachmentBlot);
+}
 
 const stripHtmlToText = (value) => String(value || "")
   .replace(/<style[\s\S]*?<\/style>/gi, " ")
@@ -251,13 +320,134 @@ const sanitizeRichHtml = (value) => {
   return DOMPurify.sanitize(prepared, RICH_TEXT_SANITIZE_OPTIONS);
 };
 
-function RichTextEditor({ value, onChange, placeholder = "", minHeight = 140, onImageUpload = null }) {
+function RichTextEditor({
+  value,
+  onChange,
+  placeholder = "",
+  minHeight = 140,
+  onImageUpload = null,
+  onFileUpload = null,
+}) {
   const quillRef = useRef(null);
+  const dragEmbedRef = useRef(null);
+  const [selectedEmbed, setSelectedEmbed] = useState(null);
+
+  const getEditor = useCallback(() => quillRef.current?.getEditor?.() || null, []);
+
+  const clearSelectedEmbedStyles = useCallback((root) => {
+    if (!root) return;
+    root.querySelectorAll(".lms-embed-selected").forEach((node) => node.classList.remove("lms-embed-selected"));
+  }, []);
+
+  const ensureEmbedAttrs = useCallback((root) => {
+    if (!root) return;
+    root.querySelectorAll("img").forEach((img) => {
+      if (!img.getAttribute("data-embed-id")) {
+        img.setAttribute("data-embed-id", createRichEmbedId());
+      }
+      img.setAttribute("draggable", "true");
+      img.classList.add("lms-image-embed");
+    });
+    root.querySelectorAll(".lms-file-embed").forEach((node) => {
+      if (!node.getAttribute("data-embed-id")) {
+        node.setAttribute("data-embed-id", createRichEmbedId());
+      }
+      node.setAttribute("draggable", "true");
+    });
+  }, []);
+
+  const clearSelectedEmbed = useCallback(() => {
+    const quill = getEditor();
+    if (quill) clearSelectedEmbedStyles(quill.root);
+    setSelectedEmbed(null);
+  }, [getEditor, clearSelectedEmbedStyles]);
+
+  const resolveSelectedNode = useCallback(() => {
+    if (!selectedEmbed) return null;
+    const quill = getEditor();
+    if (!quill) return null;
+    const root = quill.root;
+    if (selectedEmbed.embedId) {
+      const byId = root.querySelector(`[data-embed-id="${selectedEmbed.embedId}"]`);
+      if (byId) return byId;
+    }
+    if (selectedEmbed.index != null) {
+      const [leaf] = quill.getLeaf(selectedEmbed.index);
+      if (leaf?.domNode instanceof HTMLElement) {
+        return leaf.domNode;
+      }
+    }
+    return null;
+  }, [selectedEmbed, getEditor]);
+
+  const selectEmbedNode = useCallback((node, type) => {
+    const quill = getEditor();
+    if (!quill || !node) return;
+    const root = quill.root;
+    ensureEmbedAttrs(root);
+    clearSelectedEmbedStyles(root);
+    node.classList.add("lms-embed-selected");
+    const blot = Quill.find(node);
+    const index = blot ? quill.getIndex(blot) : null;
+    const embedId = String(node.getAttribute("data-embed-id") || createRichEmbedId());
+    node.setAttribute("data-embed-id", embedId);
+    const nextState = {
+      type,
+      embedId,
+      index: Number.isFinite(Number(index)) ? Number(index) : null,
+      width: null,
+    };
+    if (type === "image") {
+      const width = Math.max(1, Number(node.getAttribute("width") || Math.round(node.getBoundingClientRect().width || 0) || 0));
+      nextState.width = width;
+    }
+    setSelectedEmbed(nextState);
+  }, [getEditor, ensureEmbedAttrs, clearSelectedEmbedStyles]);
+
+  const removeSelectedEmbed = useCallback(() => {
+    const quill = getEditor();
+    if (!quill || !selectedEmbed) return;
+    const node = resolveSelectedNode();
+    if (!(node instanceof HTMLElement)) {
+      clearSelectedEmbed();
+      return;
+    }
+    const blot = Quill.find(node);
+    if (!blot) {
+      clearSelectedEmbed();
+      return;
+    }
+    const index = quill.getIndex(blot);
+    quill.deleteText(index, 1, "user");
+    clearSelectedEmbed();
+  }, [getEditor, selectedEmbed, resolveSelectedNode, clearSelectedEmbed]);
+
+  const resizeSelectedImage = useCallback((deltaPx) => {
+    if (!selectedEmbed || selectedEmbed.type !== "image") return;
+    const quill = getEditor();
+    if (!quill) return;
+    const node = resolveSelectedNode();
+    if (!(node instanceof HTMLImageElement)) return;
+    const editorWidth = Math.max(280, Math.round(quill.root.getBoundingClientRect().width || 0));
+    const minWidth = 120;
+    const maxWidth = Math.max(minWidth, editorWidth - 32);
+    const currentWidth = Math.max(1, Number(node.getAttribute("width") || Math.round(node.getBoundingClientRect().width || 0) || minWidth));
+    const nextWidth = Math.max(minWidth, Math.min(maxWidth, currentWidth + deltaPx));
+    const blot = Quill.find(node);
+    if (blot && typeof blot.format === "function") {
+      blot.format("width", String(Math.round(nextWidth)));
+      quill.update("user");
+    } else {
+      node.setAttribute("width", String(Math.round(nextWidth)));
+      quill.update("user");
+    }
+    setSelectedEmbed((prev) => (prev ? { ...prev, width: Math.round(nextWidth) } : prev));
+  }, [selectedEmbed, getEditor, resolveSelectedNode]);
 
   const handleImageInsert = useCallback(() => {
     if (typeof onImageUpload !== "function") return;
-    const editor = quillRef.current?.getEditor?.();
-    if (!editor) return;
+    const quill = getEditor();
+    if (!quill) return;
 
     const input = document.createElement("input");
     input.setAttribute("type", "file");
@@ -270,24 +460,242 @@ function RichTextEditor({ value, onChange, placeholder = "", minHeight = 140, on
         if (!file) return;
         const imageUrl = String(await onImageUpload(file)).trim();
         if (!imageUrl) return;
-        const range = editor.getSelection(true);
-        const index = range?.index ?? editor.getLength();
-        editor.insertEmbed(index, "image", imageUrl, "user");
-        editor.setSelection(index + 1, 0, "user");
+        const range = quill.getSelection(true);
+        const index = range?.index ?? quill.getLength();
+        quill.insertEmbed(index, "image", imageUrl, "user");
+        const [leaf] = quill.getLeaf(index);
+        if (leaf?.domNode instanceof HTMLImageElement) {
+          ensureEmbedAttrs(quill.root);
+          selectEmbedNode(leaf.domNode, "image");
+        }
+        quill.setSelection(index + 1, 0, "user");
       } catch (_) {
         // Ошибка уже обработана в upload callback
       }
     };
-  }, [onImageUpload]);
+  }, [onImageUpload, getEditor, ensureEmbedAttrs, selectEmbedNode]);
+
+  const handleAttachmentInsert = useCallback(() => {
+    if (typeof onFileUpload !== "function") return;
+    const quill = getEditor();
+    if (!quill) return;
+    const input = document.createElement("input");
+    input.setAttribute("type", "file");
+    input.setAttribute("accept", "*/*");
+    input.click();
+    input.onchange = async () => {
+      try {
+        const file = input.files?.[0];
+        if (!file) return;
+        const uploaded = await onFileUpload(file);
+        const payload = uploaded && typeof uploaded === "object"
+          ? uploaded
+          : { url: String(uploaded || ""), name: file.name || "Файл", mimeType: file.type || "", size: file.size || 0 };
+        const url = String(payload.url || payload.href || "").trim();
+        if (!url) return;
+        const range = quill.getSelection(true);
+        const index = range?.index ?? quill.getLength();
+        quill.insertEmbed(index, "attachment", {
+          url,
+          name: String(payload.name || file.name || "Файл"),
+          mimeType: String(payload.mimeType || payload.mime || file.type || ""),
+          size: Number(payload.size || file.size || 0) || 0,
+        }, "user");
+        const [leaf] = quill.getLeaf(index);
+        if (leaf?.domNode instanceof HTMLElement) {
+          ensureEmbedAttrs(quill.root);
+          selectEmbedNode(leaf.domNode, "attachment");
+        }
+        quill.setSelection(index + 1, 0, "user");
+      } catch (_) {
+        // error handled in upload callback
+      }
+    };
+  }, [onFileUpload, getEditor, ensureEmbedAttrs, selectEmbedNode]);
 
   const richTextModules = useMemo(() => ({
     toolbar: {
       container: RICH_TEXT_TOOLBAR,
       handlers: {
         image: handleImageInsert,
+        attachment: handleAttachmentInsert,
       },
     },
-  }), [handleImageInsert]);
+  }), [handleImageInsert, handleAttachmentInsert]);
+
+  useEffect(() => {
+    const quill = getEditor();
+    if (!quill) return;
+    ensureEmbedAttrs(quill.root);
+  }, [value, getEditor, ensureEmbedAttrs]);
+
+  useEffect(() => {
+    const quill = getEditor();
+    if (!quill) return undefined;
+    const root = quill.root;
+
+    const onClick = (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const fileNode = target.closest(".lms-file-embed");
+      if (fileNode && root.contains(fileNode)) {
+        event.preventDefault();
+        selectEmbedNode(fileNode, "attachment");
+        return;
+      }
+      const imageNode = target.closest("img");
+      if (imageNode && root.contains(imageNode)) {
+        event.preventDefault();
+        selectEmbedNode(imageNode, "image");
+        return;
+      }
+      clearSelectedEmbed();
+    };
+
+    const onKeyDown = (event) => {
+      if (!selectedEmbed) return;
+      if (event.key === "Backspace" || event.key === "Delete") {
+        event.preventDefault();
+        removeSelectedEmbed();
+      }
+    };
+
+    const onDragStart = (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+
+      const fileNode = target.closest(".lms-file-embed");
+      if (fileNode && root.contains(fileNode)) {
+        const blot = Quill.find(fileNode);
+        if (!blot) return;
+        const sourceIndex = quill.getIndex(blot);
+        dragEmbedRef.current = {
+          kind: "attachment",
+          sourceIndex,
+          payload: AttachmentBlot.value(fileNode),
+        };
+        if (event.dataTransfer) {
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/plain", "lms-attachment");
+        }
+        selectEmbedNode(fileNode, "attachment");
+        return;
+      }
+
+      const imageNode = target.closest("img");
+      if (imageNode && root.contains(imageNode)) {
+        const blot = Quill.find(imageNode);
+        if (!blot) return;
+        const sourceIndex = quill.getIndex(blot);
+        dragEmbedRef.current = {
+          kind: "image",
+          sourceIndex,
+          payload: {
+            src: String(imageNode.getAttribute("src") || "").trim(),
+            width: String(imageNode.getAttribute("width") || "").trim(),
+          },
+        };
+        if (event.dataTransfer) {
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/plain", "lms-image");
+        }
+        selectEmbedNode(imageNode, "image");
+      }
+    };
+
+    const onDragOver = (event) => {
+      if (!dragEmbedRef.current) return;
+      event.preventDefault();
+      if (event.dataTransfer) {
+        event.dataTransfer.dropEffect = "move";
+      }
+    };
+
+    const onDrop = (event) => {
+      if (!dragEmbedRef.current) return;
+      event.preventDefault();
+      const dragged = dragEmbedRef.current;
+      dragEmbedRef.current = null;
+
+      const sourceIndex = Number(dragged?.sourceIndex);
+      if (!Number.isFinite(sourceIndex)) return;
+
+      let dropIndex = null;
+      const target = event.target;
+      if (target instanceof HTMLElement) {
+        const targetEmbed = target.closest(".lms-file-embed, img");
+        if (targetEmbed && root.contains(targetEmbed)) {
+          const targetBlot = Quill.find(targetEmbed);
+          if (targetBlot) {
+            dropIndex = quill.getIndex(targetBlot);
+          }
+        } else {
+          const targetBlot = Quill.find(target, true);
+          if (targetBlot) {
+            try {
+              dropIndex = quill.getIndex(targetBlot);
+            } catch (_) {
+              dropIndex = null;
+            }
+          }
+        }
+      }
+
+      if (dropIndex == null) {
+        const range = quill.getSelection(true);
+        dropIndex = range?.index ?? quill.getLength();
+      }
+
+      if (dropIndex > sourceIndex) dropIndex -= 1;
+      dropIndex = Math.max(0, dropIndex);
+      if (dropIndex === sourceIndex) return;
+
+      quill.deleteText(sourceIndex, 1, "user");
+
+      if (dragged.kind === "image") {
+        const src = String(dragged?.payload?.src || "").trim();
+        if (!src) return;
+        quill.insertEmbed(dropIndex, "image", src, "user");
+        const [leaf] = quill.getLeaf(dropIndex);
+        if (leaf?.domNode instanceof HTMLImageElement) {
+          if (dragged?.payload?.width) {
+            leaf.domNode.setAttribute("width", dragged.payload.width);
+          }
+          ensureEmbedAttrs(root);
+          selectEmbedNode(leaf.domNode, "image");
+        }
+      } else if (dragged.kind === "attachment") {
+        quill.insertEmbed(dropIndex, "attachment", dragged.payload || {}, "user");
+        const [leaf] = quill.getLeaf(dropIndex);
+        if (leaf?.domNode instanceof HTMLElement) {
+          ensureEmbedAttrs(root);
+          selectEmbedNode(leaf.domNode, "attachment");
+        }
+      }
+
+      quill.setSelection(Math.min(dropIndex + 1, quill.getLength()), 0, "user");
+    };
+
+    const onDragEnd = () => {
+      dragEmbedRef.current = null;
+    };
+
+    root.addEventListener("click", onClick);
+    root.addEventListener("keydown", onKeyDown);
+    root.addEventListener("dragstart", onDragStart);
+    root.addEventListener("dragover", onDragOver);
+    root.addEventListener("drop", onDrop);
+    root.addEventListener("dragend", onDragEnd);
+
+    return () => {
+      root.removeEventListener("click", onClick);
+      root.removeEventListener("keydown", onKeyDown);
+      root.removeEventListener("dragstart", onDragStart);
+      root.removeEventListener("dragover", onDragOver);
+      root.removeEventListener("drop", onDrop);
+      root.removeEventListener("dragend", onDragEnd);
+    };
+  }, [getEditor, selectEmbedNode, clearSelectedEmbed, selectedEmbed, removeSelectedEmbed, ensureEmbedAttrs]);
 
   return (
     <div className="lms-rich-text-editor" style={{ "--lms-editor-min-height": `${Math.max(100, Number(minHeight || 140))}px` }}>
@@ -300,6 +708,21 @@ function RichTextEditor({ value, onChange, placeholder = "", minHeight = 140, on
         modules={richTextModules}
         formats={RICH_TEXT_FORMATS}
       />
+      {selectedEmbed && (
+        <div className="lms-rich-embed-toolbar">
+          <span className="lms-rich-embed-badge">{selectedEmbed.type === "image" ? "Изображение" : "Файл"}</span>
+          {selectedEmbed.type === "image" && (
+            <>
+              <button type="button" className="lms-rich-embed-btn" onClick={() => resizeSelectedImage(-80)}>-</button>
+              <button type="button" className="lms-rich-embed-btn" onClick={() => resizeSelectedImage(80)}>+</button>
+              <span className="lms-rich-embed-size">{Math.max(1, Number(selectedEmbed.width || 0))}px</span>
+            </>
+          )}
+          <button type="button" className="lms-rich-embed-btn lms-rich-embed-btn-danger" onClick={removeSelectedEmbed} aria-label="Удалить элемент">
+            <X size={12} />
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -3354,6 +3777,30 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
     }
   }, [uploadSingleMaterial, emitToast]);
 
+  const handleRichTextFileUpload = useCallback(async (file) => {
+    try {
+      if (!(file instanceof File)) {
+        throw new Error("Файл не выбран");
+      }
+      const detectedType = String(file.type || "").toLowerCase();
+      const materialType = detectedType.includes("pdf") ? "pdf" : "file";
+      const uploaded = await uploadSingleMaterial(file, materialType);
+      const fileUrl = String(uploaded?.signed_url || uploaded?.content_url || uploaded?.url || "").trim();
+      if (!fileUrl) {
+        throw new Error("Ссылка на файл не получена");
+      }
+      return {
+        url: fileUrl,
+        name: String(uploaded?.file_name || file.name || "Файл"),
+        mimeType: String(uploaded?.content_type || file.type || ""),
+        size: Number(file.size || 0) || 0,
+      };
+    } catch (error) {
+      emitToast?.(`Не удалось загрузить файл: ${String(error?.message || "ошибка")}`, "error");
+      throw error;
+    }
+  }, [uploadSingleMaterial, emitToast]);
+
   const readVideoDurationSeconds = useCallback((file) => new Promise((resolve) => {
     try {
       if (!(file instanceof File)) {
@@ -4004,6 +4451,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
             onChange={onChange}
             placeholder={placeholder}
             onImageUpload={handleRichTextImageUpload}
+            onFileUpload={handleRichTextFileUpload}
             minHeight={minHeight}
           />
           <div className="flex justify-end">
@@ -4413,6 +4861,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                     value={settings.description}
                     onChange={(next) => setSettings((p) => ({ ...p, description: next }))}
                     onImageUpload={handleRichTextImageUpload}
+                    onFileUpload={handleRichTextFileUpload}
                     placeholder="Краткое описание курса..."
                     minHeight={140}
                   />
@@ -4589,6 +5038,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                         value={selectedLessonModel.description || ""}
                         onChange={(next) => updateLessonById(selectedLessonModel.id, { description: next })}
                         onImageUpload={handleRichTextImageUpload}
+                        onFileUpload={handleRichTextFileUpload}
                         placeholder="Что узнает сотрудник в этом уроке..."
                         minHeight={120}
                       />
@@ -4794,6 +5244,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                               value={selectedLessonModel.contentText || ""}
                               onChange={(next) => updateLessonById(selectedLessonModel.id, { contentText: next })}
                               onImageUpload={handleRichTextImageUpload}
+                              onFileUpload={handleRichTextFileUpload}
                               placeholder="Введите текст урока..."
                               minHeight={220}
                             />
@@ -4808,6 +5259,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                                 value={selectedLessonModel.contentText || ""}
                                 onChange={(next) => updateLessonById(selectedLessonModel.id, { contentText: next })}
                                 onImageUpload={handleRichTextImageUpload}
+                                onFileUpload={handleRichTextFileUpload}
                                 placeholder="Введите текст транскрипта видео..."
                                 minHeight={170}
                               />
