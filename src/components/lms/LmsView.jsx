@@ -3856,6 +3856,21 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
       if (selectedLessonModel?.type === "quiz") return false;
       return materialType !== "video";
     });
+  const selectedLessonTextMaterial = selectedLessonMaterials.find((item) => String(item?.material_type || item?.type || "").toLowerCase() === "text" && item?.content_text);
+  const selectedLessonDescriptionRich = normalizeRichTextValue(selectedLessonModel?.description || "");
+  const selectedLessonTextContentRich = normalizeRichTextValue(selectedLessonModel?.contentText || selectedLessonTextMaterial?.content_text || selectedLessonModel?.description || "");
+  const selectedLessonTranscriptRich = normalizeRichTextValue(selectedLessonModel?.contentText || selectedLessonTextMaterial?.content_text || selectedLessonModel?.description || "");
+  const selectedLessonLocation = (() => {
+    for (let moduleIndex = 0; moduleIndex < modules.length; moduleIndex += 1) {
+      const moduleLessons = Array.isArray(modules[moduleIndex]?.lessons) ? modules[moduleIndex].lessons : [];
+      for (let lessonIndex = 0; lessonIndex < moduleLessons.length; lessonIndex += 1) {
+        if (moduleLessons[lessonIndex]?.id === selectedLessonId) {
+          return { moduleNumber: moduleIndex + 1, lessonNumber: lessonIndex + 1 };
+        }
+      }
+    }
+    return { moduleNumber: 1, lessonNumber: 1 };
+  })();
 
   const applyLessonType = useCallback((lessonId, nextType) => {
     if (!lessonId) return;
@@ -3887,6 +3902,199 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
       return { ...prev, type: "video" };
     });
   }, [updateLessonById, settings.maxAttempts, settings.passingScore, createQuestionTemplate]);
+
+  const renderSelectedLessonPreview = () => {
+    if (!selectedLessonModel) return null;
+
+    const lessonType = String(selectedLessonModel?.type || "video").toLowerCase();
+    const lessonTypeLabel = lessonType === "quiz" ? "Тест" : lessonType === "text" ? "Текст" : "Видео";
+    const durationLabel = formatDurationLabel(Number(selectedLessonModel?.durationSeconds || selectedLessonVideoDurationSeconds || 0));
+    const quizQuestionsForPreview = Array.isArray(selectedLessonQuizQuestions) ? selectedLessonQuizQuestions : [];
+    const quizQuestionLimit = Math.max(1, Number(selectedLessonModel?.quizQuestionsPerTest || quizQuestionsForPreview.length || 1));
+    const showExplanations = selectedLessonModel?.quizShowExplanations !== false;
+    const quizMinutes = Math.max(1, Number(selectedLessonModel?.quizTimeLimitMinutes || Math.ceil(Number(selectedLessonModel?.durationSeconds || 0) / 60) || 20));
+    const quizPassingScore = Math.max(1, Math.min(100, Number(selectedLessonModel?.quizPassingScore || settings.passingScore || 80)));
+    const quizAttemptLimit = Math.max(1, Number(selectedLessonModel?.quizAttemptLimit || 1));
+
+    return (
+      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 space-y-4">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-[11px] uppercase tracking-wide text-slate-400 font-semibold">Как увидит оператор</p>
+            <p className="text-sm font-semibold text-slate-900 truncate">{selectedLessonModel.title || "Без названия"}</p>
+            <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-500">
+              <span>Модуль {selectedLessonLocation.moduleNumber}</span>
+              <span>·</span>
+              <span>Урок {selectedLessonLocation.lessonNumber}</span>
+              <span>·</span>
+              <span>{durationLabel}</span>
+            </div>
+          </div>
+          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-white border border-slate-200 text-slate-700">
+            <Eye size={12} /> {lessonTypeLabel}
+          </span>
+        </div>
+
+        {selectedLessonDescriptionRich && (
+          <div className="bg-white rounded-xl border border-slate-200 p-3">
+            <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide mb-2">Описание урока</p>
+            <RichTextContent
+              value={selectedLessonDescriptionRich}
+              className="text-sm text-slate-700 leading-relaxed"
+            />
+          </div>
+        )}
+
+        {lessonType === "text" && (
+          <div className="bg-white rounded-xl border border-slate-200 p-3">
+            <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide mb-2">Текст урока</p>
+            <RichTextContent
+              value={selectedLessonTextContentRich}
+              className="text-sm text-slate-700 leading-relaxed"
+              emptyState={<div className="text-xs text-slate-400">Текст урока пока не заполнен</div>}
+            />
+          </div>
+        )}
+
+        {lessonType === "video" && (
+          <>
+            <div className="bg-white rounded-xl border border-slate-200 p-3">
+              <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide mb-2">Видео</p>
+              {selectedLessonVideoMaterial ? (
+                selectedLessonVideoUrl ? (
+                  <video
+                    key={selectedLessonVideoUrl}
+                    src={selectedLessonVideoUrl}
+                    controls
+                    preload="metadata"
+                    className="w-full max-h-72 bg-black rounded-lg"
+                  />
+                ) : (
+                  <div className="px-3 py-8 rounded-lg bg-slate-100 text-xs text-slate-500 text-center">
+                    Видео загружено, но ссылка для предпросмотра пока недоступна
+                  </div>
+                )
+              ) : (
+                <div className="px-3 py-8 rounded-lg bg-slate-100 text-xs text-slate-500 text-center">
+                  Видеофайл пока не загружен
+                </div>
+              )}
+              {selectedLessonVideoMaterial && (
+                <p className="text-xs text-slate-500 mt-2">Файл: {selectedLessonVideoName}</p>
+              )}
+            </div>
+
+            <div className="bg-white rounded-xl border border-slate-200 p-3">
+              <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide mb-2">Транскрипт</p>
+              <RichTextContent
+                value={selectedLessonTranscriptRich}
+                className="text-sm text-slate-700 leading-relaxed"
+                emptyState={<div className="text-xs text-slate-400">Транскрипт пока не заполнен</div>}
+              />
+            </div>
+          </>
+        )}
+
+        {lessonType === "quiz" && (
+          <>
+            <div className="grid grid-cols-2 gap-2">
+              <div className="bg-white rounded-xl border border-slate-200 px-3 py-2">
+                <p className="text-[10px] uppercase tracking-wide text-slate-400">Вопросов в попытке</p>
+                <p className="text-xs font-semibold text-slate-800 mt-1">{Math.min(quizQuestionLimit, Math.max(1, quizQuestionsForPreview.length))}</p>
+              </div>
+              <div className="bg-white rounded-xl border border-slate-200 px-3 py-2">
+                <p className="text-[10px] uppercase tracking-wide text-slate-400">Лимит времени</p>
+                <p className="text-xs font-semibold text-slate-800 mt-1">{quizMinutes} мин</p>
+              </div>
+              <div className="bg-white rounded-xl border border-slate-200 px-3 py-2">
+                <p className="text-[10px] uppercase tracking-wide text-slate-400">Проходной балл</p>
+                <p className="text-xs font-semibold text-slate-800 mt-1">{quizPassingScore}%</p>
+              </div>
+              <div className="bg-white rounded-xl border border-slate-200 px-3 py-2">
+                <p className="text-[10px] uppercase tracking-wide text-slate-400">Попыток</p>
+                <p className="text-xs font-semibold text-slate-800 mt-1">{quizAttemptLimit}</p>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              {quizQuestionsForPreview.length === 0 && (
+                <div className="bg-white rounded-xl border border-slate-200 px-3 py-5 text-xs text-slate-400 text-center">
+                  Добавьте вопросы, чтобы увидеть предпросмотр теста
+                </div>
+              )}
+              {quizQuestionsForPreview.map((question, index) => {
+                const questionType = String(question?.type || "single").toLowerCase();
+                const questionOptions = Array.isArray(question?.options) ? question.options : [];
+                const questionCorrect = question?.correct;
+                return (
+                  <div key={question?.id || `preview-question-${index}`} className="bg-white rounded-xl border border-slate-200 p-3">
+                    <div className="flex items-start gap-2">
+                      <span className="w-5 h-5 rounded-md bg-indigo-50 text-indigo-600 text-[11px] font-bold inline-flex items-center justify-center flex-shrink-0 mt-0.5">{index + 1}</span>
+                      <p className="text-xs font-medium text-slate-800 leading-relaxed">
+                        {question?.text || `Вопрос ${index + 1}`}
+                      </p>
+                    </div>
+
+                    {questionType !== "text" && (
+                      <div className="mt-2 space-y-1.5 pl-7">
+                        {questionOptions.map((option, optionIndex) => {
+                          const isCorrect = questionType === "multiple"
+                            ? (Array.isArray(questionCorrect) && questionCorrect.includes(optionIndex))
+                            : Number(questionCorrect) === optionIndex;
+                          return (
+                            <div key={`option-${optionIndex}`} className="flex items-start gap-2 text-xs text-slate-600">
+                              <span className={`mt-0.5 w-4 h-4 rounded border inline-flex items-center justify-center ${isCorrect ? "border-emerald-500 bg-emerald-500 text-white" : "border-slate-300 bg-white text-transparent"}`}>
+                                <Check size={9} />
+                              </span>
+                              <span className="leading-relaxed">{option || `Вариант ${optionIndex + 1}`}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {questionType === "text" && (
+                      <div className="mt-2 pl-7">
+                        <div className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] text-slate-400">
+                          Поле для текстового ответа сотрудника
+                        </div>
+                      </div>
+                    )}
+
+                    {showExplanations && question?.explanation && (
+                      <div className="mt-2 pl-7 text-[11px] text-slate-500">
+                        Пояснение: {question.explanation}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        )}
+
+        {(lessonType === "video" || lessonType === "text") && (
+          <div className="bg-white rounded-xl border border-slate-200 p-3">
+            <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide mb-2">Дополнительные материалы</p>
+            <div className="space-y-2">
+              {selectedLessonExtraMaterials.length === 0 && (
+                <div className="text-xs text-slate-400">Материалы не добавлены</div>
+              )}
+              {selectedLessonExtraMaterials.map((material, index) => (
+                <div key={`${material?.title || "material"}-${index}`} className="flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2">
+                  <FileCheck size={12} className="text-indigo-500 flex-shrink-0" />
+                  <div className="min-w-0">
+                    <div className="text-xs text-slate-700 truncate">{material?.metadata?.uploaded_file_name || material?.title || `Материал ${index + 1}`}</div>
+                    <div className="text-[10px] uppercase text-slate-400">{String(material?.material_type || material?.type || "file")}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div className="lms-shell py-8">
@@ -4066,8 +4274,9 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
             <div className="bg-white rounded-2xl border border-slate-200 p-5 sticky top-24">
               {selectedLessonModel ? (
                 <>
-                  <h3 className="text-sm font-semibold text-slate-900 mb-4">Редактор урока</h3>
-                  <div className="space-y-4">
+                  <h3 className="text-sm font-semibold text-slate-900 mb-2">Редактор урока</h3>
+                  <p className="text-[11px] text-slate-500 mb-4">Предпросмотр ниже обновляется сразу при изменениях.</p>
+                  <div className="space-y-6">
                     <div>
                       <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Описание урока</label>
                       <RichTextEditor
@@ -4418,6 +4627,12 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                         )}
                       </>
                     )}
+
+                    <div className="pt-1 border-t border-slate-100">
+                      <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">Предпросмотр урока</h4>
+                      <p className="text-[11px] text-slate-400">В этом блоке видно, как урок будет выглядеть у операторов.</p>
+                    </div>
+                    {renderSelectedLessonPreview()}
                   </div>
                 </>
               ) : (
