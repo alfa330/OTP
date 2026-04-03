@@ -252,16 +252,30 @@ class AttachmentBlot extends BlockEmbed {
     link.setAttribute("rel", "noopener noreferrer");
     link.setAttribute("download", name);
 
-    const badge = document.createElement("span");
-    badge.className = "lms-file-badge";
-    badge.textContent = "FILE";
+    const icon = document.createElement("span");
+    icon.className = "lms-file-icon";
+    icon.setAttribute("aria-hidden", "true");
 
     const title = document.createElement("span");
     title.className = "lms-file-title";
     title.textContent = name;
 
-    link.appendChild(badge);
-    link.appendChild(title);
+    const subtitle = document.createElement("span");
+    subtitle.className = "lms-file-subtitle";
+    subtitle.textContent = "Нажмите, чтобы скачать";
+
+    const content = document.createElement("span");
+    content.className = "lms-file-content";
+    content.appendChild(title);
+    content.appendChild(subtitle);
+
+    const action = document.createElement("span");
+    action.className = "lms-file-download";
+    action.textContent = "Скачать";
+
+    link.appendChild(icon);
+    link.appendChild(content);
+    link.appendChild(action);
     node.appendChild(link);
     return node;
   }
