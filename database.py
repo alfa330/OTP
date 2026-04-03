@@ -14334,12 +14334,21 @@ class Database:
         role = self._normalize_survey_role(requester_role)
         requester_id = int(requester_id)
 
-        if role_has_min(role, 'admin') or role in ('trainer', 'sv'):
+        if role_has_min(role, 'admin') or role == 'trainer':
             cursor.execute("""
                 SELECT id
                 FROM users
-                WHERE role = 'operator'
-                  AND COALESCE(status, 'working') NOT IN ('fired', 'dismissal')
+                WHERE LOWER(TRIM(COALESCE(role, ''))) = 'operator'
+                  AND COALESCE(NULLIF(LOWER(TRIM(COALESCE(status, 'working'))), ''), 'working') <> 'fired'
+            """)
+            return [int(row[0]) for row in cursor.fetchall()]
+
+        if role == 'sv':
+            cursor.execute("""
+                SELECT id
+                FROM users
+                WHERE LOWER(TRIM(COALESCE(role, ''))) = 'operator'
+                  AND COALESCE(NULLIF(LOWER(TRIM(COALESCE(status, 'working'))), ''), 'working') NOT IN ('fired', 'dismissal')
             """)
             return [int(row[0]) for row in cursor.fetchall()]
 
