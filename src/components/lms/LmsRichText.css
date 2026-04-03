@@ -89,6 +89,38 @@
   outline-offset: 2px;
 }
 
+.lms-rich-text-editor .ql-editor .lms-drop-target-before,
+.lms-rich-text-editor .ql-editor .lms-drop-target-after {
+  box-shadow: 0 0 0 2px rgb(99 102 241 / 40%);
+}
+
+.lms-rich-drop-indicator {
+  position: absolute;
+  z-index: 26;
+  height: 3px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgb(99 102 241) 0%, rgb(79 70 229) 100%);
+  pointer-events: none;
+  box-shadow: 0 8px 16px -10px rgb(79 70 229 / 80%);
+}
+
+.lms-rich-drop-indicator-dot {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: rgb(79 70 229);
+  border: 2px solid rgb(255 255 255 / 95%);
+  transform: translate(-50%, -50%);
+  box-shadow: 0 2px 8px rgb(79 70 229 / 45%);
+}
+
+.lms-rich-drop-indicator-dot-end {
+  left: 100%;
+}
+
 .lms-rich-image-controls {
   position: absolute;
   z-index: 25;

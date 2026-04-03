@@ -29526,39 +29526,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 showToast={showToast}
                             />
                         )}
-                        {user.role === 'operator' && (
-                        <div className="bg-white p-4 rounded-xl shadow-sm mb-6 border border-gray-200 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                            <div className="flex items-center gap-3">
-                                <FaIcon className={`fas fa-shield-alt ${sensitiveAccess.granted ? 'text-green-600' : 'text-amber-600'}`}></FaIcon>
-                                <div className="text-sm">
-                                    <div className="font-semibold text-gray-800">Доступ к моим данным оценок</div>
-                                    <div className={`${sensitiveAccess.granted ? 'text-green-700' : 'text-amber-700'}`}>
-                                        {sensitiveAccess.loading
-                                            ? 'Проверка статуса...'
-                                            : (sensitiveAccess.granted ? 'Открыт в текущей сессии' : 'Закрыт, нужен QR-скан от admin/sv')}
-                                    </div>
-                                </div>
-                            </div>
-                            <div className="flex items-center gap-2">
-                                {!sensitiveAccess.granted && (
-                                <button
-                                    onClick={requestSensitiveQrAccess}
-                                    className="px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm font-medium transition"
-                                >
-                                    <FaIcon className="fas fa-qrcode mr-2"></FaIcon>Сгенерировать QR
-                                </button>
-                                )}
-                                {sensitiveAccess.granted && (
-                                <button
-                                    onClick={revokeSensitiveAccess}
-                                    className="px-4 py-2 rounded-lg bg-gray-200 text-gray-800 hover:bg-gray-300 text-sm font-medium transition"
-                                >
-                                    Закрыть доступ
-                                </button>
-                                )}
-                            </div>
-                        </div>
-                        )}
                         {canSeeCallEvaluation && (
                         <div className="w-full h-full px-2 md:px-3 py-3" style={{ backgroundColor: '#f7f7f5', display: isCallEvaluationView ? undefined : 'none' }}>
                             <iframe
