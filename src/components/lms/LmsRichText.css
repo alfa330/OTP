@@ -1,0 +1,52 @@
+.lms-rich-text-editor {
+  --lms-editor-min-height: 140px;
+}
+
+.lms-rich-text-editor .ql-toolbar.ql-snow {
+  border: 1px solid rgb(226 232 240);
+  border-bottom: 0;
+  border-top-left-radius: 0.75rem;
+  border-top-right-radius: 0.75rem;
+  background: rgb(248 250 252);
+}
+
+.lms-rich-text-editor .ql-container.ql-snow {
+  border: 1px solid rgb(226 232 240);
+  border-bottom-left-radius: 0.75rem;
+  border-bottom-right-radius: 0.75rem;
+  background: #ffffff;
+}
+
+.lms-rich-text-editor .ql-editor {
+  min-height: var(--lms-editor-min-height);
+  font-size: 0.875rem;
+  line-height: 1.5;
+  color: rgb(15 23 42);
+}
+
+.lms-rich-text-editor .ql-editor.ql-blank::before {
+  font-style: normal;
+  color: rgb(148 163 184);
+}
+
+.lms-rich-content p {
+  margin: 0 0 0.75rem 0;
+}
+
+.lms-rich-content p:last-child {
+  margin-bottom: 0;
+}
+
+.lms-rich-content ul,
+.lms-rich-content ol {
+  margin: 0.5rem 0 0.75rem 1.25rem;
+}
+
+.lms-rich-content li {
+  margin: 0.15rem 0;
+}
+
+.lms-rich-content a {
+  color: rgb(79 70 229);
+  text-decoration: underline;
+}
