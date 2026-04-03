@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import ReactQuill from "react-quill";
 import DOMPurify from "dompurify";
 import {
@@ -178,16 +178,14 @@ const CERTIFICATES = [
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 
-const RICH_TEXT_MODULES = {
-  toolbar: [
-    [{ header: [2, 3, false] }],
-    [{ align: ["", "center", "right"] }],
-    ["bold", "italic", "underline", "strike"],
-    [{ list: "ordered" }, { list: "bullet" }],
-    ["blockquote", "link"],
-    ["clean"],
-  ],
-};
+const RICH_TEXT_TOOLBAR = [
+  [{ header: [2, 3, false] }],
+  [{ align: ["", "center", "right"] }],
+  ["bold", "italic", "underline", "strike"],
+  [{ list: "ordered" }, { list: "bullet" }],
+  ["blockquote", "link", "image"],
+  ["clean"],
+];
 
 const RICH_TEXT_FORMATS = [
   "header",
@@ -200,6 +198,7 @@ const RICH_TEXT_FORMATS = [
   "bullet",
   "blockquote",
   "link",
+  "image",
 ];
 
 const RICH_TEXT_SANITIZE_OPTIONS = {
@@ -210,9 +209,10 @@ const RICH_TEXT_SANITIZE_OPTIONS = {
     "ul", "ol", "li",
     "blockquote",
     "a",
+    "img",
     "span",
   ],
-  ALLOWED_ATTR: ["href", "target", "rel", "class", "data-list", "data-checked"],
+  ALLOWED_ATTR: ["href", "target", "rel", "class", "data-list", "data-checked", "src", "alt", "title"],
 };
 
 const stripHtmlToText = (value) => String(value || "")
@@ -251,15 +251,53 @@ const sanitizeRichHtml = (value) => {
   return DOMPurify.sanitize(prepared, RICH_TEXT_SANITIZE_OPTIONS);
 };
 
-function RichTextEditor({ value, onChange, placeholder = "", minHeight = 140 }) {
+function RichTextEditor({ value, onChange, placeholder = "", minHeight = 140, onImageUpload = null }) {
+  const quillRef = useRef(null);
+
+  const handleImageInsert = useCallback(() => {
+    if (typeof onImageUpload !== "function") return;
+    const editor = quillRef.current?.getEditor?.();
+    if (!editor) return;
+
+    const input = document.createElement("input");
+    input.setAttribute("type", "file");
+    input.setAttribute("accept", "image/*");
+    input.click();
+
+    input.onchange = async () => {
+      try {
+        const file = input.files?.[0];
+        if (!file) return;
+        const imageUrl = String(await onImageUpload(file)).trim();
+        if (!imageUrl) return;
+        const range = editor.getSelection(true);
+        const index = range?.index ?? editor.getLength();
+        editor.insertEmbed(index, "image", imageUrl, "user");
+        editor.setSelection(index + 1, 0, "user");
+      } catch (_) {
+        // Ошибка уже обработана в upload callback
+      }
+    };
+  }, [onImageUpload]);
+
+  const richTextModules = useMemo(() => ({
+    toolbar: {
+      container: RICH_TEXT_TOOLBAR,
+      handlers: {
+        image: handleImageInsert,
+      },
+    },
+  }), [handleImageInsert]);
+
   return (
     <div className="lms-rich-text-editor" style={{ "--lms-editor-min-height": `${Math.max(100, Number(minHeight || 140))}px` }}>
       <ReactQuill
+        ref={quillRef}
         theme="snow"
         value={prepareRichTextValue(value)}
         onChange={(html) => onChange?.(normalizeRichTextValue(html))}
         placeholder={placeholder}
-        modules={RICH_TEXT_MODULES}
+        modules={richTextModules}
         formats={RICH_TEXT_FORMATS}
       />
     </div>
@@ -3296,6 +3334,26 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
     return first;
   }, [lmsRequest]);
 
+  const handleRichTextImageUpload = useCallback(async (file) => {
+    try {
+      if (!(file instanceof File)) {
+        throw new Error("Файл не выбран");
+      }
+      if (!String(file.type || "").toLowerCase().startsWith("image/")) {
+        throw new Error("Можно загружать только изображения");
+      }
+      const uploaded = await uploadSingleMaterial(file, "file");
+      const imageUrl = String(uploaded?.signed_url || uploaded?.content_url || uploaded?.url || "").trim();
+      if (!imageUrl) {
+        throw new Error("Ссылка на изображение не получена");
+      }
+      return imageUrl;
+    } catch (error) {
+      emitToast?.(`Не удалось загрузить изображение: ${String(error?.message || "ошибка")}`, "error");
+      throw error;
+    }
+  }, [uploadSingleMaterial, emitToast]);
+
   const readVideoDurationSeconds = useCallback((file) => new Promise((resolve) => {
     try {
       if (!(file instanceof File)) {
@@ -3945,6 +4003,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
             value={value || ""}
             onChange={onChange}
             placeholder={placeholder}
+            onImageUpload={handleRichTextImageUpload}
             minHeight={minHeight}
           />
           <div className="flex justify-end">
@@ -4353,6 +4412,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                   <RichTextEditor
                     value={settings.description}
                     onChange={(next) => setSettings((p) => ({ ...p, description: next }))}
+                    onImageUpload={handleRichTextImageUpload}
                     placeholder="Краткое описание курса..."
                     minHeight={140}
                   />
@@ -4528,6 +4588,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                       <RichTextEditor
                         value={selectedLessonModel.description || ""}
                         onChange={(next) => updateLessonById(selectedLessonModel.id, { description: next })}
+                        onImageUpload={handleRichTextImageUpload}
                         placeholder="Что узнает сотрудник в этом уроке..."
                         minHeight={120}
                       />
@@ -4732,6 +4793,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                             <RichTextEditor
                               value={selectedLessonModel.contentText || ""}
                               onChange={(next) => updateLessonById(selectedLessonModel.id, { contentText: next })}
+                              onImageUpload={handleRichTextImageUpload}
                               placeholder="Введите текст урока..."
                               minHeight={220}
                             />
@@ -4745,6 +4807,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                               <RichTextEditor
                                 value={selectedLessonModel.contentText || ""}
                                 onChange={(next) => updateLessonById(selectedLessonModel.id, { contentText: next })}
+                                onImageUpload={handleRichTextImageUpload}
                                 placeholder="Введите текст транскрипта видео..."
                                 minHeight={170}
                               />
