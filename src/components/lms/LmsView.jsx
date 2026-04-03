@@ -212,7 +212,7 @@ const RICH_TEXT_SANITIZE_OPTIONS = {
     "a",
     "span",
   ],
-  ALLOWED_ATTR: ["href", "target", "rel", "class"],
+  ALLOWED_ATTR: ["href", "target", "rel", "class", "data-list", "data-checked"],
 };
 
 const stripHtmlToText = (value) => String(value || "")
