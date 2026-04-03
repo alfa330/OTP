@@ -309,12 +309,12 @@
   gap: 0.75rem;
   width: 100%;
   border: 1px solid rgb(226 232 240);
-  background: linear-gradient(180deg, rgb(248 250 252) 0%, rgb(241 245 249) 100%);
+  background: rgb(248 250 252);
   border-radius: 0.85rem;
   padding: 0.65rem 0.75rem;
   text-decoration: none;
   color: rgb(15 23 42);
-  transition: border-color 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
 }
 
 .lms-rich-content .lms-file-link,
@@ -326,8 +326,7 @@
 
 .lms-file-link:hover {
   border-color: rgb(129 140 248);
-  background: linear-gradient(180deg, rgb(238 242 255) 0%, rgb(224 231 255) 100%);
-  box-shadow: 0 6px 16px -12px rgb(79 70 229 / 45%);
+  background: rgb(238 242 255);
 }
 
 .lms-file-link:focus-visible {
