@@ -45,6 +45,13 @@
   color: rgb(148 163 184);
 }
 
+.lms-rich-text-editor .ql-editor img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 0.75rem;
+  margin: 0.5rem 0;
+}
+
 .lms-rich-content p {
   margin: 0 0 0.75rem 0;
 }
@@ -112,6 +119,14 @@
 .lms-rich-content a {
   color: rgb(79 70 229);
   text-decoration: underline;
+}
+
+.lms-rich-content img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border-radius: 0.75rem;
+  margin: 0.75rem 0;
 }
 
 .lms-rich-content .ql-align-center {
