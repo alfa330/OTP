@@ -1767,9 +1767,10 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
     setView("admin");
     setAdminTab("analytics");
   };
+  const isLessonLayout = view === "lesson" && Boolean(selectedLesson) && Boolean(selectedCourse);
 
   return (
-    <div className="min-h-screen bg-slate-50 font-sans" style={{ fontFamily: "'DM Sans', system-ui, sans-serif" }}>
+    <div className={`min-h-screen bg-slate-50 font-sans ${isLessonLayout ? "h-screen overflow-hidden" : ""}`} style={{ fontFamily: "'DM Sans', system-ui, sans-serif" }}>
       <TopNav
         view={view}
         goBack={goBack}
@@ -1779,7 +1780,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
         canToggleAdmin={canUseManagerApi}
         canGoCatalog={canGoCatalog}
       />
-      <main className="pt-16">
+      <main className={isLessonLayout ? "pt-16 h-screen overflow-hidden" : "pt-16"}>
         {homeError && canUseLearnerApi && (
           <div className="lms-shell py-4">
             <div className="rounded-xl border border-amber-200 bg-amber-50 text-amber-800 text-sm px-4 py-3">
@@ -2369,9 +2370,9 @@ function LessonView({
   })();
 
   return (
-    <div className="flex h-[calc(100vh-64px)]">
+    <div className="flex h-full min-h-0 overflow-hidden">
       {/* Sidebar */}
-      <div className={`${sidebarOpen ? "w-80 2xl:w-96" : "w-0"} flex-shrink-0 transition-all duration-300 overflow-hidden bg-white border-r border-slate-200`}>
+      <div className={`${sidebarOpen ? "w-80 2xl:w-96" : "w-0"} flex h-full min-h-0 flex-shrink-0 flex-col transition-all duration-300 overflow-hidden bg-white border-r border-slate-200`}>
         <div className="p-4 border-b border-slate-100">
           <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Программа курса</p>
           <p className="text-sm font-semibold text-slate-900 leading-tight">{course.title}</p>
@@ -2380,7 +2381,7 @@ function LessonView({
             <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden"><div className="h-full bg-indigo-500 rounded-full" style={{ width: `${course.progress}%` }} /></div>
           </div>
         </div>
-        <div className="overflow-y-auto h-full pb-20">
+        <div className="flex-1 min-h-0 overflow-y-auto pb-20">
           {course.modules_data.map((mod, moduleIndex) => (
             <div key={mod.id}>
               <div className="px-4 py-3 bg-slate-50 border-b border-slate-100">
@@ -2415,7 +2416,7 @@ function LessonView({
       </div>
 
       {/* Main content */}
-      <div className="flex-1 overflow-y-auto bg-slate-50">
+      <div className="flex-1 min-h-0 overflow-y-auto bg-slate-50">
         <div className="sticky top-0 z-10 bg-white border-b border-slate-200 px-6 py-3 flex items-center gap-3">
           <button onClick={() => setSidebarOpen(!sidebarOpen)} className="p-2 rounded-lg hover:bg-slate-100 text-slate-500 transition-colors"><AlignLeft size={16} /></button>
           <div className="flex-1">
