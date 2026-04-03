@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import ReactQuill from "react-quill";
+import DOMPurify from "dompurify";
 import {
   BookOpen, Play, CheckCircle, Clock, Award, Bell, Search, ChevronRight,
   ChevronDown, BarChart2, Plus, Trash2, Edit, Settings, Lock, Star, Download,
@@ -10,6 +12,8 @@ import {
   Save, Image, Link2, FileCheck, Pause, Volume2, Maximize, AlertTriangle,
   XCircle, CheckSquare, Square, Type, ToggleRight as RadioIcon
 } from "lucide-react";
+import "react-quill/dist/quill.snow.css";
+import "./LmsRichText.css";
 
 // ─── MOCK DATA ────────────────────────────────────────────────────────────────
 
@@ -173,6 +177,85 @@ const CERTIFICATES = [
 ];
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
+
+const RICH_TEXT_MODULES = {
+  toolbar: [
+    [{ header: [2, 3, false] }],
+    ["bold", "italic", "underline", "strike"],
+    [{ list: "ordered" }, { list: "bullet" }],
+    ["blockquote", "link"],
+    ["clean"],
+  ],
+};
+
+const RICH_TEXT_FORMATS = [
+  "header",
+  "bold",
+  "italic",
+  "underline",
+  "strike",
+  "list",
+  "bullet",
+  "blockquote",
+  "link",
+];
+
+const stripHtmlToText = (value) => String(value || "")
+  .replace(/<style[\s\S]*?<\/style>/gi, " ")
+  .replace(/<script[\s\S]*?<\/script>/gi, " ")
+  .replace(/<[^>]+>/g, " ")
+  .replace(/&nbsp;/gi, " ")
+  .replace(/&#160;/gi, " ")
+  .replace(/\s+/g, " ")
+  .trim();
+
+const normalizeRichTextValue = (value) => {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const plain = stripHtmlToText(raw);
+  return plain ? raw : "";
+};
+
+const escapeHtml = (value) => String(value || "")
+  .replace(/&/g, "&amp;")
+  .replace(/</g, "&lt;")
+  .replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;")
+  .replace(/'/g, "&#039;");
+
+const prepareRichTextValue = (value) => {
+  const raw = String(value || "");
+  if (!raw.trim()) return "";
+  if (/<\/?[a-z][\s\S]*>/i.test(raw)) return raw;
+  return escapeHtml(raw).replace(/\n/g, "<br/>");
+};
+
+const sanitizeRichHtml = (value) => {
+  const prepared = prepareRichTextValue(value);
+  if (!prepared) return "";
+  return DOMPurify.sanitize(prepared, { USE_PROFILES: { html: true } });
+};
+
+function RichTextEditor({ value, onChange, placeholder = "", minHeight = 140 }) {
+  return (
+    <div className="lms-rich-text-editor" style={{ "--lms-editor-min-height": `${Math.max(100, Number(minHeight || 140))}px` }}>
+      <ReactQuill
+        theme="snow"
+        value={prepareRichTextValue(value)}
+        onChange={(html) => onChange?.(normalizeRichTextValue(html))}
+        placeholder={placeholder}
+        modules={RICH_TEXT_MODULES}
+        formats={RICH_TEXT_FORMATS}
+      />
+    </div>
+  );
+}
+
+function RichTextContent({ value, className = "", emptyState = null }) {
+  const safeHtml = sanitizeRichHtml(value);
+  if (!safeHtml) return emptyState;
+  return <div className={`lms-rich-content ${className}`.trim()} dangerouslySetInnerHTML={{ __html: safeHtml }} />;
+}
 
 const statusConfig = {
   completed: { label: "Завершён", bg: "bg-emerald-50", text: "text-emerald-700", border: "border-emerald-200", dot: "bg-emerald-500" },
@@ -1460,7 +1543,11 @@ function CourseDetail({ course, onStartLesson }) {
             {course.mandatory && <span className="text-xs font-semibold bg-white/20 text-white px-2.5 py-1 rounded-full">Обязательный</span>}
           </div>
           <h1 className="text-3xl font-bold text-white mb-4 leading-tight tracking-tight">{course.title}</h1>
-          <p className="text-white/80 text-sm leading-relaxed mb-6">{course.description}</p>
+          <RichTextContent
+            value={course.description}
+            className="text-white/80 text-sm leading-relaxed mb-6 [&_a]:text-white [&_strong]:text-white"
+            emptyState={<div className="text-white/70 text-sm mb-6">Описание курса не заполнено</div>}
+          />
           <div className="flex items-center gap-5 text-white/70 text-sm mb-6">
             <span className="flex items-center gap-2"><Clock size={15} /> {course.duration}</span>
             <span className="flex items-center gap-2"><BookOpen size={15} /> {course.lessons} уроков</span>
@@ -1713,7 +1800,7 @@ function TextLesson({ lesson, onCompleteLesson }) {
   const [completed, setCompleted] = useState(String(lesson?.status || "").toLowerCase() === "completed");
   const materials = Array.isArray(lesson?.materials) ? lesson.materials : [];
   const transcriptMaterial = materials.find((item) => String(item?.material_type || "").toLowerCase() === "text" && item?.content_text);
-  const content = String(transcriptMaterial?.content_text || lesson?.description || "").trim();
+  const content = normalizeRichTextValue(transcriptMaterial?.content_text || lesson?.description || "");
   const lessonFiles = materials.filter((item) => {
     const type = String(item?.material_type || "").toLowerCase();
     if (type === "text") return false;
@@ -1746,11 +1833,11 @@ function TextLesson({ lesson, onCompleteLesson }) {
     <div className="space-y-6">
       <div className="bg-white rounded-2xl border border-slate-200 p-6">
         <h3 className="text-sm font-semibold text-slate-900 mb-3">Материал урока</h3>
-        {content ? (
-          <div className="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap">{content}</div>
-        ) : (
-          <div className="text-xs text-slate-400">Текст урока не заполнен</div>
-        )}
+        <RichTextContent
+          value={content}
+          className="text-sm text-slate-700 leading-relaxed"
+          emptyState={<div className="text-xs text-slate-400">Текст урока не заполнен</div>}
+        />
       </div>
 
       <div className="bg-white rounded-2xl border border-slate-200 p-5">
@@ -1840,7 +1927,7 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
   const safeTotalSeconds = Math.max(1, Number(totalSeconds || 0));
   const currentSeconds = Math.max(0, Math.floor(Number(displayCurrentSeconds || 0)));
   const transcriptMaterial = materials.find((item) => String(item?.material_type || "").toLowerCase() === "text" && item?.content_text);
-  const transcriptText = String(transcriptMaterial?.content_text || lesson?.description || "").trim();
+  const transcriptText = normalizeRichTextValue(transcriptMaterial?.content_text || lesson?.description || "");
   const lessonFiles = materials.filter((item) => {
     const type = String(item?.material_type || item?.type || "").toLowerCase();
     if (type === "video") return false;
@@ -2221,9 +2308,9 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
         </div>
         <div className="p-5">
           {activeTab === "transcript" && (
-            <div className="text-sm text-slate-600 leading-relaxed space-y-3">
+            <div className="text-sm text-slate-600 leading-relaxed">
               {transcriptText ? (
-                <p>{transcriptText}</p>
+                <RichTextContent value={transcriptText} />
               ) : (
                 <>
                   <p>В этом уроке мы рассмотрим <strong className="text-slate-800">основные принципы информационной безопасности</strong> и их практическое применение в корпоративной среде.</p>
@@ -3473,8 +3560,8 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
             if (!lessonTitle) return null;
             const rawType = String(lessonItem?.type || "video").toLowerCase();
             const lessonType = rawType === "text" ? "text" : rawType === "quiz" ? "quiz" : "video";
-            const description = String(lessonItem?.description || "").trim();
-            const contentText = String(lessonItem?.contentText || "").trim();
+            const description = normalizeRichTextValue(lessonItem?.description || "");
+            const contentText = normalizeRichTextValue(lessonItem?.contentText || "");
 
             if (lessonType === "quiz") {
               const quizQuestions = mapQuestionsToPayload(lessonItem?.quizQuestions);
@@ -3520,7 +3607,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                 const safeType = ["video", "pdf", "link", "text", "file"].includes(materialType) ? materialType : "file";
                 const contentUrl = String(materialItem?.content_url || materialItem?.signed_url || materialItem?.url || "").trim();
                 const materialText = safeType === "text"
-                  ? String(materialItem?.content_text || contentText || "").trim()
+                  ? normalizeRichTextValue(materialItem?.content_text || contentText || "")
                   : String(materialItem?.content_text || "").trim();
                 if (!contentUrl && !materialText) return null;
                 return {
@@ -3544,7 +3631,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                 material_type: "text",
                 content_url: null,
                 content_text: contentText,
-                mime_type: "text/plain",
+                mime_type: "text/html",
                 bucket: null,
                 blob_path: null,
                 metadata: {},
@@ -3560,7 +3647,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                   material_type: "text",
                   content_url: null,
                   content_text: contentText,
-                  mime_type: "text/plain",
+                  mime_type: "text/html",
                   bucket: null,
                   blob_path: null,
                   metadata: {},
@@ -3626,7 +3713,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
         method: "POST",
         body: {
           title,
-          description: String(settings.description || "").trim(),
+          description: normalizeRichTextValue(settings.description || ""),
           category: String(settings.category || "").trim(),
           pass_threshold: Number(settings.passingScore || 80),
           attempt_limit: attemptLimit,
@@ -3819,7 +3906,12 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                 </div>
                 <div>
                   <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Описание</label>
-                  <textarea rows={4} value={settings.description} onChange={e => setSettings(p => ({ ...p, description: e.target.value }))} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:border-indigo-400 transition-all resize-none" placeholder="Краткое описание курса..." />
+                  <RichTextEditor
+                    value={settings.description}
+                    onChange={(next) => setSettings((p) => ({ ...p, description: next }))}
+                    placeholder="Краткое описание курса..."
+                    minHeight={140}
+                  />
                 </div>
                 <div>
                   <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Категория</label>
@@ -3963,12 +4055,11 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                   <div className="space-y-4">
                     <div>
                       <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Описание урока</label>
-                      <textarea
-                        rows={3}
+                      <RichTextEditor
                         value={selectedLessonModel.description || ""}
-                        onChange={(e) => updateLessonById(selectedLessonModel.id, { description: e.target.value })}
-                        className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:border-indigo-400 transition-all resize-none"
+                        onChange={(next) => updateLessonById(selectedLessonModel.id, { description: next })}
                         placeholder="Что узнает сотрудник в этом уроке..."
+                        minHeight={120}
                       />
                     </div>
                     {selectedLessonModel.type === "quiz" ? (
@@ -4168,12 +4259,11 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                         {selectedLessonModel.type === "text" && (
                           <div>
                             <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Текст урока</label>
-                            <textarea
-                              rows={7}
+                            <RichTextEditor
                               value={selectedLessonModel.contentText || ""}
-                              onChange={(e) => updateLessonById(selectedLessonModel.id, { contentText: e.target.value })}
-                              className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:border-indigo-400 transition-all resize-y"
+                              onChange={(next) => updateLessonById(selectedLessonModel.id, { contentText: next })}
                               placeholder="Введите текст урока..."
+                              minHeight={220}
                             />
                           </div>
                         )}
@@ -4182,12 +4272,11 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                           <>
                             <div>
                               <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Транскрипт видео</label>
-                              <textarea
-                                rows={5}
+                              <RichTextEditor
                                 value={selectedLessonModel.contentText || ""}
-                                onChange={(e) => updateLessonById(selectedLessonModel.id, { contentText: e.target.value })}
-                                className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:border-indigo-400 transition-all resize-y"
+                                onChange={(next) => updateLessonById(selectedLessonModel.id, { contentText: next })}
                                 placeholder="Введите текст транскрипта видео..."
+                                minHeight={170}
                               />
                             </div>
                             <div>
