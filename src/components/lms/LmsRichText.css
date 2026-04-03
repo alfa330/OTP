@@ -37,6 +37,35 @@
   margin-bottom: 0;
 }
 
+.lms-rich-content h1,
+.lms-rich-content h2,
+.lms-rich-content h3,
+.lms-rich-content h4,
+.lms-rich-content h5,
+.lms-rich-content h6 {
+  margin: 0.25rem 0 0.75rem 0;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.lms-rich-content h1 {
+  font-size: 1.5rem;
+}
+
+.lms-rich-content h2 {
+  font-size: 1.25rem;
+}
+
+.lms-rich-content h3 {
+  font-size: 1.125rem;
+}
+
+.lms-rich-content h4,
+.lms-rich-content h5,
+.lms-rich-content h6 {
+  font-size: 1rem;
+}
+
 .lms-rich-content ul,
 .lms-rich-content ol {
   margin: 0.5rem 0 0.75rem 1.25rem;

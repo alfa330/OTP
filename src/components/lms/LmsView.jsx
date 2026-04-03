@@ -202,6 +202,19 @@ const RICH_TEXT_FORMATS = [
   "link",
 ];
 
+const RICH_TEXT_SANITIZE_OPTIONS = {
+  ALLOWED_TAGS: [
+    "p", "br",
+    "h1", "h2", "h3", "h4", "h5", "h6",
+    "strong", "b", "em", "i", "u", "s",
+    "ul", "ol", "li",
+    "blockquote",
+    "a",
+    "span",
+  ],
+  ALLOWED_ATTR: ["href", "target", "rel", "class"],
+};
+
 const stripHtmlToText = (value) => String(value || "")
   .replace(/<style[\s\S]*?<\/style>/gi, " ")
   .replace(/<script[\s\S]*?<\/script>/gi, " ")
@@ -235,7 +248,7 @@ const prepareRichTextValue = (value) => {
 const sanitizeRichHtml = (value) => {
   const prepared = prepareRichTextValue(value);
   if (!prepared) return "";
-  return DOMPurify.sanitize(prepared, { USE_PROFILES: { html: true } });
+  return DOMPurify.sanitize(prepared, RICH_TEXT_SANITIZE_OPTIONS);
 };
 
 function RichTextEditor({ value, onChange, placeholder = "", minHeight = 140 }) {
