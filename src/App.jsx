@@ -28976,6 +28976,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const averageScore = operatorData?.evaluations?.length > 0
                     ? operatorData.evaluations.reduce((sum, eval1) => sum + (parseFloat(eval1.score) || 0), 0) / operatorData.evaluations.length
                     : 0;
+            const operatorsViewHasSupervisorFilter = Boolean(String(selectedSvId || '').trim());
+            const operatorsViewData = operatorsViewHasSupervisorFilter ? selectedSvData : svData;
+            const operatorsViewOperators = Array.isArray(operatorsViewData?.operators) ? operatorsViewData.operators : [];
+            const operatorsViewExpectedCalls = Number(
+                operatorsViewData?.expected_calls ?? svData?.expected_calls ?? 5
+            ) || 5;
             const callEvaluationIframeUrl = `${APP_BASE_URL}call_evaluation.html`;
             const isCallEvaluationView = view === 'call_evaluation' && (isAdminLikeRoleFn(user?.role) || isSupervisorRole(user?.role));
             const canSeeCallEvaluation = isAdminLikeRoleFn(user?.role) || isSupervisorRole(user?.role);
@@ -31619,6 +31625,23 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         {getMonthOptions()}
                                         </select>
 
+                                        <select
+                                        value={selectedSvId || ''}
+                                        onChange={(e) => setSelectedSvId(e.target.value)}
+                                        className="p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 min-w-[16rem]"
+                                        disabled={isLoading || isAdminDataLoading}
+                                        aria-label="Выберите супервайзера"
+                                        >
+                                        <option value="">Все супервайзеры</option>
+                                        {(() => {
+                                            const all = svList || [];
+                                            const active = all.filter(sv => sv.status === 'working' || sv.status === 'unpaid_leave' || !sv.status);
+                                            return active.map(sv => (
+                                                <option key={sv.id} value={sv.id}>{sv.name}</option>
+                                            ));
+                                        })()}
+                                        </select>
+
                                         {/* Generate report */}
                                         <button
                                         onClick={generateMonthlyReport}
@@ -31632,14 +31655,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </button>
 
                                         <button
-                                        onClick={() => fetchSvData(selectedReportMonth || selectedMonth)}
+                                        onClick={() => {
+                                            const monthToLoad = selectedReportMonth || selectedMonth;
+                                            if (selectedSvId) {
+                                                fetchSelectedSvData(selectedSvId, monthToLoad);
+                                            } else {
+                                                fetchSvData(monthToLoad);
+                                            }
+                                        }}
                                         disabled={isLoading || isAdminDataLoading}
                                         className={`inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium transition ${isLoading || isAdminDataLoading ? 'bg-blue-300 text-blue-600 opacity-60 cursor-not-allowed' : 'bg-blue-700 text-white hover:bg-gray-900'}`}
                                         aria-disabled={isLoading || isAdminDataLoading}
-                                        title="Обновить данные по оценкам за выбранный месяц"
+                                        title={selectedSvId ? 'Обновить данные по выбранному супервайзеру' : 'Обновить данные по оценкам за выбранный месяц'}
                                         >
                                         <FaIcon className="fas fa-sync-alt" />
-                                        <span>{isLoading ? 'Обновление...' : 'Обновить'}</span>
+                                        <span>{(isLoading || isAdminDataLoading) ? 'Обновление...' : 'Обновить'}</span>
                                         </button>
                                     </div>
                                     </div>
@@ -31647,7 +31677,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     {/* Tabs */}
                                     <div className="flex items-center space-x-3 mb-6">
                                     {(() => {
-                                        const all = svData?.operators ?? [];
+                                        const all = operatorsViewOperators;
                                         const activeCount = all.filter(op => op.status === 'working' || op.status === 'unpaid_leave' || !op.status).length;
                                         const firedCount = all.filter(op => op.status === 'fired').length;
                                         return (
@@ -31677,11 +31707,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </div>
 
                                     {/* Content */}
-                                    {isLoading ? (
+                                    {isLoading || isAdminDataLoading ? (
                                     <p className="text-center text-gray-600 py-12">Загрузка...</p>
-                                    ) : (svData && svData.operators && svData.operators.length > 0) ? (
+                                    ) : (operatorsViewOperators.length > 0) ? (
                                     (() => {
-                                        const allOps = svData.operators;
+                                        const allOps = operatorsViewOperators;
                                         const filteredOperators = activeOperatorsTab === 'active'
                                         ? allOps.filter(op => op.status === 'working' || op.status === 'unpaid_leave' || !op.status)
                                         : allOps.filter(op => op.status === 'fired');
@@ -31796,7 +31826,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             </div>
                                                         </td>
 
-                                                        <td className={`px-6 py-4 whitespace-nowrap text-sm ${getCallCountColor(callCount, svData.expected_calls || 5)}`}>
+                                                        <td className={`px-6 py-4 whitespace-nowrap text-sm ${getCallCountColor(callCount, operatorsViewExpectedCalls)}`}>
                                                             {callCount}
                                                         </td>
 
@@ -31812,6 +31842,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 onClick={(e) => openCallEvaluationSection({
                                                                     operatorId: op.id,
                                                                     operatorName: op.name,
+                                                                    supervisorId: selectedSvId || op.supervisor_id || null,
                                                                     month: selectedReportMonth || selectedMonth,
                                                                     openInNewTab: Boolean(e?.ctrlKey || e?.metaKey)
                                                                 })}
@@ -31854,7 +31885,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             </div>
                                                         </td>
 
-                                                        <td className={`px-6 py-4 whitespace-nowrap text-sm ${getCallCountColor(callCount, svData.expected_calls || 5)}`}>
+                                                        <td className={`px-6 py-4 whitespace-nowrap text-sm ${getCallCountColor(callCount, operatorsViewExpectedCalls)}`}>
                                                             {callCount}
                                                         </td>
 
@@ -31870,6 +31901,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 onClick={(e) => openCallEvaluationSection({
                                                                     operatorId: op.id,
                                                                     operatorName: op.name,
+                                                                    supervisorId: selectedSvId || op.supervisor_id || null,
                                                                     month: selectedReportMonth || selectedMonth,
                                                                     openInNewTab: Boolean(e?.ctrlKey || e?.metaKey)
                                                                 })}
