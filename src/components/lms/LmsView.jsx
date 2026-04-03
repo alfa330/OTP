@@ -2627,10 +2627,19 @@ function ApiQuizSection({ quizView, setQuizView, answers, setAnswers, course, le
         )}
         {q.type === "multiple" && (
           <div className="space-y-3">
+            <div className="flex items-start gap-2 rounded-xl border border-violet-200 bg-violet-50 px-3 py-2">
+              <AlertCircle size={14} className="mt-0.5 text-violet-600 flex-shrink-0" />
+              <p className="text-xs font-medium text-violet-700">
+                {"\u041c\u043e\u0436\u043d\u043e \u0432\u044b\u0431\u0440\u0430\u0442\u044c \u043d\u0435\u0441\u043a\u043e\u043b\u044c\u043a\u043e \u0432\u0430\u0440\u0438\u0430\u043d\u0442\u043e\u0432 \u043e\u0442\u0432\u0435\u0442\u0430"}
+              </p>
+            </div>
             {q.options.map((opt) => {
               const selected = Array.isArray(answers[q.id]) && answers[q.id].includes(opt.id);
               return (
                 <button key={opt.id} onClick={() => { setAnswers((prev) => { const oldValue = Array.isArray(prev[q.id]) ? prev[q.id] : []; const nextValue = oldValue.includes(opt.id) ? oldValue.filter((id) => id !== opt.id) : [...oldValue, opt.id]; return { ...prev, [q.id]: nextValue }; }); }} className={`w-full text-left flex items-center gap-4 px-5 py-4 rounded-xl border-2 transition-all text-sm ${selected ? "border-indigo-500 bg-indigo-50 text-indigo-800" : "border-slate-200 hover:border-indigo-200 hover:bg-indigo-50/50 text-slate-700"}`}>
+                  <div className={`w-6 h-6 rounded border-2 flex items-center justify-center flex-shrink-0 ${selected ? "border-indigo-600 bg-indigo-600" : "border-slate-300"}`}>
+                    {selected && <Check size={12} className="text-white" />}
+                  </div>
                   <span className="font-medium">{opt.text}</span>
                 </button>
               );
@@ -2957,7 +2966,12 @@ function QuizSection({ quizView, setQuizView, answers, setAnswers, course }) {
         {/* Multiple */}
         {q.type === "multiple" && (
           <div className="space-y-3">
-            <p className="text-xs text-slate-400 mb-2">Выберите все правильные ответы</p>
+            <div className="flex items-start gap-2 rounded-xl border border-violet-200 bg-violet-50 px-3 py-2">
+              <AlertCircle size={14} className="mt-0.5 text-violet-600 flex-shrink-0" />
+              <p className="text-xs font-medium text-violet-700">
+                {"\u041c\u043e\u0436\u043d\u043e \u0432\u044b\u0431\u0440\u0430\u0442\u044c \u043d\u0435\u0441\u043a\u043e\u043b\u044c\u043a\u043e \u0432\u0430\u0440\u0438\u0430\u043d\u0442\u043e\u0432 \u043e\u0442\u0432\u0435\u0442\u0430"}
+              </p>
+            </div>
             {q.options.map((opt, i) => {
               const isSelected = Array.isArray(answers[q.id]) && answers[q.id].includes(i);
               return (
