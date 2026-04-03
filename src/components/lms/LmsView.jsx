@@ -1118,7 +1118,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
       />
       <main className="pt-16">
         {homeError && canUseLearnerApi && (
-          <div className="max-w-screen-xl mx-auto px-6 py-4">
+          <div className="lms-shell py-4">
             <div className="rounded-xl border border-amber-200 bg-amber-50 text-amber-800 text-sm px-4 py-3">
               {homeError}
             </div>
@@ -1201,7 +1201,7 @@ function TopNav({ view, goBack, isAdmin, setIsAdmin, navToAdmin, canToggleAdmin 
   const backLabels = { course: "Все курсы", lesson: "Курс", builder: "Все курсы", admin: "Все курсы" };
   return (
     <header className="fixed top-0 left-0 right-0 z-40 bg-white border-b border-slate-200 h-16">
-      <div className="max-w-screen-xl mx-auto px-6 h-full flex items-center justify-between gap-4">
+      <div className="lms-shell h-full flex items-center justify-between gap-4">
         <div className="flex items-center gap-4">
           {showBack ? (
             <button onClick={goBack} className="flex items-center gap-2 text-sm text-slate-500 hover:text-slate-800 transition-colors">
@@ -1301,7 +1301,7 @@ function CatalogView({
   };
 
   return (
-    <div className="max-w-screen-xl mx-auto px-6 py-8">
+    <div className="lms-shell py-8">
       <div className="flex items-start justify-between mb-6">
         <div>
           <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Обучение</h1>
@@ -1372,7 +1372,7 @@ function CatalogView({
       {(tab === "available" || tab === "completed") && (
         <>
           <div className="flex items-center gap-3 mb-6">
-            <div className="relative flex-1 max-w-md">
+            <div className="relative flex-1 max-w-xl 2xl:max-w-2xl">
               <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
               <input value={searchQuery} onChange={e => setSearchQuery(e.target.value)} placeholder="Поиск курсов..." className="w-full pl-9 pr-4 py-2.5 bg-white border border-slate-200 rounded-xl text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition-all" />
             </div>
@@ -1396,7 +1396,7 @@ function CatalogView({
           {filteredCourses.length === 0 ? (
             <div className="text-center py-20 text-slate-400"><BookOpen size={40} className="mx-auto mb-3 opacity-30" /><p className="text-sm">Курсы не найдены</p></div>
           ) : gridView ? (
-            <div className="grid grid-cols-3 gap-5">
+            <div className="grid [grid-template-columns:repeat(auto-fill,minmax(290px,1fr))] gap-5">
               {filteredCourses.map(c => (
                 <CourseCard
                   key={c.id}
@@ -1545,14 +1545,14 @@ function CourseDetail({ course, onStartLesson }) {
   }, [course?.id]);
 
   return (
-    <div className="max-w-screen-xl mx-auto px-6 py-8">
+    <div className="lms-shell py-8">
       <div className={`rounded-3xl bg-gradient-to-br ${course.color} p-8 mb-8 relative overflow-hidden`}>
         {course.coverUrl ? (
           <img src={course.coverUrl} alt={course.title} className="absolute inset-0 w-full h-full object-cover object-center opacity-30" />
         ) : (
           <div className="absolute right-8 top-8 text-8xl opacity-20">{course.cover}</div>
         )}
-        <div className="relative z-10 max-w-2xl">
+        <div className="relative z-10 max-w-2xl 2xl:max-w-3xl">
           <div className="flex items-center gap-2 mb-4">
             <span className="text-xs font-semibold text-white/70 uppercase tracking-wider">{course.category}</span>
             {course.mandatory && <span className="text-xs font-semibold bg-white/20 text-white px-2.5 py-1 rounded-full">Обязательный</span>}
@@ -1581,8 +1581,8 @@ function CourseDetail({ course, onStartLesson }) {
         </div>
       </div>
 
-      <div className="grid grid-cols-3 gap-8">
-        <div className="col-span-2 space-y-6">
+      <div className="grid grid-cols-1 xl:grid-cols-12 gap-8 2xl:gap-10">
+        <div className="xl:col-span-8 2xl:col-span-9 space-y-6">
           <div className="bg-white rounded-2xl border border-slate-200 p-6">
             <h2 className="text-base font-semibold text-slate-900 mb-4">Приобретаемые навыки</h2>
             <div className="flex flex-wrap gap-2">
@@ -1632,7 +1632,7 @@ function CourseDetail({ course, onStartLesson }) {
           )}
         </div>
 
-        <div className="space-y-4">
+        <div className="xl:col-span-4 2xl:col-span-3 space-y-4">
           <div className="bg-white rounded-2xl border border-slate-200 p-5">
             <h3 className="text-sm font-semibold text-slate-900 mb-4">Параметры курса</h3>
             <div className="space-y-3">
@@ -1705,7 +1705,7 @@ function LessonView({
   return (
     <div className="flex h-[calc(100vh-64px)]">
       {/* Sidebar */}
-      <div className={`${sidebarOpen ? "w-80" : "w-0"} flex-shrink-0 transition-all duration-300 overflow-hidden bg-white border-r border-slate-200`}>
+      <div className={`${sidebarOpen ? "w-80 2xl:w-96" : "w-0"} flex-shrink-0 transition-all duration-300 overflow-hidden bg-white border-r border-slate-200`}>
         <div className="p-4 border-b border-slate-100">
           <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Программа курса</p>
           <p className="text-sm font-semibold text-slate-900 leading-tight">{course.title}</p>
@@ -1767,7 +1767,7 @@ function LessonView({
           </div>
         </div>
 
-        <div className="max-w-4xl mx-auto px-8 py-8">
+        <div className="max-w-6xl 2xl:max-w-7xl mx-auto px-8 2xl:px-10 py-8">
           {isQuiz ? (
             apiMode && Number(lesson?.apiTestId) > 0 ? (
               <ApiQuizSection
@@ -2556,7 +2556,7 @@ function ApiQuizSection({ quizView, setQuizView, answers, setAnswers, course, le
 
   if (quizView === "intro") {
     return (
-      <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center max-w-xl mx-auto">
+      <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center max-w-2xl mx-auto">
         <div className="w-16 h-16 bg-violet-100 rounded-2xl flex items-center justify-center mx-auto mb-5"><HelpCircle size={28} className="text-violet-600" /></div>
         <h2 className="text-xl font-bold text-slate-900 mb-2">{lesson?.title || "Тест"}</h2>
         <p className="text-sm text-slate-500 mb-6">Тест будет загружен из LMS API</p>
@@ -2575,7 +2575,7 @@ function ApiQuizSection({ quizView, setQuizView, answers, setAnswers, course, le
     const scorePercent = Number(result?.score_percent || 0);
     const passed = scorePercent >= passThreshold;
     return (
-      <div className="space-y-5 max-w-2xl mx-auto">
+      <div className="space-y-5 max-w-3xl 2xl:max-w-4xl mx-auto">
         <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center">
           {autoFinished && <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 mb-5 text-xs text-amber-700">Тест завершён автоматически по времени</div>}
           <h2 className="text-3xl font-bold text-slate-900 mb-1">{Math.round(scorePercent)}%</h2>
@@ -2764,7 +2764,7 @@ function QuizSection({ quizView, setQuizView, answers, setAnswers, course }) {
   if (quizView === "result") {
     const passed = score >= 80;
     return (
-      <div className="space-y-5 max-w-2xl mx-auto">
+      <div className="space-y-5 max-w-3xl 2xl:max-w-4xl mx-auto">
         {/* Summary card */}
         <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center">
           {autoFinished && (
@@ -3020,7 +3020,7 @@ function CertificatesView({ certificates = [], onDownload }) {
       {safeCertificates.length === 0 ? (
         <div className="text-center py-20 text-slate-400"><Award size={40} className="mx-auto mb-3 opacity-30" /><p className="text-sm">Сертификатов пока нет</p></div>
       ) : (
-        <div className="grid grid-cols-2 gap-5">
+        <div className="grid [grid-template-columns:repeat(auto-fill,minmax(340px,1fr))] gap-5">
           {safeCertificates.map((cert, index) => (
             <div key={cert.id} className="bg-white rounded-2xl border border-slate-200 overflow-hidden hover:shadow-md transition-all">
               {/* Certificate preview */}
@@ -3062,7 +3062,7 @@ function NotificationsView({ notifications = [], onRead }) {
   const colorMap = { deadline: "text-amber-600 bg-amber-50", completed: "text-emerald-600 bg-emerald-50", assigned: "text-indigo-600 bg-indigo-50", certificate: "text-violet-600 bg-violet-50" };
   const safeNotifications = Array.isArray(notifications) ? notifications : [];
   return (
-    <div className="space-y-3 max-w-2xl">
+    <div className="space-y-3 max-w-4xl 2xl:max-w-5xl">
       {safeNotifications.map(n => {
         const Icon = iconMap[n.type] || Bell;
         const cls = colorMap[n.type] || "text-slate-600 bg-slate-100";
@@ -3889,7 +3889,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
   }, [updateLessonById, settings.maxAttempts, settings.passingScore, createQuestionTemplate]);
 
   return (
-    <div className="max-w-screen-xl mx-auto px-6 py-8">
+    <div className="lms-shell py-8">
       <div className="flex items-center justify-between mb-8">
         <div>
           <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Конструктор курса</h1>
@@ -3910,7 +3910,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
 
       {/* SETTINGS TAB */}
       {tab === "settings" && (
-        <div className="grid grid-cols-2 gap-6">
+        <div className="grid grid-cols-1 xl:grid-cols-2 2xl:grid-cols-[1.2fr_1fr] gap-6">
           <div className="space-y-5">
             <div className="bg-white rounded-2xl border border-slate-200 p-6">
               <h3 className="text-sm font-semibold text-slate-900 mb-5">Основная информация</h3>
@@ -4023,8 +4023,8 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
 
       {/* STRUCTURE TAB */}
       {tab === "structure" && (
-        <div className="grid grid-cols-5 gap-6">
-          <div className="col-span-3 space-y-4">
+        <div className="grid grid-cols-1 xl:grid-cols-5 2xl:grid-cols-12 gap-6">
+          <div className="xl:col-span-3 2xl:col-span-8 space-y-4">
             {modules.map(mod => (
               <div key={mod.id} className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
                 <div className="flex items-center gap-3 px-5 py-4 bg-slate-50 border-b border-slate-100">
@@ -4062,7 +4062,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
             ))}
             <button onClick={addModule} className="w-full border-2 border-dashed border-slate-200 hover:border-indigo-300 rounded-2xl py-4 text-sm text-slate-500 hover:text-indigo-600 flex items-center justify-center gap-2 transition-all font-medium"><Plus size={16} /> Добавить модуль</button>
           </div>
-          <div className="col-span-2">
+          <div className="xl:col-span-2 2xl:col-span-4">
             <div className="bg-white rounded-2xl border border-slate-200 p-5 sticky top-24">
               {selectedLessonModel ? (
                 <>
@@ -4771,7 +4771,7 @@ function AdminView({ tab, setTab, adminCourses = [], progressRows = [], attempts
   };
 
   return (
-    <div className="max-w-screen-xl mx-auto px-6 py-8">
+    <div className="lms-shell py-8">
       <div className="flex items-center justify-between mb-8">
         <div>
           <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Панель администратора</h1>
@@ -4814,9 +4814,9 @@ function AdminView({ tab, setTab, adminCourses = [], progressRows = [], attempts
             ))}
           </div>
 
-          <div className="grid grid-cols-3 gap-6 mb-6">
+          <div className="grid grid-cols-1 xl:grid-cols-3 2xl:grid-cols-12 gap-6 mb-6">
             {/* Прогресс по курсам */}
-            <div className="col-span-2 bg-white rounded-2xl border border-slate-200 p-6">
+            <div className="xl:col-span-2 2xl:col-span-8 bg-white rounded-2xl border border-slate-200 p-6">
               <h3 className="text-sm font-semibold text-slate-900 mb-5">Прогресс по курсам</h3>
               <div className="space-y-4">
                 {courseRows.slice(0, 5).map(c => (
@@ -4834,7 +4834,7 @@ function AdminView({ tab, setTab, adminCourses = [], progressRows = [], attempts
             </div>
 
             {/* Статусы */}
-            <div className="bg-white rounded-2xl border border-slate-200 p-6">
+            <div className="xl:col-span-1 2xl:col-span-4 bg-white rounded-2xl border border-slate-200 p-6">
               <h3 className="text-sm font-semibold text-slate-900 mb-5">Статусы курсов</h3>
               <div className="space-y-3">
                 {courseStatusRows.map(s => (
@@ -4850,8 +4850,8 @@ function AdminView({ tab, setTab, adminCourses = [], progressRows = [], attempts
           </div>
 
           {/* Проблемные вопросы (ТЗ 12) */}
-          <div className="grid grid-cols-2 gap-6">
-            <div className="bg-white rounded-2xl border border-slate-200 p-6">
+          <div className="grid grid-cols-1 xl:grid-cols-2 2xl:grid-cols-12 gap-6">
+            <div className="2xl:col-span-6 bg-white rounded-2xl border border-slate-200 p-6">
               <div className="flex items-center gap-2 mb-5">
                 <AlertTriangle size={16} className="text-amber-500" />
                 <h3 className="text-sm font-semibold text-slate-900">Вопросы с высоким % ошибок</h3>
@@ -4871,7 +4871,7 @@ function AdminView({ tab, setTab, adminCourses = [], progressRows = [], attempts
             </div>
 
             {/* Время и попытки */}
-            <div className="bg-white rounded-2xl border border-slate-200 p-6">
+            <div className="2xl:col-span-6 bg-white rounded-2xl border border-slate-200 p-6">
               <div className="flex items-center gap-2 mb-5">
                 <Clock size={16} className="text-indigo-500" />
                 <h3 className="text-sm font-semibold text-slate-900">Время на тесты и попытки</h3>
