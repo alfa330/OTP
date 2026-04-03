@@ -1399,7 +1399,17 @@ const App = ({ user, initialSelection }) => {
             .then(d => {
                 if (isCancelled) return;
                 if (d.status === 'success') {
-                    const nextOperators = d.operators || [];
+                    const rawOperators = d.operators || [];
+                    const scopedSupervisorId = Number(scopeId);
+                    const hasSupervisorMeta = rawOperators.some((op) => {
+                        const opSupervisorId = Number(op?.supervisor_id ?? op?.sv_id ?? op?.supervisorId);
+                        return Number.isFinite(opSupervisorId) && opSupervisorId > 0;
+                    });
+                    const filteredOperators = rawOperators.filter((op) => {
+                        const opSupervisorId = Number(op?.supervisor_id ?? op?.sv_id ?? op?.supervisorId);
+                        return Number.isFinite(opSupervisorId) && opSupervisorId === scopedSupervisorId;
+                    });
+                    const nextOperators = hasSupervisorMeta ? filteredOperators : rawOperators;
                     operatorsCacheRef.current.set(cacheKey, nextOperators);
                     setOperators(nextOperators);
                 } else {
