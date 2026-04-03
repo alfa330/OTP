@@ -1200,7 +1200,10 @@ function TopNav({ view, goBack, isAdmin, setIsAdmin, navToAdmin, canToggleAdmin 
   const showBack = ["course", "lesson", "builder"].includes(view) || (view === "admin" && canGoCatalog);
   const backLabels = { course: "Все курсы", lesson: "Курс", builder: "Все курсы", admin: "Все курсы" };
   return (
-    <header className="fixed top-0 left-0 right-0 z-40 bg-white border-b border-slate-200 h-16">
+    <header
+      className="fixed top-0 right-0 z-40 bg-white border-b border-slate-200 h-16"
+      style={{ left: "var(--main-content-sidebar-offset, 0px)" }}
+    >
       <div className="lms-shell h-full flex items-center justify-between gap-4">
         <div className="flex items-center gap-4">
           {showBack ? (
