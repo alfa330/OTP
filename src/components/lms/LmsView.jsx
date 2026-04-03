@@ -3141,6 +3141,8 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
   const [newSkill, setNewSkill] = useState("");
   const [lessonMaterialLink, setLessonMaterialLink] = useState("");
   const [selectedLessonId, setSelectedLessonId] = useState(null);
+  const [builderLessonPanelMode, setBuilderLessonPanelMode] = useState("edit");
+  const [operatorEditField, setOperatorEditField] = useState(null);
   const [saved, setSaved] = useState(false);
   const [saving, setSaving] = useState(false);
   const [createdCourseId, setCreatedCourseId] = useState(null);
@@ -3177,6 +3179,10 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
     }
     return null;
   })();
+
+  useEffect(() => {
+    setOperatorEditField(null);
+  }, [selectedLessonId, builderLessonPanelMode]);
 
   const addModule = () => setModules((prev) => [...prev, { id: Date.now(), title: `Модуль ${prev.length + 1}`, expanded: true, lessons: [] }]);
   const toggleModule = (id) => setModules((prev) => prev.map((moduleItem) => moduleItem.id === id ? { ...moduleItem, expanded: !moduleItem.expanded } : moduleItem));
@@ -3903,195 +3909,393 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
     });
   }, [updateLessonById, settings.maxAttempts, settings.passingScore, createQuestionTemplate]);
 
-  const renderSelectedLessonPreview = () => {
+  const updateSelectedLessonQuizQuestion = (questionId, updater) => {
+    if (!selectedLessonModel?.id || !questionId) return;
+    updateLessonById(selectedLessonModel.id, (prevLesson) => ({
+      ...prevLesson,
+      quizQuestions: (Array.isArray(prevLesson?.quizQuestions) ? prevLesson.quizQuestions : []).map((question) => {
+        if (question?.id !== questionId) return question;
+        return typeof updater === "function" ? updater(question) : { ...question, ...(updater || {}) };
+      }),
+    }));
+  };
+
+  const renderOperatorRichField = (fieldId, value, onChange, placeholder, minHeight = 150) => {
+    if (operatorEditField === fieldId) {
+      return (
+        <div className="space-y-2">
+          <RichTextEditor
+            value={value || ""}
+            onChange={onChange}
+            placeholder={placeholder}
+            minHeight={minHeight}
+          />
+          <div className="flex justify-end">
+            <button
+              type="button"
+              onClick={() => setOperatorEditField(null)}
+              className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-100 text-slate-700 hover:bg-slate-200 transition-colors"
+            >
+              Готово
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => setOperatorEditField(fieldId)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            setOperatorEditField(fieldId);
+          }
+        }}
+        className="w-full text-left rounded-xl border border-dashed border-slate-300 bg-slate-50 hover:border-indigo-300 hover:bg-indigo-50/40 transition-colors p-3 cursor-text"
+      >
+        <RichTextContent
+          value={value}
+          className="text-sm text-slate-700 leading-relaxed"
+          emptyState={<div className="text-xs text-slate-400">{placeholder}</div>}
+        />
+        <p className="mt-2 text-[11px] text-indigo-600">Нажмите, чтобы редактировать</p>
+      </div>
+    );
+  };
+
+  const renderOperatorCourseInterface = () => {
     if (!selectedLessonModel) return null;
 
     const lessonType = String(selectedLessonModel?.type || "video").toLowerCase();
-    const lessonTypeLabel = lessonType === "quiz" ? "Тест" : lessonType === "text" ? "Текст" : "Видео";
-    const durationLabel = formatDurationLabel(Number(selectedLessonModel?.durationSeconds || selectedLessonVideoDurationSeconds || 0));
-    const quizQuestionsForPreview = Array.isArray(selectedLessonQuizQuestions) ? selectedLessonQuizQuestions : [];
-    const quizQuestionLimit = Math.max(1, Number(selectedLessonModel?.quizQuestionsPerTest || quizQuestionsForPreview.length || 1));
-    const showExplanations = selectedLessonModel?.quizShowExplanations !== false;
-    const quizMinutes = Math.max(1, Number(selectedLessonModel?.quizTimeLimitMinutes || Math.ceil(Number(selectedLessonModel?.durationSeconds || 0) / 60) || 20));
-    const quizPassingScore = Math.max(1, Math.min(100, Number(selectedLessonModel?.quizPassingScore || settings.passingScore || 80)));
-    const quizAttemptLimit = Math.max(1, Number(selectedLessonModel?.quizAttemptLimit || 1));
+    const lessonDuration = formatDurationLabel(Number(selectedLessonModel?.durationSeconds || selectedLessonVideoDurationSeconds || 0));
+    const courseTitle = String(settings?.title || "").trim() || "Новый курс";
+    const quizQuestions = Array.isArray(selectedLessonQuizQuestions) ? selectedLessonQuizQuestions : [];
+
+    const toggleCorrectOption = (question, optionIndex) => {
+      if (!question?.id) return;
+      updateSelectedLessonQuizQuestion(question.id, (prevQuestion) => {
+        if (prevQuestion?.type === "multiple") {
+          const prevCorrect = Array.isArray(prevQuestion?.correct) ? prevQuestion.correct : [];
+          const alreadyChecked = prevCorrect.includes(optionIndex);
+          return {
+            ...prevQuestion,
+            correct: alreadyChecked ? prevCorrect.filter((item) => item !== optionIndex) : [...prevCorrect, optionIndex],
+          };
+        }
+        return { ...prevQuestion, correct: optionIndex };
+      });
+    };
 
     return (
-      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 space-y-4">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <p className="text-[11px] uppercase tracking-wide text-slate-400 font-semibold">Как увидит оператор</p>
-            <p className="text-sm font-semibold text-slate-900 truncate">{selectedLessonModel.title || "Без названия"}</p>
-            <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-500">
-              <span>Модуль {selectedLessonLocation.moduleNumber}</span>
-              <span>·</span>
-              <span>Урок {selectedLessonLocation.lessonNumber}</span>
-              <span>·</span>
-              <span>{durationLabel}</span>
-            </div>
-          </div>
-          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-white border border-slate-200 text-slate-700">
-            <Eye size={12} /> {lessonTypeLabel}
-          </span>
-        </div>
-
-        {selectedLessonDescriptionRich && (
-          <div className="bg-white rounded-xl border border-slate-200 p-3">
-            <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide mb-2">Описание урока</p>
-            <RichTextContent
-              value={selectedLessonDescriptionRich}
-              className="text-sm text-slate-700 leading-relaxed"
-            />
-          </div>
-        )}
-
-        {lessonType === "text" && (
-          <div className="bg-white rounded-xl border border-slate-200 p-3">
-            <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide mb-2">Текст урока</p>
-            <RichTextContent
-              value={selectedLessonTextContentRich}
-              className="text-sm text-slate-700 leading-relaxed"
-              emptyState={<div className="text-xs text-slate-400">Текст урока пока не заполнен</div>}
-            />
-          </div>
-        )}
-
-        {lessonType === "video" && (
-          <>
-            <div className="bg-white rounded-xl border border-slate-200 p-3">
-              <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide mb-2">Видео</p>
-              {selectedLessonVideoMaterial ? (
-                selectedLessonVideoUrl ? (
-                  <video
-                    key={selectedLessonVideoUrl}
-                    src={selectedLessonVideoUrl}
-                    controls
-                    preload="metadata"
-                    className="w-full max-h-72 bg-black rounded-lg"
-                  />
-                ) : (
-                  <div className="px-3 py-8 rounded-lg bg-slate-100 text-xs text-slate-500 text-center">
-                    Видео загружено, но ссылка для предпросмотра пока недоступна
-                  </div>
-                )
+      <div className="rounded-2xl border border-slate-200 overflow-hidden bg-white">
+        <div className="grid grid-cols-1 xl:grid-cols-[290px_minmax(0,1fr)] 2xl:grid-cols-[340px_minmax(0,1fr)] min-h-[72vh]">
+          <aside className="border-r border-slate-200 bg-white">
+            <div className="p-4 border-b border-slate-100">
+              {operatorEditField === "course-title" ? (
+                <input
+                  value={settings.title}
+                  onChange={(e) => setSettings((prev) => ({ ...prev, title: e.target.value }))}
+                  onBlur={() => setOperatorEditField(null)}
+                  autoFocus
+                  className="w-full text-sm font-semibold text-slate-900 bg-transparent border-b border-indigo-300 focus:outline-none pb-1"
+                />
               ) : (
-                <div className="px-3 py-8 rounded-lg bg-slate-100 text-xs text-slate-500 text-center">
-                  Видеофайл пока не загружен
-                </div>
-              )}
-              {selectedLessonVideoMaterial && (
-                <p className="text-xs text-slate-500 mt-2">Файл: {selectedLessonVideoName}</p>
+                <button
+                  type="button"
+                  onClick={() => setOperatorEditField("course-title")}
+                  className="w-full text-left"
+                >
+                  <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">Интерфейс оператора</p>
+                  <p className="text-sm font-semibold text-slate-900 leading-snug">{courseTitle}</p>
+                  <p className="text-[11px] text-indigo-600 mt-1">Нажмите, чтобы изменить название курса</p>
+                </button>
               )}
             </div>
-
-            <div className="bg-white rounded-xl border border-slate-200 p-3">
-              <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide mb-2">Транскрипт</p>
-              <RichTextContent
-                value={selectedLessonTranscriptRich}
-                className="text-sm text-slate-700 leading-relaxed"
-                emptyState={<div className="text-xs text-slate-400">Транскрипт пока не заполнен</div>}
-              />
-            </div>
-          </>
-        )}
-
-        {lessonType === "quiz" && (
-          <>
-            <div className="grid grid-cols-2 gap-2">
-              <div className="bg-white rounded-xl border border-slate-200 px-3 py-2">
-                <p className="text-[10px] uppercase tracking-wide text-slate-400">Вопросов в попытке</p>
-                <p className="text-xs font-semibold text-slate-800 mt-1">{Math.min(quizQuestionLimit, Math.max(1, quizQuestionsForPreview.length))}</p>
-              </div>
-              <div className="bg-white rounded-xl border border-slate-200 px-3 py-2">
-                <p className="text-[10px] uppercase tracking-wide text-slate-400">Лимит времени</p>
-                <p className="text-xs font-semibold text-slate-800 mt-1">{quizMinutes} мин</p>
-              </div>
-              <div className="bg-white rounded-xl border border-slate-200 px-3 py-2">
-                <p className="text-[10px] uppercase tracking-wide text-slate-400">Проходной балл</p>
-                <p className="text-xs font-semibold text-slate-800 mt-1">{quizPassingScore}%</p>
-              </div>
-              <div className="bg-white rounded-xl border border-slate-200 px-3 py-2">
-                <p className="text-[10px] uppercase tracking-wide text-slate-400">Попыток</p>
-                <p className="text-xs font-semibold text-slate-800 mt-1">{quizAttemptLimit}</p>
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              {quizQuestionsForPreview.length === 0 && (
-                <div className="bg-white rounded-xl border border-slate-200 px-3 py-5 text-xs text-slate-400 text-center">
-                  Добавьте вопросы, чтобы увидеть предпросмотр теста
-                </div>
-              )}
-              {quizQuestionsForPreview.map((question, index) => {
-                const questionType = String(question?.type || "single").toLowerCase();
-                const questionOptions = Array.isArray(question?.options) ? question.options : [];
-                const questionCorrect = question?.correct;
-                return (
-                  <div key={question?.id || `preview-question-${index}`} className="bg-white rounded-xl border border-slate-200 p-3">
-                    <div className="flex items-start gap-2">
-                      <span className="w-5 h-5 rounded-md bg-indigo-50 text-indigo-600 text-[11px] font-bold inline-flex items-center justify-center flex-shrink-0 mt-0.5">{index + 1}</span>
-                      <p className="text-xs font-medium text-slate-800 leading-relaxed">
-                        {question?.text || `Вопрос ${index + 1}`}
-                      </p>
-                    </div>
-
-                    {questionType !== "text" && (
-                      <div className="mt-2 space-y-1.5 pl-7">
-                        {questionOptions.map((option, optionIndex) => {
-                          const isCorrect = questionType === "multiple"
-                            ? (Array.isArray(questionCorrect) && questionCorrect.includes(optionIndex))
-                            : Number(questionCorrect) === optionIndex;
-                          return (
-                            <div key={`option-${optionIndex}`} className="flex items-start gap-2 text-xs text-slate-600">
-                              <span className={`mt-0.5 w-4 h-4 rounded border inline-flex items-center justify-center ${isCorrect ? "border-emerald-500 bg-emerald-500 text-white" : "border-slate-300 bg-white text-transparent"}`}>
-                                <Check size={9} />
-                              </span>
-                              <span className="leading-relaxed">{option || `Вариант ${optionIndex + 1}`}</span>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-
-                    {questionType === "text" && (
-                      <div className="mt-2 pl-7">
-                        <div className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] text-slate-400">
-                          Поле для текстового ответа сотрудника
+            <div className="overflow-y-auto max-h-[62vh]">
+              {modules.map((moduleItem, moduleIndex) => (
+                <div key={moduleItem.id}>
+                  <div className="px-4 py-3 bg-slate-50 border-b border-slate-100">
+                    <p className="text-xs font-semibold text-slate-600">{moduleIndex + 1}. {moduleItem.title || `Модуль ${moduleIndex + 1}`}</p>
+                  </div>
+                  {(Array.isArray(moduleItem?.lessons) ? moduleItem.lessons : []).map((lessonItem, lessonIndex) => {
+                    const Icon = lessonIcons[lessonItem?.type] || BookOpen;
+                    const isActive = lessonItem?.id === selectedLessonId;
+                    return (
+                      <button
+                        key={lessonItem.id}
+                        type="button"
+                        onClick={() => setSelectedLessonId(lessonItem.id)}
+                        className={`w-full flex items-center gap-3 px-4 py-3 border-b border-slate-50 text-left transition-colors ${isActive ? "bg-indigo-50 border-l-2 border-l-indigo-500" : "hover:bg-slate-50"}`}
+                      >
+                        <div className={`w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 ${isActive ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-500"}`}>
+                          <Icon size={12} />
                         </div>
-                      </div>
-                    )}
-
-                    {showExplanations && question?.explanation && (
-                      <div className="mt-2 pl-7 text-[11px] text-slate-500">
-                        Пояснение: {question.explanation}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          </>
-        )}
-
-        {(lessonType === "video" || lessonType === "text") && (
-          <div className="bg-white rounded-xl border border-slate-200 p-3">
-            <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide mb-2">Дополнительные материалы</p>
-            <div className="space-y-2">
-              {selectedLessonExtraMaterials.length === 0 && (
-                <div className="text-xs text-slate-400">Материалы не добавлены</div>
-              )}
-              {selectedLessonExtraMaterials.map((material, index) => (
-                <div key={`${material?.title || "material"}-${index}`} className="flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2">
-                  <FileCheck size={12} className="text-indigo-500 flex-shrink-0" />
-                  <div className="min-w-0">
-                    <div className="text-xs text-slate-700 truncate">{material?.metadata?.uploaded_file_name || material?.title || `Материал ${index + 1}`}</div>
-                    <div className="text-[10px] uppercase text-slate-400">{String(material?.material_type || material?.type || "file")}</div>
-                  </div>
+                        <div className="flex-1 min-w-0">
+                          <p className={`text-xs font-medium truncate ${isActive ? "text-indigo-700" : "text-slate-700"}`}>{lessonIndex + 1}. {lessonItem?.title || `Урок ${lessonIndex + 1}`}</p>
+                          <p className="text-[10px] text-slate-400 mt-0.5">{formatDurationLabel(Number(lessonItem?.durationSeconds || 0))}</p>
+                        </div>
+                      </button>
+                    );
+                  })}
                 </div>
               ))}
             </div>
+          </aside>
+
+          <div className="bg-slate-50">
+            <div className="sticky top-0 z-10 bg-white border-b border-slate-200 px-5 py-3">
+              <p className="text-xs text-slate-400">Модуль {selectedLessonLocation.moduleNumber} · Урок {selectedLessonLocation.lessonNumber}</p>
+              {operatorEditField === "lesson-title" ? (
+                <input
+                  value={selectedLessonModel.title || ""}
+                  onChange={(e) => updateLessonById(selectedLessonModel.id, { title: e.target.value })}
+                  onBlur={() => setOperatorEditField(null)}
+                  autoFocus
+                  className="w-full mt-1 text-sm font-semibold text-slate-900 bg-transparent border-b border-indigo-300 focus:outline-none pb-1"
+                />
+              ) : (
+                <button type="button" onClick={() => setOperatorEditField("lesson-title")} className="w-full text-left">
+                  <p className="text-sm font-semibold text-slate-900 mt-1">{selectedLessonModel.title || "Без названия"}</p>
+                  <p className="text-[11px] text-indigo-600 mt-1">Нажмите, чтобы изменить заголовок урока</p>
+                </button>
+              )}
+            </div>
+
+            <div className="p-5 space-y-4">
+              <div className="bg-white rounded-2xl border border-slate-200 p-4">
+                <div className="flex items-center justify-between gap-3 mb-2">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Описание урока</p>
+                  <span className="text-[11px] text-slate-400">{lessonDuration}</span>
+                </div>
+                {renderOperatorRichField(
+                  "lesson-description",
+                  selectedLessonDescriptionRich,
+                  (nextValue) => updateLessonById(selectedLessonModel.id, { description: nextValue }),
+                  "Описание урока пока не заполнено",
+                  120
+                )}
+              </div>
+
+              {lessonType === "text" && (
+                <div className="bg-white rounded-2xl border border-slate-200 p-4">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">Материал урока</p>
+                  {renderOperatorRichField(
+                    "lesson-text-content",
+                    selectedLessonTextContentRich,
+                    (nextValue) => updateLessonById(selectedLessonModel.id, { contentText: nextValue }),
+                    "Текст урока пока не заполнен",
+                    220
+                  )}
+                </div>
+              )}
+
+              {lessonType === "video" && (
+                <>
+                  <div className="bg-white rounded-2xl border border-slate-200 p-4">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">Видео</p>
+                    {selectedLessonVideoUrl ? (
+                      <video
+                        key={selectedLessonVideoUrl}
+                        src={selectedLessonVideoUrl}
+                        controls
+                        preload="metadata"
+                        className="w-full max-h-80 bg-black rounded-lg"
+                      />
+                    ) : (
+                      <div className="rounded-xl bg-slate-100 border border-slate-200 text-xs text-slate-500 text-center py-10 px-4">
+                        Видео ещё не загружено. Загрузите файл в режиме «Редактор».
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="bg-white rounded-2xl border border-slate-200 p-4">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">Транскрипт</p>
+                    {renderOperatorRichField(
+                      "lesson-video-transcript",
+                      selectedLessonTranscriptRich,
+                      (nextValue) => updateLessonById(selectedLessonModel.id, { contentText: nextValue }),
+                      "Транскрипт пока не заполнен",
+                      180
+                    )}
+                  </div>
+                </>
+              )}
+
+              {lessonType === "quiz" && (
+                <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-3">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Параметры теста</p>
+                  <div className="grid grid-cols-2 gap-2">
+                    {[
+                      { id: "quiz-questions-per-test", label: "Вопросов в попытке", value: Math.max(1, Number(selectedLessonModel.quizQuestionsPerTest || 1)), onSave: (next) => updateLessonById(selectedLessonModel.id, { quizQuestionsPerTest: Math.max(1, next) }) },
+                      { id: "quiz-time-limit", label: "Лимит времени (мин)", value: Math.max(1, Number(selectedLessonModel.quizTimeLimitMinutes || 20)), onSave: (next) => updateLessonById(selectedLessonModel.id, { quizTimeLimitMinutes: Math.max(1, next), durationSeconds: Math.max(60, Math.max(1, next) * 60) }) },
+                      { id: "quiz-passing-score", label: "Проходной балл (%)", value: Math.max(1, Math.min(100, Number(selectedLessonModel.quizPassingScore || settings.passingScore || 80))), onSave: (next) => updateLessonById(selectedLessonModel.id, { quizPassingScore: Math.max(1, Math.min(100, next)) }) },
+                      { id: "quiz-attempt-limit", label: "Попыток", value: Math.max(1, Number(selectedLessonModel.quizAttemptLimit || 1)), onSave: (next) => updateLessonById(selectedLessonModel.id, { quizAttemptLimit: Math.max(1, next) }) },
+                    ].map((item) => (
+                      <div key={item.id} className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+                        <p className="text-[10px] uppercase tracking-wide text-slate-400">{item.label}</p>
+                        {operatorEditField === item.id ? (
+                          <input
+                            type="number"
+                            min={1}
+                            value={item.value}
+                            onChange={(e) => item.onSave(Number(e.target.value || 1))}
+                            onBlur={() => setOperatorEditField(null)}
+                            autoFocus
+                            className="w-full mt-1 text-xs font-semibold text-slate-800 bg-transparent border-b border-indigo-300 focus:outline-none"
+                          />
+                        ) : (
+                          <button type="button" onClick={() => setOperatorEditField(item.id)} className="text-left text-xs font-semibold text-slate-800 mt-1">
+                            {item.value}
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="space-y-2 pt-1">
+                    {quizQuestions.length === 0 && (
+                      <div className="text-xs text-slate-400 border border-dashed border-slate-300 rounded-xl p-3">
+                        Добавьте вопросы в режиме «Редактор», затем редактируйте их кликом здесь.
+                      </div>
+                    )}
+                    {quizQuestions.map((question, questionIndex) => {
+                      const questionType = String(question?.type || "single").toLowerCase();
+                      const questionOptions = Array.isArray(question?.options) ? question.options : [];
+                      const questionCorrect = question?.correct;
+                      return (
+                        <div key={question.id} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                          <div className="flex items-start gap-2">
+                            <span className="w-5 h-5 rounded-md bg-indigo-100 text-indigo-700 text-[11px] font-bold inline-flex items-center justify-center flex-shrink-0 mt-0.5">{questionIndex + 1}</span>
+                            {operatorEditField === `quiz-question-${question.id}` ? (
+                              <input
+                                value={question.text || ""}
+                                onChange={(e) => updateSelectedLessonQuizQuestion(question.id, { text: e.target.value })}
+                                onBlur={() => setOperatorEditField(null)}
+                                autoFocus
+                                className="w-full text-xs font-medium text-slate-800 bg-white border border-indigo-300 rounded-lg px-2 py-1.5 focus:outline-none"
+                              />
+                            ) : (
+                              <button type="button" onClick={() => setOperatorEditField(`quiz-question-${question.id}`)} className="text-left text-xs font-medium text-slate-800 leading-relaxed">
+                                {question.text || `Вопрос ${questionIndex + 1}`}
+                              </button>
+                            )}
+                          </div>
+
+                          {questionType !== "text" && (
+                            <div className="mt-2 space-y-1.5 pl-7">
+                              {questionOptions.map((option, optionIndex) => {
+                                const isCorrect = questionType === "multiple"
+                                  ? (Array.isArray(questionCorrect) && questionCorrect.includes(optionIndex))
+                                  : Number(questionCorrect) === optionIndex;
+                                return (
+                                  <div key={`${question.id}-${optionIndex}`} className="flex items-center gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => toggleCorrectOption(question, optionIndex)}
+                                      className={`w-4 h-4 rounded border inline-flex items-center justify-center transition-colors ${isCorrect ? "border-emerald-500 bg-emerald-500 text-white" : "border-slate-300 bg-white text-transparent hover:border-emerald-300"}`}
+                                      title="Отметить правильный вариант"
+                                    >
+                                      <Check size={9} />
+                                    </button>
+                                    {operatorEditField === `quiz-option-${question.id}-${optionIndex}` ? (
+                                      <input
+                                        value={option || ""}
+                                        onChange={(e) => updateSelectedLessonQuizQuestion(question.id, (prevQuestion) => ({
+                                          ...prevQuestion,
+                                          options: (Array.isArray(prevQuestion?.options) ? prevQuestion.options : []).map((item, idx) => idx === optionIndex ? e.target.value : item),
+                                        }))}
+                                        onBlur={() => setOperatorEditField(null)}
+                                        autoFocus
+                                        className="flex-1 text-xs text-slate-700 bg-white border border-indigo-300 rounded-lg px-2 py-1 focus:outline-none"
+                                      />
+                                    ) : (
+                                      <button
+                                        type="button"
+                                        onClick={() => setOperatorEditField(`quiz-option-${question.id}-${optionIndex}`)}
+                                        className="text-left text-xs text-slate-700"
+                                      >
+                                        {option || `Вариант ${optionIndex + 1}`}
+                                      </button>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+
+                          {questionType === "text" && (
+                            <div className="mt-2 pl-7">
+                              {operatorEditField === `quiz-keywords-${question.id}` ? (
+                                <input
+                                  value={Array.isArray(question?.correct_text_answers) ? question.correct_text_answers.join(", ") : ""}
+                                  onChange={(e) => updateSelectedLessonQuizQuestion(question.id, { correct_text_answers: e.target.value.split(",").map((item) => item.trim()).filter(Boolean) })}
+                                  onBlur={() => setOperatorEditField(null)}
+                                  autoFocus
+                                  className="w-full text-xs text-slate-700 bg-white border border-indigo-300 rounded-lg px-2 py-1.5 focus:outline-none"
+                                  placeholder="Ключевые слова через запятую"
+                                />
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => setOperatorEditField(`quiz-keywords-${question.id}`)}
+                                  className="text-left text-[11px] text-slate-500"
+                                >
+                                  {Array.isArray(question?.correct_text_answers) && question.correct_text_answers.length > 0
+                                    ? `Ключевые слова: ${question.correct_text_answers.join(", ")}`
+                                    : "Нажмите, чтобы добавить ключевые слова"}
+                                </button>
+                              )}
+                            </div>
+                          )}
+
+                          <div className="mt-2 pl-7">
+                            {operatorEditField === `quiz-explanation-${question.id}` ? (
+                              <input
+                                value={question.explanation || ""}
+                                onChange={(e) => updateSelectedLessonQuizQuestion(question.id, { explanation: e.target.value })}
+                                onBlur={() => setOperatorEditField(null)}
+                                autoFocus
+                                className="w-full text-[11px] text-slate-600 bg-white border border-indigo-300 rounded-lg px-2 py-1.5 focus:outline-none"
+                                placeholder="Пояснение к ответу"
+                              />
+                            ) : (
+                              <button type="button" onClick={() => setOperatorEditField(`quiz-explanation-${question.id}`)} className="text-left text-[11px] text-slate-500">
+                                {question.explanation ? `Пояснение: ${question.explanation}` : "Нажмите, чтобы добавить пояснение"}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {(lessonType === "video" || lessonType === "text") && (
+                <div className="bg-white rounded-2xl border border-slate-200 p-4">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">Дополнительные материалы</p>
+                  <div className="space-y-2">
+                    {selectedLessonExtraMaterials.length === 0 && (
+                      <div className="text-xs text-slate-400">Материалы не добавлены</div>
+                    )}
+                    {selectedLessonExtraMaterials.map((material, index) => (
+                      <div key={`${material?.title || "material"}-${index}`} className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 flex items-center gap-2">
+                        <FileCheck size={12} className="text-indigo-500 flex-shrink-0" />
+                        <div className="min-w-0">
+                          <div className="text-xs text-slate-700 truncate">{material?.metadata?.uploaded_file_name || material?.title || `Материал ${index + 1}`}</div>
+                          <div className="text-[10px] uppercase text-slate-400">{String(material?.material_type || material?.type || "file")}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
-        )}
+        </div>
       </div>
     );
   };
@@ -4232,7 +4436,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
       {/* STRUCTURE TAB */}
       {tab === "structure" && (
         <div className="grid grid-cols-1 xl:grid-cols-5 2xl:grid-cols-12 gap-6">
-          <div className="xl:col-span-3 2xl:col-span-8 space-y-4">
+          <div className={`${builderLessonPanelMode === "operator" ? "xl:col-span-2 2xl:col-span-4" : "xl:col-span-3 2xl:col-span-8"} space-y-4`}>
             {modules.map(mod => (
               <div key={mod.id} className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
                 <div className="flex items-center gap-3 px-5 py-4 bg-slate-50 border-b border-slate-100">
@@ -4270,13 +4474,38 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
             ))}
             <button onClick={addModule} className="w-full border-2 border-dashed border-slate-200 hover:border-indigo-300 rounded-2xl py-4 text-sm text-slate-500 hover:text-indigo-600 flex items-center justify-center gap-2 transition-all font-medium"><Plus size={16} /> Добавить модуль</button>
           </div>
-          <div className="xl:col-span-2 2xl:col-span-4">
-            <div className="bg-white rounded-2xl border border-slate-200 p-5 sticky top-24">
+          <div className={`${builderLessonPanelMode === "operator" ? "xl:col-span-3 2xl:col-span-8" : "xl:col-span-2 2xl:col-span-4"}`}>
+            <div className={`bg-white rounded-2xl border border-slate-200 ${builderLessonPanelMode === "operator" ? "p-0 overflow-hidden" : "p-5 sticky top-24"}`}>
               {selectedLessonModel ? (
                 <>
-                  <h3 className="text-sm font-semibold text-slate-900 mb-2">Редактор урока</h3>
-                  <p className="text-[11px] text-slate-500 mb-4">Предпросмотр ниже обновляется сразу при изменениях.</p>
-                  <div className="space-y-6">
+                  <div className={`${builderLessonPanelMode === "operator" ? "px-4 py-3 border-b border-slate-200 bg-white sticky top-0 z-20" : "mb-4"}`}>
+                    <div className="inline-flex items-center gap-1 bg-slate-100 rounded-xl p-1">
+                      <button
+                        type="button"
+                        onClick={() => setBuilderLessonPanelMode("edit")}
+                        className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors ${builderLessonPanelMode === "edit" ? "bg-white text-slate-900 shadow-sm" : "text-slate-600 hover:text-slate-900"}`}
+                      >
+                        {"\u0420\u0435\u0434\u0430\u043a\u0442\u043e\u0440"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setBuilderLessonPanelMode("operator")}
+                        className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors inline-flex items-center gap-1 ${builderLessonPanelMode === "operator" ? "bg-white text-slate-900 shadow-sm" : "text-slate-600 hover:text-slate-900"}`}
+                      >
+                        <Eye size={12} /> {"\u041a\u0430\u043a \u0443 \u043e\u043f\u0435\u0440\u0430\u0442\u043e\u0440\u0430"}
+                      </button>
+                    </div>
+                  </div>
+
+                  {builderLessonPanelMode === "operator" ? (
+                    <div className="p-4 bg-slate-50">
+                      <p className="text-xs text-slate-500 mb-3">{"\u041a\u043b\u0438\u043a\u0430\u0439\u0442\u0435 \u043f\u043e \u0437\u0430\u0433\u043e\u043b\u043e\u0432\u043a\u0430\u043c \u0438 \u0442\u0435\u043a\u0441\u0442\u0443, \u0447\u0442\u043e\u0431\u044b \u0440\u0435\u0434\u0430\u043a\u0442\u0438\u0440\u043e\u0432\u0430\u0442\u044c \u043f\u0440\u044f\u043c\u043e \u0432 \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441\u0435 \u043e\u043f\u0435\u0440\u0430\u0442\u043e\u0440\u0430."}</p>
+                      {renderOperatorCourseInterface()}
+                    </div>
+                  ) : (
+                    <>
+                      <h3 className="text-sm font-semibold text-slate-900 mb-2">{"\u0420\u0435\u0434\u0430\u043a\u0442\u043e\u0440 \u0443\u0440\u043e\u043a\u0430"}</h3>
+                      <div className="space-y-6">
                     <div>
                       <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Описание урока</label>
                       <RichTextEditor
@@ -4627,13 +4856,9 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                         )}
                       </>
                     )}
-
-                    <div className="pt-1 border-t border-slate-100">
-                      <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">Предпросмотр урока</h4>
-                      <p className="text-[11px] text-slate-400">В этом блоке видно, как урок будет выглядеть у операторов.</p>
-                    </div>
-                    {renderSelectedLessonPreview()}
-                  </div>
+                      </div>
+                    </>
+                  )}
                 </>
               ) : (
                 <div className="text-center py-10 text-slate-300"><Edit size={28} className="mx-auto mb-3" /><p className="text-sm">Выберите урок для редактирования</p></div>
@@ -5191,3 +5416,7 @@ function AdminView({ tab, setTab, adminCourses = [], progressRows = [], attempts
     </div>
   );
 }
+
+
+
+
