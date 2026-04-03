@@ -1495,11 +1495,11 @@ function CourseDetail({ course, onStartLesson }) {
                 <h2 className="text-base font-semibold text-slate-900">Программа курса</h2>
                 <p className="text-xs text-slate-500 mt-1">{course.modules} модуля · {course.lessons} уроков</p>
               </div>
-              {course.modules_data.map(mod => (
+              {course.modules_data.map((mod, moduleIndex) => (
                 <div key={mod.id} className="border-b border-slate-100 last:border-0">
                   <button onClick={() => toggleModule(mod.id)} className="w-full flex items-center justify-between px-6 py-4 hover:bg-slate-50 transition-colors">
                     <div className="flex items-center gap-3">
-                      <div className="w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center text-xs font-bold">{mod.id}</div>
+                      <div className="w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center text-xs font-bold">{moduleIndex + 1}</div>
                       <span className="text-sm font-semibold text-slate-800">{mod.title}</span>
                       <span className="text-xs text-slate-400">{mod.lessons.length} уроков</span>
                     </div>
@@ -1507,7 +1507,7 @@ function CourseDetail({ course, onStartLesson }) {
                   </button>
                   {openModules.includes(mod.id) && (
                     <div className="px-6 pb-4 space-y-1">
-                      {mod.lessons.map(l => {
+                      {mod.lessons.map((l, lessonIndex) => {
                         const Icon = lessonIcons[l.type];
                         return (
                           <div key={l.id} onClick={() => !l.locked && onStartLesson(l)} className={`flex items-center gap-3 p-3 rounded-xl transition-all ${l.locked ? "opacity-50 cursor-not-allowed" : "cursor-pointer hover:bg-indigo-50 group"}`}>
@@ -1515,7 +1515,7 @@ function CourseDetail({ course, onStartLesson }) {
                               {l.status === "completed" ? <CheckCircle size={14} className="text-emerald-600" /> : l.locked ? <Lock size={14} className="text-slate-400" /> : <Icon size={14} className="text-indigo-600" />}
                             </div>
                             <div className="flex-1">
-                              <p className={`text-xs font-medium ${l.locked ? "text-slate-400" : "text-slate-800 group-hover:text-indigo-700"}`}>{l.title}</p>
+                              <p className={`text-xs font-medium ${l.locked ? "text-slate-400" : "text-slate-800 group-hover:text-indigo-700"}`}>{lessonIndex + 1}. {l.title}</p>
                               <p className="text-[10px] text-slate-400 mt-0.5">{l.type === "video" ? "Видеоурок" : l.type === "text" ? "Текстовый материал" : "Тест"} · {l.duration}</p>
                             </div>
                             {l.requiresTest && !l.locked && <span className="text-[10px] bg-violet-50 text-violet-600 px-1.5 py-0.5 rounded-full font-medium">Тест</span>}
@@ -1587,6 +1587,18 @@ function LessonView({
   const lessonAttemptLimit = Math.max(0, Number(lesson?.maxAttempts ?? course?.maxAttempts ?? 0));
   const lessonAttemptsUsed = Math.max(0, Number(lesson?.attemptsUsed ?? course?.attemptsUsed ?? 0));
   const lessonAttemptsLeft = Math.max(0, lessonAttemptLimit - lessonAttemptsUsed);
+  const lessonLocation = (() => {
+    const modules = Array.isArray(course?.modules_data) ? course.modules_data : [];
+    for (let moduleIndex = 0; moduleIndex < modules.length; moduleIndex += 1) {
+      const lessons = Array.isArray(modules[moduleIndex]?.lessons) ? modules[moduleIndex].lessons : [];
+      for (let lessonIndex = 0; lessonIndex < lessons.length; lessonIndex += 1) {
+        if (String(lessons[lessonIndex]?.id) === String(lesson?.id)) {
+          return { moduleNumber: moduleIndex + 1, lessonNumber: lessonIndex + 1 };
+        }
+      }
+    }
+    return { moduleNumber: 1, lessonNumber: 1 };
+  })();
 
   return (
     <div className="flex h-[calc(100vh-64px)]">
@@ -1601,12 +1613,12 @@ function LessonView({
           </div>
         </div>
         <div className="overflow-y-auto h-full pb-20">
-          {course.modules_data.map(mod => (
+          {course.modules_data.map((mod, moduleIndex) => (
             <div key={mod.id}>
               <div className="px-4 py-3 bg-slate-50 border-b border-slate-100">
-                <p className="text-xs font-semibold text-slate-600">{mod.id}. {mod.title}</p>
+                <p className="text-xs font-semibold text-slate-600">{moduleIndex + 1}. {mod.title}</p>
               </div>
-              {mod.lessons.map(l => {
+              {mod.lessons.map((l, lessonIndex) => {
                 const Icon = lessonIcons[l.type];
                 const isActive = l.id === lesson.id;
                 const dl = course.deadline ? formatDeadline(course.deadline) : null;
@@ -1616,7 +1628,7 @@ function LessonView({
                       {isActive ? <Play size={11} className="text-white ml-0.5" /> : l.status === "completed" ? <CheckCircle size={13} className="text-emerald-600" /> : l.locked ? <Lock size={11} className="text-slate-400" /> : <Icon size={12} className="text-slate-500" />}
                     </div>
                     <div className="flex-1 min-w-0">
-                      <p className={`text-xs font-medium leading-snug ${isActive ? "text-indigo-700" : "text-slate-700"}`}>{l.title}</p>
+                      <p className={`text-xs font-medium leading-snug ${isActive ? "text-indigo-700" : "text-slate-700"}`}>{lessonIndex + 1}. {l.title}</p>
                       <div className="flex items-center gap-1.5 mt-1 flex-wrap">
                         <span className="text-[10px] text-slate-400">{l.duration}</span>
                         {l.type === "quiz" && <span className="text-[10px] bg-violet-50 text-violet-600 px-1.5 py-0.5 rounded-full font-medium">Тест</span>}
@@ -1639,7 +1651,7 @@ function LessonView({
         <div className="sticky top-0 z-10 bg-white border-b border-slate-200 px-6 py-3 flex items-center gap-3">
           <button onClick={() => setSidebarOpen(!sidebarOpen)} className="p-2 rounded-lg hover:bg-slate-100 text-slate-500 transition-colors"><AlignLeft size={16} /></button>
           <div className="flex-1">
-            <p className="text-xs text-slate-400">Модуль 1 · Урок {lesson.id}</p>
+            <p className="text-xs text-slate-400">Модуль {lessonLocation.moduleNumber} · Урок {lessonLocation.lessonNumber}</p>
             <p className="text-sm font-semibold text-slate-900">{lesson.title}</p>
           </div>
           <div className="flex items-center gap-3">
