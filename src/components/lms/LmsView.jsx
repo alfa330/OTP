@@ -216,7 +216,7 @@ const RICH_TEXT_SANITIZE_OPTIONS = {
     "span",
   ],
   ALLOWED_ATTR: [
-    "href", "target", "rel", "class",
+    "href", "rel", "class",
     "data-list", "data-checked",
     "data-url", "data-name", "data-mime", "data-size", "data-embed-id",
     "src", "alt", "title", "download", "width",
@@ -248,7 +248,6 @@ class AttachmentBlot extends BlockEmbed {
     const link = document.createElement("a");
     link.className = "lms-file-link";
     link.href = url || "#";
-    link.setAttribute("target", "_blank");
     link.setAttribute("rel", "noopener noreferrer");
     link.setAttribute("download", name);
 
@@ -2531,7 +2530,6 @@ function TextLesson({ lesson, onCompleteLesson }) {
               <a
                 key={`${material?.id || idx}-${label}`}
                 href={fileUrl || "#"}
-                target="_blank"
                 rel="noopener noreferrer"
                 download={label}
                 className="lms-file-link"
@@ -3006,7 +3004,6 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
                   <a
                     key={`${material?.id || idx}-${label}`}
                     href={fileUrl || "#"}
-                    target="_blank"
                     rel="noopener noreferrer"
                     download={label}
                     className="lms-file-link"
@@ -5013,7 +5010,6 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                         <a
                           key={`${material?.id || index}-${label}`}
                           href={fileUrl || "#"}
-                          target="_blank"
                           rel="noopener noreferrer"
                           download={label}
                           className="lms-file-link"
