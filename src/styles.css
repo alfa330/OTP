@@ -223,10 +223,12 @@
       background: rgba(147, 197, 253, 0.9);
     }
     .main-content {
+      --main-content-sidebar-offset: 256px;
       margin-left: 256px;
       transition: margin-left 0.3s ease;
     }
     .main-content.sidebar-collapsed {
+      --main-content-sidebar-offset: 80px;
       margin-left: 80px;
     }
     
@@ -299,6 +301,7 @@
         display: none !important;
       }
       .main-content {
+        --main-content-sidebar-offset: 0px;
         margin-left: 0 !important;
       }
       .sidebar-collapse-btn {
