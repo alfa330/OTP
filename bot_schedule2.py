@@ -6539,10 +6539,7 @@ def handle_surveys():
         if not operator_ids:
             return jsonify({"error": "At least one operator must be assigned"}), 400
 
-        visible_operator_ids = set(db.get_visible_operator_ids_for_requester(requester_id, requester_role))
-        forbidden = [op_id for op_id in operator_ids if op_id not in visible_operator_ids]
-        if forbidden:
-            return jsonify({"error": "You cannot assign surveys to these operators", "operator_ids": forbidden}), 403
+        # Admin/sv/trainer can assign surveys to any selected operators.
 
         if repeat_from_survey_id is not None:
             visible_surveys = db.get_surveys_for_management(requester_id, requester_role)
