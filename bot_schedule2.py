@@ -2673,6 +2673,8 @@ def get_admin_users():
                         u.company_name,
                         u.employment_type,
                         COALESCE(u.has_proxy, FALSE) as has_proxy,
+                        u.proxy_card_number,
+                        COALESCE(u.has_driver_license, FALSE) as has_driver_license,
                         u.sip_number,
                         u.study_place,
                         u.study_course,
@@ -2751,20 +2753,22 @@ def get_admin_users():
                         "company_name": row[25] or "",
                         "employment_type": row[26] or "",
                         "has_proxy": bool(row[27]) if row[27] is not None else False,
-                        "sip_number": row[28] or "",
-                        "study_place": row[29] or "",
-                        "study_course": row[30] or "",
-                        "close_contact_1_relation": row[31] or "",
-                        "close_contact_1_full_name": row[32] or "",
-                        "close_contact_1_phone": row[33] or "",
-                        "close_contact_2_relation": row[34] or "",
-                        "close_contact_2_full_name": row[35] or "",
-                        "close_contact_2_phone": row[36] or "",
-                        "card_number": row[37] or "",
-                        "internship_in_company": bool(row[38]) if row[38] is not None else False,
-                        "front_office_training": bool(row[39]) if row[39] is not None else False,
-                        "front_office_training_date": row[40].strftime('%Y-%m-%d') if row[40] else None,
-                        "taxipro_id": row[41] or ""
+                        "proxy_card_number": row[28] or "",
+                        "has_driver_license": bool(row[29]) if row[29] is not None else False,
+                        "sip_number": row[30] or "",
+                        "study_place": row[31] or "",
+                        "study_course": row[32] or "",
+                        "close_contact_1_relation": row[33] or "",
+                        "close_contact_1_full_name": row[34] or "",
+                        "close_contact_1_phone": row[35] or "",
+                        "close_contact_2_relation": row[36] or "",
+                        "close_contact_2_full_name": row[37] or "",
+                        "close_contact_2_phone": row[38] or "",
+                        "card_number": row[39] or "",
+                        "internship_in_company": bool(row[40]) if row[40] is not None else False,
+                        "front_office_training": bool(row[41]) if row[41] is not None else False,
+                        "front_office_training_date": row[42].strftime('%Y-%m-%d') if row[42] else None,
+                        "taxipro_id": row[43] or ""
                     })
         return jsonify({"status": "success", "users": users}), 200
     except Exception as e:
@@ -2835,6 +2839,7 @@ def admin_update_user():
             'instagram',
             'telegram_nick',
             'company_name',
+            'proxy_card_number',
             'sip_number',
             'study_place',
             'study_course',
@@ -2849,7 +2854,7 @@ def admin_update_user():
         ]:
             value = str(value).strip() if value is not None else ''
             value = value or None
-            if field == 'sip_number' and target_role != 'operator':
+            if field in ['sip_number', 'proxy_card_number'] and target_role != 'operator':
                 value = None
             if field in ['phone', 'close_contact_1_phone', 'close_contact_2_phone'] and value and not _is_valid_kz_phone(value):
                 return jsonify({"error": f"Invalid {field} format. Use +7XXXXXXXXXX"}), 400
@@ -2860,7 +2865,7 @@ def admin_update_user():
             value = value or None
             if value not in [None, 'gph', 'of']:
                 return jsonify({"error": "Invalid employment_type value"}), 400
-        elif field in ['has_proxy', 'internship_in_company', 'front_office_training']:
+        elif field in ['has_proxy', 'has_driver_license', 'internship_in_company', 'front_office_training']:
             if isinstance(value, bool):
                 pass
             elif isinstance(value, (int, float)):
@@ -5972,6 +5977,28 @@ def add_user():
         else:
             return jsonify({"error": "Invalid has_proxy value"}), 400
 
+        has_driver_license_raw = data.get('has_driver_license')
+        if isinstance(has_driver_license_raw, bool):
+            has_driver_license = has_driver_license_raw
+        elif isinstance(has_driver_license_raw, (int, float)):
+            has_driver_license = bool(has_driver_license_raw)
+        elif isinstance(has_driver_license_raw, str):
+            has_driver_license_value = has_driver_license_raw.strip().lower()
+            if has_driver_license_value in ['1', 'true', 'yes', 'y', 'on']:
+                has_driver_license = True
+            elif has_driver_license_value in ['0', 'false', 'no', 'n', 'off', '']:
+                has_driver_license = False
+            else:
+                return jsonify({"error": "Invalid has_driver_license value"}), 400
+        elif has_driver_license_raw is None:
+            has_driver_license = False
+        else:
+            return jsonify({"error": "Invalid has_driver_license value"}), 400
+
+        proxy_card_number = str(data.get('proxy_card_number') or '').strip() or None
+        if role != 'operator' or not has_proxy:
+            proxy_card_number = None
+
         sip_number = str(data.get('sip_number') or '').strip() or None
         if role != 'operator':
             sip_number = None
@@ -6006,6 +6033,8 @@ def add_user():
             company_name=company_name,
             employment_type=employment_type,
             has_proxy=has_proxy,
+            proxy_card_number=proxy_card_number,
+            has_driver_license=has_driver_license,
             sip_number=sip_number,
             study_place=study_place,
             study_course=study_course,

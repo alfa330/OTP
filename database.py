@@ -514,6 +514,8 @@ class Database:
                     ADD COLUMN IF NOT EXISTS company_name VARCHAR(255),
                     ADD COLUMN IF NOT EXISTS employment_type VARCHAR(10),
                     ADD COLUMN IF NOT EXISTS has_proxy BOOLEAN NOT NULL DEFAULT FALSE,
+                    ADD COLUMN IF NOT EXISTS proxy_card_number VARCHAR(64),
+                    ADD COLUMN IF NOT EXISTS has_driver_license BOOLEAN NOT NULL DEFAULT FALSE,
                     ADD COLUMN IF NOT EXISTS sip_number VARCHAR(64),
                     ADD COLUMN IF NOT EXISTS study_place VARCHAR(255),
                     ADD COLUMN IF NOT EXISTS study_course VARCHAR(100),
@@ -1948,6 +1950,8 @@ class Database:
         company_name=None,
         employment_type=None,
         has_proxy=None,
+        proxy_card_number=None,
+        has_driver_license=None,
         sip_number=None,
         study_place=None,
         study_course=None,
@@ -1984,6 +1988,7 @@ class Database:
         telegram_nick = str(telegram_nick).strip() if telegram_nick is not None else ""
         company_name = str(company_name).strip() if company_name is not None else ""
         employment_type = str(employment_type).strip().lower() if employment_type is not None else ""
+        proxy_card_number = str(proxy_card_number).strip() if proxy_card_number is not None else ""
         sip_number = str(sip_number).strip() if sip_number is not None else ""
         study_place = str(study_place).strip() if study_place is not None else ""
         study_course = str(study_course).strip() if study_course is not None else ""
@@ -2002,6 +2007,7 @@ class Database:
         telegram_nick = telegram_nick or None
         company_name = company_name or None
         employment_type = employment_type or None
+        proxy_card_number = proxy_card_number or None
         sip_number = sip_number or None
         study_place = study_place or None
         study_course = study_course or None
@@ -2016,10 +2022,15 @@ class Database:
         if employment_type not in (None, 'gph', 'of'):
             raise ValueError("Invalid employment_type")
         has_proxy_value = None if has_proxy is None else bool(has_proxy)
+        if not has_proxy_value:
+            proxy_card_number = None
+        has_driver_license_value = None if has_driver_license is None else bool(has_driver_license)
         internship_in_company_value = None if internship_in_company is None else bool(internship_in_company)
         front_office_training_value = None if front_office_training is None else bool(front_office_training)
         if not front_office_training_value:
             front_office_training_date = None
+        if role_norm != 'operator':
+            proxy_card_number = None
         if role_norm == 'trainer':
             direction_id = None
             supervisor_id = None
@@ -2039,19 +2050,21 @@ class Database:
                     INSERT INTO users (
                         telegram_id, name, role, direction_id, rate, hire_date, supervisor_id,
                         login, password_hash, hours_table_url, gender, birth_date, phone, email,
-                        instagram, telegram_nick, company_name, employment_type, has_proxy, sip_number,
+                        instagram, telegram_nick, company_name, employment_type, has_proxy, proxy_card_number, has_driver_license, sip_number,
                         study_place, study_course,
                         close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
                         close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
                         card_number, internship_in_company, front_office_training, front_office_training_date, taxipro_id
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                 """, (
                     telegram_id, name, role, direction_id, rate, hire_date, supervisor_id,
                     login, password_hash, hours_table_url, gender, birth_date, phone, email,
                     instagram, telegram_nick, company_name, employment_type,
                     (has_proxy_value if has_proxy_value is not None else False),
+                    proxy_card_number,
+                    (has_driver_license_value if has_driver_license_value is not None else False),
                     sip_number,
                     study_place, study_course,
                     close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
@@ -2082,6 +2095,8 @@ class Database:
                             company_name = COALESCE(%s, company_name),
                             employment_type = COALESCE(%s, employment_type),
                             has_proxy = COALESCE(%s, has_proxy),
+                            proxy_card_number = COALESCE(%s, proxy_card_number),
+                            has_driver_license = COALESCE(%s, has_driver_license),
                             sip_number = COALESCE(%s, sip_number),
                             study_place = COALESCE(%s, study_place),
                             study_course = COALESCE(%s, study_course),
@@ -2100,7 +2115,7 @@ class Database:
                         RETURNING id
                     """, (
                         direction_id, supervisor_id, hours_table_url, gender, birth_date,
-                        phone, email, instagram, telegram_nick, company_name, employment_type, has_proxy_value, sip_number,
+                        phone, email, instagram, telegram_nick, company_name, employment_type, has_proxy_value, proxy_card_number, has_driver_license_value, sip_number,
                         study_place, study_course,
                         close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
                         close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
@@ -2134,6 +2149,8 @@ class Database:
                             company_name = COALESCE(%s, company_name),
                             employment_type = COALESCE(%s, employment_type),
                             has_proxy = COALESCE(%s, has_proxy),
+                            proxy_card_number = COALESCE(%s, proxy_card_number),
+                            has_driver_license = COALESCE(%s, has_driver_license),
                             sip_number = COALESCE(%s, sip_number),
                             study_place = COALESCE(%s, study_place),
                             study_course = COALESCE(%s, study_course),
@@ -2153,7 +2170,7 @@ class Database:
                     """, (
                         name, role, direction_id, hire_date, supervisor_id, login, password_hash, hours_table_url,
                         gender, birth_date, phone, email, instagram, telegram_nick, company_name, employment_type,
-                        has_proxy_value, sip_number,
+                        has_proxy_value, proxy_card_number, has_driver_license_value, sip_number,
                         study_place, study_course,
                         close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
                         close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
@@ -4825,6 +4842,8 @@ class Database:
             'company_name',
             'employment_type',
             'has_proxy',
+            'proxy_card_number',
+            'has_driver_license',
             'sip_number',
             'study_place',
             'study_course',
@@ -6761,6 +6780,8 @@ class Database:
                         u.company_name,
                         u.employment_type,
                         COALESCE(u.has_proxy, FALSE) as has_proxy,
+                        u.proxy_card_number,
+                        COALESCE(u.has_driver_license, FALSE) as has_driver_license,
                         u.sip_number,
                         u.close_contact_1_relation,
                         u.close_contact_1_full_name,
@@ -6823,6 +6844,8 @@ class Database:
                 "Дата обучения во фронт офисе",
                 "ID таксипро",
                 "Наличие прокси",
+                "Номер прокси карты",
+                "Наличие водительских прав",
                 "SIP номер",
                 "Близкий 1: Кем приходится",
                 "Близкий 1: ФИО",
@@ -6841,7 +6864,7 @@ class Database:
                     name, login, role, direction, supervisor, status, rate, hire_date,
                     phone, email, instagram, telegram_nick,
                     study_place, study_course, card_number,
-                    company_name, employment_type, internship_in_company, front_office_training, front_office_training_date, taxipro_id, has_proxy, sip_number,
+                    company_name, employment_type, internship_in_company, front_office_training, front_office_training_date, taxipro_id, has_proxy, proxy_card_number, has_driver_license, sip_number,
                     close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
                     close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
                     sup_id
@@ -6870,6 +6893,8 @@ class Database:
                     _format_date(front_office_training_date),
                     taxipro_id or "",
                     _format_proxy(has_proxy),
+                    (proxy_card_number or "") if bool(has_proxy) else "",
+                    _format_proxy(has_driver_license),
                     sip_number or "",
                     close_contact_1_relation or "",
                     close_contact_1_full_name or "",
