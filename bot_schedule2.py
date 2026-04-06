@@ -7481,36 +7481,38 @@ def update_task_status(task_id):
             action = (request.form.get('action') or '').strip().lower()
             comment = (request.form.get('comment') or '').strip()
             completion_summary = (request.form.get('completion_summary') or '').strip()
-            completion_files = request.files.getlist('files')
+            uploaded_files = request.files.getlist('files')
         else:
             data = request.get_json() or {}
             action = (data.get('action') or '').strip().lower()
             comment = (data.get('comment') or '').strip()
             completion_summary = (data.get('completion_summary') or '').strip()
-            completion_files = []
+            uploaded_files = []
 
         if action not in TASK_ALLOWED_ACTIONS:
             return jsonify({"error": "Invalid action"}), 400
 
-        completion_attachments = []
+        action_attachments = []
         uploaded_blob_paths = []
         gcs_bucket = None
 
-        if action == 'completed':
+        actions_with_files = {'completed', 'returned', 'reopened'}
+        if action in actions_with_files:
             try:
-                completion_attachments, uploaded_blob_paths, gcs_bucket = _upload_task_attachments_to_gcs(
-                    completion_files,
-                    stage='result'
+                stage = 'result' if action == 'completed' else action
+                action_attachments, uploaded_blob_paths, gcs_bucket = _upload_task_attachments_to_gcs(
+                    uploaded_files,
+                    stage=stage
                 )
             except ValueError as upload_error:
                 return jsonify({"error": str(upload_error)}), 400
             except RuntimeError as upload_error:
                 return jsonify({"error": str(upload_error)}), 500
             except Exception as upload_error:
-                logging.error(f"Task completion attachment upload failed: {upload_error}")
-                return jsonify({"error": "Failed to upload completion attachments"}), 500
-        elif completion_files:
-            return jsonify({"error": "Files can be attached only when completing a task"}), 400
+                logging.error(f"Task attachment upload failed ({action}): {upload_error}")
+                return jsonify({"error": "Failed to upload attachments"}), 500
+        elif uploaded_files:
+            return jsonify({"error": "Files can be attached only when completing, returning, or reopening a task"}), 400
 
         try:
             result = db.update_task_status(
@@ -7520,7 +7522,7 @@ def update_task_status(task_id):
                 action=action,
                 comment=comment,
                 completion_summary=completion_summary if action == 'completed' else None,
-                completion_attachments=completion_attachments
+                completion_attachments=action_attachments
             )
         except ValueError as value_error:
             _cleanup_task_uploaded_blobs(gcs_bucket, uploaded_blob_paths)
@@ -7558,7 +7560,7 @@ def update_task_status(task_id):
                             recipient_kind=recipient.get('kind') or 'participant',
                             comment=comment,
                             completion_summary=completion_summary,
-                            completion_files_count=len(completion_attachments)
+                            completion_files_count=len(action_attachments)
                         )
                         response = _send_telegram_text_message(
                             recipient.get('chat_id'),
@@ -7577,7 +7579,7 @@ def update_task_status(task_id):
                                 _send_task_completion_attachments_to_telegram(
                                     recipient.get('chat_id'),
                                     task_subject,
-                                    completion_attachments
+                                    action_attachments
                                 )
                             )
         except Exception as notify_error:

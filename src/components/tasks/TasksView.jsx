@@ -764,7 +764,7 @@ const TaskRow = React.memo(({ task, onClick }) => {
 /* ─── TaskDrawer — defined outside to avoid remount ─── */
 const TaskDrawer = React.memo(({
   task, onClose, actionLoadingKey,
-  getActionButtons, openCompleteModal, updateStatus, downloadAttachment,
+  getActionButtons, openCompleteModal, openStatusModal, updateStatus, downloadAttachment,
 }) => {
   const sm = STATUS_META[task.status] || { label: task.status, badge: 'tv-badge-gray' };
   const tm = TAG_META[task.tag]       || { label: task.tag || '—', badge: 'tv-badge-gray' };
@@ -908,6 +908,7 @@ const TaskDrawer = React.memo(({
                   disabled={!!actionLoadingKey}
                   onClick={() => {
                     if (btn.action === 'completed') { openCompleteModal(task); return; }
+                    if (btn.action === 'returned' || btn.action === 'reopened') { openStatusModal(task, btn.action); return; }
                     updateStatus(task.id, btn.action);
                   }}
                 >
@@ -949,14 +950,18 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
   const [createOpen,        setCreateOpen]        = useState(false);
   const [drawerTask,        setDrawerTask]        = useState(null);
   const [completeModal,     setCompleteModal]     = useState({ open: false, taskId: null, taskSubject: '' });
+  const [statusModal,       setStatusModal]       = useState({ open: false, taskId: null, action: '', taskSubject: '' });
   const [completionSummary, setCompletionSummary] = useState('');
   const [completionFiles,   setCompletionFiles]   = useState([]);
+  const [statusComment,     setStatusComment]     = useState('');
+  const [statusFiles,       setStatusFiles]       = useState([]);
   const [myTasksTab,        setMyTasksTab]        = useState('incoming');
   const [incomingPersonKey, setIncomingPersonKey] = useState(null);
   const [outgoingPersonKey, setOutgoingPersonKey] = useState(null);
 
   const fileInputRef           = useRef(null);
   const completionFileInputRef = useRef(null);
+  const statusFileInputRef     = useRef(null);
   const searchRef              = useRef(null);
   const [form, setForm] = useState({ subject: '', description: '', tag: 'task', assignedTo: '' });
 
@@ -1106,23 +1111,34 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
   };
 
   /* ── Update status ── */
-  const updateStatus = useCallback(async (taskId, action) => {
-    const comment = action === 'returned'
-      ? (window.prompt('Комментарий по доработке (необязательно):', '') || '').trim()
-      : '';
+  const updateStatus = useCallback(async (taskId, action, options = {}) => {
+    const comment = String(options?.comment || '').trim();
+    const files = Array.isArray(options?.files) ? options.files.filter(Boolean) : [];
+    const useMultipart = files.length > 0 || action === 'returned' || action === 'reopened';
     const key = `${taskId}:${action}`;
     setActionLoadingKey(key);
     try {
+      const payload = useMultipart
+        ? (() => {
+          const body = new FormData();
+          body.append('action', action);
+          body.append('comment', comment);
+          files.forEach(file => body.append('files', file));
+          return body;
+        })()
+        : { action, comment };
       const res = await axios.post(
         `${apiBaseUrl}/api/tasks/${taskId}/status`,
-        { action, comment },
+        payload,
         { headers: buildHeaders() }
       );
       notify(res?.data?.message || 'Статус обновлён');
       if (res?.data?.warning) notify(res.data.warning, 'error');
       await fetchTasks();
+      return true;
     } catch (e) {
       notify(e?.response?.data?.error || 'Не удалось обновить статус', 'error');
+      return false;
     } finally { setActionLoadingKey(''); }
   }, [apiBaseUrl, buildHeaders, notify, fetchTasks]);
 
@@ -1140,6 +1156,22 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     setCompletionSummary('');
     setCompletionFiles([]);
     if (completionFileInputRef.current) completionFileInputRef.current.value = '';
+  }, []);
+
+  const openStatusModal = useCallback((task, action) => {
+    if (!task?.id) return;
+    if (action !== 'returned' && action !== 'reopened') return;
+    setStatusComment('');
+    setStatusFiles([]);
+    if (statusFileInputRef.current) statusFileInputRef.current.value = '';
+    setStatusModal({ open: true, taskId: task.id, action, taskSubject: task.subject || '' });
+  }, []);
+
+  const closeStatusModal = useCallback(() => {
+    setStatusModal({ open: false, taskId: null, action: '', taskSubject: '' });
+    setStatusComment('');
+    setStatusFiles([]);
+    if (statusFileInputRef.current) statusFileInputRef.current.value = '';
   }, []);
 
   const submitComplete = useCallback(async (e) => {
@@ -1165,6 +1197,16 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
       notify(e?.response?.data?.error || 'Не удалось завершить задачу', 'error');
     } finally { setActionLoadingKey(''); }
   }, [completeModal, completionSummary, completionFiles, apiBaseUrl, buildHeaders, notify, closeCompleteModal, fetchTasks]);
+
+  const submitStatusModal = useCallback(async (e) => {
+    e.preventDefault();
+    if (!statusModal.taskId || !statusModal.action) return;
+    const ok = await updateStatus(statusModal.taskId, statusModal.action, {
+      comment: statusComment,
+      files: statusFiles,
+    });
+    if (ok) closeStatusModal();
+  }, [statusModal, statusComment, statusFiles, updateStatus, closeStatusModal]);
 
   /* ── Download ── */
   const downloadAttachment = useCallback(async (att) => {
@@ -1204,6 +1246,12 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
       btns.push({ action: 'reopened', label: 'Возобновить', cls: 'tv-btn-ghost' });
     return btns;
   }, [currentUserId, currentUserRole]);
+
+  const isReturnAction = statusModal.action === 'returned';
+  const statusModalTitle = isReturnAction ? 'Возврат на доработку' : 'Возобновление задачи';
+  const statusModalCommentLabel = isReturnAction ? 'Комментарий по доработке' : 'Комментарий к возобновлению';
+  const statusModalSubmitLabel = isReturnAction ? 'Вернуть на доработку' : 'Возобновить задачу';
+  const statusModalLoadingKey = `${statusModal.taskId}:${statusModal.action}`;
 
   /* ── Render helpers ── */
   const renderTaskList = (list, emptyTitle, emptySub) => {
@@ -1438,6 +1486,7 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
           actionLoadingKey={actionLoadingKey}
           getActionButtons={getActionButtons}
           openCompleteModal={openCompleteModal}
+          openStatusModal={openStatusModal}
           updateStatus={updateStatus}
           downloadAttachment={downloadAttachment}
         />
@@ -1563,6 +1612,62 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                   onClick={closeCompleteModal}>Отмена</button>
                 <button type="submit" className="tv-btn tv-btn-indigo" disabled={!!actionLoadingKey}>
                   {actionLoadingKey === `${completeModal.taskId}:completed` ? 'Сохраняю...' : 'Отметить выполненной'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Status Modal */}
+      {statusModal.open && (
+        <div className="tv-modal-overlay" onClick={closeStatusModal}>
+          <div className="tv-modal" onClick={e => e.stopPropagation()}>
+            <div className="tv-modal-header">
+              <h3 className="tv-modal-title">{statusModalTitle}</h3>
+              <button className="tv-close-btn" onClick={closeStatusModal}><CloseIcon /></button>
+            </div>
+            <form onSubmit={submitStatusModal}>
+              <div className="tv-modal-body">
+                {statusModal.taskSubject && (
+                  <div style={{
+                    background: '#f8f7f4', border: '1px solid var(--border)',
+                    borderRadius: 'var(--radius-sm)', padding: '10px 14px',
+                    fontSize: 13, color: 'var(--ink-2)', marginBottom: 16,
+                    display: 'flex', gap: 8, alignItems: 'flex-start',
+                  }}>
+                    <span style={{ color: 'var(--ink-3)', marginTop: 1 }}>📌</span>
+                    <span><strong style={{ color: 'var(--ink)' }}>{statusModal.taskSubject}</strong></span>
+                  </div>
+                )}
+                <div className="tv-form-grid">
+                  <div className="tv-form-field">
+                    <label>{statusModalCommentLabel}</label>
+                    <textarea className="tv-textarea" value={statusComment}
+                      placeholder="Добавьте пояснение (необязательно)"
+                      style={{ minHeight: 110 }}
+                      autoFocus
+                      disabled={!!actionLoadingKey}
+                      onChange={e => setStatusComment(e.target.value)} />
+                  </div>
+                  <div className="tv-form-field">
+                    <label>Прикрепить файлы</label>
+                    <input ref={statusFileInputRef} type="file" multiple className="tv-input"
+                      disabled={!!actionLoadingKey}
+                      onChange={e => setStatusFiles(Array.from(e.target.files || []))} />
+                    {statusFiles.length > 0 && (
+                      <p style={{ fontSize: 11, color: 'var(--ink-3)', marginTop: 4 }}>
+                        Прикреплено файлов: {statusFiles.length}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </div>
+              <div className="tv-modal-footer">
+                <button type="button" className="tv-btn tv-btn-ghost" disabled={!!actionLoadingKey}
+                  onClick={closeStatusModal}>Отмена</button>
+                <button type="submit" className={`tv-btn ${isReturnAction ? 'tv-btn-rose' : 'tv-btn-indigo'}`} disabled={!!actionLoadingKey}>
+                  {actionLoadingKey === statusModalLoadingKey ? 'Сохраняю...' : statusModalSubmitLabel}
                 </button>
               </div>
             </form>
