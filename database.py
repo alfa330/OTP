@@ -1577,6 +1577,8 @@ class Database:
                 ON operator_technical_issues(issue_date, start_time, end_time);
                 CREATE INDEX IF NOT EXISTS idx_operator_technical_issues_operator_id
                 ON operator_technical_issues(operator_id);
+                CREATE INDEX IF NOT EXISTS idx_operator_technical_issues_operator_date
+                ON operator_technical_issues(operator_id, issue_date);
                 CREATE INDEX IF NOT EXISTS idx_operator_technical_issues_reason
                 ON operator_technical_issues(reason);
                 CREATE INDEX IF NOT EXISTS idx_operator_technical_issues_created_by
@@ -1589,6 +1591,8 @@ class Database:
                 ON operator_offline_activities(activity_date, start_time, end_time);
                 CREATE INDEX IF NOT EXISTS idx_operator_offline_activities_operator_id
                 ON operator_offline_activities(operator_id);
+                CREATE INDEX IF NOT EXISTS idx_operator_offline_activities_operator_date
+                ON operator_offline_activities(operator_id, activity_date);
                 CREATE INDEX IF NOT EXISTS idx_operator_offline_activities_created_by
                 ON operator_offline_activities(created_by);
                 CREATE INDEX IF NOT EXISTS idx_operator_offline_activities_created_at
@@ -3646,6 +3650,15 @@ class Database:
             last_day = calendar.monthrange(today.year, today.month)[1]
             return date(today.year, today.month, last_day)
 
+    def _get_month_date_range(self, month: Optional[str]) -> Tuple[date, date]:
+        month_end_date = self._get_month_end_date(month)
+        month_start_date = date(month_end_date.year, month_end_date.month, 1)
+        if month_end_date.month == 12:
+            next_month_start = date(month_end_date.year + 1, 1, 1)
+        else:
+            next_month_start = date(month_end_date.year, month_end_date.month + 1, 1)
+        return month_start_date, next_month_start
+
     def _get_tenure_months_for_reference(self, hire_date_value, reference_date: Optional[date]) -> Optional[int]:
         if not hire_date_value or not reference_date:
             return None
@@ -3681,21 +3694,116 @@ class Database:
             return 10
         return 5
 
+    def _fetch_operator_call_evaluation_target_source(self, cursor, operator_id: int, target_month: str):
+        month_start_date, next_month_start = self._get_month_date_range(target_month)
+        cursor.execute("""
+            SELECT
+                u.hire_date,
+                COALESCE(wh.regular_hours, 0) AS regular_hours,
+                COALESCE(wh.norm_hours, 0) AS norm_hours,
+                COALESCE((
+                    SELECT SUM(
+                        CASE
+                            WHEN t.end_time <= t.start_time
+                                THEN EXTRACT(EPOCH FROM (t.end_time + INTERVAL '24 hours' - t.start_time))
+                            ELSE EXTRACT(EPOCH FROM (t.end_time - t.start_time))
+                        END
+                    ) / 3600.0
+                    FROM trainings t
+                    WHERE t.operator_id = u.id
+                      AND t.count_in_hours = TRUE
+                      AND t.training_date >= %s
+                      AND t.training_date < %s
+                ), 0) AS training_hours,
+                COALESCE((
+                    SELECT SUM(
+                        CASE
+                            WHEN ti.end_time <= ti.start_time
+                                THEN EXTRACT(EPOCH FROM (ti.end_time + INTERVAL '24 hours' - ti.start_time))
+                            ELSE EXTRACT(EPOCH FROM (ti.end_time - ti.start_time))
+                        END
+                    ) / 3600.0
+                    FROM operator_technical_issues ti
+                    WHERE ti.operator_id = u.id
+                      AND ti.issue_date >= %s
+                      AND ti.issue_date < %s
+                ), 0) AS technical_issue_hours,
+                COALESCE((
+                    SELECT SUM(
+                        CASE
+                            WHEN oa.end_time <= oa.start_time
+                                THEN EXTRACT(EPOCH FROM (oa.end_time + INTERVAL '24 hours' - oa.start_time))
+                            ELSE EXTRACT(EPOCH FROM (oa.end_time - oa.start_time))
+                        END
+                    ) / 3600.0
+                    FROM operator_offline_activities oa
+                    WHERE oa.operator_id = u.id
+                      AND oa.activity_date >= %s
+                      AND oa.activity_date < %s
+                ), 0) AS offline_activity_hours
+            FROM users u
+            LEFT JOIN work_hours wh
+                ON wh.operator_id = u.id
+               AND wh.month = %s
+            WHERE u.id = %s
+            LIMIT 1
+        """, (
+            month_start_date,
+            next_month_start,
+            month_start_date,
+            next_month_start,
+            month_start_date,
+            next_month_start,
+            target_month,
+            operator_id
+        ))
+        row = cursor.fetchone()
+        if not row:
+            return {
+                'hire_date_value': None,
+                'regular_hours': 0.0,
+                'norm_hours': 0.0,
+                'training_hours': 0.0,
+                'technical_issue_hours': 0.0,
+                'offline_activity_hours': 0.0,
+            }
+
+        return {
+            'hire_date_value': row[0],
+            'regular_hours': float(row[1] or 0.0),
+            'norm_hours': float(row[2] or 0.0),
+            'training_hours': float(row[3] or 0.0),
+            'technical_issue_hours': float(row[4] or 0.0),
+            'offline_activity_hours': float(row[5] or 0.0),
+        }
+
     def _build_operator_call_evaluation_target(
         self,
         operator_id: int,
         target_month: str,
         hire_date_value=None,
         regular_hours: float = 0.0,
+        training_hours: float = 0.0,
+        technical_issue_hours: float = 0.0,
+        offline_activity_hours: float = 0.0,
         norm_hours: float = 0.0
     ):
         month_end_date = self._get_month_end_date(target_month)
         regular_hours_value = float(regular_hours or 0.0)
+        training_hours_value = float(training_hours or 0.0)
+        technical_issue_hours_value = float(technical_issue_hours or 0.0)
+        offline_activity_hours_value = float(offline_activity_hours or 0.0)
+        accounted_hours_value = (
+            regular_hours_value
+            + training_hours_value
+            + technical_issue_hours_value
+            + offline_activity_hours_value
+        )
         norm_hours_value = float(norm_hours or 0.0)
 
         tenure_months = self._get_tenure_months_for_reference(hire_date_value, month_end_date)
         base_call_target = self._get_base_call_target_by_tenure(tenure_months)
-        worked_hours_ratio = (regular_hours_value / norm_hours_value) if norm_hours_value > 0 else 0.0
+        worked_hours_ratio = (accounted_hours_value / norm_hours_value) if norm_hours_value > 0 else 0.0
         required_calls_raw = float(worked_hours_ratio) * float(base_call_target)
         required_calls = int(math.ceil(required_calls_raw - 1e-9)) if required_calls_raw > 0 else 0
 
@@ -3716,6 +3824,11 @@ class Database:
             'tenure_bucket': tenure_bucket,
             'base_call_target': int(base_call_target),
             'worked_hours_for_calls': round(float(regular_hours_value), 2),
+            'training_hours': round(float(training_hours_value), 2),
+            'technical_issue_hours': round(float(technical_issue_hours_value), 2),
+            'offline_activity_hours': round(float(offline_activity_hours_value), 2),
+            'accounted_hours': round(float(accounted_hours_value), 2),
+            'worked_hours_used': round(float(accounted_hours_value), 2),
             'norm_hours': round(float(norm_hours_value), 2),
             'worked_hours_ratio': round(float(worked_hours_ratio), 4),
             'required_calls_raw': round(float(required_calls_raw), 2),
@@ -3726,31 +3839,17 @@ class Database:
         target_month = str(month or datetime.now().strftime('%Y-%m'))
 
         with self._get_cursor() as cursor:
-            cursor.execute("""
-                SELECT
-                    u.hire_date,
-                    COALESCE(wh.regular_hours, 0) AS regular_hours,
-                    COALESCE(wh.norm_hours, 0) AS norm_hours
-                FROM users u
-                LEFT JOIN work_hours wh
-                    ON wh.operator_id = u.id
-                   AND wh.month = %s
-                WHERE u.id = %s
-                LIMIT 1
-            """, (target_month, operator_id))
-            row = cursor.fetchone()
-
-        if row:
-            hire_date_value, regular_hours, norm_hours = row
-        else:
-            hire_date_value, regular_hours, norm_hours = None, 0.0, 0.0
+            source = self._fetch_operator_call_evaluation_target_source(cursor, operator_id, target_month)
 
         return self._build_operator_call_evaluation_target(
             operator_id=operator_id,
             target_month=target_month,
-            hire_date_value=hire_date_value,
-            regular_hours=regular_hours,
-            norm_hours=norm_hours
+            hire_date_value=source.get('hire_date_value'),
+            regular_hours=source.get('regular_hours'),
+            training_hours=source.get('training_hours'),
+            technical_issue_hours=source.get('technical_issue_hours'),
+            offline_activity_hours=source.get('offline_activity_hours'),
+            norm_hours=source.get('norm_hours')
         )
 
     def get_operator_stats(self, operator_id):
@@ -4716,29 +4815,16 @@ class Database:
 
         with self._get_cursor() as cursor:
             if include_target:
-                cursor.execute("""
-                    SELECT
-                        u.hire_date,
-                        COALESCE(wh.regular_hours, 0) AS regular_hours,
-                        COALESCE(wh.norm_hours, 0) AS norm_hours
-                    FROM users u
-                    LEFT JOIN work_hours wh
-                        ON wh.operator_id = u.id
-                       AND wh.month = %s
-                    WHERE u.id = %s
-                    LIMIT 1
-                """, (target_month, operator_id))
-                target_row = cursor.fetchone()
-                if target_row:
-                    hire_date_value, regular_hours, norm_hours = target_row
-                else:
-                    hire_date_value, regular_hours, norm_hours = None, 0.0, 0.0
+                source = self._fetch_operator_call_evaluation_target_source(cursor, operator_id, target_month)
                 evaluation_target = self._build_operator_call_evaluation_target(
                     operator_id=operator_id,
                     target_month=target_month,
-                    hire_date_value=hire_date_value,
-                    regular_hours=regular_hours,
-                    norm_hours=norm_hours
+                    hire_date_value=source.get('hire_date_value'),
+                    regular_hours=source.get('regular_hours'),
+                    training_hours=source.get('training_hours'),
+                    technical_issue_hours=source.get('technical_issue_hours'),
+                    offline_activity_hours=source.get('offline_activity_hours'),
+                    norm_hours=source.get('norm_hours')
                 )
 
             cursor.execute(query, params)
