@@ -1397,6 +1397,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
   const [certificates, setCertificates] = useState([]);
   const [notifications, setNotifications] = useState([]);
   const [adminCourses, setAdminCourses] = useState([]);
+  const [adminAnalytics, setAdminAnalytics] = useState(null);
   const [adminProgressRows, setAdminProgressRows] = useState([]);
   const [adminAttempts, setAdminAttempts] = useState([]);
   const [learners, setLearners] = useState([]);
@@ -1561,17 +1562,24 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
     const loadPromise = (async () => {
       setLoadingAdmin(true);
       try {
-      const [coursesRes, progressRes, attemptsRes, learnersRes] = await Promise.all([
-        lmsRequest("/api/lms/admin/courses"),
-        lmsRequest("/api/lms/admin/progress"),
-        lmsRequest("/api/lms/admin/attempts?limit=400"),
-        lmsRequest("/api/lms/admin/learners"),
-      ]);
-      setAdminCourses(Array.isArray(coursesRes?.courses) ? coursesRes.courses : []);
-      setAdminProgressRows(Array.isArray(progressRes?.rows) ? progressRes.rows : []);
-      setAdminAttempts(Array.isArray(attemptsRes?.attempts) ? attemptsRes.attempts : []);
-      setLearners(Array.isArray(learnersRes?.learners) ? learnersRes.learners : []);
-      setApiMode(true);
+        if (view === "builder") {
+          const [coursesRes, learnersRes] = await Promise.all([
+            lmsRequest("/api/lms/admin/courses"),
+            lmsRequest("/api/lms/admin/learners"),
+          ]);
+          setAdminCourses(Array.isArray(coursesRes?.courses) ? coursesRes.courses : []);
+          setLearners(Array.isArray(learnersRes?.learners) ? learnersRes.learners : []);
+        } else {
+          const [coursesRes, analyticsRes] = await Promise.all([
+            lmsRequest("/api/lms/admin/courses"),
+            lmsRequest("/api/lms/admin/analytics"),
+          ]);
+          setAdminCourses(Array.isArray(coursesRes?.courses) ? coursesRes.courses : []);
+          setAdminAnalytics(analyticsRes && typeof analyticsRes === "object" ? analyticsRes : null);
+          setAdminProgressRows([]);
+          setAdminAttempts([]);
+        }
+        setApiMode(true);
     } catch (error) {
       emitToast(`LMS admin: ${String(error?.message || "ошибка загрузки")}`, "error");
       } finally {
@@ -1587,7 +1595,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
         adminLoadPromiseRef.current = null;
       }
     }
-  }, [apiRoot, canUseManagerApi, lmsRequest, emitToast]);
+  }, [apiRoot, canUseManagerApi, lmsRequest, emitToast, view]);
 
   useEffect(() => {
     loadLearnerDashboard();
@@ -1874,6 +1882,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
             adminCourses={adminCourses}
             progressRows={adminProgressRows}
             attempts={adminAttempts}
+            analytics={adminAnalytics}
             loading={loadingAdmin}
             onOpenBuilder={() => setView("builder")}
             onDeleteCourse={handleDeleteAdminCourse}
@@ -5832,7 +5841,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
 
 // ─── ADMIN VIEW ───────────────────────────────────────────────────────────────
 
-function AdminView({ tab, setTab, adminCourses = [], progressRows = [], attempts = [], loading = false, onOpenBuilder, onDeleteCourse }) {
+function AdminView({ tab, setTab, adminCourses = [], progressRows = [], attempts = [], analytics = null, loading = false, onOpenBuilder, onDeleteCourse }) {
   const [deletingCourseId, setDeletingCourseId] = useState(null);
   const tabs = [
     { id: "analytics", label: "Аналитика", icon: BarChart2 },
@@ -5966,7 +5975,7 @@ function AdminView({ tab, setTab, adminCourses = [], progressRows = [], attempts
       progress: progressPercent,
     };
   });
-  const failStatsRows = safeAttempts
+  let failStatsRows = safeAttempts
     .filter((item) => item?.score_percent != null)
     .sort((a, b) => Number(a?.score_percent || 0) - Number(b?.score_percent || 0))
     .slice(0, 4)
@@ -5977,11 +5986,11 @@ function AdminView({ tab, setTab, adminCourses = [], progressRows = [], attempts
       course: item?.course_title || "Курс",
     }));
 
-  const overallProgress = safeProgressRows.length
+  let overallProgress = safeProgressRows.length
     ? Math.round(safeProgressRows.reduce((sum, row) => sum + clampLmsProgress(row?.progress_percent), 0) / safeProgressRows.length)
     : 0;
-  const avgScore = employeeRows.length ? Math.round(employeeRows.reduce((a, e) => a + Number(e.avgScore || 0), 0) / employeeRows.length) : 0;
-  const overdueCount = employeeRows.reduce((a, e) => a + Number(e.overdue || 0), 0);
+  let avgScore = employeeRows.length ? Math.round(employeeRows.reduce((a, e) => a + Number(e.avgScore || 0), 0) / employeeRows.length) : 0;
+  let overdueCount = employeeRows.reduce((a, e) => a + Number(e.overdue || 0), 0);
   const assignmentStatusCounts = safeProgressRows.reduce((acc, row) => {
     const uiStatus = mapAdminProgressRowToUiStatus(row);
     if (isCompletedLmsStatus(uiStatus)) acc.completed += 1;
@@ -6003,7 +6012,7 @@ function AdminView({ tab, setTab, adminCourses = [], progressRows = [], attempts
     1,
     completedCoursesCount + inProgressCoursesCount + notStartedCoursesCount + overdueCoursesCount
   );
-  const courseStatusRows = [
+  let courseStatusRows = [
     { label: "Завершены", count: completedCoursesCount, color: "bg-emerald-500" },
     { label: "В процессе", count: inProgressCoursesCount, color: "bg-blue-500" },
     { label: "Не начаты", count: notStartedCoursesCount, color: "bg-slate-300" },
@@ -6012,6 +6021,84 @@ function AdminView({ tab, setTab, adminCourses = [], progressRows = [], attempts
     ...item,
     pct: Math.round((item.count / courseStatusTotal) * 100),
   }));
+
+  const safeAnalytics = analytics && typeof analytics === "object" ? analytics : null;
+  const hasAnalyticsPayload = Boolean(
+    safeAnalytics &&
+    (
+      safeAnalytics.summary ||
+      Array.isArray(safeAnalytics.employee_rows) ||
+      Array.isArray(safeAnalytics.course_stats) ||
+      Array.isArray(safeAnalytics.course_status_rows) ||
+      Array.isArray(safeAnalytics.fail_stats)
+    )
+  );
+
+  if (hasAnalyticsPayload) {
+    const analyticsEmployeeRows = Array.isArray(safeAnalytics?.employee_rows) ? safeAnalytics.employee_rows : [];
+    const analyticsCourseStats = new Map(
+      (Array.isArray(safeAnalytics?.course_stats) ? safeAnalytics.course_stats : [])
+        .map((item) => [Number(item?.course_id || 0), item])
+        .filter(([courseId]) => courseId > 0)
+    );
+
+    employeeRows = analyticsEmployeeRows.map((row) => {
+      const totalDuration = Math.max(0, Number(row?.test_duration_seconds || 0));
+      const hours = Math.floor(totalDuration / 3600);
+      const minutes = Math.floor((totalDuration % 3600) / 60);
+      return {
+        id: Number(row?.id || 0),
+        name: String(row?.name || `User #${row?.id || 0}`),
+        dept: String(row?.dept || "—"),
+        courses: Math.max(0, Number(row?.courses || 0)),
+        completed: Math.max(0, Number(row?.completed || 0)),
+        progress: Math.max(0, Math.min(100, Number(row?.progress || 0))),
+        avgScore: Math.max(0, Number(row?.avg_score || 0)),
+        overdue: Math.max(0, Number(row?.overdue || 0)),
+        attempts: Math.max(0, Number(row?.attempts || 0)),
+        testTime: `${hours}ч ${String(minutes).padStart(2, "0")}м`,
+        lastActive: row?.last_active_at ? toRelativeTime(row.last_active_at) : "—",
+      };
+    });
+
+    courseRows = safeAdminCourses.map((item, index) => {
+      const visual = pickCourseVisual(item?.id || index, item?.category || "");
+      const stat = analyticsCourseStats.get(Number(item?.id || 0)) || {};
+      const lessons = Math.max(0, Number(stat?.lessons || 0));
+      return {
+        id: Number(item?.id || index + 1),
+        title: item?.title || `Курс #${item?.id || index + 1}`,
+        category: item?.category || "Без категории",
+        cover: visual.cover,
+        color: visual.color,
+        mandatory: false,
+        duration: lessons > 0 ? `${lessons} уроков` : "—",
+        lessons,
+        maxAttempts: Number(item?.default_attempt_limit || 3),
+        attemptsUsed: 0,
+        rating: 0,
+        status: String(stat?.status || "not_started"),
+        progress: Math.max(0, Math.min(100, Number(stat?.progress || 0))),
+      };
+    });
+
+    failStatsRows = (Array.isArray(safeAnalytics?.fail_stats) ? safeAnalytics.fail_stats : []).map((item, index) => ({
+      questionId: Number(item?.question_id || index + 1),
+      text: item?.text || "Тест",
+      failRate: Math.max(0, Math.min(100, Number(item?.fail_rate || 0))),
+      course: item?.course || "Курс",
+    }));
+
+    overallProgress = Math.max(0, Math.min(100, Number(safeAnalytics?.summary?.overall_progress || 0)));
+    avgScore = Math.max(0, Math.min(100, Number(safeAnalytics?.summary?.avg_score || 0)));
+    overdueCount = Math.max(0, Number(safeAnalytics?.summary?.overdue_count || 0));
+    courseStatusRows = (Array.isArray(safeAnalytics?.course_status_rows) ? safeAnalytics.course_status_rows : []).map((item) => ({
+      label: item?.label || "",
+      count: Math.max(0, Number(item?.count || 0)),
+      color: item?.color || "bg-slate-300",
+      pct: Math.max(0, Math.min(100, Number(item?.pct || 0))),
+    }));
+  }
 
   const handleDeleteCourse = async (courseItem) => {
     const courseId = Number(courseItem?.id || 0);
