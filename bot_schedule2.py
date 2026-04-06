@@ -14297,6 +14297,186 @@ def _lms_deadline_status(due_at, completed_at):
     return None
 
 
+def _lms_admin_assignment_stats_tx(cursor, where_clauses=None, params=None):
+    where_sql = " AND ".join(where_clauses or ["1=1"])
+    query_params = list(params or [])
+    cursor.execute(f"""
+        WITH filtered_assignments AS (
+            SELECT
+                a.id,
+                a.course_id,
+                c.title AS course_title,
+                a.course_version_id,
+                a.user_id,
+                u.name AS user_name,
+                u.role AS user_role,
+                a.status,
+                a.due_at,
+                a.started_at,
+                a.completed_at,
+                a.completion_color_status,
+                a.updated_at
+            FROM lms_course_assignments a
+            JOIN lms_courses c ON c.id = a.course_id
+            JOIN users u ON u.id = a.user_id
+            WHERE {where_sql}
+        ),
+        lesson_stats AS (
+            SELECT
+                fa.id AS assignment_id,
+                COUNT(l.id) AS total_lessons,
+                COUNT(l.id) FILTER (WHERE p.status = 'completed') AS completed_lessons
+            FROM filtered_assignments fa
+            LEFT JOIN lms_modules m
+              ON m.course_version_id = fa.course_version_id
+            LEFT JOIN lms_lessons l
+              ON l.module_id = m.id
+            LEFT JOIN lms_lesson_progress p
+              ON p.assignment_id = fa.id
+             AND p.user_id = fa.user_id
+             AND p.lesson_id = l.id
+            GROUP BY fa.id
+        ),
+        test_passes AS (
+            SELECT
+                ta.assignment_id,
+                ta.user_id,
+                ta.test_id,
+                BOOL_OR(COALESCE(ta.passed, FALSE)) FILTER (WHERE ta.status = 'finished') AS passed_any
+            FROM lms_test_attempts ta
+            JOIN filtered_assignments fa
+              ON fa.id = ta.assignment_id
+             AND fa.user_id = ta.user_id
+            GROUP BY ta.assignment_id, ta.user_id, ta.test_id
+        ),
+        test_stats AS (
+            SELECT
+                fa.id AS assignment_id,
+                COUNT(t.id) FILTER (WHERE t.status <> 'archived') AS total_tests,
+                COUNT(t.id) FILTER (
+                    WHERE t.status <> 'archived'
+                      AND COALESCE(tp.passed_any, FALSE)
+                ) AS passed_tests,
+                COUNT(t.id) FILTER (
+                    WHERE t.status <> 'archived'
+                      AND COALESCE(t.is_final, FALSE) = FALSE
+                ) AS total_intermediate_tests,
+                COUNT(t.id) FILTER (
+                    WHERE t.status <> 'archived'
+                      AND COALESCE(t.is_final, FALSE) = FALSE
+                      AND COALESCE(tp.passed_any, FALSE)
+                ) AS passed_intermediate_tests
+            FROM filtered_assignments fa
+            LEFT JOIN lms_tests t
+              ON t.course_version_id = fa.course_version_id
+            LEFT JOIN test_passes tp
+              ON tp.assignment_id = fa.id
+             AND tp.user_id = fa.user_id
+             AND tp.test_id = t.id
+            GROUP BY fa.id
+        )
+        SELECT
+            fa.id,
+            fa.course_id,
+            fa.course_title,
+            fa.course_version_id,
+            fa.user_id,
+            fa.user_name,
+            fa.user_role,
+            fa.status,
+            fa.due_at,
+            fa.started_at,
+            fa.completed_at,
+            fa.completion_color_status,
+            COALESCE(ls.total_lessons, 0) AS total_lessons,
+            COALESCE(ls.completed_lessons, 0) AS completed_lessons,
+            COALESCE(ts.total_tests, 0) AS total_tests,
+            COALESCE(ts.passed_tests, 0) AS passed_tests,
+            COALESCE(ts.total_intermediate_tests, 0) AS total_intermediate_tests,
+            COALESCE(ts.passed_intermediate_tests, 0) AS passed_intermediate_tests
+        FROM filtered_assignments fa
+        LEFT JOIN lesson_stats ls
+          ON ls.assignment_id = fa.id
+        LEFT JOIN test_stats ts
+          ON ts.assignment_id = fa.id
+        ORDER BY fa.updated_at DESC, fa.id DESC
+    """, query_params)
+    rows = cursor.fetchall()
+
+    payload = []
+    for row in rows:
+        deadline_status = row[11] or _lms_deadline_status(row[8], row[10])
+        total_lessons = int(row[12] or 0)
+        completed_lessons = int(row[13] or 0)
+        total_intermediate_tests = int(row[16] or 0)
+        passed_intermediate_tests = int(row[17] or 0)
+        progress_total_items = total_lessons + total_intermediate_tests
+        progress_completed_items = completed_lessons + passed_intermediate_tests
+        progress_percent = 0.0
+        if row[7] == 'completed':
+            progress_percent = 100.0
+        elif progress_total_items > 0:
+            progress_percent = round((progress_completed_items / progress_total_items) * 100.0, 2)
+        payload.append({
+            "assignment_id": int(row[0]),
+            "course_id": int(row[1]),
+            "course_title": row[2],
+            "course_version_id": int(row[3]) if row[3] is not None else None,
+            "user_id": int(row[4]),
+            "user_name": row[5],
+            "user_role": row[6],
+            "status": row[7],
+            "due_at": row[8].isoformat() if row[8] else None,
+            "started_at": row[9].isoformat() if row[9] else None,
+            "completed_at": row[10].isoformat() if row[10] else None,
+            "deadline_status": deadline_status,
+            "total_lessons": total_lessons,
+            "completed_lessons": completed_lessons,
+            "progress_percent": progress_percent,
+            "total_tests": int(row[14] or 0),
+            "passed_tests": int(row[15] or 0),
+            "total_intermediate_tests": total_intermediate_tests,
+            "passed_intermediate_tests": passed_intermediate_tests
+        })
+    return payload
+
+
+def _lms_assignment_status_to_ui(status, deadline_status):
+    status_norm = str(status or '').strip().lower()
+    deadline_norm = str(deadline_status or '').strip().lower()
+    if status_norm == 'completed':
+        return 'completed_late' if deadline_norm == 'orange' else 'completed'
+    if deadline_norm == 'red':
+        return 'overdue'
+    if status_norm == 'in_progress':
+        return 'in_progress'
+    return 'not_started'
+
+
+def _lms_admin_course_aggregate_status(stat):
+    total = max(0, int(stat.get('total') or 0))
+    if total <= 0:
+        return 'not_started'
+
+    overdue = max(0, int(stat.get('overdue') or 0))
+    in_progress = max(0, int(stat.get('in_progress') or 0))
+    completed = max(0, int(stat.get('completed') or 0))
+    completed_late = max(0, int(stat.get('completed_late') or 0))
+    not_started = max(0, int(stat.get('not_started') or 0))
+
+    if overdue > 0:
+        return 'overdue'
+    if in_progress > 0:
+        return 'in_progress'
+    if (completed + completed_late) >= total:
+        return 'completed_late' if completed_late > 0 else 'completed'
+    if not_started >= total:
+        return 'not_started'
+    if (completed + completed_late) > 0:
+        return 'in_progress'
+    return 'not_started'
+
+
 def _lms_bucket_name():
     return (
         (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_LMS') or '').strip()
@@ -17656,149 +17836,257 @@ def lms_admin_progress():
                     return jsonify({"status": "success", "rows": []}), 200
                 where.append("a.user_id = ANY(%s)")
                 params.append(list(visible_ids))
-
-            cursor.execute(f"""
-                WITH filtered_assignments AS (
-                    SELECT
-                        a.id,
-                        a.course_id,
-                        c.title AS course_title,
-                        a.course_version_id,
-                        a.user_id,
-                        u.name AS user_name,
-                        u.role AS user_role,
-                        a.status,
-                        a.due_at,
-                        a.started_at,
-                        a.completed_at,
-                        a.completion_color_status,
-                        a.updated_at
-                    FROM lms_course_assignments a
-                    JOIN lms_courses c ON c.id = a.course_id
-                    JOIN users u ON u.id = a.user_id
-                    WHERE {" AND ".join(where)}
-                ),
-                lesson_stats AS (
-                    SELECT
-                        fa.id AS assignment_id,
-                        COUNT(l.id) AS total_lessons,
-                        COUNT(l.id) FILTER (WHERE p.status = 'completed') AS completed_lessons
-                    FROM filtered_assignments fa
-                    LEFT JOIN lms_modules m
-                      ON m.course_version_id = fa.course_version_id
-                    LEFT JOIN lms_lessons l
-                      ON l.module_id = m.id
-                    LEFT JOIN lms_lesson_progress p
-                      ON p.assignment_id = fa.id
-                     AND p.user_id = fa.user_id
-                     AND p.lesson_id = l.id
-                    GROUP BY fa.id
-                ),
-                test_passes AS (
-                    SELECT
-                        ta.assignment_id,
-                        ta.user_id,
-                        ta.test_id,
-                        BOOL_OR(COALESCE(ta.passed, FALSE)) FILTER (WHERE ta.status = 'finished') AS passed_any
-                    FROM lms_test_attempts ta
-                    JOIN filtered_assignments fa
-                      ON fa.id = ta.assignment_id
-                     AND fa.user_id = ta.user_id
-                    GROUP BY ta.assignment_id, ta.user_id, ta.test_id
-                ),
-                test_stats AS (
-                    SELECT
-                        fa.id AS assignment_id,
-                        COUNT(t.id) FILTER (WHERE t.status <> 'archived') AS total_tests,
-                        COUNT(t.id) FILTER (
-                            WHERE t.status <> 'archived'
-                              AND COALESCE(tp.passed_any, FALSE)
-                        ) AS passed_tests,
-                        COUNT(t.id) FILTER (
-                            WHERE t.status <> 'archived'
-                              AND COALESCE(t.is_final, FALSE) = FALSE
-                        ) AS total_intermediate_tests,
-                        COUNT(t.id) FILTER (
-                            WHERE t.status <> 'archived'
-                              AND COALESCE(t.is_final, FALSE) = FALSE
-                              AND COALESCE(tp.passed_any, FALSE)
-                        ) AS passed_intermediate_tests
-                    FROM filtered_assignments fa
-                    LEFT JOIN lms_tests t
-                      ON t.course_version_id = fa.course_version_id
-                    LEFT JOIN test_passes tp
-                      ON tp.assignment_id = fa.id
-                     AND tp.user_id = fa.user_id
-                     AND tp.test_id = t.id
-                    GROUP BY fa.id
-                )
-                SELECT
-                    fa.id,
-                    fa.course_id,
-                    fa.course_title,
-                    fa.course_version_id,
-                    fa.user_id,
-                    fa.user_name,
-                    fa.user_role,
-                    fa.status,
-                    fa.due_at,
-                    fa.started_at,
-                    fa.completed_at,
-                    fa.completion_color_status,
-                    COALESCE(ls.total_lessons, 0) AS total_lessons,
-                    COALESCE(ls.completed_lessons, 0) AS completed_lessons,
-                    COALESCE(ts.total_tests, 0) AS total_tests,
-                    COALESCE(ts.passed_tests, 0) AS passed_tests,
-                    COALESCE(ts.total_intermediate_tests, 0) AS total_intermediate_tests,
-                    COALESCE(ts.passed_intermediate_tests, 0) AS passed_intermediate_tests
-                FROM filtered_assignments fa
-                LEFT JOIN lesson_stats ls
-                  ON ls.assignment_id = fa.id
-                LEFT JOIN test_stats ts
-                  ON ts.assignment_id = fa.id
-                ORDER BY fa.updated_at DESC, fa.id DESC
-            """, params)
-            rows = cursor.fetchall()
-
-            payload = []
-            for row in rows:
-                deadline_status = row[11] or _lms_deadline_status(row[8], row[10])
-                total_lessons = int(row[12] or 0)
-                completed_lessons = int(row[13] or 0)
-                total_intermediate_tests = int(row[16] or 0)
-                passed_intermediate_tests = int(row[17] or 0)
-                progress_total_items = total_lessons + total_intermediate_tests
-                progress_completed_items = completed_lessons + passed_intermediate_tests
-                progress_percent = 0.0
-                if row[7] == 'completed':
-                    progress_percent = 100.0
-                elif progress_total_items > 0:
-                    progress_percent = round((progress_completed_items / progress_total_items) * 100.0, 2)
-                payload.append({
-                    "assignment_id": int(row[0]),
-                    "course_id": int(row[1]),
-                    "course_title": row[2],
-                    "course_version_id": int(row[3]) if row[3] is not None else None,
-                    "user_id": int(row[4]),
-                    "user_name": row[5],
-                    "user_role": row[6],
-                    "status": row[7],
-                    "due_at": row[8].isoformat() if row[8] else None,
-                    "started_at": row[9].isoformat() if row[9] else None,
-                    "completed_at": row[10].isoformat() if row[10] else None,
-                    "deadline_status": deadline_status,
-                    "total_lessons": total_lessons,
-                    "completed_lessons": completed_lessons,
-                    "progress_percent": progress_percent,
-                    "total_tests": int(row[14] or 0),
-                    "passed_tests": int(row[15] or 0),
-                    "total_intermediate_tests": total_intermediate_tests,
-                    "passed_intermediate_tests": passed_intermediate_tests
-                })
+            payload = _lms_admin_assignment_stats_tx(cursor, where, params)
 
         return jsonify({"status": "success", "rows": payload}), 200
     except Exception as e:
         logging.exception("Error in /api/lms/admin/progress")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/lms/admin/analytics', methods=['GET'])
+@require_api_key
+def lms_admin_analytics():
+    requester_id, _, requester_role, error_response, status_code = _lms_resolve_request('manager')
+    if error_response:
+        return error_response, status_code
+
+    try:
+        course_id_filter = _lms_to_int(request.args.get('course_id'), default=0)
+        user_id_filter = _lms_to_int(request.args.get('user_id'), default=0)
+        visible_ids = None
+        if requester_role in ('sv', 'trainer'):
+            visible_ids = set(_lms_visible_learner_ids(requester_id, requester_role))
+
+        assignment_where = ["1=1"]
+        assignment_params = []
+        attempt_where = ["1=1"]
+        attempt_params = []
+
+        if course_id_filter > 0:
+            assignment_where.append("a.course_id = %s")
+            assignment_params.append(course_id_filter)
+            attempt_where.append("a.course_id = %s")
+            attempt_params.append(course_id_filter)
+        if user_id_filter > 0:
+            assignment_where.append("a.user_id = %s")
+            assignment_params.append(user_id_filter)
+            attempt_where.append("ta.user_id = %s")
+            attempt_params.append(user_id_filter)
+        if visible_ids is not None:
+            if not visible_ids:
+                return jsonify({
+                    "status": "success",
+                    "summary": {
+                        "employee_count": 0,
+                        "overall_progress": 0,
+                        "avg_score": 0,
+                        "overdue_count": 0
+                    },
+                    "employee_rows": [],
+                    "course_stats": [],
+                    "course_status_rows": [],
+                    "fail_stats": []
+                }), 200
+            visible_list = list(visible_ids)
+            assignment_where.append("a.user_id = ANY(%s)")
+            assignment_params.append(visible_list)
+            attempt_where.append("ta.user_id = ANY(%s)")
+            attempt_params.append(visible_list)
+
+        with db._get_cursor() as cursor:
+            assignment_rows = _lms_admin_assignment_stats_tx(cursor, assignment_where, assignment_params)
+
+            cursor.execute(f"""
+                SELECT
+                    ta.user_id,
+                    COUNT(*) AS attempts,
+                    AVG(ta.score_percent) FILTER (WHERE ta.score_percent IS NOT NULL) AS avg_score,
+                    SUM(COALESCE(ta.duration_seconds, 0)) AS total_duration_seconds,
+                    MAX(ta.started_at) AS last_active_at
+                FROM lms_test_attempts ta
+                JOIN lms_course_assignments a ON a.id = ta.assignment_id
+                WHERE {" AND ".join(attempt_where)}
+                GROUP BY ta.user_id
+            """, attempt_params)
+            attempt_rows = cursor.fetchall()
+
+            cursor.execute(f"""
+                SELECT
+                    ta.score_percent,
+                    t.title,
+                    c.title
+                FROM lms_test_attempts ta
+                JOIN lms_tests t ON t.id = ta.test_id
+                JOIN lms_course_assignments a ON a.id = ta.assignment_id
+                JOIN lms_courses c ON c.id = a.course_id
+                WHERE {" AND ".join(attempt_where)}
+                  AND ta.score_percent IS NOT NULL
+                ORDER BY ta.score_percent ASC, ta.started_at DESC, ta.id DESC
+                LIMIT 4
+            """, attempt_params)
+            fail_rows = cursor.fetchall()
+
+        attempt_agg_by_user = {}
+        for row in attempt_rows:
+            user_id = int(row[0])
+            attempt_agg_by_user[user_id] = {
+                "attempts": int(row[1] or 0),
+                "avg_score": int(round(float(row[2]))) if row[2] is not None else 0,
+                "test_duration_seconds": int(row[3] or 0),
+                "last_active_at": row[4].isoformat() if row[4] else None
+            }
+
+        employee_map = {}
+        course_map = {}
+        assignment_status_counts = {
+            "completed": 0,
+            "in_progress": 0,
+            "not_started": 0,
+            "overdue": 0,
+        }
+        overall_progress_sum = 0.0
+
+        for row in assignment_rows:
+            progress_percent = float(row.get("progress_percent") or 0.0)
+            ui_status = _lms_assignment_status_to_ui(row.get("status"), row.get("deadline_status"))
+            overall_progress_sum += progress_percent
+
+            if ui_status in ("completed", "completed_late"):
+                assignment_status_counts["completed"] += 1
+            elif ui_status == "overdue":
+                assignment_status_counts["overdue"] += 1
+            elif ui_status == "in_progress":
+                assignment_status_counts["in_progress"] += 1
+            else:
+                assignment_status_counts["not_started"] += 1
+
+            user_id = int(row.get("user_id") or 0)
+            if user_id:
+                employee = employee_map.get(user_id) or {
+                    "id": user_id,
+                    "name": row.get("user_name") or f"User #{user_id}",
+                    "dept": row.get("user_role") or "—",
+                    "courses": 0,
+                    "completed": 0,
+                    "progress_sum": 0.0,
+                    "overdue": 0,
+                    "last_started_at": None,
+                }
+                employee["courses"] += 1
+                employee["progress_sum"] += progress_percent
+                if ui_status in ("completed", "completed_late"):
+                    employee["completed"] += 1
+                if ui_status == "overdue":
+                    employee["overdue"] += 1
+                started_at = row.get("started_at")
+                if started_at and (not employee["last_started_at"] or started_at > employee["last_started_at"]):
+                    employee["last_started_at"] = started_at
+                employee_map[user_id] = employee
+
+            course_id = int(row.get("course_id") or 0)
+            if course_id:
+                course_stat = course_map.get(course_id) or {
+                    "course_id": course_id,
+                    "progress_sum": 0.0,
+                    "total": 0,
+                    "completed": 0,
+                    "completed_late": 0,
+                    "in_progress": 0,
+                    "not_started": 0,
+                    "overdue": 0,
+                    "lessons": 0,
+                }
+                course_stat["progress_sum"] += progress_percent
+                course_stat["total"] += 1
+                if ui_status == "completed":
+                    course_stat["completed"] += 1
+                elif ui_status == "completed_late":
+                    course_stat["completed_late"] += 1
+                elif ui_status == "in_progress":
+                    course_stat["in_progress"] += 1
+                elif ui_status == "overdue":
+                    course_stat["overdue"] += 1
+                else:
+                    course_stat["not_started"] += 1
+                course_stat["lessons"] = max(course_stat["lessons"], int(row.get("total_lessons") or 0))
+                course_map[course_id] = course_stat
+
+        employee_rows = []
+        avg_score_sum = 0
+        overdue_count = 0
+        for employee in sorted(employee_map.values(), key=lambda item: (str(item.get("name") or "").lower(), int(item.get("id") or 0))):
+            agg = attempt_agg_by_user.get(int(employee["id"])) or {}
+            avg_score = int(agg.get("avg_score") or 0)
+            avg_score_sum += avg_score
+            overdue_count += int(employee.get("overdue") or 0)
+            employee_rows.append({
+                "id": int(employee["id"]),
+                "name": employee.get("name") or f"User #{employee['id']}",
+                "dept": employee.get("dept") or "—",
+                "courses": int(employee.get("courses") or 0),
+                "completed": int(employee.get("completed") or 0),
+                "progress": int(round((employee["progress_sum"] / employee["courses"]))) if employee.get("courses") else 0,
+                "avg_score": avg_score,
+                "overdue": int(employee.get("overdue") or 0),
+                "attempts": int(agg.get("attempts") or 0),
+                "test_duration_seconds": int(agg.get("test_duration_seconds") or 0),
+                "last_active_at": agg.get("last_active_at") or employee.get("last_started_at"),
+            })
+
+        course_stats = []
+        for course_stat in course_map.values():
+            progress = int(round((course_stat["progress_sum"] / course_stat["total"]))) if course_stat.get("total") else 0
+            course_stats.append({
+                "course_id": int(course_stat["course_id"]),
+                "progress": progress,
+                "status": _lms_admin_course_aggregate_status(course_stat),
+                "lessons": int(course_stat.get("lessons") or 0),
+            })
+
+        course_status_total = max(1, sum(int(value or 0) for value in assignment_status_counts.values()))
+        course_status_rows = []
+        for status_id, label, color in [
+            ("completed", "Завершены", "bg-emerald-500"),
+            ("in_progress", "В процессе", "bg-blue-500"),
+            ("not_started", "Не начаты", "bg-slate-300"),
+            ("overdue", "Просрочены", "bg-red-500"),
+        ]:
+            count = int(assignment_status_counts.get(status_id) or 0)
+            course_status_rows.append({
+                "id": status_id,
+                "label": label,
+                "count": count,
+                "color": color,
+                "pct": int(round((count / course_status_total) * 100))
+            })
+
+        fail_stats = []
+        for index, row in enumerate(fail_rows, start=1):
+            fail_stats.append({
+                "question_id": index,
+                "text": row[1] or "Тест",
+                "fail_rate": max(0, 100 - int(round(float(row[0] or 0)))),
+                "course": row[2] or "Курс"
+            })
+
+        summary = {
+            "employee_count": len(employee_rows),
+            "overall_progress": int(round(overall_progress_sum / len(assignment_rows))) if assignment_rows else 0,
+            "avg_score": int(round(avg_score_sum / len(employee_rows))) if employee_rows else 0,
+            "overdue_count": overdue_count
+        }
+
+        return jsonify({
+            "status": "success",
+            "summary": summary,
+            "employee_rows": employee_rows,
+            "course_stats": course_stats,
+            "course_status_rows": course_status_rows,
+            "fail_stats": fail_stats
+        }), 200
+    except Exception as e:
+        logging.exception("Error in /api/lms/admin/analytics")
         return jsonify({"error": str(e)}), 500
 
 
