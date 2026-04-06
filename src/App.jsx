@@ -65,6 +65,7 @@ const APP_BASE_URL = import.meta.env.BASE_URL || '/';
 const API_BASE_URL = 'https://otp-2-fos4.onrender.com';
 const AUTH_REFRESH_URL = `${API_BASE_URL}/api/auth/refresh`;
 const CALL_EVALUATION_EMBED_STATE_KEY = 'call_evaluation_embed_state';
+const APP_VIEW_QUERY_PARAM = 'view';
 const ACCESS_TOKEN_STORAGE_KEY = 'otp_access_token';
 const REFRESH_TOKEN_STORAGE_KEY = 'otp_refresh_token';
 const ADMIN_SESSIONS_PAGE_SIZE = 100;
@@ -167,6 +168,53 @@ const canAccessLmsSectionForUser = (userLike) => {
         (role === 'super_admin' && userId === 2) ||
         (role === 'operator' && userId === 56)
     );
+};
+
+const isNewTabNavigationEvent = (event) => Boolean(event?.ctrlKey || event?.metaKey);
+
+const readAppViewFromUrl = () => {
+    if (typeof window === 'undefined') return '';
+    try {
+        const url = new URL(window.location.href);
+        return String(url.searchParams.get(APP_VIEW_QUERY_PARAM) || '').trim();
+    } catch (error) {
+        console.warn('Failed to read app view from URL', error);
+        return '';
+    }
+};
+
+const buildAppViewUrl = (nextView) => {
+    if (typeof window === 'undefined') return APP_BASE_URL;
+    try {
+        const url = new URL(window.location.href);
+        const appBaseUrl = new URL(APP_BASE_URL, window.location.origin);
+        url.pathname = appBaseUrl.pathname;
+        if (nextView) {
+            url.searchParams.set(APP_VIEW_QUERY_PARAM, nextView);
+        } else {
+            url.searchParams.delete(APP_VIEW_QUERY_PARAM);
+        }
+        return url.toString();
+    } catch (error) {
+        console.warn('Failed to build app view URL', error);
+        return APP_BASE_URL;
+    }
+};
+
+const syncAppViewWithUrl = (nextView) => {
+    if (typeof window === 'undefined') return;
+    try {
+        const url = new URL(window.location.href);
+        if (nextView) {
+            url.searchParams.set(APP_VIEW_QUERY_PARAM, nextView);
+        } else {
+            url.searchParams.delete(APP_VIEW_QUERY_PARAM);
+        }
+        const nextUrl = `${url.pathname}${url.search}${url.hash}`;
+        window.history.replaceState(window.history.state, '', nextUrl);
+    } catch (error) {
+        console.warn('Failed to sync app view with URL', error);
+    }
 };
 
 const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'auto' }) => (
@@ -23787,6 +23835,31 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
             };
 
+            const openAppViewInNewTab = useCallback((nextView) => {
+                if (!nextView || typeof window === 'undefined') return;
+                window.open(buildAppViewUrl(nextView), '_blank', 'noopener,noreferrer');
+            }, []);
+
+            const navigateToView = useCallback((nextView) => {
+                if (!nextView) return;
+                setView(nextView);
+                setMobileMenuOpen(false);
+            }, []);
+
+            const handleSidebarViewNavigation = useCallback((event, nextView, options = {}) => {
+                if (!nextView) return;
+                const onNavigate = typeof options?.onNavigate === 'function' ? options.onNavigate : null;
+                if (isNewTabNavigationEvent(event)) {
+                    event?.preventDefault?.();
+                    event?.stopPropagation?.();
+                    openAppViewInNewTab(nextView);
+                    onNavigate?.();
+                    return;
+                }
+                navigateToView(nextView);
+                onNavigate?.();
+            }, [navigateToView, openAppViewInNewTab]);
+
             const inputRef = useRef(null);
 
             useEffect(() => {
@@ -24924,19 +24997,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             useEffect(() => {
                 if (!user) return;
 
-                const savedView = localStorage.getItem('currentView');
+                const requestedViewFromUrl = readAppViewFromUrl();
                 if (user.role === 'trainer') {
                     const trainerAllowedViews = new Set(['surveys', 'manage_operators']);
-                    if (savedView && trainerAllowedViews.has(savedView)) {
-                        setView(savedView);
+                    if (requestedViewFromUrl && trainerAllowedViews.has(requestedViewFromUrl)) {
+                        setView(requestedViewFromUrl);
                         return;
                     }
                     setView('surveys');
                     return;
                 }
 
-                if (savedView && (savedView !== 'lms' || canAccessLmsSection)) {
-                    setView(savedView);
+                if (requestedViewFromUrl && (requestedViewFromUrl !== 'lms' || canAccessLmsSection)) {
+                    setView(requestedViewFromUrl);
                     return;
                 }
 
@@ -24956,12 +25029,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     else setView('hours');
                 }
             }, [user?.role, view, canAccessLmsSection]);
-            
+
             useEffect(() => {
                 if (view && user) { // Only save if user is logged in
-                    localStorage.setItem('currentView', view);
+                    syncAppViewWithUrl(view);
                 }
-            }, [view]);
+            }, [view, user]);
             
             useEffect(() => {
                 if (selectedMonth && user) {
@@ -27905,10 +27978,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     });
                     setSalaryResult(null);
                     localStorage.removeItem('user');
-                    localStorage.removeItem('currentView');
                     localStorage.removeItem('selectedMonth');
                     localStorage.removeItem('selectedReportMonth');
                     localStorage.removeItem('calculatorType');
+                    syncAppViewWithUrl('');
                 }
             };
 
@@ -29147,7 +29220,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {canAccessLmsSection && (
                                     <li>
                                         <button
-                                            onClick={() => { setView('lms'); setMobileMenuOpen(false); }}
+                                            onClick={(e) => handleSidebarViewNavigation(e, 'lms')}
                                             className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'lms' ? 'bg-blue-700' : ''}`}
                                         >
                                             <FaIcon className="fas fa-graduation-cap"></FaIcon> <span className="sidebar-text">Обучение</span>
@@ -29177,7 +29250,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     style={{ position: 'fixed', top: employeesDropdownPos.top, left: employeesDropdownPos.left, zIndex: 9999 }}
                                                 >
                                                     <button
-                                                        onClick={() => { setView('sv_list'); setMobileMenuOpen(false); handleToggleEmployeesDropdown(true); }}
+                                                        onClick={(e) => handleSidebarViewNavigation(e, 'sv_list', { onNavigate: () => handleToggleEmployeesDropdown(true) })}
                                                         className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'sv_list' ? 'bg-gray-100 font-medium' : ''}`}
                                                     >
                                                         <FaIcon className="fas fa-users mr-2"></FaIcon> Супервайзеры
@@ -29186,7 +29259,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <div className="border-t border-gray-200" />
 
                                                     <button
-                                                        onClick={() => { setView(isSuperAdmin ? 'employees' : 'manage_users'); setMobileMenuOpen(false); handleToggleEmployeesDropdown(true); }}
+                                                        onClick={(e) => handleSidebarViewNavigation(e, isSuperAdmin ? 'employees' : 'manage_users', { onNavigate: () => handleToggleEmployeesDropdown(true) })}
                                                         className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${(view === 'manage_users' || view === 'employees') ? 'bg-gray-100 font-medium' : ''}`}
                                                     >
                                                         <FaIcon className="fas fa-user-cog mr-2"></FaIcon> {isSuperAdmin ? 'Сотрудники' : 'Операторы'}
@@ -29195,7 +29268,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <div className="border-t border-gray-200" />
 
                                                     <button
-                                                        onClick={() => { setView('manage_trainers'); setMobileMenuOpen(false); handleToggleEmployeesDropdown(true); }}
+                                                        onClick={(e) => handleSidebarViewNavigation(e, 'manage_trainers', { onNavigate: () => handleToggleEmployeesDropdown(true) })}
                                                         className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'manage_trainers' ? 'bg-gray-100 font-medium' : ''}`}
                                                     >
                                                         <FaIcon className="fas fa-book mr-2"></FaIcon> Тренеры
@@ -29205,7 +29278,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         <>
                                                             <div className="border-t border-gray-200" />
                                                             <button
-                                                                onClick={() => { setView('manage_admins'); setMobileMenuOpen(false); handleToggleEmployeesDropdown(true); }}
+                                                                onClick={(e) => handleSidebarViewNavigation(e, 'manage_admins', { onNavigate: () => handleToggleEmployeesDropdown(true) })}
                                                                 className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'manage_admins' ? 'bg-gray-100 font-medium' : ''}`}
                                                             >
                                                                 <FaIcon className="fas fa-user-shield mr-2"></FaIcon> Админы
@@ -29216,12 +29289,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             )}
                                         </li>
                                         <li>
-                                            <button onClick={() => { setView('admin_sessions'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'admin_sessions' ? 'bg-blue-700' : ''}`}>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'admin_sessions')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'admin_sessions' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-laptop-house"></FaIcon> <span className="sidebar-text">Сессии</span>
                                             </button>
                                         </li>
                                         <li>
-                                            <button onClick={() => { setView('qr_access'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'qr_access' ? 'bg-blue-700' : ''}`}>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'qr_access')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'qr_access' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-qrcode"></FaIcon> <span className="sidebar-text">QR доступ</span>
                                             </button>
                                         </li>
@@ -29229,15 +29302,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         <hr className="border-t border-white-700 my-2 opacity-40" />
 
                                         <li>
-                                            <button onClick={() => { setView('view_scores'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'view_scores' ? 'bg-blue-700' : ''}`}>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'view_scores')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'view_scores' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-chart-bar"></FaIcon> <span className="sidebar-text">Оценки операторов</span>
                                             </button>
                                         </li>
                                         <li>
                                             <button
-                                                onClick={() => openCallEvaluationSection({
+                                                onClick={(e) => openCallEvaluationSection({
                                                     supervisorId: selectedSvId || null,
-                                                    month: selectedReportMonth || selectedMonth
+                                                    month: selectedReportMonth || selectedMonth,
+                                                    openInNewTab: isNewTabNavigationEvent(e)
                                                 })}
                                                 className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'call_evaluation' ? 'bg-blue-700' : ''}`}
                                             >
@@ -29246,7 +29320,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </li>
                                         <li>
                                             <button
-                                                onClick={() => { setView('sv_hours'); setMobileMenuOpen(false); }}
+                                                onClick={(e) => handleSidebarViewNavigation(e, 'sv_hours')}
                                                 className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sv_hours' ? 'bg-blue-700' : ''}`}
                                             >
                                                 <FaIcon className="fas fa-clock" /> <span className="sidebar-text">Учет часов</span>
@@ -29254,34 +29328,34 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </li>
                                         <li>
                                             <button
-                                                onClick={() => { setView('work_schedules'); setMobileMenuOpen(false); }}
+                                                onClick={(e) => handleSidebarViewNavigation(e, 'work_schedules')}
                                                 className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'work_schedules' ? 'bg-blue-700' : ''}`}
                                             >
                                                 <FaIcon className="fas fa-calendar-alt" /> <span className="sidebar-text">Графики работы</span>
                                             </button>
                                         </li>
                                         <li>
-                                            <button onClick={() => { setView('trainings'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'trainings' ? 'bg-blue-700' : ''}`}>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'trainings')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'trainings' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-book"></FaIcon> <span className="sidebar-text">Учет тренингов</span>
                                             </button>
                                         </li>
                                         <li>
-                                            <button onClick={() => { setView('technical_issues'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'technical_issues' ? 'bg-blue-700' : ''}`}>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'technical_issues')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'technical_issues' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-tools"></FaIcon> <span className="sidebar-text">Тех причины</span>
                                             </button>
                                         </li>
                                         <li>
-                                            <button onClick={() => { setView('tasks'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'tasks' ? 'bg-blue-700' : ''}`}>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'tasks')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'tasks' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-tasks"></FaIcon> <span className="sidebar-text">Задачи</span>
                                             </button>
                                         </li>
                                         <li>
-                                            <button onClick={() => { setView('surveys'); setMobileMenuOpen(false); }} className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'surveys')} className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarCompactBadge()} {renderSurveysSidebarLabel()}
                                             </button>
                                         </li>
                                         <li>
-                                            <button onClick={() => { setView('recruiting'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'recruiting' ? 'bg-blue-700' : ''}`}>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'recruiting')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'recruiting' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-user-tie"></FaIcon> <span className="sidebar-text">Рекрутинг</span>
                                             </button>
                                         </li>
@@ -29290,7 +29364,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                         <li>
                                             <button
-                                                onClick={() => { setView('call_division'); setMobileMenuOpen(false); }}
+                                                onClick={(e) => handleSidebarViewNavigation(e, 'call_division')}
                                                 className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'call_division' ? 'bg-blue-700' : ''}`}
                                             >
                                                 <FaIcon className="fas fa-random" /> <span className="sidebar-text">Деление звонков</span>
@@ -29302,7 +29376,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </button>
                                         </li>
                                         <li>
-                                            <button onClick={() => { setView('contests'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'contests' ? 'bg-blue-700' : ''}`}>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'contests')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'contests' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-award"></FaIcon> <span className="sidebar-text">Конкурсы</span>
                                             </button>
                                         </li>
@@ -29311,51 +29385,54 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {(user.role === 'sv' || user.role === 'supervisor') && (
                                     <>
                                         <li>
-                                            <button onClick={() => { setView('operators'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'operators' ? 'bg-blue-700' : ''}`}>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'operators')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'operators' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-users-cog"></FaIcon> <span className="sidebar-text">Оценки операторов</span>
                                             </button>
                                         </li>
                                         <li>
                                             <button
-                                                onClick={() => openCallEvaluationSection({ month: selectedReportMonth || selectedMonth })}
+                                                onClick={(e) => openCallEvaluationSection({
+                                                    month: selectedReportMonth || selectedMonth,
+                                                    openInNewTab: isNewTabNavigationEvent(e)
+                                                })}
                                                 className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'call_evaluation' ? 'bg-blue-700' : ''}`}
                                             >
                                                 <FaIcon className="fas fa-clipboard-check"></FaIcon> <span className="sidebar-text">Журнал оценок</span>
                                             </button>
                                         </li>
                                         <li>
-                                            <button onClick={() => { setView('qr_access'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'qr_access' ? 'bg-blue-700' : ''}`}>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'qr_access')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'qr_access' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-qrcode"></FaIcon> <span className="sidebar-text">QR доступ</span>
                                             </button>
                                         </li>
                                         <li>
-                                            <button onClick={() => { setView('manage_operators'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_operators' ? 'bg-blue-700' : ''}`}>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'manage_operators')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_operators' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-user-edit"></FaIcon> <span className="sidebar-text">Сотрудники</span>
                                             </button>
                                         </li>
                                         <li>
-                                            <button onClick={() => { setView('trainings'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'trainings' ? 'bg-blue-700' : ''}`}>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'trainings')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'trainings' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-book"></FaIcon> <span className="sidebar-text">Учет тренингов</span>
                                             </button>
                                         </li>
                                         <li>
-                                            <button onClick={() => { setView('technical_issues'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'technical_issues' ? 'bg-blue-700' : ''}`}>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'technical_issues')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'technical_issues' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-tools"></FaIcon> <span className="sidebar-text">Тех причины</span>
                                             </button>
                                         </li>
                                         <li>
-                                            <button onClick={() => { setView('tasks'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'tasks' ? 'bg-blue-700' : ''}`}>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'tasks')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'tasks' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-tasks"></FaIcon> <span className="sidebar-text">Задачи</span>
                                             </button>
                                         </li>
                                         <li>
-                                            <button onClick={() => { setView('surveys'); setMobileMenuOpen(false); }} className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'surveys')} className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarCompactBadge()} {renderSurveysSidebarLabel()}
                                             </button>
                                         </li>
                                         <li>
                                             <button
-                                                onClick={() => { setView('sv_hours'); setMobileMenuOpen(false); }}
+                                                onClick={(e) => handleSidebarViewNavigation(e, 'sv_hours')}
                                                 className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sv_hours' ? 'bg-blue-700' : ''}`}
                                             >
                                                 <FaIcon className="fas fa-clock" /> <span className="sidebar-text">Учет часов</span>
@@ -29363,7 +29440,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </li>
                                         <li>
                                             <button
-                                                onClick={() => { setView('work_schedules'); setMobileMenuOpen(false); }}
+                                                onClick={(e) => handleSidebarViewNavigation(e, 'work_schedules')}
                                                 className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'work_schedules' ? 'bg-blue-700' : ''}`}
                                             >
                                                 <FaIcon className="fas fa-calendar-alt" /> <span className="sidebar-text">Графики работы</span>
@@ -29371,14 +29448,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </li>
                                         <li>
                                             <button
-                                                onClick={() => { setView('call_division'); setMobileMenuOpen(false); }}
+                                                onClick={(e) => handleSidebarViewNavigation(e, 'call_division')}
                                                 className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'call_division' ? 'bg-blue-700' : ''}`}
                                             >
                                                 <FaIcon className="fas fa-random" /> <span className="sidebar-text">Деление звонков</span>
                                             </button>
                                         </li>
                                         <li>
-                                            <button onClick={() => { setView('contests'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'contests' ? 'bg-blue-700' : ''}`}>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'contests')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'contests' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-award"></FaIcon> <span className="sidebar-text">Конкурсы</span>
                                             </button>
                                         </li>
@@ -29387,12 +29464,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {user.role === 'trainer' && (
                                     <>
                                         <li>
-                                            <button onClick={() => { setView('manage_operators'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_operators' ? 'bg-blue-700' : ''}`}>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'manage_operators')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_operators' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-user-edit"></FaIcon> <span className="sidebar-text">Сотрудники</span>
                                             </button>
                                         </li>
                                         <li>
-                                            <button onClick={() => { setView('surveys'); setMobileMenuOpen(false); }} className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'surveys')} className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarCompactBadge()} {renderSurveysSidebarLabel()}
                                             </button>
                                         </li>
@@ -29401,37 +29478,37 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {user.role === 'operator' && (
                                     <>
                                         <li>
-                                            <button onClick={() => { setView('profile'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'profile' ? 'bg-blue-700' : ''}`}>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'profile')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'profile' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-user-circle"></FaIcon> <span className="sidebar-text">Профиль</span>
                                             </button>
                                         </li>
                                         <li>
-                                            <button onClick={() => { setView('hours'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'hours' ? 'bg-blue-700' : ''}`}>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'hours')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'hours' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-clock"></FaIcon> <span className="sidebar-text">Мои часы</span>
                                             </button>
                                         </li>
                                         <li>
-                                            <button onClick={() => { setView('surveys'); setMobileMenuOpen(false); }} className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'surveys')} className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarCompactBadge()} {renderSurveysSidebarLabel()}
                                             </button>
                                         </li>
                                         <li>
-                                            <button onClick={() => { setView('work_schedules'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'work_schedules' ? 'bg-blue-700' : ''}`}>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'work_schedules')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'work_schedules' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-calendar-alt"></FaIcon> <span className="sidebar-text">Мои смены</span>
                                             </button>
                                         </li>
                                         <li>
-                                            <button onClick={() => { setView('evaluation'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'evaluation' ? 'bg-blue-700' : ''}`}>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'evaluation')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'evaluation' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-chart-bar"></FaIcon> <span className="sidebar-text">Мои оценки</span>
                                             </button>
                                         </li>
                                         <li>
-                                            <button onClick={() => { setView('ai_feedback'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'ai_feedback' ? 'bg-blue-700' : ''}`}>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'ai_feedback')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'ai_feedback' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-sparkles"></FaIcon> <span className="sidebar-text">Dos AI</span>
                                             </button>
                                         </li>
                                         <li>
-                                            <button onClick={() => { setView('contests'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'contests' ? 'bg-blue-700' : ''}`}>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'contests')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'contests' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-award"></FaIcon> <span className="sidebar-text">Конкурсы</span>
                                             </button>
                                         </li>
@@ -29439,7 +29516,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 )}
                                 {user.role !== 'trainer' && user.role !== 'trainee' && (
                                     <li>
-                                        <button onClick={() => { setView('salary'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'salary' ? 'bg-blue-700' : ''}`}>
+                                        <button onClick={(e) => handleSidebarViewNavigation(e, 'salary')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'salary' ? 'bg-blue-700' : ''}`}>
                                             <FaIcon className="fas fa-calculator"></FaIcon> <span className="sidebar-text">Калькулятор зарплаты</span>
                                         </button>
                                     </li>
