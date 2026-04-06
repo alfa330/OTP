@@ -23403,17 +23403,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
 
             const formatEmployeeBoolLabel = (value) => (isEmployeeTruthy(value) ? 'Да' : 'Нет');
-            const renderEmployeeBoolIcon = (value, yesLabel = 'Есть', noLabel = 'Нет') => {
+            const renderEmployeeBoolIcon = (value, yesLabel = 'Есть', noLabel = 'Нет', secondaryText = '') => {
                 const isOn = isEmployeeTruthy(value);
+                const normalizedSecondaryText = String(secondaryText || '').trim();
+                const titleText = isOn
+                    ? (normalizedSecondaryText ? `${yesLabel}: ${normalizedSecondaryText}` : yesLabel)
+                    : noLabel;
                 return (
-                    <span
-                        className={`inline-flex items-center justify-center ${
-                            isOn ? 'text-emerald-600' : 'text-red-600'
-                        }`}
-                        title={isOn ? yesLabel : noLabel}
-                        aria-label={isOn ? yesLabel : noLabel}
-                    >
-                        <FaIcon className={isOn ? 'fa-solid fa-check' : 'fa-solid fa-times'} />
+                    <span className="inline-flex flex-col items-center justify-center" title={titleText} aria-label={titleText}>
+                        <span
+                            className={`inline-flex items-center justify-center ${
+                                isOn ? 'text-emerald-600' : 'text-red-600'
+                            }`}
+                        >
+                            <FaIcon className={isOn ? 'fa-solid fa-check' : 'fa-solid fa-times'} />
+                        </span>
+                        {isOn && normalizedSecondaryText ? (
+                            <span className="mt-1 max-w-[96px] text-center text-[10px] font-medium leading-tight text-slate-500 break-all">
+                                {normalizedSecondaryText}
+                            </span>
+                        ) : null}
                     </span>
                 );
             };
@@ -23548,6 +23557,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             key: 'card_number',
                             label: 'Номер карты',
                             render: (employee) => employee?.card_number || '-'
+                        },
+                        {
+                            key: 'has_driver_license',
+                            label: 'Вод. права',
+                            headerClassName: 'text-center',
+                            cellClassName: 'text-center',
+                            render: (employee) => renderEmployeeBoolIcon(employee?.has_driver_license, 'Есть', 'Нет')
                         }
                     ];
                 }
@@ -23681,7 +23697,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         label: 'Прокси',
                         headerClassName: 'text-center',
                         cellClassName: 'text-center',
-                        render: (employee) => renderEmployeeBoolIcon(employee?.has_proxy, 'Есть', 'Нет')
+                        render: (employee) => renderEmployeeBoolIcon(
+                            employee?.has_proxy,
+                            'Есть',
+                            'Нет',
+                            employee?.proxy_card_number
+                        )
                     },
                     {
                         key: 'sip_number',
@@ -26416,6 +26437,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 : null,
                             taxipro_id: normalizeTextForApi(editedUser.taxipro_id),
                             has_proxy: normalizeBoolForApi(editedUser.has_proxy),
+                            proxy_card_number: isCreatedOperator && normalizeBoolForApi(editedUser.has_proxy)
+                                ? normalizeTextForApi(editedUser.proxy_card_number)
+                                : null,
+                            has_driver_license: normalizeBoolForApi(editedUser.has_driver_license),
                             sip_number: isCreatedOperator ? normalizeTextForApi(editedUser.sip_number) : null,
                             status: isPeriodStatusValue(editedUser?.status) ? "working" : (editedUser.status || "working"),
                             // если UI даёт new_login/new_password — можно передать их
@@ -26834,7 +26859,33 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
                         });
                     }
-                    const nextSipNumber = editedRole === 'operator' ? normalizeTextForApi(editedUser?.sip_number) : null;
+                    const nextHasDriverLicense = normalizeBoolForApi(editedUser?.has_driver_license);
+                    const prevHasDriverLicense = normalizeBoolForApi(userToEdit?.has_driver_license);
+                    if (nextHasDriverLicense !== prevHasDriverLicense) {
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'has_driver_license',
+                            value: nextHasDriverLicense
+                        }, {
+                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        });
+                    }
+                    const nextProxyCardNumber = editedRole === 'operator' && nextHasProxy
+                        ? normalizeTextForApi(editedUser?.proxy_card_number)
+                        : null;
+                    const prevProxyCardNumber = normalizeTextForApi(userToEdit?.proxy_card_number);
+                    if (nextProxyCardNumber !== prevProxyCardNumber) {
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'proxy_card_number',
+                            value: nextProxyCardNumber
+                        }, {
+                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        });
+                    }
+                    const nextSipNumber = editedRole === 'operator'
+                        ? normalizeTextForApi(editedUser?.sip_number)
+                        : null;
                     const prevSipNumber = normalizeTextForApi(userToEdit?.sip_number);
                     if (nextSipNumber !== prevSipNumber) {
                         await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
