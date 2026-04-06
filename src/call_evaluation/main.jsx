@@ -1232,6 +1232,7 @@ const App = ({ user, initialSelection }) => {
     const [editingEval, setEditingEval] = useState(null);
     const [showEvalModal, setShowEvalModal] = useState(false);
     const [evalModalMode, setEvalModalMode] = useState('journal');
+    const [evaluationTarget, setEvaluationTarget] = useState(null);
     const [isLoading, setIsLoading] = useState(false);
     const [loadingCallId, setLoadingCallId] = useState(null);
     const [operatorFromToken, setOperatorFromToken] = useState(null);
@@ -1264,10 +1265,11 @@ const App = ({ user, initialSelection }) => {
     const [versionHistory, setVersionHistory] = useState([]);
     const operatorsCacheRef = useRef(new Map());
     const callsCacheRef = useRef(new Map());
+    const evaluationTargetCacheRef = useRef(new Map());
     const calibrationJoinInFlightRef = useRef(new Map());
     const calibrationDetailInFlightRef = useRef(new Map());
     const calibrationDetailCacheRef = useRef(new Map());
-    const MAX_EVALS = 20;
+    const DEFAULT_MAX_EVALS = 20;
 
     const fmtDate = (ds) => {
         if (!ds) return '—';
@@ -1431,14 +1433,16 @@ const App = ({ user, initialSelection }) => {
 
     // Evaluations fetch
     const fetchEvaluations = useCallback(async ({ force = false } = {}) => {
-        if (!selectedOperator || !userId) { setCalls([]); return; }
+        if (!selectedOperator || !userId) { setCalls([]); setEvaluationTarget(null); return; }
         const isOperatorFromLoadedList = operators.some(op => op.id === selectedOperator.id);
-        if (!isOperatorFromLoadedList) { setCalls([]); return; }
+        if (!isOperatorFromLoadedList) { setCalls([]); setEvaluationTarget(null); return; }
         const cacheKey = getCallsCacheKey(selectedOperator.id, selectedMonth);
         if (!force && callsCacheRef.current.has(cacheKey)) {
             setCalls(callsCacheRef.current.get(cacheKey) || []);
+            setEvaluationTarget(evaluationTargetCacheRef.current.get(cacheKey) || null);
             return;
         }
+        setEvaluationTarget(null);
         setIsLoading(true);
         try {
             const params = new URLSearchParams({
@@ -1449,8 +1453,11 @@ const App = ({ user, initialSelection }) => {
             const d = await r.json();
             if (d.status === 'success') {
                 const nextCalls = (d.evaluations || []).map(ev => mapEvaluationToCall(ev, selectedOperator));
+                const nextEvaluationTarget = d.evaluation_target || null;
                 callsCacheRef.current.set(cacheKey, nextCalls);
+                evaluationTargetCacheRef.current.set(cacheKey, nextEvaluationTarget);
                 setCalls(nextCalls);
+                setEvaluationTarget(nextEvaluationTarget);
             }
         } catch(e) { console.error(e); }
         finally { setIsLoading(false); }
@@ -1569,6 +1576,7 @@ const App = ({ user, initialSelection }) => {
     useEffect(() => {
         window.__callEvaluationFocus = () => {
             callsCacheRef.current.clear();
+            evaluationTargetCacheRef.current.clear();
             fetchEvaluations({ force: true });
             if (activeSection === 'calibration') {
                 calibrationDetailCacheRef.current.clear();
@@ -1910,7 +1918,16 @@ const App = ({ user, initialSelection }) => {
     const hasExtra = callsByMonth.filter(c => c.date.slice(0,7) !== selectedMonth).length > 0;
     const evalCount = displayedCalls.filter(c => !c.isDraft && !c.is_imported).length;
     const avgScore = evalCount > 0 ? displayedCalls.filter(c=>!c.isDraft&&!c.is_imported).reduce((s,c)=>s+parseFloat(c.totalScore),0)/evalCount : 0;
-    const isMaxReached = callsByMonth.filter(c=>!c.isDraft&&!c.is_imported).length >= MAX_EVALS;
+    const targetEvalCount = (() => {
+        const parsed = Number(evaluationTarget?.required_calls);
+        if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+        return DEFAULT_MAX_EVALS;
+    })();
+    const totalEvaluatedInMonth = callsByMonth.filter(c=>!c.isDraft&&!c.is_imported).length;
+    const isMaxReached = totalEvaluatedInMonth >= targetEvalCount;
+    const progressPercent = targetEvalCount > 0
+        ? Math.min((totalEvaluatedInMonth / targetEvalCount) * 100, 100)
+        : 100;
     const orderedSupervisors = sortByFiredAndName(supervisors);
     const orderedOperators = sortByFiredAndName(operators);
     const selectedSupervisorObj = selectedSupervisor ? supervisors.find(sv => sv.id === selectedSupervisor) : null;
@@ -2143,8 +2160,8 @@ const App = ({ user, initialSelection }) => {
                         <div className="stat-item">
                             <div className="stat-icon blue"><FaIcon className="fas fa-headset" /></div>
                             <div>
-                                <div className="stat-value">{evalCount} <span style={{fontSize:12,color:'var(--text-2)',fontFamily:'var(--font)',fontWeight:400}}>/ {MAX_EVALS}</span></div>
-                                <div className="stat-label">Оценок в месяце</div>
+                                <div className="stat-value">{totalEvaluatedInMonth} <span style={{fontSize:12,color:'var(--text-2)',fontFamily:'var(--font)',fontWeight:400}}>/ {targetEvalCount}</span></div>
+                                <div className="stat-label">Прослушано / нужно</div>
                             </div>
                         </div>
                         <div className="stat-item">
@@ -2160,10 +2177,10 @@ const App = ({ user, initialSelection }) => {
                             <div style={{width:'100%'}}>
                                 <div style={{display:'flex',justifyContent:'space-between',fontSize:11,color:'var(--text-2)',marginBottom:4}}>
                                     <span>Прогресс оценок</span>
-                                    <span style={{fontFamily:'var(--font-mono)'}}>{evalCount}/{MAX_EVALS}</span>
+                                    <span style={{fontFamily:'var(--font-mono)'}}>{totalEvaluatedInMonth}/{targetEvalCount}</span>
                                 </div>
                                 <div style={{background:'var(--surface-2)',borderRadius:4,height:6,overflow:'hidden'}}>
-                                    <div style={{height:'100%', borderRadius:4, background: evalCount/MAX_EVALS > 0.8 ? 'var(--green)' : 'var(--accent)', width:`${Math.min(evalCount/MAX_EVALS*100,100)}%`, transition:'width 0.4s ease'}} />
+                                    <div style={{height:'100%', borderRadius:4, background: targetEvalCount > 0 && totalEvaluatedInMonth/targetEvalCount > 0.8 ? 'var(--green)' : 'var(--accent)', width:`${progressPercent}%`, transition:'width 0.4s ease'}} />
                                 </div>
                             </div>
                         </div>

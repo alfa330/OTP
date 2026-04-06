@@ -12,6 +12,7 @@ import re
 import json
 import csv
 import io
+import math
 from io import BytesIO
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -3632,6 +3633,126 @@ class Database:
             return None, None, str(e)
 
 
+    def _get_month_end_date(self, month: Optional[str]) -> date:
+        month_str = str(month or '').strip()
+        try:
+            year_str, month_part = month_str.split('-', 1)
+            year_value = int(year_str)
+            month_value = int(month_part)
+            last_day = calendar.monthrange(year_value, month_value)[1]
+            return date(year_value, month_value, last_day)
+        except Exception:
+            today = datetime.now().date()
+            last_day = calendar.monthrange(today.year, today.month)[1]
+            return date(today.year, today.month, last_day)
+
+    def _get_tenure_months_for_reference(self, hire_date_value, reference_date: Optional[date]) -> Optional[int]:
+        if not hire_date_value or not reference_date:
+            return None
+
+        if isinstance(hire_date_value, datetime):
+            hire_date_obj = hire_date_value.date()
+        elif isinstance(hire_date_value, date):
+            hire_date_obj = hire_date_value
+        elif isinstance(hire_date_value, str):
+            hire_date_obj = None
+            for date_format in ('%Y-%m-%d', '%d-%m-%Y'):
+                try:
+                    hire_date_obj = datetime.strptime(hire_date_value, date_format).date()
+                    break
+                except ValueError:
+                    continue
+            if hire_date_obj is None:
+                return None
+        else:
+            return None
+
+        months = (reference_date.year - hire_date_obj.year) * 12 + (reference_date.month - hire_date_obj.month)
+        if reference_date.day < hire_date_obj.day:
+            months -= 1
+        return max(int(months), 0)
+
+    def _get_base_call_target_by_tenure(self, tenure_months: Optional[int]) -> int:
+        if tenure_months is None:
+            return 20
+        if tenure_months <= 2:
+            return 20
+        if tenure_months <= 5:
+            return 10
+        return 5
+
+    def _build_operator_call_evaluation_target(
+        self,
+        operator_id: int,
+        target_month: str,
+        hire_date_value=None,
+        regular_hours: float = 0.0,
+        norm_hours: float = 0.0
+    ):
+        month_end_date = self._get_month_end_date(target_month)
+        regular_hours_value = float(regular_hours or 0.0)
+        norm_hours_value = float(norm_hours or 0.0)
+
+        tenure_months = self._get_tenure_months_for_reference(hire_date_value, month_end_date)
+        base_call_target = self._get_base_call_target_by_tenure(tenure_months)
+        worked_hours_ratio = (regular_hours_value / norm_hours_value) if norm_hours_value > 0 else 0.0
+        required_calls_raw = float(worked_hours_ratio) * float(base_call_target)
+        required_calls = int(math.ceil(required_calls_raw - 1e-9)) if required_calls_raw > 0 else 0
+
+        if tenure_months is None:
+            tenure_bucket = 'unknown'
+        elif tenure_months <= 2:
+            tenure_bucket = '0_2_months'
+        elif tenure_months <= 5:
+            tenure_bucket = '3_5_months'
+        else:
+            tenure_bucket = '6_plus_months'
+
+        return {
+            'operator_id': int(operator_id),
+            'month': target_month,
+            'reference_date': month_end_date.isoformat(),
+            'tenure_months': tenure_months,
+            'tenure_bucket': tenure_bucket,
+            'base_call_target': int(base_call_target),
+            'worked_hours_for_calls': round(float(regular_hours_value), 2),
+            'norm_hours': round(float(norm_hours_value), 2),
+            'worked_hours_ratio': round(float(worked_hours_ratio), 4),
+            'required_calls_raw': round(float(required_calls_raw), 2),
+            'required_calls': int(required_calls),
+        }
+
+    def get_operator_call_evaluation_target(self, operator_id: int, month: Optional[str] = None):
+        target_month = str(month or datetime.now().strftime('%Y-%m'))
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    u.hire_date,
+                    COALESCE(wh.regular_hours, 0) AS regular_hours,
+                    COALESCE(wh.norm_hours, 0) AS norm_hours
+                FROM users u
+                LEFT JOIN work_hours wh
+                    ON wh.operator_id = u.id
+                   AND wh.month = %s
+                WHERE u.id = %s
+                LIMIT 1
+            """, (target_month, operator_id))
+            row = cursor.fetchone()
+
+        if row:
+            hire_date_value, regular_hours, norm_hours = row
+        else:
+            hire_date_value, regular_hours, norm_hours = None, 0.0, 0.0
+
+        return self._build_operator_call_evaluation_target(
+            operator_id=operator_id,
+            target_month=target_month,
+            hire_date_value=hire_date_value,
+            regular_hours=regular_hours,
+            norm_hours=norm_hours
+        )
+
     def get_operator_stats(self, operator_id):
         """Получить статистику оператора (часы, оценки, звонки в час, тренинги)"""
         with self._get_cursor() as cursor:
@@ -4473,7 +4594,7 @@ class Database:
                 }
             }
 
-    def get_call_evaluations(self, operator_id, month=None):
+    def get_call_evaluations(self, operator_id, month=None, include_target: bool = False):
         """
         Возвращает оценки звонков (calls) + неоценённые звонки (imported_calls).
         Для calls.duration -> NULL, для imported_calls.duration -> ic.duration_sec.
@@ -4590,11 +4711,40 @@ class Database:
 
         query += " ORDER BY created_at DESC"
 
+        target_month = str(month or datetime.now().strftime('%Y-%m'))
+        evaluation_target = None
+
         with self._get_cursor() as cursor:
+            if include_target:
+                cursor.execute("""
+                    SELECT
+                        u.hire_date,
+                        COALESCE(wh.regular_hours, 0) AS regular_hours,
+                        COALESCE(wh.norm_hours, 0) AS norm_hours
+                    FROM users u
+                    LEFT JOIN work_hours wh
+                        ON wh.operator_id = u.id
+                       AND wh.month = %s
+                    WHERE u.id = %s
+                    LIMIT 1
+                """, (target_month, operator_id))
+                target_row = cursor.fetchone()
+                if target_row:
+                    hire_date_value, regular_hours, norm_hours = target_row
+                else:
+                    hire_date_value, regular_hours, norm_hours = None, 0.0, 0.0
+                evaluation_target = self._build_operator_call_evaluation_target(
+                    operator_id=operator_id,
+                    target_month=target_month,
+                    hire_date_value=hire_date_value,
+                    regular_hours=regular_hours,
+                    norm_hours=norm_hours
+                )
+
             cursor.execute(query, params)
             rows = cursor.fetchall()
 
-            return [
+            evaluations = [
                 {
                     "id": row[0],
                     "month": row[1],
@@ -4637,6 +4787,14 @@ class Database:
                 }
                 for row in rows
             ]
+
+            if include_target:
+                return {
+                    "evaluations": evaluations,
+                    "evaluation_target": evaluation_target
+                }
+
+            return evaluations
 
     def get_operator_score_aggregates_for_month(self, month, operator_ids: Optional[List[int]] = None):
         """

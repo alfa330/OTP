@@ -3838,7 +3838,9 @@ def get_call_evaluations():
         if not _authorize_operator_scope(requester, requester_id, operator_id):
             return jsonify({"error": "Unauthorized to view this operator evaluations"}), 403
 
-        evaluations = db.get_call_evaluations(operator_id, month=month)
+        evaluations_payload = db.get_call_evaluations(operator_id, month=month, include_target=True)
+        evaluations = evaluations_payload.get("evaluations", []) if isinstance(evaluations_payload, dict) else []
+        evaluation_target = evaluations_payload.get("evaluation_target") if isinstance(evaluations_payload, dict) else None
         session_id = _current_session_id_from_access_token()
         role = requester[3]
         if role == 'operator':
@@ -3859,6 +3861,7 @@ def get_call_evaluations():
         return jsonify({
             "status": "success", 
             "evaluations": evaluations,
+            "evaluation_target": evaluation_target,
             "supervisor": {
                 "id": supervisor[0] if supervisor else None,
                 "name": supervisor[2] if supervisor else None
