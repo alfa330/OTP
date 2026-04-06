@@ -17658,46 +17658,105 @@ def lms_admin_progress():
                 params.append(list(visible_ids))
 
             cursor.execute(f"""
-                SELECT
-                    a.id, a.course_id, c.title, a.course_version_id,
-                    a.user_id, u.name, u.role,
-                    a.status, a.due_at, a.started_at, a.completed_at, a.completion_color_status,
-                    COALESCE(lp.total_lessons, 0) AS total_lessons,
-                    COALESCE(lp.completed_lessons, 0) AS completed_lessons,
-                    COALESCE(tp.total_tests, 0) AS total_tests,
-                    COALESCE(tp.passed_tests, 0) AS passed_tests
-                FROM lms_course_assignments a
-                JOIN lms_courses c ON c.id = a.course_id
-                JOIN users u ON u.id = a.user_id
-                LEFT JOIN LATERAL (
+                WITH filtered_assignments AS (
                     SELECT
-                        COUNT(*) AS total_lessons,
-                        COUNT(*) FILTER (WHERE p.status = 'completed') AS completed_lessons
-                    FROM lms_lessons l
-                    JOIN lms_modules m ON m.id = l.module_id
+                        a.id,
+                        a.course_id,
+                        c.title AS course_title,
+                        a.course_version_id,
+                        a.user_id,
+                        u.name AS user_name,
+                        u.role AS user_role,
+                        a.status,
+                        a.due_at,
+                        a.started_at,
+                        a.completed_at,
+                        a.completion_color_status,
+                        a.updated_at
+                    FROM lms_course_assignments a
+                    JOIN lms_courses c ON c.id = a.course_id
+                    JOIN users u ON u.id = a.user_id
+                    WHERE {" AND ".join(where)}
+                ),
+                lesson_stats AS (
+                    SELECT
+                        fa.id AS assignment_id,
+                        COUNT(l.id) AS total_lessons,
+                        COUNT(l.id) FILTER (WHERE p.status = 'completed') AS completed_lessons
+                    FROM filtered_assignments fa
+                    LEFT JOIN lms_modules m
+                      ON m.course_version_id = fa.course_version_id
+                    LEFT JOIN lms_lessons l
+                      ON l.module_id = m.id
                     LEFT JOIN lms_lesson_progress p
-                      ON p.assignment_id = a.id
+                      ON p.assignment_id = fa.id
+                     AND p.user_id = fa.user_id
                      AND p.lesson_id = l.id
-                     AND p.user_id = a.user_id
-                    WHERE m.course_version_id = a.course_version_id
-                ) lp ON TRUE
-                LEFT JOIN LATERAL (
+                    GROUP BY fa.id
+                ),
+                test_passes AS (
                     SELECT
-                        COUNT(*) AS total_tests,
-                        COUNT(*) FILTER (WHERE EXISTS (
-                            SELECT 1
-                            FROM lms_test_attempts ta
-                            WHERE ta.assignment_id = a.id
-                              AND ta.user_id = a.user_id
-                              AND ta.test_id = t.id
-                              AND ta.passed = TRUE
-                        )) AS passed_tests
-                    FROM lms_tests t
-                    WHERE t.course_version_id = a.course_version_id
-                      AND t.status <> 'archived'
-                ) tp ON TRUE
-                WHERE {" AND ".join(where)}
-                ORDER BY a.updated_at DESC, a.id DESC
+                        ta.assignment_id,
+                        ta.user_id,
+                        ta.test_id,
+                        BOOL_OR(COALESCE(ta.passed, FALSE)) FILTER (WHERE ta.status = 'finished') AS passed_any
+                    FROM lms_test_attempts ta
+                    JOIN filtered_assignments fa
+                      ON fa.id = ta.assignment_id
+                     AND fa.user_id = ta.user_id
+                    GROUP BY ta.assignment_id, ta.user_id, ta.test_id
+                ),
+                test_stats AS (
+                    SELECT
+                        fa.id AS assignment_id,
+                        COUNT(t.id) FILTER (WHERE t.status <> 'archived') AS total_tests,
+                        COUNT(t.id) FILTER (
+                            WHERE t.status <> 'archived'
+                              AND COALESCE(tp.passed_any, FALSE)
+                        ) AS passed_tests,
+                        COUNT(t.id) FILTER (
+                            WHERE t.status <> 'archived'
+                              AND COALESCE(t.is_final, FALSE) = FALSE
+                        ) AS total_intermediate_tests,
+                        COUNT(t.id) FILTER (
+                            WHERE t.status <> 'archived'
+                              AND COALESCE(t.is_final, FALSE) = FALSE
+                              AND COALESCE(tp.passed_any, FALSE)
+                        ) AS passed_intermediate_tests
+                    FROM filtered_assignments fa
+                    LEFT JOIN lms_tests t
+                      ON t.course_version_id = fa.course_version_id
+                    LEFT JOIN test_passes tp
+                      ON tp.assignment_id = fa.id
+                     AND tp.user_id = fa.user_id
+                     AND tp.test_id = t.id
+                    GROUP BY fa.id
+                )
+                SELECT
+                    fa.id,
+                    fa.course_id,
+                    fa.course_title,
+                    fa.course_version_id,
+                    fa.user_id,
+                    fa.user_name,
+                    fa.user_role,
+                    fa.status,
+                    fa.due_at,
+                    fa.started_at,
+                    fa.completed_at,
+                    fa.completion_color_status,
+                    COALESCE(ls.total_lessons, 0) AS total_lessons,
+                    COALESCE(ls.completed_lessons, 0) AS completed_lessons,
+                    COALESCE(ts.total_tests, 0) AS total_tests,
+                    COALESCE(ts.passed_tests, 0) AS passed_tests,
+                    COALESCE(ts.total_intermediate_tests, 0) AS total_intermediate_tests,
+                    COALESCE(ts.passed_intermediate_tests, 0) AS passed_intermediate_tests
+                FROM filtered_assignments fa
+                LEFT JOIN lesson_stats ls
+                  ON ls.assignment_id = fa.id
+                LEFT JOIN test_stats ts
+                  ON ts.assignment_id = fa.id
+                ORDER BY fa.updated_at DESC, fa.id DESC
             """, params)
             rows = cursor.fetchall()
 
@@ -17706,11 +17765,15 @@ def lms_admin_progress():
                 deadline_status = row[11] or _lms_deadline_status(row[8], row[10])
                 total_lessons = int(row[12] or 0)
                 completed_lessons = int(row[13] or 0)
+                total_intermediate_tests = int(row[16] or 0)
+                passed_intermediate_tests = int(row[17] or 0)
+                progress_total_items = total_lessons + total_intermediate_tests
+                progress_completed_items = completed_lessons + passed_intermediate_tests
                 progress_percent = 0.0
-                if total_lessons > 0:
-                    progress_percent = round((completed_lessons / total_lessons) * 100.0, 2)
-                elif row[7] == 'completed':
+                if row[7] == 'completed':
                     progress_percent = 100.0
+                elif progress_total_items > 0:
+                    progress_percent = round((progress_completed_items / progress_total_items) * 100.0, 2)
                 payload.append({
                     "assignment_id": int(row[0]),
                     "course_id": int(row[1]),
@@ -17728,7 +17791,9 @@ def lms_admin_progress():
                     "completed_lessons": completed_lessons,
                     "progress_percent": progress_percent,
                     "total_tests": int(row[14] or 0),
-                    "passed_tests": int(row[15] or 0)
+                    "passed_tests": int(row[15] or 0),
+                    "total_intermediate_tests": total_intermediate_tests,
+                    "passed_intermediate_tests": passed_intermediate_tests
                 })
 
         return jsonify({"status": "success", "rows": payload}), 200

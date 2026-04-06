@@ -1006,6 +1006,32 @@ const mapAssignmentStatusToUi = (assignmentStatus, deadlineStatus) => {
   return "not_started";
 };
 
+const clampLmsProgress = (value) => Math.max(0, Math.min(100, Number(value) || 0));
+
+const isCompletedLmsStatus = (status) => status === "completed" || status === "completed_late";
+
+const mapAdminProgressRowToUiStatus = (row) => mapAssignmentStatusToUi(row?.status, row?.deadline_status);
+
+const resolveAdminCourseAggregateStatus = (stat = {}) => {
+  const total = Math.max(0, Number(stat?.total || 0));
+  if (!total) return "not_started";
+
+  const overdue = Math.max(0, Number(stat?.overdue || 0));
+  const inProgress = Math.max(0, Number(stat?.inProgress || 0));
+  const completed = Math.max(0, Number(stat?.completed || 0));
+  const completedLate = Math.max(0, Number(stat?.completedLate || 0));
+  const notStarted = Math.max(0, Number(stat?.notStarted || 0));
+
+  if (overdue > 0) return "overdue";
+  if (inProgress > 0) return "in_progress";
+  if (completed + completedLate >= total) {
+    return completedLate > 0 ? "completed_late" : "completed";
+  }
+  if (notStarted >= total) return "not_started";
+  if (completed + completedLate > 0) return "in_progress";
+  return "not_started";
+};
+
 const pickCourseVisual = (courseId, category = "") => {
   const base = Number(courseId) || Math.abs(String(category || "").length);
   const color = COURSE_COLORS[Math.abs(base) % COURSE_COLORS.length];
@@ -5840,21 +5866,30 @@ function AdminView({ tab, setTab, adminCourses = [], progressRows = [], attempts
   safeProgressRows.forEach((row) => {
     const userId = Number(row?.user_id || 0);
     if (!userId) return;
+    const uiStatus = mapAdminProgressRowToUiStatus(row);
+    const progressPercent = clampLmsProgress(row?.progress_percent);
+    const startedAt = row?.started_at ? new Date(row.started_at) : null;
     const prev = employeeMap.get(userId) || {
       id: userId,
       name: row?.user_name || `User #${userId}`,
       dept: row?.user_role || "—",
       courses: 0,
       completed: 0,
+      progressSum: 0,
       avgScore: 0,
       overdue: 0,
       lastActive: "—",
       testTime: "0ч 00м",
       attempts: 0,
+      lastStartedAt: null,
     };
     prev.courses += 1;
-    if (String(row?.status || "").toLowerCase() === "completed") prev.completed += 1;
-    if (String(row?.deadline_status || "").toLowerCase() === "red" && String(row?.status || "").toLowerCase() !== "completed") prev.overdue += 1;
+    prev.progressSum += progressPercent;
+    if (isCompletedLmsStatus(uiStatus)) prev.completed += 1;
+    if (uiStatus === "overdue") prev.overdue += 1;
+    if (startedAt && !Number.isNaN(startedAt.getTime()) && (!prev.lastStartedAt || startedAt > prev.lastStartedAt)) {
+      prev.lastStartedAt = startedAt;
+    }
     employeeMap.set(userId, prev);
   });
 
@@ -5866,27 +5901,55 @@ function AdminView({ tab, setTab, adminCourses = [], progressRows = [], attempts
     const minutes = Math.floor((totalDuration % 3600) / 60);
     return {
       ...row,
+      progress: row.courses > 0 ? Math.round(row.progressSum / row.courses) : 0,
       avgScore,
       attempts: agg ? agg.count : row.attempts,
       testTime: `${hours}ч ${String(minutes).padStart(2, "0")}м`,
-      lastActive: agg?.lastAt ? toRelativeTime(agg.lastAt.toISOString()) : row.lastActive,
+      lastActive: agg?.lastAt
+        ? toRelativeTime(agg.lastAt.toISOString())
+        : (row.lastStartedAt ? toRelativeTime(row.lastStartedAt.toISOString()) : row.lastActive),
     };
   });
   const courseStatMap = new Map();
   safeProgressRows.forEach((row) => {
     const courseId = Number(row?.course_id || 0);
     if (!courseId) return;
-    const prev = courseStatMap.get(courseId) || { total: 0, completed: 0, lessons: 0 };
+    const uiStatus = mapAdminProgressRowToUiStatus(row);
+    const progressPercent = clampLmsProgress(row?.progress_percent);
+    const prev = courseStatMap.get(courseId) || {
+      total: 0,
+      completed: 0,
+      completedLate: 0,
+      inProgress: 0,
+      notStarted: 0,
+      overdue: 0,
+      progressSum: 0,
+      lessons: 0,
+    };
     prev.total += 1;
-    if (String(row?.status || "").toLowerCase() === "completed") prev.completed += 1;
+    prev.progressSum += progressPercent;
+    if (uiStatus === "completed") prev.completed += 1;
+    else if (uiStatus === "completed_late") prev.completedLate += 1;
+    else if (uiStatus === "in_progress") prev.inProgress += 1;
+    else if (uiStatus === "overdue") prev.overdue += 1;
+    else prev.notStarted += 1;
     prev.lessons = Math.max(prev.lessons, Number(row?.total_lessons || 0));
     courseStatMap.set(courseId, prev);
   });
 
   let courseRows = safeAdminCourses.map((item, index) => {
     const visual = pickCourseVisual(item?.id || index, item?.category || "");
-    const stat = courseStatMap.get(Number(item?.id || 0)) || { total: 0, completed: 0, lessons: 0 };
-    const progressPercent = stat.total > 0 ? Math.round((stat.completed / stat.total) * 100) : 0;
+    const stat = courseStatMap.get(Number(item?.id || 0)) || {
+      total: 0,
+      completed: 0,
+      completedLate: 0,
+      inProgress: 0,
+      notStarted: 0,
+      overdue: 0,
+      progressSum: 0,
+      lessons: 0,
+    };
+    const progressPercent = stat.total > 0 ? Math.round(stat.progressSum / stat.total) : 0;
     return {
       id: Number(item?.id || index + 1),
       title: item?.title || `Курс #${item?.id || index + 1}`,
@@ -5899,7 +5962,7 @@ function AdminView({ tab, setTab, adminCourses = [], progressRows = [], attempts
       maxAttempts: Number(item?.default_attempt_limit || 3),
       attemptsUsed: 0,
       rating: 0,
-      status: progressPercent >= 100 ? "completed" : (progressPercent > 0 ? "in_progress" : "not_started"),
+      status: resolveAdminCourseAggregateStatus(stat),
       progress: progressPercent,
     };
   });
@@ -5914,19 +5977,34 @@ function AdminView({ tab, setTab, adminCourses = [], progressRows = [], attempts
       course: item?.course_title || "Курс",
     }));
 
-  const overallComplete = employeeRows.length ? Math.round(employeeRows.reduce((a, e) => a + (e.courses ? (e.completed / e.courses) : 0), 0) / employeeRows.length * 100) : 0;
+  const overallProgress = safeProgressRows.length
+    ? Math.round(safeProgressRows.reduce((sum, row) => sum + clampLmsProgress(row?.progress_percent), 0) / safeProgressRows.length)
+    : 0;
   const avgScore = employeeRows.length ? Math.round(employeeRows.reduce((a, e) => a + Number(e.avgScore || 0), 0) / employeeRows.length) : 0;
   const overdueCount = employeeRows.reduce((a, e) => a + Number(e.overdue || 0), 0);
-  const completedCoursesCount = courseRows.filter((item) => item.status === "completed" || item.status === "completed_late").length;
-  const inProgressCoursesCount = courseRows.filter((item) => ["in_progress", "waiting_test", "test_failed"].includes(item.status)).length;
-  const notStartedCoursesCount = courseRows.filter((item) => item.status === "not_started").length;
-  const overdueCoursesCount = courseRows.filter((item) => item.status === "overdue").length;
+  const assignmentStatusCounts = safeProgressRows.reduce((acc, row) => {
+    const uiStatus = mapAdminProgressRowToUiStatus(row);
+    if (isCompletedLmsStatus(uiStatus)) acc.completed += 1;
+    else if (uiStatus === "overdue") acc.overdue += 1;
+    else if (uiStatus === "in_progress") acc.inProgress += 1;
+    else acc.notStarted += 1;
+    return acc;
+  }, {
+    completed: 0,
+    inProgress: 0,
+    notStarted: 0,
+    overdue: 0,
+  });
+  const completedCoursesCount = assignmentStatusCounts.completed;
+  const inProgressCoursesCount = assignmentStatusCounts.inProgress;
+  const notStartedCoursesCount = assignmentStatusCounts.notStarted;
+  const overdueCoursesCount = assignmentStatusCounts.overdue;
   const courseStatusTotal = Math.max(
     1,
     completedCoursesCount + inProgressCoursesCount + notStartedCoursesCount + overdueCoursesCount
   );
   const courseStatusRows = [
-    { label: "Завершены в срок", count: completedCoursesCount, color: "bg-emerald-500" },
+    { label: "Завершены", count: completedCoursesCount, color: "bg-emerald-500" },
     { label: "В процессе", count: inProgressCoursesCount, color: "bg-blue-500" },
     { label: "Не начаты", count: notStartedCoursesCount, color: "bg-slate-300" },
     { label: "Просрочены", count: overdueCoursesCount, color: "bg-red-500" },
@@ -5984,7 +6062,7 @@ function AdminView({ tab, setTab, adminCourses = [], progressRows = [], attempts
           <div className="grid grid-cols-4 gap-4 mb-8">
             {[
               { label: "Сотрудников обучается", value: employeeRows.length, sub: "активных пользователей", icon: Users, color: "text-indigo-600 bg-indigo-50" },
-              { label: "Средний прогресс", value: `${overallComplete}%`, sub: "завершения назначенных", icon: TrendingUp, color: "text-emerald-600 bg-emerald-50" },
+              { label: "Средний прогресс", value: `${overallProgress}%`, sub: "завершения назначенных", icon: TrendingUp, color: "text-emerald-600 bg-emerald-50" },
               { label: "Средний балл", value: `${avgScore}%`, sub: "по всем тестам", icon: Target, color: "text-violet-600 bg-violet-50" },
               { label: "Просроченных", value: overdueCount, sub: "требуют внимания", icon: AlertCircle, color: "text-red-600 bg-red-50" },
             ].map(k => (
