@@ -32023,6 +32023,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                           const evalsFiltered = evals.filter(ev => !(ev?.call?.is_imported === true || ev?.is_imported === true));
                                           const evalCount = evalsFiltered.length;
                                           const avgScore = evalCount > 0 ? evalsFiltered.reduce((sum, ev) => sum + Number(ev.score || 0), 0) / evalCount : 0;
+                                          const evaluationTarget = operatorData?.evaluation_target || null;
+                                          const targetEvalCount = Number.isFinite(Number(evaluationTarget?.required_calls)) ? Number(evaluationTarget.required_calls) : 20;
+                                          const remainingEvalCount = Math.max(0, targetEvalCount - evalCount);
                                           
                                           const hoursOp = hoursData?.operators?.find(o => Number(o.operator_id) === Number(user.id)) || hoursData?.operators?.[0];
                                           const totalHoursBase = Number(hoursOp?.aggregates?.regular_hours ?? hoursOp?.aggregates?.regular ?? 0);
@@ -32064,8 +32067,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                           return (
                                             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
                                               <div className="bg-gradient-to-br from-blue-50 to-blue-100 p-3 sm:p-4 rounded-xl text-center">
-                                                <div className="text-2xl sm:text-3xl font-bold text-blue-600">{evalCount}</div>
-                                                <div className="text-xs text-gray-600 mt-1">Оценок</div>
+                                                <div className="text-2xl sm:text-3xl font-bold text-blue-600">{evalCount}/{targetEvalCount}</div>
+                                                <div className="text-xs text-gray-600 mt-1">Прослушано / нужно</div>
+                                                <div className={`text-[11px] mt-1 ${remainingEvalCount > 0 ? 'text-amber-600' : 'text-green-600'}`}>
+                                                  {remainingEvalCount > 0 ? `Осталось ${remainingEvalCount}` : 'Норма выполнена'}
+                                                </div>
                                               </div>
                                               <div className="bg-gradient-to-br from-green-50 to-green-100 p-3 sm:p-4 rounded-xl text-center">
                                                 <div className={`text-2xl sm:text-3xl font-bold ${avgScore >= 90 ? 'text-green-600' : avgScore >= 70 ? 'text-yellow-600' : 'text-red-600'}`}>
@@ -32441,6 +32447,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         // prepare filtered lists: exclude evaluations whose call is imported
                                         const allEvals = operatorData?.evaluations ?? [];
                                         const canAccessSensitiveCallData = !!operatorData?.sensitive_access?.granted;
+                                        const evaluationTarget = operatorData?.evaluation_target || null;
                                         const evalsForCalc = allEvals.filter(ev => {
                                             // if ev.call?.is_imported === true -> should be excluded from calculations
                                             return !(ev?.call?.is_imported === true || ev?.is_imported === true);
@@ -32451,26 +32458,38 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             evaluationCount > 0
                                             ? evalsForCalc.reduce((sum, ev) => sum + Number(ev.score || 0), 0) / evaluationCount
                                             : 0;
+                                        const targetEvalCount = Number.isFinite(Number(evaluationTarget?.required_calls)) ? Number(evaluationTarget.required_calls) : 20;
+                                        const remainingEvalCount = Math.max(0, targetEvalCount - evaluationCount);
+                                        const workedHoursUsed = Number(evaluationTarget?.worked_hours_used ?? evaluationTarget?.accounted_hours ?? 0);
+                                        const targetNormHours = Number(evaluationTarget?.norm_hours ?? 0);
+                                        const baseCallTarget = Number(evaluationTarget?.base_call_target ?? 20);
+                                        const requiredCallsRaw = Number(evaluationTarget?.required_calls_raw ?? targetEvalCount);
+                                        const hasCalculationDetails = evaluationTarget != null;
 
                                         return isLoading ? (
                                             <p className="text-center text-gray-600 flex items-center justify-center">
                                             <FaIcon className="fas fa-spinner fa-spin mr-2 text-gray-500"></FaIcon>
                                             <span className="italic">Загрузка оценок...</span>
                                             </p>
-                                        ) : allEvals.length > 0 ? (
+                                        ) : (
                                             <div>
                                             {/* KPI cards */}
                                             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6 mb-6 sm:mb-8">
                                                 <div className="col-span-1 sm:col-span-2">
                                                 <div className="p-4 sm:p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
                                                     <p className="text-xs uppercase tracking-wide text-gray-500 mb-2 flex items-center gap-1">
-                                                    <FaIcon className="fas fa-list-ol text-gray-400"></FaIcon> Количество оценок
+                                                    <FaIcon className="fas fa-list-ol text-gray-400"></FaIcon> Прослушано / нужно
                                                     </p>
-                                                    <p className="text-2xl sm:text-3xl lg:text-4xl font-bold text-gray-900">{evaluationCount}</p>
-                                                    <p className={`mt-2 text-base sm:text-lg font-medium ${evaluationCount >= 20 ? 'text-green-600' : 'text-yellow-600'}`}>
-                                                    {Math.max(0, 20 - evaluationCount)} оценок из 20
+                                                    <p className="text-2xl sm:text-3xl lg:text-4xl font-bold text-gray-900">{evaluationCount} / {targetEvalCount}</p>
+                                                    <p className={`mt-2 text-base sm:text-lg font-medium ${remainingEvalCount > 0 ? 'text-yellow-600' : 'text-green-600'}`}>
+                                                    {remainingEvalCount > 0 ? `Осталось прослушать ${remainingEvalCount}` : 'Норма прослушки выполнена'}
                                                     </p>
                                                     <p className="mt-1 text-xs text-gray-500">Всего оценок (включая не оцененные): {allEvals.length}</p>
+                                                    {hasCalculationDetails && (
+                                                        <p className="mt-2 text-xs text-gray-500 leading-5">
+                                                            Расчет: ({workedHoursUsed.toFixed(2)} ч / {targetNormHours.toFixed(2)} ч) x {baseCallTarget} = {requiredCallsRaw.toFixed(2)}, итог {targetEvalCount}
+                                                        </p>
+                                                    )}
                                                 </div>
                                                 </div>
 
@@ -32484,6 +32503,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </div>
                                             </div>
 
+                                            {allEvals.length === 0 ? (
+                                                <p className="text-center text-gray-600 flex items-center justify-center">
+                                                    <FaIcon className="fas fa-times-circle mr-2 text-red-500"></FaIcon>
+                                                    Нет оценок за выбранный период.
+                                                </p>
+                                            ) : (
+                                                <>
                                             {/* Mobile card layout */}
                                             <div className="block lg:hidden space-y-3">
                                                 {allEvals.map((ev, index) => {
@@ -32860,6 +32886,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </tbody>
                                                 </table>
                                             </div>
+                                            </>
+                                            )}
 
                                             {/* Dispute modal (использует локальный state выше) */}
                                             {showDisputeModal && (
@@ -32875,11 +32903,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </Suspense>
                                             )}
                                             </div>
-                                        ) : (
-                                            <p className="text-center text-gray-600 flex items-center justify-center">
-                                            <FaIcon className="fas fa-times-circle mr-2 text-red-500"></FaIcon>
-                                            Нет оценок за выбранный период.
-                                            </p>
                                         );
                                         })()}
                                     </div>
