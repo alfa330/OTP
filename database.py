@@ -1485,7 +1485,7 @@ class Database:
                 );
             """)
 
-            # Tasks attachments (GCS primary, DB fallback)
+            # Task attachments (GCS storage; DB `file_data` kept for legacy reads)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS task_attachments (
                     id SERIAL PRIMARY KEY,
@@ -1494,7 +1494,7 @@ class Database:
                     content_type VARCHAR(255),
                     file_size INTEGER NOT NULL DEFAULT 0,
                     file_data BYTEA,
-                    storage_type VARCHAR(16) NOT NULL DEFAULT 'db' CHECK (storage_type IN ('db', 'gcs')),
+                    storage_type VARCHAR(16) NOT NULL DEFAULT 'gcs' CHECK (storage_type IN ('db', 'gcs')),
                     gcs_bucket VARCHAR(255),
                     gcs_blob_path TEXT,
                     attachment_kind VARCHAR(16) NOT NULL DEFAULT 'initial' CHECK (attachment_kind IN ('initial', 'result')),
@@ -1504,7 +1504,11 @@ class Database:
             """)
             cursor.execute("""
                 ALTER TABLE task_attachments
-                ADD COLUMN IF NOT EXISTS storage_type VARCHAR(16) NOT NULL DEFAULT 'db';
+                ADD COLUMN IF NOT EXISTS storage_type VARCHAR(16) NOT NULL DEFAULT 'gcs';
+            """)
+            cursor.execute("""
+                ALTER TABLE task_attachments
+                ALTER COLUMN storage_type SET DEFAULT 'gcs';
             """)
             cursor.execute("""
                 ALTER TABLE task_attachments
@@ -15846,32 +15850,21 @@ class Database:
             for attachment in attachments:
                 file_name = (attachment.get('file_name') or 'attachment').strip() or 'attachment'
                 content_type = (attachment.get('content_type') or '').strip() or None
-                storage_type = (attachment.get('storage_type') or 'db').strip().lower() or 'db'
-                if storage_type == 'gcs':
-                    gcs_bucket = (attachment.get('gcs_bucket') or '').strip() or None
-                    gcs_blob_path = (attachment.get('gcs_blob_path') or '').strip() or None
-                    file_size = int(attachment.get('file_size') or 0)
-                    if not gcs_bucket or not gcs_blob_path:
-                        continue
-                    cursor.execute("""
-                        INSERT INTO task_attachments (
-                            task_id, file_name, content_type, file_size, file_data,
-                            storage_type, gcs_bucket, gcs_blob_path, attachment_kind, uploaded_by
-                        )
-                        VALUES (%s, %s, %s, %s, NULL, 'gcs', %s, %s, 'initial', %s)
-                    """, (task_id, file_name, content_type, file_size, gcs_bucket, gcs_blob_path, created_by_id))
-                else:
-                    file_data = attachment.get('file_data') or b''
-                    file_size = int(attachment.get('file_size') or len(file_data) or 0)
-                    if not isinstance(file_data, (bytes, bytearray, memoryview)):
-                        continue
-                    cursor.execute("""
-                        INSERT INTO task_attachments (
-                            task_id, file_name, content_type, file_size, file_data,
-                            storage_type, gcs_bucket, gcs_blob_path, attachment_kind, uploaded_by
-                        )
-                        VALUES (%s, %s, %s, %s, %s, 'db', NULL, NULL, 'initial', %s)
-                    """, (task_id, file_name, content_type, file_size, psycopg2.Binary(bytes(file_data)), created_by_id))
+                storage_type = (attachment.get('storage_type') or 'gcs').strip().lower() or 'gcs'
+                if storage_type != 'gcs':
+                    continue
+                gcs_bucket = (attachment.get('gcs_bucket') or '').strip() or None
+                gcs_blob_path = (attachment.get('gcs_blob_path') or '').strip() or None
+                file_size = int(attachment.get('file_size') or 0)
+                if not gcs_bucket or not gcs_blob_path:
+                    continue
+                cursor.execute("""
+                    INSERT INTO task_attachments (
+                        task_id, file_name, content_type, file_size, file_data,
+                        storage_type, gcs_bucket, gcs_blob_path, attachment_kind, uploaded_by
+                    )
+                    VALUES (%s, %s, %s, %s, NULL, 'gcs', %s, %s, 'initial', %s)
+                """, (task_id, file_name, content_type, file_size, gcs_bucket, gcs_blob_path, created_by_id))
 
         return {
             "id": task_id,
@@ -16118,36 +16111,26 @@ class Database:
             """, (task_id, history_status, requester_id, history_comment))
             history_row = cursor.fetchone()
 
-            if action_norm == 'completed':
+            if action_norm in ('completed', 'returned', 'reopened'):
+                attachment_kind = 'result' if action_norm == 'completed' else 'initial'
                 for attachment in completion_attachments:
                     file_name = (attachment.get('file_name') or 'attachment').strip() or 'attachment'
                     content_type = (attachment.get('content_type') or '').strip() or None
-                    storage_type = (attachment.get('storage_type') or 'db').strip().lower() or 'db'
-                    if storage_type == 'gcs':
-                        gcs_bucket = (attachment.get('gcs_bucket') or '').strip() or None
-                        gcs_blob_path = (attachment.get('gcs_blob_path') or '').strip() or None
-                        file_size = int(attachment.get('file_size') or 0)
-                        if not gcs_bucket or not gcs_blob_path:
-                            continue
-                        cursor.execute("""
-                            INSERT INTO task_attachments (
-                                task_id, file_name, content_type, file_size, file_data,
-                                storage_type, gcs_bucket, gcs_blob_path, attachment_kind, uploaded_by
-                            )
-                            VALUES (%s, %s, %s, %s, NULL, 'gcs', %s, %s, 'result', %s)
-                        """, (task_id, file_name, content_type, file_size, gcs_bucket, gcs_blob_path, requester_id))
-                    else:
-                        file_data = attachment.get('file_data') or b''
-                        file_size = int(attachment.get('file_size') or len(file_data) or 0)
-                        if not isinstance(file_data, (bytes, bytearray, memoryview)):
-                            continue
-                        cursor.execute("""
-                            INSERT INTO task_attachments (
-                                task_id, file_name, content_type, file_size, file_data,
-                                storage_type, gcs_bucket, gcs_blob_path, attachment_kind, uploaded_by
-                            )
-                            VALUES (%s, %s, %s, %s, %s, 'db', NULL, NULL, 'result', %s)
-                        """, (task_id, file_name, content_type, file_size, psycopg2.Binary(bytes(file_data)), requester_id))
+                    storage_type = (attachment.get('storage_type') or 'gcs').strip().lower() or 'gcs'
+                    if storage_type != 'gcs':
+                        continue
+                    gcs_bucket = (attachment.get('gcs_bucket') or '').strip() or None
+                    gcs_blob_path = (attachment.get('gcs_blob_path') or '').strip() or None
+                    file_size = int(attachment.get('file_size') or 0)
+                    if not gcs_bucket or not gcs_blob_path:
+                        continue
+                    cursor.execute("""
+                        INSERT INTO task_attachments (
+                            task_id, file_name, content_type, file_size, file_data,
+                            storage_type, gcs_bucket, gcs_blob_path, attachment_kind, uploaded_by
+                        )
+                        VALUES (%s, %s, %s, %s, NULL, 'gcs', %s, %s, %s, %s)
+                    """, (task_id, file_name, content_type, file_size, gcs_bucket, gcs_blob_path, attachment_kind, requester_id))
 
             return {
                 "task_id": task_id,
