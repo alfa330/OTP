@@ -5904,6 +5904,7 @@ function AdminView({
   const [employeeSearch, setEmployeeSearch] = useState("");
   const [employeeDeptFilter, setEmployeeDeptFilter] = useState("all");
   const [selectedEmployeeId, setSelectedEmployeeId] = useState(null);
+  const [selectedEmployeeCourseKey, setSelectedEmployeeCourseKey] = useState(null);
   const [employeeCourseDeadlines, setEmployeeCourseDeadlines] = useState({});
   const [assigningCourseId, setAssigningCourseId] = useState(null);
   const tabs = [
@@ -6274,6 +6275,7 @@ function AdminView({
       const uiStatus = mapAdminProgressRowToUiStatus(row);
 
       return {
+        rowKey: `${assignmentId || 0}:${Number(row?.course_id || 0)}`,
         assignmentId,
         courseId: Number(row?.course_id || 0),
         title: String(row?.course_title || `Курс #${row?.course_id || "-"}`),
@@ -6297,6 +6299,28 @@ function AdminView({
       const bTime = b.deadline ? new Date(b.deadline).getTime() : Number.MAX_SAFE_INTEGER;
       return aTime - bTime;
     });
+
+  useEffect(() => {
+    setSelectedEmployeeCourseKey(null);
+  }, [selectedEmployee?.id]);
+
+  useEffect(() => {
+    if (!selectedEmployeeCourseKey) return;
+    const exists = selectedEmployeeCourseAnalyticsRows.some((item) => item?.rowKey === selectedEmployeeCourseKey);
+    if (!exists) {
+      setSelectedEmployeeCourseKey(null);
+    }
+  }, [selectedEmployeeCourseAnalyticsRows, selectedEmployeeCourseKey]);
+
+  const selectedEmployeeCourseItem = selectedEmployeeCourseAnalyticsRows.find(
+    (item) => item?.rowKey === selectedEmployeeCourseKey
+  );
+  const selectedEmployeeCourseStatus = selectedEmployeeCourseItem
+    ? (statusConfig[selectedEmployeeCourseItem.status] || statusConfig.not_started)
+    : null;
+  const selectedEmployeeCourseDeadlineInfo = selectedEmployeeCourseItem?.deadline
+    ? formatDeadline(selectedEmployeeCourseItem.deadline)
+    : null;
 
   const getEmployeeCourseDeadline = (courseId, assignmentRow) => {
     const employeeId = Number(selectedEmployee?.id || 0);
@@ -6522,7 +6546,10 @@ function AdminView({
                   return (
                     <tr
                       key={e.id}
-                      onClick={() => setSelectedEmployeeId(Number(e.id) || null)}
+                      onClick={() => {
+                        setSelectedEmployeeId(Number(e.id) || null);
+                        setSelectedEmployeeCourseKey(null);
+                      }}
                       className={`border-b border-slate-50 transition-colors cursor-pointer ${isSelected ? "bg-indigo-50/70" : "hover:bg-slate-50"}`}
                     >
                       <td className="px-4 py-4">
@@ -6582,8 +6609,14 @@ function AdminView({
                   {selectedEmployeeCourseAnalyticsRows.map((courseItem) => {
                     const st = statusConfig[courseItem.status] || statusConfig.not_started;
                     const deadlineInfo = courseItem.deadline ? formatDeadline(courseItem.deadline) : null;
+                    const isSelectedCourse = selectedEmployeeCourseKey === courseItem.rowKey;
                     return (
-                      <div key={`${courseItem.assignmentId || courseItem.courseId}`} className="rounded-xl border border-slate-200 p-4">
+                      <button
+                        key={courseItem.rowKey}
+                        type="button"
+                        onClick={() => setSelectedEmployeeCourseKey(courseItem.rowKey)}
+                        className={`w-full text-left rounded-xl border p-4 transition-colors ${isSelectedCourse ? "border-indigo-300 bg-indigo-50/60" : "border-slate-200 hover:bg-slate-50"}`}
+                      >
                         <div className="flex items-start justify-between gap-4">
                           <div className="min-w-0">
                             <p className="text-sm font-semibold text-slate-900 truncate">{courseItem.title}</p>
@@ -6596,41 +6629,67 @@ function AdminView({
                           </div>
                           <div className="text-right"><p className="text-xs text-slate-400">Прогресс</p><p className="text-sm font-bold text-slate-800">{courseItem.progress}%</p></div>
                         </div>
-
-                        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-2 mt-4">
-                          <div className="rounded-lg bg-slate-50 px-3 py-2"><p className="text-[10px] text-slate-400">Уроки</p><p className="text-xs font-semibold text-slate-700">{courseItem.completedLessons}/{courseItem.totalLessons}</p></div>
-                          <div className="rounded-lg bg-slate-50 px-3 py-2"><p className="text-[10px] text-slate-400">Тесты</p><p className="text-xs font-semibold text-slate-700">{courseItem.passedTests}/{courseItem.totalTests}</p></div>
-                          <div className="rounded-lg bg-slate-50 px-3 py-2"><p className="text-[10px] text-slate-400">Промежуточные</p><p className="text-xs font-semibold text-slate-700">{courseItem.passedIntermediateTests}/{courseItem.totalIntermediateTests}</p></div>
-                          <div className="rounded-lg bg-slate-50 px-3 py-2"><p className="text-[10px] text-slate-400">Средний балл</p><p className="text-xs font-semibold text-slate-700">{courseItem.avgTestScore == null ? "—" : `${courseItem.avgTestScore}%`}</p></div>
-                          <div className="rounded-lg bg-slate-50 px-3 py-2"><p className="text-[10px] text-slate-400">Итоговый тест</p><p className="text-xs font-semibold text-slate-700">{courseItem.finalTestScore == null ? "—" : `${courseItem.finalTestScore}%`}</p></div>
-                          <div className="rounded-lg bg-slate-50 px-3 py-2"><p className="text-[10px] text-slate-400">Время тестов</p><p className="text-xs font-semibold text-slate-700">{courseItem.testDuration}</p></div>
-                        </div>
-
-                        <div className="mt-4">
-                          <p className="text-xs font-semibold text-slate-600 mb-2">Баллы по тестам</p>
-                          {courseItem.tests.length === 0 ? (
-                            <p className="text-xs text-slate-400">Попыток по тестам пока нет</p>
-                          ) : (
-                            <div className="space-y-2">
-                              {courseItem.tests.map((testItem) => (
-                                <div key={testItem.key} className="flex items-center justify-between gap-3 rounded-lg border border-slate-100 px-3 py-2">
-                                  <div className="min-w-0">
-                                    <p className="text-xs text-slate-700 truncate">{testItem.title}</p>
-                                    <p className="text-[11px] text-slate-400">Попыток: {testItem.attempts}{testItem.passed ? " • пройден" : ""}{testItem.isFinal ? " • итоговый" : ""}</p>
-                                  </div>
-                                  <div className="text-right">
-                                    <p className="text-[11px] text-slate-400">Лучший / последний</p>
-                                    <p className="text-xs font-semibold text-slate-700">{testItem.bestScore == null ? "—" : `${testItem.bestScore}%`} / {testItem.lastScore == null ? "—" : `${testItem.lastScore}%`}</p>
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      </div>
+                      </button>
                     );
                   })}
                 </div>
+
+                {selectedEmployeeCourseItem ? (
+                  <div className="rounded-xl border border-slate-200 p-4">
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="min-w-0">
+                        <p className="text-sm font-semibold text-slate-900 truncate">{selectedEmployeeCourseItem.title}</p>
+                        <div className="mt-1 flex items-center gap-2 flex-wrap">
+                          {selectedEmployeeCourseStatus && (
+                            <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${selectedEmployeeCourseStatus.bg} ${selectedEmployeeCourseStatus.text}`}>
+                              {selectedEmployeeCourseStatus.label}
+                            </span>
+                          )}
+                          {selectedEmployeeCourseDeadlineInfo && (
+                            <span className={`text-[11px] font-medium px-2 py-0.5 rounded-full ${selectedEmployeeCourseDeadlineInfo.overdue ? "bg-red-50 text-red-600" : selectedEmployeeCourseDeadlineInfo.urgent ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-600"}`}>
+                              Дедлайн: {selectedEmployeeCourseDeadlineInfo.label}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-2 mt-4">
+                      <div className="rounded-lg bg-slate-50 px-3 py-2"><p className="text-[10px] text-slate-400">Уроки</p><p className="text-xs font-semibold text-slate-700">{selectedEmployeeCourseItem.completedLessons}/{selectedEmployeeCourseItem.totalLessons}</p></div>
+                      <div className="rounded-lg bg-slate-50 px-3 py-2"><p className="text-[10px] text-slate-400">Тесты</p><p className="text-xs font-semibold text-slate-700">{selectedEmployeeCourseItem.passedTests}/{selectedEmployeeCourseItem.totalTests}</p></div>
+                      <div className="rounded-lg bg-slate-50 px-3 py-2"><p className="text-[10px] text-slate-400">Промежуточные</p><p className="text-xs font-semibold text-slate-700">{selectedEmployeeCourseItem.passedIntermediateTests}/{selectedEmployeeCourseItem.totalIntermediateTests}</p></div>
+                      <div className="rounded-lg bg-slate-50 px-3 py-2"><p className="text-[10px] text-slate-400">Средний балл</p><p className="text-xs font-semibold text-slate-700">{selectedEmployeeCourseItem.avgTestScore == null ? "—" : `${selectedEmployeeCourseItem.avgTestScore}%`}</p></div>
+                      <div className="rounded-lg bg-slate-50 px-3 py-2"><p className="text-[10px] text-slate-400">Итоговый тест</p><p className="text-xs font-semibold text-slate-700">{selectedEmployeeCourseItem.finalTestScore == null ? "—" : `${selectedEmployeeCourseItem.finalTestScore}%`}</p></div>
+                      <div className="rounded-lg bg-slate-50 px-3 py-2"><p className="text-[10px] text-slate-400">Время тестов</p><p className="text-xs font-semibold text-slate-700">{selectedEmployeeCourseItem.testDuration}</p></div>
+                    </div>
+
+                    <div className="mt-4">
+                      <p className="text-xs font-semibold text-slate-600 mb-2">Баллы по тестам</p>
+                      {selectedEmployeeCourseItem.tests.length === 0 ? (
+                        <p className="text-xs text-slate-400">Попыток по тестам пока нет</p>
+                      ) : (
+                        <div className="space-y-2">
+                          {selectedEmployeeCourseItem.tests.map((testItem) => (
+                            <div key={testItem.key} className="flex items-center justify-between gap-3 rounded-lg border border-slate-100 px-3 py-2">
+                              <div className="min-w-0">
+                                <p className="text-xs text-slate-700 truncate">{testItem.title}</p>
+                                <p className="text-[11px] text-slate-400">Попыток: {testItem.attempts}{testItem.passed ? " • пройден" : ""}{testItem.isFinal ? " • итоговый" : ""}</p>
+                              </div>
+                              <div className="text-right">
+                                <p className="text-[11px] text-slate-400">Лучший / последний</p>
+                                <p className="text-xs font-semibold text-slate-700">{testItem.bestScore == null ? "—" : `${testItem.bestScore}%`} / {testItem.lastScore == null ? "—" : `${testItem.lastScore}%`}</p>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ) : selectedEmployeeCourseAnalyticsRows.length > 0 ? (
+                  <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-500 text-center">
+                    Выберите курс в списке выше, чтобы открыть подробную аналитику по этому сотруднику.
+                  </div>
+                ) : null}
               </div>
 
               <div className="xl:col-span-4 bg-white rounded-2xl border border-slate-200 p-6">
