@@ -23358,11 +23358,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return <span>{callCount}</span>;
             }
 
+            const formulaText = formatEvaluationPlanFormula(operatorRow);
             return (
-                <div className="leading-5" title={formatEvaluationPlanFormula(operatorRow)}>
-                    <div className="font-medium">{callCount} / {planMeta.requiredCalls}</div>
-                    <div className="text-xs text-gray-500">
-                        {planMeta.workedHoursUsed.toFixed(2)} ч / {planMeta.normHours.toFixed(2)} ч x {planMeta.baseCallTarget}
+                <div className="group relative inline-flex" title={formulaText}>
+                    <div className="font-medium cursor-help underline decoration-dotted underline-offset-2 decoration-gray-400">
+                        {callCount} / {planMeta.requiredCalls}
+                    </div>
+                    <div className="pointer-events-none absolute left-0 top-full z-20 mt-2 w-72 rounded-lg border border-gray-200 bg-gray-900 px-3 py-2 text-xs leading-5 text-white opacity-0 shadow-lg transition-opacity duration-150 group-hover:opacity-100">
+                        {formulaText}
                     </div>
                 </div>
             );
