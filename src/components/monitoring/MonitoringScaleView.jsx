@@ -170,6 +170,7 @@ export default function MonitoringScaleView({
   const { toasts, show, remove } = useToast();
   const [directions, setDirections] = useState(() => normalizeDirections(initialDirections));
   const [selectedDir, setSelectedDir] = useState(0);
+  const [selectedCrit, setSelectedCrit] = useState(0);
   const [dirName, setDirName] = useState('');
   const [dirFile, setDirFile] = useState(true);
   const [editingDir, setEditingDir] = useState(null);
@@ -280,6 +281,11 @@ export default function MonitoringScaleView({
   }, [directions.length]);
 
   useEffect(() => {
+    const criteriaLength = directions[selectedDir]?.criteria?.length || 0;
+    setSelectedCrit((prev) => clampIndex(prev, criteriaLength));
+  }, [directions, selectedDir]);
+
+  useEffect(() => {
     if (!canUseApi) return undefined;
 
     let cancelled = false;
@@ -337,6 +343,7 @@ export default function MonitoringScaleView({
         { name: dirName.trim(), hasFileUpload: dirFile, criteria: [] },
       ]);
       setSelectedDir(directions.length);
+      setSelectedCrit(0);
       notify('Направление добавлено.');
     }
 
@@ -390,6 +397,7 @@ export default function MonitoringScaleView({
         setDefDesc('');
       }
       setEditingCrit(criterionIndex);
+      setSelectedCrit(criterionIndex);
     } else {
       resetWizard();
     }
@@ -480,6 +488,9 @@ export default function MonitoringScaleView({
         return { ...direction, criteria: nextCriteria };
       })
     );
+    setSelectedCrit(
+      editingCrit !== null ? editingCrit : directions[selectedDir]?.criteria?.length || 0
+    );
 
     notify(editingCrit !== null ? 'Критерий обновлён.' : 'Критерий добавлен.');
     closeWizard();
@@ -497,6 +508,11 @@ export default function MonitoringScaleView({
             }
       )
     );
+    setSelectedCrit((prev) => {
+      if (prev > index) return prev - 1;
+      if (prev === index) return Math.max(index - 1, 0);
+      return prev;
+    });
   };
 
   const handleSave = async () => {
@@ -550,6 +566,7 @@ export default function MonitoringScaleView({
   const selectedDirectionWeight = selectedDirection ? totalWeight(selectedDir) : 0;
   const hasCriteria = Boolean(selectedDirection?.criteria?.length);
   const hasNonCritical = Boolean(selectedDirection?.criteria?.some((criterion) => !criterion.isCritical));
+  const activeCriterion = selectedDirection?.criteria?.[selectedCrit] || null;
   const uploadRequiredCount = directions.filter((direction) => direction.hasFileUpload).length;
   const validatedDirections = weightedDirectionsCount(directions);
 
@@ -754,7 +771,7 @@ export default function MonitoringScaleView({
         }
 
         .msv-form-grid,
-        .msv-criteria-grid,
+        .msv-criteria-layout,
         .msv-modal-grid {
           display: grid;
           gap: 14px;
@@ -1099,12 +1116,84 @@ export default function MonitoringScaleView({
           transition: width .25s ease, background .25s ease;
         }
 
-        .msv-criteria-grid {
+        .msv-criteria-layout {
           grid-template-columns: 1fr;
+          align-items: start;
+          gap: 16px;
         }
 
-        .crit-card {
-          height: 100%;
+        .msv-criteria-list {
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+          padding: 8px;
+          border-radius: 16px;
+          border: 1px solid #e5e7eb;
+          background: #f8fafc;
+          min-height: 0;
+        }
+
+        .crit-row {
+          width: 100%;
+          border: 1px solid transparent;
+          background: #ffffff;
+          border-radius: 12px;
+          padding: 10px 12px;
+          text-align: left;
+          cursor: pointer;
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+          transition: border-color .15s ease, background .15s ease, transform .15s ease;
+        }
+
+        .crit-row:hover {
+          border-color: #cbd5e1;
+          background: #fdfefe;
+          transform: translateX(1px);
+        }
+
+        .crit-row.is-active {
+          border-color: #93c5fd;
+          background: #eff6ff;
+          box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.08);
+        }
+
+        .crit-row-head {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 10px;
+          min-width: 0;
+        }
+
+        .crit-row-name {
+          min-width: 0;
+          font-size: 13px;
+          font-weight: 700;
+          color: #0f172a;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .crit-row-desc {
+          margin: 0;
+          font-size: 12px;
+          color: #64748b;
+          line-height: 1.4;
+          display: -webkit-box;
+          -webkit-line-clamp: 2;
+          -webkit-box-orient: vertical;
+          overflow: hidden;
+        }
+
+        .crit-row-desc.is-placeholder {
+          color: #94a3b8;
+          font-style: italic;
+        }
+
+        .msv-criterion-panel {
           border-radius: 18px;
           border: 1px solid #e5e7eb;
           background: linear-gradient(180deg, #ffffff 0%, #fcfcfd 100%);
@@ -1113,10 +1202,13 @@ export default function MonitoringScaleView({
           animation: msv-slide-in .16s ease;
         }
 
-        .crit-head {
+        .msv-criterion-head {
+          display: flex;
+          align-items: flex-start;
           justify-content: space-between;
           gap: 12px;
-          margin-bottom: 12px;
+          margin-bottom: 14px;
+          flex-wrap: wrap;
         }
 
         .crit-main {
@@ -1138,15 +1230,65 @@ export default function MonitoringScaleView({
           color: #475569;
         }
 
+        .crit-copy-main {
+          min-width: 0;
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+        }
+
         .crit-title {
           font-size: 15px;
           font-weight: 700;
           color: #111827;
           line-height: 1.35;
-          margin: 0 0 8px;
+          margin: 0;
         }
 
-        .crit-copy p {
+        .msv-criterion-blocks {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+          gap: 10px;
+          margin-bottom: 12px;
+        }
+
+        .msv-criterion-block {
+          border: 1px solid #e5e7eb;
+          border-radius: 12px;
+          background: #f8fafc;
+          padding: 10px 12px;
+        }
+
+        .msv-criterion-label {
+          display: block;
+          font-size: 11px;
+          font-weight: 700;
+          letter-spacing: 0.03em;
+          text-transform: uppercase;
+          color: #64748b;
+          margin-bottom: 4px;
+        }
+
+        .msv-criterion-value {
+          display: block;
+          font-size: 14px;
+          font-weight: 700;
+          color: #111827;
+          line-height: 1.4;
+        }
+
+        .msv-criterion-text-block {
+          border: 1px solid #e5e7eb;
+          border-radius: 12px;
+          background: #ffffff;
+          padding: 12px;
+        }
+
+        .msv-criterion-text-block + .msv-criterion-text-block {
+          margin-top: 10px;
+        }
+
+        .msv-criterion-text {
           margin: 0;
           font-size: 13px;
           color: #6b7280;
@@ -1154,13 +1296,8 @@ export default function MonitoringScaleView({
           white-space: pre-wrap;
         }
 
-        .crit-copy p + p {
-          margin-top: 8px;
-        }
-
-        .crit-copy .is-deficiency {
+        .msv-criterion-text.is-deficiency {
           color: #9a3412;
-          font-style: italic;
         }
 
         .msv-empty {
@@ -1432,8 +1569,13 @@ export default function MonitoringScaleView({
             padding: 22px;
           }
 
-          .msv-criteria-grid {
-            grid-template-columns: repeat(2, minmax(0, 1fr));
+          .msv-criteria-layout {
+            grid-template-columns: minmax(300px, 340px) minmax(0, 1fr);
+          }
+
+          .msv-criteria-list {
+            max-height: 620px;
+            overflow: auto;
           }
 
           .msv-modal-grid {
@@ -1457,8 +1599,8 @@ export default function MonitoringScaleView({
             grid-template-columns: minmax(360px, 430px) minmax(0, 1fr);
           }
 
-          .msv-criteria-grid {
-            grid-template-columns: repeat(3, minmax(0, 1fr));
+          .msv-criteria-layout {
+            grid-template-columns: minmax(340px, 380px) minmax(0, 1fr);
           }
 
           .wiz-card {
@@ -1708,7 +1850,10 @@ export default function MonitoringScaleView({
                 <label className="field-label">Направление:</label>
                 <select
                   value={selectedDirection ? String(selectedDir) : ''}
-                  onChange={(event) => setSelectedDir(Number(event.target.value))}
+                  onChange={(event) => {
+                    setSelectedDir(Number(event.target.value));
+                    setSelectedCrit(0);
+                  }}
                   disabled={!directions.length}
                 >
                   {!directions.length ? (
@@ -1788,38 +1933,89 @@ export default function MonitoringScaleView({
                 }
               />
             ) : (
-              <div className="msv-criteria-grid">
-                {selectedDirection.criteria.map((criterion, index) => (
-                  <div key={`${criterion.name}-${index}`} className="crit-card">
-                    <div className="crit-head">
+              <div className="msv-criteria-layout">
+                <div className="msv-criteria-list">
+                  {selectedDirection.criteria.map((criterion, index) => {
+                    const previewText =
+                      criterion.value && criterion.value !== EMPTY_DESCRIPTION
+                        ? criterion.value
+                        : criterion.deficiency?.description &&
+                          criterion.deficiency.description !== EMPTY_DESCRIPTION
+                          ? criterion.deficiency.description
+                          : EMPTY_DESCRIPTION;
+
+                    return (
+                      <button
+                        key={`${criterion.name}-${index}`}
+                        type="button"
+                        className={`crit-row${index === selectedCrit ? ' is-active' : ''}`}
+                        onClick={() => setSelectedCrit(index)}
+                      >
+                        <div className="crit-row-head">
+                          <span className="crit-row-name">
+                            {criterion.name || `Критерий ${index + 1}`}
+                          </span>
+                          <span className={`chip ${criterion.isCritical ? 'amber' : 'emerald'}`}>
+                            <Icon
+                              icon={criterion.isCritical ? 'fa-triangle-exclamation' : 'fa-bullseye'}
+                              size={10}
+                            />
+                            {criterion.isCritical ? 'Критичный' : `${criterion.weight}%`}
+                          </span>
+                        </div>
+                        <p
+                          className={`crit-row-desc${
+                            previewText === EMPTY_DESCRIPTION ? ' is-placeholder' : ''
+                          }`}
+                        >
+                          {previewText}
+                        </p>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {activeCriterion ? (
+                  <div className="msv-criterion-panel">
+                    <div className="msv-criterion-head">
                       <div className="crit-main">
                         <div
                           className="crit-icon"
                           style={{
-                            background: criterion.isCritical ? '#fffbeb' : '#f0fdf4',
-                            color: criterion.isCritical ? '#d97706' : '#16a34a',
+                            background: activeCriterion.isCritical ? '#fffbeb' : '#f0fdf4',
+                            color: activeCriterion.isCritical ? '#d97706' : '#16a34a',
                           }}
                         >
                           <Icon
-                            icon={criterion.isCritical ? 'fa-triangle-exclamation' : 'fa-circle-check'}
+                            icon={
+                              activeCriterion.isCritical
+                                ? 'fa-triangle-exclamation'
+                                : 'fa-circle-check'
+                            }
                             size={15}
                           />
                         </div>
 
-                        <div className="crit-copy">
-                          <h3 className="crit-title">{criterion.name}</h3>
+                        <div className="crit-copy-main">
+                          <h3 className="crit-title">
+                            {activeCriterion.name || `Критерий ${selectedCrit + 1}`}
+                          </h3>
                           <div className="dir-item-meta">
-                            <span className={`chip ${criterion.isCritical ? 'amber' : 'emerald'}`}>
+                            <span className={`chip ${activeCriterion.isCritical ? 'amber' : 'emerald'}`}>
                               <Icon
-                                icon={criterion.isCritical ? 'fa-triangle-exclamation' : 'fa-bullseye'}
+                                icon={
+                                  activeCriterion.isCritical
+                                    ? 'fa-triangle-exclamation'
+                                    : 'fa-bullseye'
+                                }
                                 size={10}
                               />
-                              {criterion.isCritical ? 'Критичный' : `${criterion.weight}%`}
+                              {activeCriterion.isCritical ? 'Критичный' : `${activeCriterion.weight}%`}
                             </span>
-                            {criterion.deficiency ? (
+                            {activeCriterion.deficiency ? (
                               <span className="chip orange">
                                 <Icon icon="fa-circle-info" size={10} />
-                                Недочёт {criterion.deficiency.weight}%
+                                Недочет {activeCriterion.deficiency.weight}%
                               </span>
                             ) : null}
                           </div>
@@ -1831,7 +2027,7 @@ export default function MonitoringScaleView({
                           <button
                             type="button"
                             className="icon-btn"
-                            onClick={() => openWizard(index)}
+                            onClick={() => openWizard(selectedCrit)}
                             title="Редактировать"
                           >
                             <Icon icon="fa-pen-to-square" size={13} />
@@ -1839,7 +2035,7 @@ export default function MonitoringScaleView({
                           <button
                             type="button"
                             className="icon-btn danger"
-                            onClick={() => deleteCrit(index)}
+                            onClick={() => deleteCrit(selectedCrit)}
                             title="Удалить"
                           >
                             <Icon icon="fa-trash-can" size={13} />
@@ -1848,17 +2044,51 @@ export default function MonitoringScaleView({
                       ) : null}
                     </div>
 
-                    <div className="crit-copy">
-                      {criterion.value && criterion.value !== EMPTY_DESCRIPTION ? (
-                        <p>{criterion.value}</p>
-                      ) : null}
-                      {criterion.deficiency?.description &&
-                      criterion.deficiency.description !== EMPTY_DESCRIPTION ? (
-                        <p className="is-deficiency">Недочёт: {criterion.deficiency.description}</p>
-                      ) : null}
+                    <div className="msv-criterion-blocks">
+                      <div className="msv-criterion-block">
+                        <span className="msv-criterion-label">Тип</span>
+                        <span className="msv-criterion-value">
+                          {activeCriterion.isCritical ? 'Критический' : 'Взвешенный'}
+                        </span>
+                      </div>
+                      <div className="msv-criterion-block">
+                        <span className="msv-criterion-label">Вес</span>
+                        <span className="msv-criterion-value">
+                          {activeCriterion.isCritical ? '0%' : `${activeCriterion.weight}%`}
+                        </span>
+                      </div>
+                      <div className="msv-criterion-block">
+                        <span className="msv-criterion-label">Недочет</span>
+                        <span className="msv-criterion-value">
+                          {activeCriterion.deficiency
+                            ? `${activeCriterion.deficiency.weight}%`
+                            : 'Не задан'}
+                        </span>
+                      </div>
                     </div>
+
+                    <div className="msv-criterion-text-block">
+                      <span className="msv-criterion-label">Описание критерия</span>
+                      <p className="msv-criterion-text">
+                        {activeCriterion.value && activeCriterion.value !== EMPTY_DESCRIPTION
+                          ? activeCriterion.value
+                          : EMPTY_DESCRIPTION}
+                      </p>
+                    </div>
+
+                    {activeCriterion.deficiency ? (
+                      <div className="msv-criterion-text-block">
+                        <span className="msv-criterion-label">Описание недочета</span>
+                        <p className="msv-criterion-text is-deficiency">
+                          {activeCriterion.deficiency.description &&
+                          activeCriterion.deficiency.description !== EMPTY_DESCRIPTION
+                            ? activeCriterion.deficiency.description
+                            : EMPTY_DESCRIPTION}
+                        </p>
+                      </div>
+                    ) : null}
                   </div>
-                ))}
+                ) : null}
               </div>
             )}
           </div>
