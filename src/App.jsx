@@ -23364,7 +23364,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     <div className="font-medium cursor-help underline decoration-dotted underline-offset-2 decoration-gray-400">
                         {callCount} / {planMeta.requiredCalls}
                     </div>
-                    <div className="pointer-events-none absolute left-0 top-full z-20 mt-2 w-72 rounded-lg border border-gray-200 bg-gray-900 px-3 py-2 text-xs leading-5 text-white opacity-0 shadow-lg transition-opacity duration-150 group-hover:opacity-100">
+                    <div className="pointer-events-none absolute left-1/2 top-full z-20 mt-2 w-max max-w-[min(42rem,calc(100vw-2rem))] -translate-x-1/2 whitespace-normal break-words rounded-lg border border-gray-200 bg-gray-900 px-3 py-2 text-xs leading-5 text-white opacity-0 shadow-lg transition-opacity duration-150 group-hover:opacity-100">
                         {formulaText}
                     </div>
                 </div>
