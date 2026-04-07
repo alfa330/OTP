@@ -7,6 +7,29 @@ const FILTER_ITEMS = [
     { id: 'issues', label: 'С проблемами' }
 ];
 
+const CRITERION_FLOW_STEPS = [
+    {
+        id: 'type',
+        label: 'Тип критерия',
+        description: 'Выберите модель оценки'
+    },
+    {
+        id: 'content',
+        label: 'Основа',
+        description: 'Название и описание'
+    },
+    {
+        id: 'scoring',
+        label: 'Оценка',
+        description: 'Вес и недочет'
+    },
+    {
+        id: 'review',
+        label: 'Проверка',
+        description: 'Финальный просмотр'
+    }
+];
+
 const createEmptyCriterionDraft = () => ({
     name: '',
     weight: '',
@@ -113,6 +136,7 @@ const MonitoringScaleView = ({
     canEdit = true
 }) => {
     const tempDirectionIdRef = useRef(1);
+    const criterionBuilderRef = useRef(null);
     const sourceDirections = useMemo(() => normalizeDirections(directions), [directions]);
     const [draftDirections, setDraftDirections] = useState(sourceDirections);
     const [selectedDirectionId, setSelectedDirectionId] = useState(sourceDirections[0]?._localId || '');
@@ -120,6 +144,8 @@ const MonitoringScaleView = ({
     const [activeFilter, setActiveFilter] = useState('all');
     const [criterionDraft, setCriterionDraft] = useState(createEmptyCriterionDraft());
     const [editingCriterionIndex, setEditingCriterionIndex] = useState(null);
+    const [criterionStep, setCriterionStep] = useState(0);
+    const [isCriterionFlowOpen, setIsCriterionFlowOpen] = useState(false);
 
     const notify = (message, type = 'info') => {
         if (typeof showToast === 'function') {
@@ -160,6 +186,8 @@ const MonitoringScaleView = ({
     useEffect(() => {
         setCriterionDraft(createEmptyCriterionDraft());
         setEditingCriterionIndex(null);
+        setCriterionStep(0);
+        setIsCriterionFlowOpen(false);
     }, [selectedDirectionId]);
 
     const selectedMetrics = useMemo(() => getDirectionMetrics(selectedDirection), [selectedDirection]);
@@ -242,18 +270,47 @@ const MonitoringScaleView = ({
     const resetCriterionEditor = () => {
         setCriterionDraft(createEmptyCriterionDraft());
         setEditingCriterionIndex(null);
+        setCriterionStep(0);
     };
 
-    const validateCriterionDraft = () => {
+    const focusCriterionBuilder = () => {
+        if (typeof window === 'undefined') return;
+        window.requestAnimationFrame(() => {
+            criterionBuilderRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        });
+    };
+
+    const openCriterionFlow = () => {
+        setIsCriterionFlowOpen(true);
+        focusCriterionBuilder();
+    };
+
+    const closeCriterionFlow = () => {
+        setIsCriterionFlowOpen(false);
+        resetCriterionEditor();
+    };
+
+    const handleStartCriterion = () => {
         if (!selectedDirection) {
             notify('Сначала выберите направление.', 'error');
-            return null;
+            return;
+        }
+
+        resetCriterionEditor();
+        openCriterionFlow();
+    };
+
+    const getCriterionDraftError = (scope = 'all') => {
+        if (!selectedDirection) {
+            return 'Сначала выберите направление.';
         }
 
         const name = criterionDraft.name.trim();
-        if (!name) {
-            notify('Введите название критерия.', 'error');
-            return null;
+        const requiresContentValidation = scope === 'content' || scope === 'all';
+        const requiresScoringValidation = scope === 'scoring' || scope === 'all';
+
+        if (requiresContentValidation && !name) {
+            return 'Введите название критерия.';
         }
 
         const baseCriterion = editingCriterionIndex != null
@@ -263,33 +320,33 @@ const MonitoringScaleView = ({
         const currentWeightedTotal = getWeightedTotal(selectedDirection) - reservedWeight;
 
         let normalizedWeight = 0;
-        if (!criterionDraft.isCritical) {
+        if (requiresScoringValidation && !criterionDraft.isCritical) {
             normalizedWeight = Number(criterionDraft.weight);
             if (!Number.isFinite(normalizedWeight) || normalizedWeight <= 0) {
-                notify('Вес критерия должен быть больше 0.', 'error');
-                return null;
+                return 'Вес критерия должен быть больше 0.';
             }
             if (currentWeightedTotal + normalizedWeight > 100) {
-                notify(`Сумма весов в направлении не может превышать 100. Доступно: ${Math.max(0, 100 - currentWeightedTotal)}%.`, 'error');
-                return null;
+                return `Сумма весов в направлении не может превышать 100. Доступно: ${Math.max(0, 100 - currentWeightedTotal)}%.`;
             }
         }
 
         let deficiency = null;
-        if (!criterionDraft.isCritical && criterionDraft.hasDeficiency) {
+        if (requiresScoringValidation && !criterionDraft.isCritical && criterionDraft.hasDeficiency) {
             const deficiencyWeight = Number(criterionDraft.deficiencyWeight);
             if (!Number.isFinite(deficiencyWeight) || deficiencyWeight <= 0) {
-                notify('Вес недочета должен быть больше 0.', 'error');
-                return null;
+                return 'Вес недочета должен быть больше 0.';
             }
             if (deficiencyWeight > normalizedWeight) {
-                notify('Вес недочета не может быть больше веса критерия.', 'error');
-                return null;
+                return 'Вес недочета не может быть больше веса критерия.';
             }
             deficiency = {
                 weight: deficiencyWeight,
                 description: criterionDraft.deficiencyDescription.trim() || 'Нет описания'
             };
+        }
+
+        if (scope !== 'all') {
+            return '';
         }
 
         return {
@@ -299,6 +356,37 @@ const MonitoringScaleView = ({
             value: criterionDraft.value.trim() || 'Нет описания',
             deficiency
         };
+    };
+
+    const validateCriterionDraft = () => {
+        const validationResult = getCriterionDraftError('all');
+        if (typeof validationResult === 'string') {
+            notify(validationResult, 'error');
+            return null;
+        }
+
+        return validationResult;
+    };
+
+    const handleNextCriterionStep = () => {
+        const scopeByStep = {
+            1: 'content',
+            2: 'scoring'
+        };
+        const scope = scopeByStep[criterionStep];
+        if (scope) {
+            const error = getCriterionDraftError(scope);
+            if (error) {
+                notify(error, 'error');
+                return;
+            }
+        }
+
+        setCriterionStep((prev) => Math.min(prev + 1, CRITERION_FLOW_STEPS.length - 1));
+    };
+
+    const handlePreviousCriterionStep = () => {
+        setCriterionStep((prev) => Math.max(prev - 1, 0));
     };
 
     const handleSubmitCriterion = () => {
@@ -315,7 +403,8 @@ const MonitoringScaleView = ({
             return { ...direction, criteria };
         });
 
-        resetCriterionEditor();
+        notify(editingCriterionIndex != null ? 'Критерий обновлен.' : 'Критерий добавлен.', 'success');
+        closeCriterionFlow();
     };
 
     const handleEditCriterion = (criterion, index) => {
@@ -329,6 +418,8 @@ const MonitoringScaleView = ({
             deficiencyDescription: criterion?.deficiency ? String(criterion.deficiency.description || '') : ''
         });
         setEditingCriterionIndex(index);
+        setCriterionStep(0);
+        openCriterionFlow();
     };
 
     const handleDeleteCriterion = (index) => {
@@ -345,7 +436,9 @@ const MonitoringScaleView = ({
         }));
 
         if (editingCriterionIndex === index) {
-            resetCriterionEditor();
+            closeCriterionFlow();
+        } else if (editingCriterionIndex != null && index < editingCriterionIndex) {
+            setEditingCriterionIndex((prev) => (prev == null ? prev : prev - 1));
         }
     };
 
@@ -404,6 +497,20 @@ const MonitoringScaleView = ({
         const reservedWeight = originalCriterion && !originalCriterion.isCritical ? Number(originalCriterion.weight || 0) : 0;
         return Math.max(0, 100 - (getWeightedTotal(selectedDirection) - reservedWeight));
     }, [editingCriterionIndex, selectedDirection]);
+
+    const projectedWeightedTotal = useMemo(() => {
+        if (!selectedDirection) return 0;
+
+        const originalCriterion = editingCriterionIndex != null
+            ? selectedDirection.criteria[editingCriterionIndex]
+            : null;
+        const reservedWeight = originalCriterion && !originalCriterion.isCritical ? Number(originalCriterion.weight || 0) : 0;
+        const currentWeightedTotal = getWeightedTotal(selectedDirection) - reservedWeight;
+        const draftWeight = criterionDraft.isCritical ? 0 : Number(criterionDraft.weight || 0);
+        const normalizedDraftWeight = Number.isFinite(draftWeight) && draftWeight > 0 ? draftWeight : 0;
+
+        return currentWeightedTotal + normalizedDraftWeight;
+    }, [criterionDraft.isCritical, criterionDraft.weight, editingCriterionIndex, selectedDirection]);
 
     return (
         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
@@ -695,12 +802,17 @@ const MonitoringScaleView = ({
                                 </div>
                             </div>
 
-                            <div className="grid grid-cols-1 2xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] gap-6">
+                            <div className="space-y-6">
                                 <div className="rounded-2xl border border-slate-200 overflow-hidden">
                                     <div className="px-5 py-4 border-b border-slate-200 bg-slate-50 flex items-center justify-between gap-3">
                                         <div>
-                                            <h3 className="text-sm font-semibold text-slate-900">Параметры направления</h3>
-                                            <p className="text-xs text-slate-500 mt-0.5">Название, работа с файлами и быстрые действия.</p>
+                                            <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-full bg-blue-100 text-blue-700 text-[11px] font-semibold uppercase tracking-[0.18em]">
+                                                Шаг 1
+                                            </div>
+                                            <h3 className="mt-3 text-sm font-semibold text-slate-900">Параметры направления</h3>
+                                            <p className="text-xs text-slate-500 mt-0.5">
+                                                Сначала настройте направление, а затем переходите к созданию критериев.
+                                            </p>
                                         </div>
                                         <button
                                             type="button"
@@ -714,6 +826,10 @@ const MonitoringScaleView = ({
                                     </div>
 
                                     <div className="p-5 space-y-5">
+                                        <div className="rounded-2xl border border-blue-100 bg-blue-50 px-4 py-4 text-sm text-blue-900">
+                                            Основа направления задается отдельно, чтобы мастер критерия не перегружал экран лишними полями.
+                                        </div>
+
                                         <div>
                                             <label className="block text-sm font-medium text-slate-700 mb-2">Название направления</label>
                                             <input
@@ -774,169 +890,196 @@ const MonitoringScaleView = ({
                                 </div>
 
                                 <div className="rounded-2xl border border-slate-200 overflow-hidden">
-                                    <div className="px-5 py-4 border-b border-slate-200 bg-slate-50 flex items-center justify-between gap-3">
+                                    <div className="px-5 py-4 border-b border-slate-200 bg-slate-50 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                                         <div>
-                                            <h3 className="text-sm font-semibold text-slate-900">
-                                                {editingCriterionIndex != null ? 'Редактирование критерия' : 'Новый критерий'}
+                                            <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-full bg-violet-100 text-violet-700 text-[11px] font-semibold uppercase tracking-[0.18em]">
+                                                Шаг 2
+                                            </div>
+                                            <h3 className="mt-3 text-sm font-semibold text-slate-900">
+                                                {editingCriterionIndex != null ? 'Мастер редактирования критерия' : 'Мастер создания критерия'}
                                             </h3>
                                             <p className="text-xs text-slate-500 mt-0.5">
-                                                Добавляйте обычные, критические критерии и недочеты без выхода из раздела.
+                                                Вместо длинной формы мастер показывает только текущий этап: тип, основу, оценку и проверку.
                                             </p>
                                         </div>
-                                        {editingCriterionIndex != null && (
-                                            <button
-                                                type="button"
-                                                onClick={resetCriterionEditor}
-                                                className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 transition"
-                                            >
-                                                <FaIcon className="fas fa-xmark" />
-                                                Отмена
-                                            </button>
-                                        )}
+                                        <div className="flex flex-wrap gap-2">
+                                            <span className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-white border border-slate-200 text-sm text-slate-600">
+                                                <FaIcon className="fas fa-diagram-project" />
+                                                Шаг {criterionStep + 1} из {CRITERION_FLOW_STEPS.length}
+                                            </span>
+                                            {isCriterionFlowOpen ? (
+                                                <button
+                                                    type="button"
+                                                    onClick={closeCriterionFlow}
+                                                    className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 transition"
+                                                >
+                                                    <FaIcon className="fas fa-xmark" />
+                                                    Закрыть мастер
+                                                </button>
+                                            ) : (
+                                                <button
+                                                    type="button"
+                                                    onClick={handleStartCriterion}
+                                                    disabled={!canEdit}
+                                                    className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-blue-600 text-white hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                                                >
+                                                    <FaIcon className="fas fa-plus" />
+                                                    Добавить критерий
+                                                </button>
+                                            )}
+                                        </div>
                                     </div>
 
-                                    <div className="p-5 space-y-4">
-                                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                                            <div>
-                                                <label className="block text-sm font-medium text-slate-700 mb-2">Название критерия</label>
-                                                <input
-                                                    type="text"
-                                                    value={criterionDraft.name}
-                                                    onChange={(event) => setCriterionDraft((prev) => ({ ...prev, name: event.target.value }))}
-                                                    disabled={!canEdit}
-                                                    placeholder="Например, Проверил потребность"
-                                                    className="w-full px-4 py-3 rounded-xl border border-slate-200 bg-white text-sm text-slate-700 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-slate-50"
-                                                />
-                                            </div>
-
-                                            <div>
-                                                <label className="block text-sm font-medium text-slate-700 mb-2">
-                                                    {criterionDraft.isCritical ? 'Вес не требуется' : `Вес критерия (доступно до ${remainingWeight}%)`}
-                                                </label>
-                                                <input
-                                                    type="number"
-                                                    value={criterionDraft.weight}
-                                                    onChange={(event) => setCriterionDraft((prev) => ({ ...prev, weight: event.target.value }))}
-                                                    disabled={!canEdit || criterionDraft.isCritical}
-                                                    min="1"
-                                                    placeholder={criterionDraft.isCritical ? 'Критический критерий' : 'Введите вес'}
-                                                    className="w-full px-4 py-3 rounded-xl border border-slate-200 bg-white text-sm text-slate-700 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-slate-50"
-                                                />
-                                            </div>
-                                        </div>
-
-                                        <div>
-                                            <label className="block text-sm font-medium text-slate-700 mb-2">Описание критерия</label>
-                                            <textarea
-                                                rows={4}
-                                                value={criterionDraft.value}
-                                                onChange={(event) => setCriterionDraft((prev) => ({ ...prev, value: event.target.value }))}
-                                                disabled={!canEdit}
-                                                placeholder="Подробно опишите, как должен оцениваться критерий."
-                                                className="w-full px-4 py-3 rounded-xl border border-slate-200 bg-white text-sm text-slate-700 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 resize-y disabled:bg-slate-50"
-                                            />
-                                        </div>
-
-                                        <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
-                                            <label className="flex items-start gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 cursor-pointer flex-1">
-                                                <input
-                                                    type="checkbox"
-                                                    checked={criterionDraft.isCritical}
-                                                    onChange={(event) => setCriterionDraft((prev) => ({
-                                                        ...prev,
-                                                        isCritical: event.target.checked,
-                                                        weight: event.target.checked ? '' : prev.weight,
-                                                        hasDeficiency: event.target.checked ? false : prev.hasDeficiency,
-                                                        deficiencyWeight: event.target.checked ? '' : prev.deficiencyWeight,
-                                                        deficiencyDescription: event.target.checked ? '' : prev.deficiencyDescription
-                                                    }))}
-                                                    disabled={!canEdit}
-                                                    className="mt-1 h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-                                                />
-                                                <span>
-                                                    <span className="block text-sm font-medium text-slate-800">Критический критерий</span>
-                                                    <span className="block text-xs text-slate-500 mt-1">
-                                                        Ошибка по такому критерию обнуляет результат и не использует отдельный вес.
-                                                    </span>
-                                                </span>
-                                            </label>
-
-                                            <label className={`flex items-start gap-3 rounded-2xl border px-4 py-3 cursor-pointer flex-1 ${
-                                                criterionDraft.isCritical ? 'border-slate-200 bg-slate-50 opacity-60' : 'border-slate-200 bg-slate-50'
-                                            }`}>
-                                                <input
-                                                    type="checkbox"
-                                                    checked={criterionDraft.hasDeficiency}
-                                                    onChange={(event) => setCriterionDraft((prev) => ({
-                                                        ...prev,
-                                                        hasDeficiency: event.target.checked,
-                                                        deficiencyWeight: event.target.checked ? prev.deficiencyWeight : '',
-                                                        deficiencyDescription: event.target.checked ? prev.deficiencyDescription : ''
-                                                    }))}
-                                                    disabled={!canEdit || criterionDraft.isCritical}
-                                                    className="mt-1 h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-                                                />
-                                                <span>
-                                                    <span className="block text-sm font-medium text-slate-800">Добавить недочет</span>
-                                                    <span className="block text-xs text-slate-500 mt-1">
-                                                        Для мягкой ошибки можно задать отдельный штраф и пояснение.
-                                                    </span>
-                                                </span>
-                                            </label>
-                                        </div>
-
-                                        {criterionDraft.hasDeficiency && !criterionDraft.isCritical && (
-                                            <div className="grid grid-cols-1 lg:grid-cols-[180px_minmax(0,1fr)] gap-4 rounded-2xl border border-amber-200 bg-amber-50/70 p-4">
-                                                <div>
-                                                    <label className="block text-sm font-medium text-amber-900 mb-2">Вес недочета</label>
-                                                    <input
-                                                        type="number"
-                                                        min="1"
-                                                        value={criterionDraft.deficiencyWeight}
-                                                        onChange={(event) => setCriterionDraft((prev) => ({ ...prev, deficiencyWeight: event.target.value }))}
-                                                        disabled={!canEdit}
-                                                        className="w-full px-4 py-3 rounded-xl border border-amber-200 bg-white text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-amber-400"
-                                                    />
-                                                </div>
-                                                <div>
-                                                    <label className="block text-sm font-medium text-amber-900 mb-2">Описание недочета</label>
-                                                    <textarea
-                                                        rows={3}
-                                                        value={criterionDraft.deficiencyDescription}
-                                                        onChange={(event) => setCriterionDraft((prev) => ({ ...prev, deficiencyDescription: event.target.value }))}
-                                                        disabled={!canEdit}
-                                                        placeholder="Когда ставится недочет и чем он отличается от полной ошибки."
-                                                        className="w-full px-4 py-3 rounded-xl border border-amber-200 bg-white text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-amber-400 resize-y"
-                                                    />
+                                    {!isCriterionFlowOpen ? (
+                                        <div className="p-5">
+                                            <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 px-5 py-5">
+                                                <div className="text-sm font-semibold text-slate-900">Создание критерия по шагам</div>
+                                                <p className="mt-2 text-sm text-slate-500">
+                                                    Откройте мастер, чтобы последовательно пройти тип, описание, оценку и финальную проверку.
+                                                </p>
+                                                <div className="mt-4 grid grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+                                                    {CRITERION_FLOW_STEPS.map((step, index) => (
+                                                        <div key={step.id} className="rounded-xl border border-white bg-white px-3 py-3">
+                                                            <div className="font-semibold text-slate-900">{index + 1}. {step.label}</div>
+                                                            <div className="mt-1 text-slate-500">{step.description}</div>
+                                                        </div>
+                                                    ))}
                                                 </div>
                                             </div>
-                                        )}
+                                        </div>
+                                    ) : (
+                                        <div className="p-5 space-y-5">
+                                            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                                                {CRITERION_FLOW_STEPS.map((step, index) => (
+                                                    <button
+                                                        key={step.id}
+                                                        type="button"
+                                                        onClick={() => index < criterionStep && setCriterionStep(index)}
+                                                        disabled={index > criterionStep}
+                                                        className={`rounded-2xl border px-3 py-3 text-left transition ${
+                                                            index === criterionStep ? 'border-blue-300 bg-blue-50' : index < criterionStep ? 'border-emerald-200 bg-emerald-50/70' : 'border-slate-200 bg-slate-50 text-slate-400'
+                                                        }`}
+                                                    >
+                                                        <div className="text-xs font-semibold">{index + 1}. {step.label}</div>
+                                                        <div className="mt-1 text-[11px]">{step.description}</div>
+                                                    </button>
+                                                ))}
+                                            </div>
 
-                                        <div className="flex flex-wrap gap-3">
-                                            <button
-                                                type="button"
-                                                onClick={handleSubmitCriterion}
-                                                disabled={!canEdit}
-                                                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-blue-600 text-white hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
-                                            >
-                                                <FaIcon className={editingCriterionIndex != null ? 'fas fa-floppy-disk' : 'fas fa-plus'} />
-                                                {editingCriterionIndex != null ? 'Сохранить изменения' : 'Добавить критерий'}
-                                            </button>
-                                            <div className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-100 text-slate-600 text-sm">
-                                                <FaIcon className="fas fa-circle-info" />
-                                                Свободный вес для обычных критериев: {remainingWeight}%
+                                            {criterionStep === 0 && (
+                                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                                    <button type="button" onClick={() => setCriterionDraft((prev) => ({ ...prev, isCritical: false }))} className={`rounded-2xl border p-4 text-left transition ${!criterionDraft.isCritical ? 'border-emerald-300 bg-emerald-50' : 'border-slate-200 bg-white'}`}>
+                                                        <div className="text-sm font-semibold text-slate-900">Обычный критерий</div>
+                                                        <div className="mt-1 text-sm text-slate-500">Использует вес и может иметь недочет.</div>
+                                                    </button>
+                                                    <button type="button" onClick={() => setCriterionDraft((prev) => ({ ...prev, isCritical: true, weight: '', hasDeficiency: false, deficiencyWeight: '', deficiencyDescription: '' }))} className={`rounded-2xl border p-4 text-left transition ${criterionDraft.isCritical ? 'border-red-300 bg-red-50' : 'border-slate-200 bg-white'}`}>
+                                                        <div className="text-sm font-semibold text-slate-900">Критический критерий</div>
+                                                        <div className="mt-1 text-sm text-slate-500">Обнуляет результат и не использует вес.</div>
+                                                    </button>
+                                                </div>
+                                            )}
+
+                                            {criterionStep === 1 && (
+                                                <div className="space-y-4">
+                                                    <div>
+                                                        <label className="block text-sm font-medium text-slate-700 mb-2">Название критерия</label>
+                                                        <input type="text" value={criterionDraft.name} onChange={(event) => setCriterionDraft((prev) => ({ ...prev, name: event.target.value }))} disabled={!canEdit} placeholder="Например, Проверил потребность" className="w-full px-4 py-3 rounded-xl border border-slate-200 bg-white text-sm text-slate-700 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-slate-50" />
+                                                    </div>
+                                                    <div>
+                                                        <label className="block text-sm font-medium text-slate-700 mb-2">Описание критерия</label>
+                                                        <textarea rows={4} value={criterionDraft.value} onChange={(event) => setCriterionDraft((prev) => ({ ...prev, value: event.target.value }))} disabled={!canEdit} placeholder="Подробно опишите, как должен оцениваться критерий." className="w-full px-4 py-3 rounded-xl border border-slate-200 bg-white text-sm text-slate-700 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 resize-y disabled:bg-slate-50" />
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {criterionStep === 2 && (
+                                                <div className="space-y-4">
+                                                    {!criterionDraft.isCritical ? (
+                                                        <>
+                                                            <div className="flex flex-wrap items-end gap-3">
+                                                                <div className="w-full max-w-xs">
+                                                                    <label className="block text-sm font-medium text-slate-700 mb-2">Вес критерия</label>
+                                                                    <input type="number" value={criterionDraft.weight} onChange={(event) => setCriterionDraft((prev) => ({ ...prev, weight: event.target.value }))} disabled={!canEdit} min="1" placeholder="Введите вес" className="w-full px-4 py-3 rounded-xl border border-slate-200 bg-white text-sm text-slate-700 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-slate-50" />
+                                                                </div>
+                                                                <button type="button" onClick={() => setCriterionDraft((prev) => ({ ...prev, weight: String(remainingWeight || '') }))} disabled={!canEdit || remainingWeight <= 0} className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 transition disabled:opacity-50 disabled:cursor-not-allowed">
+                                                                    <FaIcon className="fas fa-fill-drip" />
+                                                                    Использовать остаток {remainingWeight}%
+                                                                </button>
+                                                            </div>
+                                                            <label className="flex items-start gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 cursor-pointer">
+                                                                <input type="checkbox" checked={criterionDraft.hasDeficiency} onChange={(event) => setCriterionDraft((prev) => ({ ...prev, hasDeficiency: event.target.checked, deficiencyWeight: event.target.checked ? prev.deficiencyWeight : '', deficiencyDescription: event.target.checked ? prev.deficiencyDescription : '' }))} disabled={!canEdit} className="mt-1 h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500" />
+                                                                <span><span className="block text-sm font-medium text-slate-800">Добавить недочет</span><span className="block text-xs text-slate-500 mt-1">Для мягкой ошибки с меньшим штрафом.</span></span>
+                                                            </label>
+                                                            {criterionDraft.hasDeficiency && (
+                                                                <div className="grid grid-cols-1 lg:grid-cols-[180px_minmax(0,1fr)] gap-4 rounded-2xl border border-amber-200 bg-amber-50/70 p-4">
+                                                                    <div>
+                                                                        <label className="block text-sm font-medium text-amber-900 mb-2">Вес недочета</label>
+                                                                        <input type="number" min="1" value={criterionDraft.deficiencyWeight} onChange={(event) => setCriterionDraft((prev) => ({ ...prev, deficiencyWeight: event.target.value }))} disabled={!canEdit} className="w-full px-4 py-3 rounded-xl border border-amber-200 bg-white text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-amber-400" />
+                                                                    </div>
+                                                                    <div>
+                                                                        <label className="block text-sm font-medium text-amber-900 mb-2">Описание недочета</label>
+                                                                        <textarea rows={3} value={criterionDraft.deficiencyDescription} onChange={(event) => setCriterionDraft((prev) => ({ ...prev, deficiencyDescription: event.target.value }))} disabled={!canEdit} placeholder="Когда ставится недочет и чем он отличается от полной ошибки." className="w-full px-4 py-3 rounded-xl border border-amber-200 bg-white text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-amber-400 resize-y" />
+                                                                    </div>
+                                                                </div>
+                                                            )}
+                                                        </>
+                                                    ) : (
+                                                        <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-4 text-sm text-red-900">
+                                                            Для критического критерия вес и недочет не используются.
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )}
+
+                                            {criterionStep === 3 && (
+                                                <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 px-4 py-4">
+                                                    <div className="text-sm font-semibold text-slate-900">{criterionDraft.name.trim() || 'Название не заполнено'}</div>
+                                                    <div className="mt-2 text-sm text-slate-600 whitespace-pre-wrap">{criterionDraft.value.trim() || 'После сохранения будет подставлено стандартное описание.'}</div>
+                                                    <div className="mt-4 flex flex-wrap gap-2 text-xs">
+                                                        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-white border border-slate-200 text-slate-700">{criterionDraft.isCritical ? 'Критический' : `Вес ${criterionDraft.weight || '—'}%`}</span>
+                                                        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-white border border-slate-200 text-slate-700">После сохранения: {projectedWeightedTotal}/100</span>
+                                                        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-white border border-slate-200 text-slate-700">Остаток: {Math.max(0, 100 - projectedWeightedTotal)}%</span>
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            <div className="flex flex-wrap gap-3">
+                                                {criterionStep > 0 && (
+                                                    <button type="button" onClick={handlePreviousCriterionStep} className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 transition">
+                                                        <FaIcon className="fas fa-arrow-left" />
+                                                        Назад
+                                                    </button>
+                                                )}
+                                                {criterionStep < CRITERION_FLOW_STEPS.length - 1 ? (
+                                                    <button type="button" onClick={handleNextCriterionStep} disabled={!canEdit} className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-blue-600 text-white hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed">
+                                                        Далее
+                                                        <FaIcon className="fas fa-arrow-right" />
+                                                    </button>
+                                                ) : (
+                                                    <button type="button" onClick={handleSubmitCriterion} disabled={!canEdit} className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-blue-600 text-white hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed">
+                                                        <FaIcon className={editingCriterionIndex != null ? 'fas fa-floppy-disk' : 'fas fa-plus'} />
+                                                        {editingCriterionIndex != null ? 'Сохранить изменения' : 'Добавить критерий'}
+                                                    </button>
+                                                )}
+                                                <div className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-100 text-slate-600 text-sm">
+                                                    <FaIcon className="fas fa-circle-info" />
+                                                    Свободный вес: {remainingWeight}%
+                                                </div>
                                             </div>
                                         </div>
-                                    </div>
+                                    )}
                                 </div>
                             </div>
 
                             <div className="rounded-2xl border border-slate-200 overflow-hidden">
                                 <div className="px-5 py-4 border-b border-slate-200 bg-slate-50 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                                     <div>
-                                        <h3 className="text-sm font-semibold text-slate-900">Критерии направления</h3>
+                                        <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-700 text-[11px] font-semibold uppercase tracking-[0.18em]">
+                                            Шаг 3
+                                        </div>
+                                        <h3 className="mt-3 text-sm font-semibold text-slate-900">Критерии направления</h3>
                                         <p className="text-xs text-slate-500 mt-0.5">
-                                            Табличный обзор по критериям, весу, статусу и описанию.
+                                            Здесь остается только обзор. Создание и редактирование теперь вынесены в мастер выше.
                                         </p>
                                     </div>
                                     <div className="flex flex-wrap gap-2 text-xs">
@@ -952,6 +1095,17 @@ const MonitoringScaleView = ({
                                             <FaIcon className="fas fa-triangle-exclamation" />
                                             {selectedMetrics.deficiencyCount} недочетов
                                         </span>
+                                        {!isCriterionFlowOpen && (
+                                            <button
+                                                type="button"
+                                                onClick={handleStartCriterion}
+                                                disabled={!canEdit}
+                                                className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                                            >
+                                                <FaIcon className="fas fa-plus" />
+                                                Новый критерий
+                                            </button>
+                                        )}
                                     </div>
                                 </div>
 
@@ -962,8 +1116,19 @@ const MonitoringScaleView = ({
                                         </div>
                                         <h4 className="mt-4 text-sm font-semibold text-slate-900">Критерии еще не добавлены</h4>
                                         <p className="mt-1 text-sm text-slate-500">
-                                            Начните с первого критерия справа. Здесь сразу появится удобная таблица для работы со шкалой.
+                                            Откройте мастер выше и создайте первый критерий по шагам. После сохранения он появится в этом списке.
                                         </p>
+                                        {!isCriterionFlowOpen && (
+                                            <button
+                                                type="button"
+                                                onClick={handleStartCriterion}
+                                                disabled={!canEdit}
+                                                className="mt-5 inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-blue-600 text-white hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                                            >
+                                                <FaIcon className="fas fa-plus" />
+                                                Создать первый критерий
+                                            </button>
+                                        )}
                                     </div>
                                 ) : (
                                     <div className="overflow-x-auto">
@@ -1028,7 +1193,7 @@ const MonitoringScaleView = ({
                                                                     className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 transition disabled:opacity-50 disabled:cursor-not-allowed"
                                                                 >
                                                                     <FaIcon className="fas fa-pen" />
-                                                                    Править
+                                                                    В мастер
                                                                 </button>
                                                                 <button
                                                                     type="button"
