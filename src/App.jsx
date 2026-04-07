@@ -31226,8 +31226,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {( view === "contests" && (<ContestsApp user={user} operators={users} directions={directions} />))}
                                 {( view === "monitoring_scale" && (
                                     <MonitoringScaleView
+                                        user={user}
+                                        apiBaseUrl={API_BASE_URL}
                                         directions={directions}
-                                        loading={isLoading}
+                                        onDirectionsChange={setDirections}
                                         onRefresh={fetchDirections}
                                         onSave={saveDirections}
                                         showToast={showToast}
