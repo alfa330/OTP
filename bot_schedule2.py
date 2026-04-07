@@ -7763,11 +7763,13 @@ def handle_monthly_report():
             operators = db.get_operators_by_supervisor(sv_id)
             special_evaluator_id = 169
             report_rows = []
+            target_ids = []
 
             for op in operators:
                 op_id = op['id']
                 op_name = op['name']
                 op_status = str(op.get('status') or '').strip().lower()
+                target_ids.append(op_id)
 
                 scores = _fetch_latest_scores_for_user(op_id, month, evaluator_id=None)
                 special_scores = _fetch_latest_scores_for_user(op_id, month, evaluator_id=special_evaluator_id)
@@ -7778,16 +7780,24 @@ def handle_monthly_report():
                     continue
 
                 report_rows.append({
+                    'id': op_id,
                     'name': op_name,
                     'scores': scores,
                     'special_scores': special_scores
                 })
+
+            target_ids.append(sv_id)
+            try:
+                evaluation_targets = db.get_operator_call_evaluation_targets_for_month(target_ids, month=month)
+            except Exception:
+                evaluation_targets = {}
 
             # Добавляем самого супервайзера в его группу, если за месяц есть оценки.
             sv_scores = _fetch_latest_scores_for_user(sv_id, month, evaluator_id=None)
             sv_special_scores = _fetch_latest_scores_for_user(sv_id, month, evaluator_id=special_evaluator_id)
             if sv_scores or sv_special_scores:
                 report_rows.append({
+                    'id': sv_id,
                     'name': f"{sv_name} (СВ)",
                     'scores': sv_scores,
                     'special_scores': sv_special_scores
@@ -7806,6 +7816,7 @@ def handle_monthly_report():
                 headers.append(f'{i}')
             headers.append('Средний балл')
             headers.append('Кол-во оцененных звонков')
+            headers.append('План')
 
             for col, header in enumerate(headers):
                 worksheet.write(0, col, header, header_format)
@@ -7814,9 +7825,12 @@ def handle_monthly_report():
                 worksheet.write(special_table_header_row, col, header, header_format)
 
             for row_idx, op_row in enumerate(report_rows, start=1):
+                op_id = op_row.get('id')
                 op_name = op_row['name']
                 scores = op_row['scores']
                 special_scores = op_row['special_scores']
+                evaluation_target = evaluation_targets.get(int(op_id)) if op_id is not None else None
+                planned_calls = int(evaluation_target.get('required_calls') or 0) if isinstance(evaluation_target, dict) else 0
 
                 count = len(scores)
                 avg_score = sum(scores) / count if count > 0 else 0.0
@@ -7859,15 +7873,18 @@ def handle_monthly_report():
                 # Итоговые колонки
                 worksheet.write(row_idx, 21, avg_score, total_format)
                 worksheet.write(row_idx, 22, count, total_int_format)
+                worksheet.write(row_idx, 23, planned_calls, total_int_format)
 
                 worksheet.write(special_row_idx, 21, special_avg_score, total_format)
                 worksheet.write(special_row_idx, 22, special_count, total_int_format)
+                worksheet.write(special_row_idx, 23, planned_calls, total_int_format)
 
             worksheet.set_column('A:A', 30)
             for i in range(1, 21):
                 worksheet.set_column(i, i, 12)
             worksheet.set_column(21, 21, 15)
             worksheet.set_column(22, 22, 20)
+            worksheet.set_column(23, 23, 12)
 
         workbook.close()
         output.seek(0)
