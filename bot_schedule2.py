@@ -6316,6 +6316,11 @@ def get_sv_data():
         except Exception:
             operator_metrics = {}
 
+        try:
+            operator_targets = db.get_operator_call_evaluation_targets_for_month(metric_ids, month=month)
+        except Exception:
+            operator_targets = {}
+
         seen_response_ids = set()
         for op in operators:
             # flexible unpacking: support dict or sequence rows
@@ -6375,6 +6380,7 @@ def get_sv_data():
             except (TypeError, ValueError):
                 operator_id_int = None
             metrics = operator_metrics.get(operator_id_int, {}) if operator_id_int is not None else {}
+            evaluation_target = operator_targets.get(operator_id_int) if operator_id_int is not None else None
             eval_count = int(metrics.get("call_count") or 0)
             avg_score = metrics.get("avg_score")
             if operator_id_int is not None:
@@ -6398,6 +6404,7 @@ def get_sv_data():
                 # number of actual evaluated calls (with scores)
                 "call_count": eval_count,
                 "avg_score": avg_score,
+                "evaluation_target": evaluation_target,
                 "scores_table_url": scores_table_url,
                 "status": status,
                 "rate": rate_val,
@@ -6420,6 +6427,7 @@ def get_sv_data():
                 continue
 
             sv_metrics = operator_metrics.get(supervisor_id_int, {})
+            sv_evaluation_target = operator_targets.get(supervisor_id_int)
             sv_call_count = int(sv_metrics.get("call_count") or 0)
             if sv_call_count <= 0:
                 continue
@@ -6451,6 +6459,7 @@ def get_sv_data():
                 "role": "sv",
                 "call_count": sv_call_count,
                 "avg_score": sv_metrics.get("avg_score"),
+                "evaluation_target": sv_evaluation_target,
                 "scores_table_url": sv_scores_table_url,
                 "status": sv_status,
                 "rate": sv_rate_val,

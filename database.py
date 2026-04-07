@@ -3861,6 +3861,41 @@ class Database:
             operator_norm_hours=source.get('operator_norm_hours')
         )
 
+    def get_operator_call_evaluation_targets_for_month(self, operator_ids, month: Optional[str] = None):
+        target_month = str(month or datetime.now().strftime('%Y-%m'))
+
+        normalized_ids = []
+        seen_ids = set()
+        for raw_id in (operator_ids or []):
+            try:
+                op_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            if op_id in seen_ids:
+                continue
+            seen_ids.add(op_id)
+            normalized_ids.append(op_id)
+
+        if not normalized_ids:
+            return {}
+
+        result = {}
+        with self._get_cursor() as cursor:
+            for op_id in normalized_ids:
+                source = self._fetch_operator_call_evaluation_target_source(cursor, op_id, target_month)
+                result[op_id] = self._build_operator_call_evaluation_target(
+                    operator_id=op_id,
+                    target_month=target_month,
+                    hire_date_value=source.get('hire_date_value'),
+                    regular_hours=source.get('regular_hours'),
+                    training_hours=source.get('training_hours'),
+                    technical_issue_hours=source.get('technical_issue_hours'),
+                    offline_activity_hours=source.get('offline_activity_hours'),
+                    operator_norm_hours=source.get('operator_norm_hours')
+                )
+
+        return result
+
     def get_operator_stats(self, operator_id):
         """Получить статистику оператора (часы, оценки, звонки в час, тренинги)"""
         with self._get_cursor() as cursor:

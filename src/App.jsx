@@ -23325,6 +23325,49 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             return res * dir;
             };
 
+            const getEvaluationPlanMeta = (operatorRow) => {
+            const target = operatorRow?.evaluation_target;
+            if (!target || typeof target !== 'object') return null;
+
+            const requiredCalls = Number(target?.required_calls);
+            if (!Number.isFinite(requiredCalls) || requiredCalls < 0) return null;
+
+            const workedHoursUsed = Number(target?.worked_hours_used ?? target?.accounted_hours ?? 0);
+            const normHours = Number(target?.full_rate_norm_hours ?? target?.norm_hours ?? 0);
+            const baseCallTarget = Number(target?.base_call_target ?? 0);
+            const requiredCallsRaw = Number(target?.required_calls_raw ?? requiredCalls);
+
+            return {
+                requiredCalls,
+                workedHoursUsed: Number.isFinite(workedHoursUsed) ? workedHoursUsed : 0,
+                normHours: Number.isFinite(normHours) ? normHours : 0,
+                baseCallTarget: Number.isFinite(baseCallTarget) ? baseCallTarget : 0,
+                requiredCallsRaw: Number.isFinite(requiredCallsRaw) ? requiredCallsRaw : requiredCalls,
+            };
+            };
+
+            const formatEvaluationPlanFormula = (operatorRow) => {
+            const planMeta = getEvaluationPlanMeta(operatorRow);
+            if (!planMeta) return '';
+            return `Расчет: (${planMeta.workedHoursUsed.toFixed(2)} ч / ${planMeta.normHours.toFixed(2)} ч полной ставки) x ${planMeta.baseCallTarget} = ${planMeta.requiredCallsRaw.toFixed(2)}, итог ${planMeta.requiredCalls}`;
+            };
+
+            const renderEvaluationPlanContent = (operatorRow, callCount) => {
+            const planMeta = getEvaluationPlanMeta(operatorRow);
+            if (!planMeta) {
+                return <span>{callCount}</span>;
+            }
+
+            return (
+                <div className="leading-5" title={formatEvaluationPlanFormula(operatorRow)}>
+                    <div className="font-medium">{callCount} / {planMeta.requiredCalls}</div>
+                    <div className="text-xs text-gray-500">
+                        {planMeta.workedHoursUsed.toFixed(2)} ч / {planMeta.normHours.toFixed(2)} ч x {planMeta.baseCallTarget}
+                    </div>
+                </div>
+            );
+            };
+
 
             const handleSort = (field) => {
             if (sortField === field) {
@@ -30277,6 +30320,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                             // предвычислим общие значения для футера
                                             const totalCalls = filteredOperators.reduce((sum, o) => sum + (parseInt(o.call_count) || 0), 0);
+                                            const totalPlanCalls = filteredOperators.reduce((sum, o) => {
+                                            const planMeta = getEvaluationPlanMeta(o);
+                                            return sum + (planMeta ? planMeta.requiredCalls : 0);
+                                            }, 0);
                                             const scoresArr = filteredOperators
                                             .map(o => (o.avg_score == null ? NaN : Number(o.avg_score)))
                                             .filter(v => !isNaN(v));
@@ -30297,7 +30344,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         onClick={() => handleViewScoresSort('listened')}
                                                         className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer w-1/4"
                                                     >
-                                                        Оценено {getViewScoresSortIcon('listened')}
+                                                        Оценено / план {getViewScoresSortIcon('listened')}
                                                     </th>
                                                     <th
                                                         onClick={() => handleViewScoresSort('avg_score')}
@@ -30323,6 +30370,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         const currentWeek = getCurrentWeekOfMonth();
                                                         const expectedCalls = getExpectedCalls(currentWeek);
                                                         const callCount = parseInt(op.call_count) || 0;
+                                                        const planMeta = getEvaluationPlanMeta(op);
+                                                        const displayTargetCalls = planMeta?.requiredCalls ?? expectedCalls;
                                                         const hasIssue = callCount < expectedCalls;
 
                                                         return (
@@ -30339,7 +30388,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     <span className="truncate">{op.name}</span>
                                                                 </div>
                                                             </td>
-                                                            <td className={`px-6 py-4 whitespace-nowrap ${getCallCountColor(callCount, expectedCalls)}`}>{callCount}</td>
+                                                            <td className={`px-6 py-4 whitespace-nowrap ${getCallCountColor(callCount, displayTargetCalls)}`}>
+                                                                {renderEvaluationPlanContent(op, callCount)}
+                                                            </td>
                                                             <td className="px-6 py-4 whitespace-nowrap">
                                                                 <span className={getScoreColor(op.avg_score)}>
                                                                 {op.avg_score ? Number(op.avg_score).toFixed(2) : '-'}
@@ -30384,7 +30435,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <tfoot className="bg-gray-50">
                                                     <tr>
                                                     <td className="px-6 py-3 font-medium">Итого</td>
-                                                    <td className="px-6 py-3 font-medium">{totalCalls}</td>
+                                                    <td className="px-6 py-3 font-medium">{totalPlanCalls > 0 ? `${totalCalls} / ${totalPlanCalls}` : totalCalls}</td>
                                                     <td className="px-6 py-3 font-medium">{avgByScored == null ? '-' : avgByScored.toFixed(2)}</td>
                                                     <td className="px-6 py-3" />
                                                     </tr>
@@ -31878,7 +31929,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     onClick={() => handleOpsSort('call_count')}
                                                     className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer select-none"
                                                 >
-                                                    Оценок {getOpsSortIcon('call_count')}
+                                                    Оценено / план {getOpsSortIcon('call_count')}
                                                 </th>
                                                 <th
                                                     onClick={() => handleOpsSort('avg_score')}
@@ -31901,6 +31952,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                                     {myOperatorsSorted.map((op, idx) => {
                                                     const callCount = parseInt(op.call_count) || 0;
+                                                    const planMeta = getEvaluationPlanMeta(op);
+                                                    const displayTargetCalls = planMeta?.requiredCalls ?? (svData.expected_calls || 5);
                                                     return (
                                                         <tr key={`my-op-${op.id ?? idx}`} className="hover:bg-gray-50 transition-colors duration-200">
                                                         <td className="px-6 py-4 text-sm text-gray-900">
@@ -31916,8 +31969,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             </div>
                                                         </td>
 
-                                                        <td className={`px-6 py-4 whitespace-nowrap text-sm ${getCallCountColor(callCount, svData.expected_calls || 5)}`}>
-                                                            {callCount}
+                                                        <td className={`px-6 py-4 whitespace-nowrap text-sm ${getCallCountColor(callCount, displayTargetCalls)}`}>
+                                                            {renderEvaluationPlanContent(op, callCount)}
                                                         </td>
 
                                                         <td className="px-6 py-4 whitespace-nowrap text-sm">
@@ -31959,6 +32012,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                                     {grouped[dirName].map((op, idx) => {
                                                     const callCount = parseInt(op.call_count) || 0;
+                                                    const planMeta = getEvaluationPlanMeta(op);
+                                                    const displayTargetCalls = planMeta?.requiredCalls ?? (svData.expected_calls || 5);
                                                     return (
                                                         <tr key={op.id ?? `${dirName}-${idx}`} className="hover:bg-gray-50 transition-colors duration-200">
                                                         <td className="px-6 py-4 text-sm text-gray-900">
@@ -31974,8 +32029,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             </div>
                                                         </td>
 
-                                                        <td className={`px-6 py-4 whitespace-nowrap text-sm ${getCallCountColor(callCount, svData.expected_calls || 5)}`}>
-                                                            {callCount}
+                                                        <td className={`px-6 py-4 whitespace-nowrap text-sm ${getCallCountColor(callCount, displayTargetCalls)}`}>
+                                                            {renderEvaluationPlanContent(op, callCount)}
                                                         </td>
 
                                                         <td className="px-6 py-4 whitespace-nowrap text-sm">
@@ -32011,6 +32066,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <tfoot className="bg-gray-50">
                                                 {(() => {
                                                 const totalCalls = filteredOperators.reduce((sum, o) => sum + (parseInt(o.call_count) || 0), 0);
+                                                const totalPlanCalls = filteredOperators.reduce((sum, o) => {
+                                                    const planMeta = getEvaluationPlanMeta(o);
+                                                    return sum + (planMeta ? planMeta.requiredCalls : 0);
+                                                }, 0);
                                                 const scores = filteredOperators.map(o => parseFloat(o.avg_score)).filter(v => !isNaN(v));
                                                 const overallAvg = scores.length > 0 ? (scores.reduce((a, b) => a + b, 0) / scores.length) : null;
                                                 const overallAvgStr = overallAvg == null ? '-' : Number(overallAvg).toFixed(2);
@@ -32018,7 +32077,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 return (
                                                     <tr>
                                                     <td className="px-6 py-3 text-sm font-medium text-gray-700">Итого</td>
-                                                    <td className="px-6 py-3 text-sm font-medium text-gray-900">{totalCalls}</td>
+                                                    <td className="px-6 py-3 text-sm font-medium text-gray-900">{totalPlanCalls > 0 ? `${totalCalls} / ${totalPlanCalls}` : totalCalls}</td>
                                                     <td className="px-6 py-3 text-sm font-medium text-gray-900">{overallAvgStr}</td>
                                                     <td className="px-6 py-3" />
                                                     </tr>
