@@ -5,6 +5,27 @@ import FaIcon from '../common/FaIcon';
 const EMPTY_DESCRIPTION = 'Нет описания';
 const STEPS = ['Основное', 'Вес и тип', 'Описание'];
 
+const CRITERION_STAGE_CARDS = [
+  {
+    id: 'main',
+    icon: 'fa-list-check',
+    title: '1. Основное',
+    text: 'Сформулируйте короткое и понятное название критерия, чтобы его легко было найти в списке.',
+  },
+  {
+    id: 'weight',
+    icon: 'fa-bullseye',
+    title: '2. Вес и тип',
+    text: 'Укажите вес, при необходимости добавьте недочёт или переведите критерий в критичный.',
+  },
+  {
+    id: 'description',
+    icon: 'fa-circle-info',
+    title: '3. Описание',
+    text: 'Опишите правила оценки. В списке справа текст показывается в сокращённом виде, чтобы не раздувать строки.',
+  },
+];
+
 const TONE_STYLES = {
   blue: { iconBg: '#dbeafe', iconColor: '#2563eb', titleColor: '#1d4ed8', valueColor: '#111827' },
   emerald: { iconBg: '#dcfce7', iconColor: '#16a34a', titleColor: '#15803d', valueColor: '#111827' },
@@ -1099,31 +1120,100 @@ export default function MonitoringScaleView({
           transition: width .25s ease, background .25s ease;
         }
 
-        .msv-criteria-grid {
+        .msv-criteria-layout {
+          display: grid;
           grid-template-columns: 1fr;
+          gap: 24px;
+          align-items: start;
         }
 
-        .crit-card {
-          height: 100%;
-          border-radius: 18px;
+        .msv-criteria-sidebar {
+          display: flex;
+          flex-direction: column;
+          gap: 18px;
+        }
+
+        .msv-stage-list {
+          display: grid;
+          gap: 12px;
+        }
+
+        .msv-stage-card {
+          display: flex;
+          gap: 12px;
+          padding: 14px;
+          border-radius: 16px;
+          border: 1px solid #e5e7eb;
+          background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+        }
+
+        .msv-stage-badge {
+          width: 38px;
+          height: 38px;
+          border-radius: 14px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          flex-shrink: 0;
+          background: #eff6ff;
+          color: #2563eb;
+        }
+
+        .msv-stage-copy {
+          min-width: 0;
+        }
+
+        .msv-stage-title {
+          display: block;
+          margin: 0 0 4px;
+          font-size: 14px;
+          font-weight: 700;
+          color: #111827;
+        }
+
+        .msv-stage-text {
+          margin: 0;
+          font-size: 13px;
+          color: #64748b;
+          line-height: 1.6;
+        }
+
+        .msv-criteria-list {
+          display: grid;
+          gap: 10px;
+        }
+
+        .msv-criteria-grid {
+          display: grid;
+          gap: 10px;
+        }
+
+        .crit-card,
+        .msv-criteria-row {
+          display: grid;
+          grid-template-columns: minmax(0, 1.3fr) minmax(220px, 0.8fr) auto;
+          align-items: center;
+          gap: 14px;
+          padding: 14px 16px;
+          border-radius: 16px;
           border: 1px solid #e5e7eb;
           background: linear-gradient(180deg, #ffffff 0%, #fcfcfd 100%);
-          padding: 16px;
-          box-shadow: 0 12px 28px rgba(15, 23, 42, 0.04);
+          box-shadow: 0 10px 24px rgba(15, 23, 42, 0.04);
           animation: msv-slide-in .16s ease;
-        }
-
-        .crit-head {
-          justify-content: space-between;
-          gap: 12px;
-          margin-bottom: 12px;
         }
 
         .crit-main {
           display: flex;
+          align-items: flex-start;
           gap: 12px;
           min-width: 0;
           flex: 1;
+          grid-column: 1;
+        }
+
+        .crit-head,
+        .msv-criteria-row-main {
+          display: contents;
         }
 
         .crit-icon {
@@ -1138,7 +1228,26 @@ export default function MonitoringScaleView({
           color: #475569;
         }
 
-        .crit-title {
+        .crit-copy,
+        .msv-criteria-row-copy {
+          min-width: 0;
+          flex: 1;
+        }
+
+        .crit-card > .crit-copy {
+          grid-column: 2;
+          min-width: 0;
+          max-width: 360px;
+        }
+
+        .crit-actions {
+          grid-column: 3;
+          justify-self: end;
+          align-self: center;
+        }
+
+        .crit-title,
+        .msv-criteria-row-title {
           font-size: 15px;
           font-weight: 700;
           color: #111827;
@@ -1146,19 +1255,26 @@ export default function MonitoringScaleView({
           margin: 0 0 8px;
         }
 
-        .crit-copy p {
+        .crit-copy p,
+        .msv-criteria-row-text {
           margin: 0;
           font-size: 13px;
           color: #6b7280;
-          line-height: 1.65;
-          white-space: pre-wrap;
+          line-height: 1.5;
+          display: -webkit-box;
+          -webkit-box-orient: vertical;
+          -webkit-line-clamp: 2;
+          overflow: hidden;
+          text-overflow: ellipsis;
         }
 
-        .crit-copy p + p {
-          margin-top: 8px;
+        .crit-copy p + p,
+        .msv-criteria-row-text + .msv-criteria-row-text {
+          margin-top: 6px;
         }
 
-        .crit-copy .is-deficiency {
+        .crit-copy .is-deficiency,
+        .msv-criteria-row-text.is-deficiency {
           color: #9a3412;
           font-style: italic;
         }
@@ -1404,9 +1520,28 @@ export default function MonitoringScaleView({
             align-items: stretch;
           }
 
+          .crit-card,
+          .msv-criteria-row {
+            display: block;
+          }
+
           .dir-item-actions,
           .crit-actions {
             justify-content: flex-end;
+            justify-self: auto;
+            margin-top: 10px;
+          }
+
+          .crit-head {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 12px;
+          }
+
+          .crit-card > .crit-copy {
+            max-width: none;
+            margin-top: 8px;
           }
 
           .msv-select-wrap {
@@ -1432,10 +1567,6 @@ export default function MonitoringScaleView({
             padding: 22px;
           }
 
-          .msv-criteria-grid {
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-          }
-
           .msv-modal-grid {
             grid-template-columns: repeat(2, minmax(0, 1fr));
           }
@@ -1444,6 +1575,10 @@ export default function MonitoringScaleView({
         @media (min-width: 1100px) {
           .msv-directions-layout {
             grid-template-columns: minmax(340px, 400px) minmax(0, 1fr);
+          }
+
+          .msv-criteria-layout {
+            grid-template-columns: minmax(320px, 360px) minmax(0, 1fr);
           }
 
           .msv-sticky {
@@ -1455,10 +1590,6 @@ export default function MonitoringScaleView({
         @media (min-width: 1440px) {
           .msv-directions-layout {
             grid-template-columns: minmax(360px, 430px) minmax(0, 1fr);
-          }
-
-          .msv-criteria-grid {
-            grid-template-columns: repeat(3, minmax(0, 1fr));
           }
 
           .wiz-card {
@@ -1702,7 +1833,31 @@ export default function MonitoringScaleView({
         )}
 
         {activeTab === 'criteria' && (
-          <div className="msv-card">
+          <div className="msv-criteria-layout">
+            <div className="msv-card msv-criteria-sidebar msv-sticky">
+              <div className="msv-card-head" style={{ marginBottom: 0 }}>
+                <div>
+                  <h2>Р­С‚Р°РїС‹ РєСЂРёС‚РµСЂРёСЏ</h2>
+                  <p>РљР°Р¶РґС‹Р№ РєСЂРёС‚РµСЂРёР№ СЃРѕСЃС‚РѕРёС‚ РёР· С‚СЂС‘С… РѕСЃРЅРѕРІРЅС‹С… С€Р°РіРѕРІ.</p>
+                </div>
+              </div>
+
+              <div className="msv-stage-list">
+                {CRITERION_STAGE_CARDS.map((stage) => (
+                  <div key={stage.id} className="msv-stage-card">
+                    <div className="msv-stage-badge">
+                      <Icon icon={stage.icon} size={15} />
+                    </div>
+                    <div className="msv-stage-copy">
+                      <span className="msv-stage-title">{stage.title}</span>
+                      <p className="msv-stage-text">{stage.text}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="msv-card">
             <div className="msv-toolbar">
               <div className="msv-select-wrap">
                 <label className="field-label">Направление:</label>
@@ -1767,6 +1922,19 @@ export default function MonitoringScaleView({
                       background: weightPalette.iconColor,
                     }}
                   />
+                </div>
+              </div>
+            ) : null}
+
+            {selectedDirection ? (
+              <div className="msv-card-head" style={{ marginBottom: 16 }}>
+                <div>
+                  <h2>РљСЂРёС‚РµСЂРёРё РЅР°РїСЂР°РІР»РµРЅРёСЏ</h2>
+                  <p>РЎРїРёСЃРѕРє СЃРѕР±СЂР°РЅ РІ РєРѕРјРїР°РєС‚РЅС‹Рµ СЃС‚СЂРѕРєРё, С‡С‚РѕР±С‹ РѕРїРёСЃР°РЅРёСЏ РЅРµ Р·Р°РЅРёРјР°Р»Рё РјРЅРѕРіРѕ РјРµСЃС‚Р°.</p>
+                </div>
+                <div className="chip emerald">
+                  <Icon icon="fa-list-check" size={11} />
+                  {selectedDirection.criteria.length} РєСЂРёС‚РµСЂРёРµРІ
                 </div>
               </div>
             ) : null}
@@ -1861,6 +2029,7 @@ export default function MonitoringScaleView({
                 ))}
               </div>
             )}
+          </div>
           </div>
         )}
       </div>
