@@ -23360,7 +23360,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             const formulaText = formatEvaluationPlanFormula(operatorRow);
             return (
-                <div className="group relative inline-flex" title={formulaText}>
+                <div className="group relative inline-flex">
                     <div className="font-medium cursor-help underline decoration-dotted underline-offset-2 decoration-gray-400">
                         {callCount} / {planMeta.requiredCalls}
                     </div>
