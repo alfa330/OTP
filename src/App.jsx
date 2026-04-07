@@ -32538,7 +32538,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         const targetEvalCount = Number.isFinite(Number(evaluationTarget?.required_calls)) ? Number(evaluationTarget.required_calls) : 20;
                                         const remainingEvalCount = Math.max(0, targetEvalCount - evaluationCount);
                                         const workedHoursUsed = Number(evaluationTarget?.worked_hours_used ?? evaluationTarget?.accounted_hours ?? 0);
-                                        const targetNormHours = Number(evaluationTarget?.norm_hours ?? 0);
+                                        const targetNormHours = Number(evaluationTarget?.full_rate_norm_hours ?? evaluationTarget?.norm_hours ?? 0);
                                         const baseCallTarget = Number(evaluationTarget?.base_call_target ?? 20);
                                         const requiredCallsRaw = Number(evaluationTarget?.required_calls_raw ?? targetEvalCount);
                                         const hasCalculationDetails = evaluationTarget != null;
@@ -32564,7 +32564,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <p className="mt-1 text-xs text-gray-500">Всего оценок (включая не оцененные): {allEvals.length}</p>
                                                     {hasCalculationDetails && (
                                                         <p className="mt-2 text-xs text-gray-500 leading-5">
-                                                            Расчет: ({workedHoursUsed.toFixed(2)} ч / {targetNormHours.toFixed(2)} ч) x {baseCallTarget} = {requiredCallsRaw.toFixed(2)}, итог {targetEvalCount}
+                                                            Расчет: ({workedHoursUsed.toFixed(2)} ч / {targetNormHours.toFixed(2)} ч полной ставки) x {baseCallTarget} = {requiredCallsRaw.toFixed(2)}, итог {targetEvalCount}
                                                         </p>
                                                     )}
                                                 </div>

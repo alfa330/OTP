@@ -2891,25 +2891,12 @@ class Database:
         Возвращает словарь: {"month": month, "work_days": int, "processed": int}
         processed — число строк, на которые сработал INSERT/UPDATE (оценочно).
         """
-        import calendar as _py_calendar
-        from datetime import date as _date, timedelta as _td
-
         try:
             year, mon = map(int, month.split('-'))
         except Exception as e:
             raise ValueError("Invalid month format, expected YYYY-MM") from e
 
-        days_in_month = _py_calendar.monthrange(year, mon)[1]
-        start = _date(year, mon, 1)
-        end = _date(year, mon, days_in_month)
-
-        # считаем рабочие дни (понедельник=0 .. пятница=4)
-        work_days = 0
-        cur = start
-        while cur <= end:
-            if cur.weekday() < 5:
-                work_days += 1
-            cur += _td(days=1)
+        work_days = self._get_month_work_days(f"{year}-{mon:02d}")
 
         with self._get_cursor() as cursor:
             # Вставляем/обновляем norm_hours для всех операторов.
@@ -3661,6 +3648,19 @@ class Database:
             next_month_start = date(month_end_date.year, month_end_date.month + 1, 1)
         return month_start_date, next_month_start
 
+    def _get_month_work_days(self, month: Optional[str]) -> int:
+        month_start_date, next_month_start = self._get_month_date_range(month)
+        work_days = 0
+        current_date = month_start_date
+        while current_date < next_month_start:
+            if current_date.weekday() < 5:
+                work_days += 1
+            current_date += timedelta(days=1)
+        return int(work_days)
+
+    def _get_full_rate_norm_hours(self, month: Optional[str]) -> float:
+        return float(self._get_month_work_days(month) * 8.0)
+
     def _get_tenure_months_for_reference(self, hire_date_value, reference_date: Optional[date]) -> Optional[int]:
         if not hire_date_value or not reference_date:
             return None
@@ -3764,7 +3764,7 @@ class Database:
             return {
                 'hire_date_value': None,
                 'regular_hours': 0.0,
-                'norm_hours': 0.0,
+                'operator_norm_hours': 0.0,
                 'training_hours': 0.0,
                 'technical_issue_hours': 0.0,
                 'offline_activity_hours': 0.0,
@@ -3773,7 +3773,7 @@ class Database:
         return {
             'hire_date_value': row[0],
             'regular_hours': float(row[1] or 0.0),
-            'norm_hours': float(row[2] or 0.0),
+            'operator_norm_hours': float(row[2] or 0.0),
             'training_hours': float(row[3] or 0.0),
             'technical_issue_hours': float(row[4] or 0.0),
             'offline_activity_hours': float(row[5] or 0.0),
@@ -3788,7 +3788,7 @@ class Database:
         training_hours: float = 0.0,
         technical_issue_hours: float = 0.0,
         offline_activity_hours: float = 0.0,
-        norm_hours: float = 0.0
+        operator_norm_hours: float = 0.0
     ):
         month_end_date = self._get_month_end_date(target_month)
         regular_hours_value = float(regular_hours or 0.0)
@@ -3801,11 +3801,15 @@ class Database:
             + technical_issue_hours_value
             + offline_activity_hours_value
         )
-        norm_hours_value = float(norm_hours or 0.0)
+        operator_norm_hours_value = float(operator_norm_hours or 0.0)
+        work_days_value = int(self._get_month_work_days(target_month))
+        full_rate_norm_hours_value = float(self._get_full_rate_norm_hours(target_month) or 0.0)
 
         tenure_months = self._get_tenure_months_for_reference(hire_date_value, month_end_date)
         base_call_target = self._get_base_call_target_by_tenure(tenure_months)
-        worked_hours_ratio = (accounted_hours_value / norm_hours_value) if norm_hours_value > 0 else 0.0
+        worked_hours_ratio = (
+            accounted_hours_value / full_rate_norm_hours_value
+        ) if full_rate_norm_hours_value > 0 else 0.0
         required_calls_raw = float(worked_hours_ratio) * float(base_call_target)
         required_calls = int(math.ceil(required_calls_raw - 1e-9)) if required_calls_raw > 0 else 0
 
@@ -3831,7 +3835,10 @@ class Database:
             'offline_activity_hours': round(float(offline_activity_hours_value), 2),
             'accounted_hours': round(float(accounted_hours_value), 2),
             'worked_hours_used': round(float(accounted_hours_value), 2),
-            'norm_hours': round(float(norm_hours_value), 2),
+            'work_days': int(work_days_value),
+            'operator_norm_hours': round(float(operator_norm_hours_value), 2),
+            'full_rate_norm_hours': round(float(full_rate_norm_hours_value), 2),
+            'norm_hours': round(float(full_rate_norm_hours_value), 2),
             'worked_hours_ratio': round(float(worked_hours_ratio), 4),
             'required_calls_raw': round(float(required_calls_raw), 2),
             'required_calls': int(required_calls),
@@ -3851,7 +3858,7 @@ class Database:
             training_hours=source.get('training_hours'),
             technical_issue_hours=source.get('technical_issue_hours'),
             offline_activity_hours=source.get('offline_activity_hours'),
-            norm_hours=source.get('norm_hours')
+            operator_norm_hours=source.get('operator_norm_hours')
         )
 
     def get_operator_stats(self, operator_id):
@@ -4698,27 +4705,38 @@ class Database:
     def get_call_evaluations(self, operator_id, month=None, include_target: bool = False):
         """
         Возвращает оценки звонков (calls) + неоценённые звонки (imported_calls).
+        Последняя версия оценки определяется по ключу
+        (operator_id, phone_number, month, appeal_date).
         Для calls.duration -> NULL, для imported_calls.duration -> ic.duration_sec.
         """
         query = """
             WITH latest_versions AS (
                 SELECT 
+                    operator_id,
                     phone_number,
                     month,
+                    appeal_date,
                     MAX(created_at) AS latest_date
                 FROM calls
                 WHERE operator_id = %s
-                GROUP BY phone_number, month
+                GROUP BY operator_id, phone_number, month, appeal_date
             ),
             latest_calls AS (
                 SELECT 
                     c.id::text AS id_text,
+                    c.operator_id,
                     c.phone_number,
                     c.month,
+                    c.appeal_date,
                     c.created_at
                 FROM calls c
                 JOIN latest_versions lv ON 
-                    c.phone_number = lv.phone_number 
+                    c.operator_id = lv.operator_id
+                    AND (
+                        (c.appeal_date IS NULL AND lv.appeal_date IS NULL)
+                        OR c.appeal_date = lv.appeal_date
+                    )
+                    AND c.phone_number = lv.phone_number 
                     AND c.month = lv.month 
                     AND c.created_at = lv.latest_date
                 WHERE c.operator_id = %s
@@ -4826,7 +4844,7 @@ class Database:
                     training_hours=source.get('training_hours'),
                     technical_issue_hours=source.get('technical_issue_hours'),
                     offline_activity_hours=source.get('offline_activity_hours'),
-                    norm_hours=source.get('norm_hours')
+                    operator_norm_hours=source.get('operator_norm_hours')
                 )
 
             cursor.execute(query, params)
@@ -4891,7 +4909,8 @@ class Database:
         - avg_score: средний балл
 
         Логика "последней версии" соответствует get_call_evaluations:
-        берем MAX(created_at) для пары (operator_id, phone_number, month).
+        берем MAX(created_at) для пары
+        (operator_id, phone_number, month, appeal_date).
         """
         if not month:
             return {}
@@ -4924,10 +4943,11 @@ class Database:
                     operator_id,
                     phone_number,
                     month,
+                    appeal_date,
                     MAX(created_at) AS latest_date
                 FROM calls
                 WHERE {filter_clause}
-                GROUP BY operator_id, phone_number, month
+                GROUP BY operator_id, phone_number, month, appeal_date
             ),
             latest_calls AS (
                 SELECT
@@ -4938,6 +4958,10 @@ class Database:
                   ON c.operator_id = lv.operator_id
                  AND c.phone_number = lv.phone_number
                  AND c.month = lv.month
+                 AND (
+                     (c.appeal_date IS NULL AND lv.appeal_date IS NULL)
+                     OR c.appeal_date = lv.appeal_date
+                 )
                  AND c.created_at = lv.latest_date
             )
             SELECT
@@ -5258,15 +5282,17 @@ class Database:
             query = """
                 WITH latest_versions AS (
                     SELECT 
+                        operator_id,
                         phone_number,
                         month,
+                        appeal_date,
                         MAX(created_at) as latest_date
                     FROM calls
                     WHERE operator_id = %s
                     AND created_at >= %s
                     AND created_at <= %s
                     AND is_draft = FALSE
-                    GROUP BY phone_number, month
+                    GROUP BY operator_id, phone_number, month, appeal_date
                 ),
                 latest_calls AS (
                     SELECT 
@@ -5274,8 +5300,13 @@ class Database:
                         c.score
                     FROM calls c
                     JOIN latest_versions lv ON 
+                        c.operator_id = lv.operator_id AND
                         c.phone_number = lv.phone_number AND 
                         c.month = lv.month AND 
+                        (
+                            (c.appeal_date IS NULL AND lv.appeal_date IS NULL)
+                            OR c.appeal_date = lv.appeal_date
+                        ) AND
                         c.created_at = lv.latest_date
                     WHERE c.operator_id = %s
                     AND c.is_draft = FALSE
@@ -5304,7 +5335,8 @@ class Database:
             "overall": {"count": total_count, "avg_score": overall_avg}
         }
 
-        Реализация основана на логике последних версий оценок (по phone_number/operator_id/month)
+        Реализация основана на логике последних версий оценок
+        (по phone_number/operator_id/month/appeal_date)
         аналогично `get_week_call_stats`, но аггрегирует по операторам за период.
         """
         # normalize dates if strings were provided (leave as-is otherwise)
@@ -5314,11 +5346,11 @@ class Database:
 
         query = """
             WITH latest_versions AS (
-                SELECT phone_number, operator_id, month, MAX(created_at) AS latest_date
+                SELECT phone_number, operator_id, month, appeal_date, MAX(created_at) AS latest_date
                 FROM calls
                 WHERE is_draft = FALSE
                   AND created_at >= %s AND created_at <= %s
-                GROUP BY phone_number, operator_id, month
+                GROUP BY phone_number, operator_id, month, appeal_date
             )
             SELECT c.operator_id, COUNT(*) AS cnt, AVG(c.score)::float AS avg_score
             FROM calls c
@@ -5326,6 +5358,10 @@ class Database:
               ON c.phone_number = lv.phone_number
              AND c.operator_id = lv.operator_id
              AND c.month = lv.month
+             AND (
+                 (c.appeal_date IS NULL AND lv.appeal_date IS NULL)
+                 OR c.appeal_date = lv.appeal_date
+             )
              AND c.created_at = lv.latest_date
         """
 
