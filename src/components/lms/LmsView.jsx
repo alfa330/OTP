@@ -1083,6 +1083,14 @@ const toRelativeTime = (isoDate) => {
   return dt.toLocaleDateString("ru-RU");
 };
 
+const toDateInputValue = (value) => {
+  if (!value) return "";
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const timezoneOffsetMs = date.getTimezoneOffset() * 60000;
+  return new Date(date.getTime() - timezoneOffsetMs).toISOString().slice(0, 10);
+};
+
 const mapHomeCourseToView = (course) => {
   const courseId = Number(course?.course_id || 0);
   const visual = pickCourseVisual(courseId, course?.category);
@@ -1570,14 +1578,16 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
           setAdminCourses(Array.isArray(coursesRes?.courses) ? coursesRes.courses : []);
           setLearners(Array.isArray(learnersRes?.learners) ? learnersRes.learners : []);
         } else {
-          const [coursesRes, analyticsRes] = await Promise.all([
+          const [coursesRes, analyticsRes, progressRes, attemptsRes] = await Promise.all([
             lmsRequest("/api/lms/admin/courses"),
             lmsRequest("/api/lms/admin/analytics"),
+            lmsRequest("/api/lms/admin/progress").catch(() => ({ rows: [] })),
+            lmsRequest("/api/lms/admin/attempts?limit=1000").catch(() => ({ attempts: [] })),
           ]);
           setAdminCourses(Array.isArray(coursesRes?.courses) ? coursesRes.courses : []);
           setAdminAnalytics(analyticsRes && typeof analyticsRes === "object" ? analyticsRes : null);
-          setAdminProgressRows([]);
-          setAdminAttempts([]);
+          setAdminProgressRows(Array.isArray(progressRes?.rows) ? progressRes.rows : []);
+          setAdminAttempts(Array.isArray(attemptsRes?.attempts) ? attemptsRes.attempts : []);
         }
         setApiMode(true);
     } catch (error) {
@@ -1633,6 +1643,42 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
       return true;
     } catch (error) {
       emitToast(`Не удалось удалить курс: ${String(error?.message || "ошибка")}`, "error");
+      return false;
+    }
+  }, [canUseManagerApi, lmsRequest, emitToast, loadAdminData]);
+
+  const handleAssignAdminCourseToEmployee = useCallback(async ({ courseId, userId, dueDate, employeeName, courseTitle }) => {
+    if (!canUseManagerApi) {
+      emitToast("Недостаточно прав для назначения курса", "error");
+      return false;
+    }
+    if (typeof lmsRequest !== "function") {
+      emitToast("LMS API не подключен", "error");
+      return false;
+    }
+
+    const normalizedCourseId = Number(courseId || 0);
+    const normalizedUserId = Number(userId || 0);
+    if (!normalizedCourseId || !normalizedUserId) {
+      emitToast("Некорректные параметры назначения", "error");
+      return false;
+    }
+
+    try {
+      await lmsRequest(`/api/lms/admin/courses/${normalizedCourseId}/assignments`, {
+        method: "POST",
+        body: {
+          user_ids: [normalizedUserId],
+          due_at: dueDate ? `${dueDate} 23:59:59` : null,
+        },
+      });
+      const employeeLabel = String(employeeName || `#${normalizedUserId}`).trim();
+      const courseLabel = String(courseTitle || `#${normalizedCourseId}`).trim();
+      emitToast(`Курс «${courseLabel}» назначен сотруднику ${employeeLabel}`, "success");
+      await loadAdminData();
+      return true;
+    } catch (error) {
+      emitToast(`Не удалось назначить курс: ${String(error?.message || "ошибка")}`, "error");
       return false;
     }
   }, [canUseManagerApi, lmsRequest, emitToast, loadAdminData]);
@@ -1886,6 +1932,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
             loading={loadingAdmin}
             onOpenBuilder={() => setView("builder")}
             onDeleteCourse={handleDeleteAdminCourse}
+            onAssignCourseToEmployee={handleAssignAdminCourseToEmployee}
           />
         )}
       </main>
@@ -5841,8 +5888,24 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
 
 // ─── ADMIN VIEW ───────────────────────────────────────────────────────────────
 
-function AdminView({ tab, setTab, adminCourses = [], progressRows = [], attempts = [], analytics = null, loading = false, onOpenBuilder, onDeleteCourse }) {
+function AdminView({
+  tab,
+  setTab,
+  adminCourses = [],
+  progressRows = [],
+  attempts = [],
+  analytics = null,
+  loading = false,
+  onOpenBuilder,
+  onDeleteCourse,
+  onAssignCourseToEmployee,
+}) {
   const [deletingCourseId, setDeletingCourseId] = useState(null);
+  const [employeeSearch, setEmployeeSearch] = useState("");
+  const [employeeDeptFilter, setEmployeeDeptFilter] = useState("all");
+  const [selectedEmployeeId, setSelectedEmployeeId] = useState(null);
+  const [employeeCourseDeadlines, setEmployeeCourseDeadlines] = useState({});
+  const [assigningCourseId, setAssigningCourseId] = useState(null);
   const tabs = [
     { id: "analytics", label: "Аналитика", icon: BarChart2 },
     { id: "employees", label: "Сотрудники", icon: Users },
@@ -6100,6 +6163,181 @@ function AdminView({ tab, setTab, adminCourses = [], progressRows = [], attempts
     }));
   }
 
+  const normalizedEmployeeSearch = employeeSearch.trim().toLowerCase();
+  const departmentOptions = Array.from(
+    new Set(employeeRows.map((item) => String(item?.dept || "—").trim() || "—"))
+  ).sort((a, b) => a.localeCompare(b, "ru"));
+
+  const filteredEmployeeRows = employeeRows.filter((employee) => {
+    const dept = String(employee?.dept || "—").trim() || "—";
+    if (employeeDeptFilter !== "all" && dept !== employeeDeptFilter) return false;
+    if (!normalizedEmployeeSearch) return true;
+    const haystack = `${String(employee?.name || "")} ${dept}`.toLowerCase();
+    return haystack.includes(normalizedEmployeeSearch);
+  });
+
+  useEffect(() => {
+    if (tab !== "employees") return;
+    if (!filteredEmployeeRows.length) {
+      if (selectedEmployeeId != null) setSelectedEmployeeId(null);
+      return;
+    }
+    const exists = filteredEmployeeRows.some((item) => Number(item?.id || 0) === Number(selectedEmployeeId || 0));
+    if (!exists) {
+      setSelectedEmployeeId(Number(filteredEmployeeRows[0]?.id || 0) || null);
+    }
+  }, [tab, filteredEmployeeRows, selectedEmployeeId]);
+
+  const selectedEmployee = filteredEmployeeRows.find((item) => Number(item?.id || 0) === Number(selectedEmployeeId || 0))
+    || null;
+
+  const selectedEmployeeProgressRows = selectedEmployee
+    ? safeProgressRows.filter((row) => Number(row?.user_id || 0) === Number(selectedEmployee.id))
+    : [];
+
+  const selectedEmployeeAssignmentsByCourse = new Map();
+  selectedEmployeeProgressRows.forEach((row) => {
+    const courseId = Number(row?.course_id || 0);
+    if (!courseId) return;
+    selectedEmployeeAssignmentsByCourse.set(courseId, row);
+  });
+
+  const selectedEmployeeAttemptsByAssignment = new Map();
+  if (selectedEmployee) {
+    safeAttempts.forEach((attempt) => {
+      if (Number(attempt?.user_id || 0) !== Number(selectedEmployee.id)) return;
+      const assignmentId = Number(attempt?.assignment_id || 0);
+      if (!assignmentId) return;
+      const prev = selectedEmployeeAttemptsByAssignment.get(assignmentId) || [];
+      prev.push(attempt);
+      selectedEmployeeAttemptsByAssignment.set(assignmentId, prev);
+    });
+  }
+
+  const selectedEmployeeCourseAnalyticsRows = selectedEmployeeProgressRows
+    .map((row) => {
+      const assignmentId = Number(row?.assignment_id || 0);
+      const attemptsForAssignment = assignmentId
+        ? (selectedEmployeeAttemptsByAssignment.get(assignmentId) || [])
+        : [];
+
+      const testsById = new Map();
+      attemptsForAssignment.forEach((attempt) => {
+        const explicitTestId = Number(attempt?.test_id || 0);
+        const testTitle = String(attempt?.test_title || "Тест").trim() || "Тест";
+        const testKey = explicitTestId > 0 ? `id:${explicitTestId}` : `title:${testTitle.toLowerCase()}`;
+        const scoreRaw = attempt?.score_percent;
+        const hasScore = scoreRaw != null && scoreRaw !== "";
+        const score = hasScore ? Math.max(0, Math.min(100, Math.round(Number(scoreRaw) || 0))) : null;
+        const startedAt = attempt?.started_at ? new Date(attempt.started_at) : null;
+        const startedAtMs = startedAt && !Number.isNaN(startedAt.getTime()) ? startedAt.getTime() : 0;
+        const explicitFinal = attempt?.is_final === true || attempt?.is_final === 1;
+        const inferredFinal = /итог|финал|final/i.test(testTitle);
+        const prev = testsById.get(testKey) || {
+          key: testKey,
+          testId: explicitTestId || null,
+          title: testTitle,
+          attempts: 0,
+          bestScore: null,
+          lastScore: null,
+          lastAtMs: 0,
+          isFinal: false,
+          passed: false,
+        };
+        prev.attempts += 1;
+        prev.isFinal = Boolean(prev.isFinal || explicitFinal || inferredFinal);
+        if (Boolean(attempt?.passed)) prev.passed = true;
+        if (hasScore) {
+          prev.bestScore = prev.bestScore == null ? score : Math.max(prev.bestScore, score);
+          if (startedAtMs >= prev.lastAtMs) {
+            prev.lastAtMs = startedAtMs;
+            prev.lastScore = score;
+          }
+        }
+        testsById.set(testKey, prev);
+      });
+
+      const tests = Array.from(testsById.values()).sort((a, b) => {
+        if (a.isFinal !== b.isFinal) return a.isFinal ? -1 : 1;
+        if (a.lastAtMs !== b.lastAtMs) return b.lastAtMs - a.lastAtMs;
+        return String(a.title).localeCompare(String(b.title), "ru");
+      });
+      const scoredTests = tests.filter((item) => item.bestScore != null);
+      const avgTestScore = scoredTests.length
+        ? Math.round(scoredTests.reduce((sum, item) => sum + Number(item.bestScore || 0), 0) / scoredTests.length)
+        : null;
+      const finalTest = tests.find((item) => item.isFinal) || null;
+      const totalDurationSeconds = attemptsForAssignment.reduce(
+        (sum, item) => sum + Math.max(0, Number(item?.duration_seconds || 0)),
+        0
+      );
+      const uiStatus = mapAdminProgressRowToUiStatus(row);
+
+      return {
+        assignmentId,
+        courseId: Number(row?.course_id || 0),
+        title: String(row?.course_title || `Курс #${row?.course_id || "-"}`),
+        status: uiStatus,
+        deadline: row?.due_at || null,
+        progress: clampLmsProgress(row?.progress_percent),
+        completedLessons: Math.max(0, Number(row?.completed_lessons || 0)),
+        totalLessons: Math.max(0, Number(row?.total_lessons || 0)),
+        passedTests: Math.max(0, Number(row?.passed_tests || 0)),
+        totalTests: Math.max(0, Number(row?.total_tests || 0)),
+        passedIntermediateTests: Math.max(0, Number(row?.passed_intermediate_tests || 0)),
+        totalIntermediateTests: Math.max(0, Number(row?.total_intermediate_tests || 0)),
+        testDuration: formatDurationLabel(totalDurationSeconds),
+        avgTestScore,
+        finalTestScore: finalTest?.bestScore ?? null,
+        tests,
+      };
+    })
+    .sort((a, b) => {
+      const aTime = a.deadline ? new Date(a.deadline).getTime() : Number.MAX_SAFE_INTEGER;
+      const bTime = b.deadline ? new Date(b.deadline).getTime() : Number.MAX_SAFE_INTEGER;
+      return aTime - bTime;
+    });
+
+  const getEmployeeCourseDeadline = (courseId, assignmentRow) => {
+    const employeeId = Number(selectedEmployee?.id || 0);
+    const courseKey = Number(courseId || 0);
+    if (!employeeId || !courseKey) return "";
+    const key = `${employeeId}:${courseKey}`;
+    if (Object.prototype.hasOwnProperty.call(employeeCourseDeadlines, key)) {
+      return employeeCourseDeadlines[key];
+    }
+    return toDateInputValue(assignmentRow?.due_at || null);
+  };
+
+  const handleEmployeeCourseDeadlineChange = (courseId, value) => {
+    const employeeId = Number(selectedEmployee?.id || 0);
+    const courseKey = Number(courseId || 0);
+    if (!employeeId || !courseKey) return;
+    const key = `${employeeId}:${courseKey}`;
+    setEmployeeCourseDeadlines((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const handleAssignCourseForSelectedEmployee = async (courseLike) => {
+    if (!selectedEmployee || typeof onAssignCourseToEmployee !== "function") return;
+    const courseId = Number(courseLike?.id || 0);
+    if (!courseId) return;
+    const assignmentRow = selectedEmployeeAssignmentsByCourse.get(courseId);
+    const dueDate = getEmployeeCourseDeadline(courseId, assignmentRow);
+
+    setAssigningCourseId(courseId);
+    try {
+      await onAssignCourseToEmployee({
+        courseId,
+        userId: selectedEmployee.id,
+        dueDate: dueDate || null,
+        employeeName: selectedEmployee.name,
+        courseTitle: courseLike?.title,
+      });
+    } finally {
+      setAssigningCourseId((prev) => (prev === courseId ? null : prev));
+    }
+  };
+
   const handleDeleteCourse = async (courseItem) => {
     const courseId = Number(courseItem?.id || 0);
     if (!courseId || typeof onDeleteCourse !== "function") return;
@@ -6239,46 +6477,209 @@ function AdminView({ tab, setTab, adminCourses = [], progressRows = [], attempts
       )}
 
       {tab === "employees" && (
-        <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
-          <div className="px-6 py-4 border-b border-slate-100 flex items-center gap-3">
-            <div className="relative flex-1 max-w-xs"><Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" /><input placeholder="Поиск сотрудников..." className="w-full pl-9 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm placeholder-slate-400 focus:outline-none focus:border-indigo-400 transition-all" /></div>
-            <select className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-600 focus:outline-none"><option>Все отделы</option><option>HR</option><option>Разработка</option><option>Финансы</option></select>
-          </div>
-          <table className="w-full">
-            <thead>
-              <tr className="bg-slate-50 border-b border-slate-100">
-                {["Сотрудник", "Отдел", "Назначено", "Завершено", "Ср. балл", "Попытки", "Время тестов", "Просрочено"].map(h => (
-                  <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">{h}</th>
+        <div className="space-y-6">
+          <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-100 flex items-center gap-3">
+              <div className="relative flex-1 max-w-xs">
+                <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input
+                  value={employeeSearch}
+                  onChange={(event) => setEmployeeSearch(event.target.value)}
+                  placeholder="Поиск сотрудников..."
+                  className="w-full pl-9 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm placeholder-slate-400 focus:outline-none focus:border-indigo-400 transition-all"
+                />
+              </div>
+              <select
+                value={employeeDeptFilter}
+                onChange={(event) => setEmployeeDeptFilter(event.target.value)}
+                className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-600 focus:outline-none"
+              >
+                <option value="all">Все отделы</option>
+                {departmentOptions.map((dept) => (
+                  <option key={dept} value={dept}>{dept}</option>
                 ))}
-              </tr>
-            </thead>
-            <tbody>
-              {employeeRows.map(e => (
-                <tr key={e.id} className="border-b border-slate-50 hover:bg-slate-50 transition-colors">
-                  <td className="px-4 py-4">
-                    <div className="flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-400 to-violet-500 flex items-center justify-center text-white text-xs font-semibold flex-shrink-0">{e.name.split(" ").map(w => w[0]).join("").slice(0, 2)}</div>
-                      <span className="text-sm font-medium text-slate-800">{e.name}</span>
-                    </div>
-                  </td>
-                  <td className="px-4 py-4"><span className="text-xs bg-slate-100 text-slate-600 px-2.5 py-1 rounded-full font-medium">{e.dept}</span></td>
-                  <td className="px-4 py-4"><span className="text-sm font-semibold text-slate-700">{e.courses}</span></td>
-                  <td className="px-4 py-4">
-                    <div className="flex items-center gap-2">
-                      <div className="w-16 h-1.5 bg-slate-100 rounded-full overflow-hidden"><div className="h-full bg-emerald-500 rounded-full" style={{ width: `${e.courses > 0 ? (e.completed / e.courses) * 100 : 0}%` }} /></div>
-                      <span className="text-xs font-semibold text-slate-700">{e.completed}/{e.courses}</span>
-                    </div>
-                  </td>
-                  <td className="px-4 py-4"><span className={`text-xs font-bold ${e.avgScore >= 90 ? "text-emerald-600" : e.avgScore >= 75 ? "text-blue-600" : "text-red-600"}`}>{e.avgScore}%</span></td>
-                  <td className="px-4 py-4"><span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${e.attempts >= 12 ? "bg-red-50 text-red-700" : e.attempts >= 8 ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-600"}`}>{e.attempts}</span></td>
-                  <td className="px-4 py-4"><span className="text-xs text-slate-500">{e.testTime}</span></td>
-                  <td className="px-4 py-4">
-                    {e.overdue > 0 ? <span className="text-xs font-semibold text-red-600 bg-red-50 px-2.5 py-1 rounded-full">{e.overdue} просрочено</span> : <span className="text-xs text-emerald-600 font-medium">В срок</span>}
-                  </td>
+              </select>
+              <span className="text-xs text-slate-400">{filteredEmployeeRows.length} сотрудников</span>
+            </div>
+            <table className="w-full">
+              <thead>
+                <tr className="bg-slate-50 border-b border-slate-100">
+                  {["Сотрудник", "Отдел", "Назначено", "Завершено", "Ср. балл", "Попытки", "Время тестов", "Просрочено"].map(h => (
+                    <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">{h}</th>
+                  ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {filteredEmployeeRows.length === 0 && (
+                  <tr>
+                    <td colSpan={8} className="px-4 py-8 text-center text-sm text-slate-400">
+                      Сотрудники по фильтру не найдены
+                    </td>
+                  </tr>
+                )}
+                {filteredEmployeeRows.map((e) => {
+                  const isSelected = Number(selectedEmployee?.id || 0) === Number(e.id);
+                  return (
+                    <tr
+                      key={e.id}
+                      onClick={() => setSelectedEmployeeId(Number(e.id) || null)}
+                      className={`border-b border-slate-50 transition-colors cursor-pointer ${isSelected ? "bg-indigo-50/70" : "hover:bg-slate-50"}`}
+                    >
+                      <td className="px-4 py-4">
+                        <div className="flex items-center gap-3">
+                          <div className="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-400 to-violet-500 flex items-center justify-center text-white text-xs font-semibold flex-shrink-0">
+                            {String(e.name || "").split(" ").map((w) => w[0]).join("").slice(0, 2)}
+                          </div>
+                          <div className="min-w-0">
+                            <span className="text-sm font-medium text-slate-800 block truncate">{e.name}</span>
+                            <span className="text-[11px] text-slate-400">{e.lastActive || "—"}</span>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-4 py-4"><span className="text-xs bg-slate-100 text-slate-600 px-2.5 py-1 rounded-full font-medium">{e.dept}</span></td>
+                      <td className="px-4 py-4"><span className="text-sm font-semibold text-slate-700">{e.courses}</span></td>
+                      <td className="px-4 py-4">
+                        <div className="flex items-center gap-2">
+                          <div className="w-16 h-1.5 bg-slate-100 rounded-full overflow-hidden"><div className="h-full bg-emerald-500 rounded-full" style={{ width: `${e.courses > 0 ? (e.completed / e.courses) * 100 : 0}%` }} /></div>
+                          <span className="text-xs font-semibold text-slate-700">{e.completed}/{e.courses}</span>
+                        </div>
+                      </td>
+                      <td className="px-4 py-4"><span className={`text-xs font-bold ${e.avgScore >= 90 ? "text-emerald-600" : e.avgScore >= 75 ? "text-blue-600" : "text-red-600"}`}>{e.avgScore}%</span></td>
+                      <td className="px-4 py-4"><span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${e.attempts >= 12 ? "bg-red-50 text-red-700" : e.attempts >= 8 ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-600"}`}>{e.attempts}</span></td>
+                      <td className="px-4 py-4"><span className="text-xs text-slate-500">{e.testTime}</span></td>
+                      <td className="px-4 py-4">
+                        {e.overdue > 0 ? <span className="text-xs font-semibold text-red-600 bg-red-50 px-2.5 py-1 rounded-full">{e.overdue} просрочено</span> : <span className="text-xs text-emerald-600 font-medium">В срок</span>}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {selectedEmployee ? (
+            <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
+              <div className="xl:col-span-8 bg-white rounded-2xl border border-slate-200 p-6 space-y-5">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <p className="text-xs uppercase tracking-wider text-slate-400">Карточка сотрудника</p>
+                    <h3 className="text-lg font-semibold text-slate-900 mt-1">{selectedEmployee.name}</h3>
+                    <p className="text-sm text-slate-500 mt-0.5">{selectedEmployee.dept} • Активность: {selectedEmployee.lastActive || "—"}</p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="inline-flex items-center gap-1 text-xs font-semibold px-3 py-1.5 rounded-full bg-indigo-50 text-indigo-700"><BookOpen size={12} /> {selectedEmployee.courses} курсов</span>
+                    <span className="inline-flex items-center gap-1 text-xs font-semibold px-3 py-1.5 rounded-full bg-emerald-50 text-emerald-700"><CheckCircle size={12} /> {selectedEmployee.completed} завершено</span>
+                    <span className="inline-flex items-center gap-1 text-xs font-semibold px-3 py-1.5 rounded-full bg-violet-50 text-violet-700"><Target size={12} /> {selectedEmployee.avgScore}%</span>
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  {selectedEmployeeCourseAnalyticsRows.length === 0 && (
+                    <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-500 text-center">
+                      По сотруднику пока нет назначенных курсов
+                    </div>
+                  )}
+                  {selectedEmployeeCourseAnalyticsRows.map((courseItem) => {
+                    const st = statusConfig[courseItem.status] || statusConfig.not_started;
+                    const deadlineInfo = courseItem.deadline ? formatDeadline(courseItem.deadline) : null;
+                    return (
+                      <div key={`${courseItem.assignmentId || courseItem.courseId}`} className="rounded-xl border border-slate-200 p-4">
+                        <div className="flex items-start justify-between gap-4">
+                          <div className="min-w-0">
+                            <p className="text-sm font-semibold text-slate-900 truncate">{courseItem.title}</p>
+                            <div className="mt-1 flex items-center gap-2 flex-wrap">
+                              <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${st.bg} ${st.text}`}>{st.label}</span>
+                              {deadlineInfo && (
+                                <span className={`text-[11px] font-medium px-2 py-0.5 rounded-full ${deadlineInfo.overdue ? "bg-red-50 text-red-600" : deadlineInfo.urgent ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-600"}`}>Дедлайн: {deadlineInfo.label}</span>
+                              )}
+                            </div>
+                          </div>
+                          <div className="text-right"><p className="text-xs text-slate-400">Прогресс</p><p className="text-sm font-bold text-slate-800">{courseItem.progress}%</p></div>
+                        </div>
+
+                        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-2 mt-4">
+                          <div className="rounded-lg bg-slate-50 px-3 py-2"><p className="text-[10px] text-slate-400">Уроки</p><p className="text-xs font-semibold text-slate-700">{courseItem.completedLessons}/{courseItem.totalLessons}</p></div>
+                          <div className="rounded-lg bg-slate-50 px-3 py-2"><p className="text-[10px] text-slate-400">Тесты</p><p className="text-xs font-semibold text-slate-700">{courseItem.passedTests}/{courseItem.totalTests}</p></div>
+                          <div className="rounded-lg bg-slate-50 px-3 py-2"><p className="text-[10px] text-slate-400">Промежуточные</p><p className="text-xs font-semibold text-slate-700">{courseItem.passedIntermediateTests}/{courseItem.totalIntermediateTests}</p></div>
+                          <div className="rounded-lg bg-slate-50 px-3 py-2"><p className="text-[10px] text-slate-400">Средний балл</p><p className="text-xs font-semibold text-slate-700">{courseItem.avgTestScore == null ? "—" : `${courseItem.avgTestScore}%`}</p></div>
+                          <div className="rounded-lg bg-slate-50 px-3 py-2"><p className="text-[10px] text-slate-400">Итоговый тест</p><p className="text-xs font-semibold text-slate-700">{courseItem.finalTestScore == null ? "—" : `${courseItem.finalTestScore}%`}</p></div>
+                          <div className="rounded-lg bg-slate-50 px-3 py-2"><p className="text-[10px] text-slate-400">Время тестов</p><p className="text-xs font-semibold text-slate-700">{courseItem.testDuration}</p></div>
+                        </div>
+
+                        <div className="mt-4">
+                          <p className="text-xs font-semibold text-slate-600 mb-2">Баллы по тестам</p>
+                          {courseItem.tests.length === 0 ? (
+                            <p className="text-xs text-slate-400">Попыток по тестам пока нет</p>
+                          ) : (
+                            <div className="space-y-2">
+                              {courseItem.tests.map((testItem) => (
+                                <div key={testItem.key} className="flex items-center justify-between gap-3 rounded-lg border border-slate-100 px-3 py-2">
+                                  <div className="min-w-0">
+                                    <p className="text-xs text-slate-700 truncate">{testItem.title}</p>
+                                    <p className="text-[11px] text-slate-400">Попыток: {testItem.attempts}{testItem.passed ? " • пройден" : ""}{testItem.isFinal ? " • итоговый" : ""}</p>
+                                  </div>
+                                  <div className="text-right">
+                                    <p className="text-[11px] text-slate-400">Лучший / последний</p>
+                                    <p className="text-xs font-semibold text-slate-700">{testItem.bestScore == null ? "—" : `${testItem.bestScore}%`} / {testItem.lastScore == null ? "—" : `${testItem.lastScore}%`}</p>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="xl:col-span-4 bg-white rounded-2xl border border-slate-200 p-6">
+                <h3 className="text-sm font-semibold text-slate-900">Назначение курса с дедлайном</h3>
+                <p className="text-xs text-slate-500 mt-1 mb-4">Настраивайте дедлайн отдельно для каждого курса и назначайте сразу из карточки сотрудника.</p>
+                <div className="space-y-3 max-h-[640px] overflow-y-auto pr-1">
+                  {safeAdminCourses.length === 0 && (
+                    <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-5 text-xs text-slate-500 text-center">
+                      Нет доступных курсов для назначения
+                    </div>
+                  )}
+                  {safeAdminCourses.map((courseItem) => {
+                    const courseId = Number(courseItem?.id || 0);
+                    const assignmentRow = selectedEmployeeAssignmentsByCourse.get(courseId) || null;
+                    const assignmentStatus = assignmentRow ? (statusConfig[mapAdminProgressRowToUiStatus(assignmentRow)] || statusConfig.not_started) : null;
+                    const deadlineValue = getEmployeeCourseDeadline(courseId, assignmentRow);
+                    const isAssigning = assigningCourseId === courseId;
+                    return (
+                      <div key={courseId} className="rounded-xl border border-slate-200 p-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <p className="text-xs font-semibold text-slate-800 leading-5">{courseItem?.title || `Курс #${courseId}`}</p>
+                          {assignmentStatus && <span className={`text-[10px] px-2 py-0.5 rounded-full font-semibold ${assignmentStatus.bg} ${assignmentStatus.text}`}>{assignmentStatus.label}</span>}
+                        </div>
+                        <div className="mt-3 flex items-center gap-2">
+                          <input
+                            type="date"
+                            value={deadlineValue}
+                            onChange={(event) => handleEmployeeCourseDeadlineChange(courseId, event.target.value)}
+                            className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-700 focus:outline-none focus:border-indigo-400 transition-all"
+                          />
+                          <button
+                            onClick={() => { void handleAssignCourseForSelectedEmployee(courseItem); }}
+                            disabled={isAssigning || !courseId}
+                            className="px-3 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs font-semibold rounded-lg transition-colors inline-flex items-center gap-1.5"
+                          >
+                            <UserCheck size={12} /> {isAssigning ? "..." : (assignmentRow ? "Переназначить" : "Назначить")}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="bg-white rounded-2xl border border-slate-200 px-6 py-10 text-center text-sm text-slate-500">
+              Выберите сотрудника в таблице выше, чтобы открыть аналитику по курсам и назначение с дедлайнами.
+            </div>
+          )}
         </div>
       )}
 
