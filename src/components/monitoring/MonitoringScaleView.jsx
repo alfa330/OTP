@@ -1,1086 +1,1343 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useState } from 'react';
+import ToastContainer from '../common/ToastContainer';
 import FaIcon from '../common/FaIcon';
 
-const FILTER_ITEMS = [
-    { id: 'all', label: 'Все' },
-    { id: 'files', label: 'С файлами' },
-    { id: 'issues', label: 'С проблемами' }
-];
-
-const createEmptyCriterionDraft = () => ({
-    name: '',
-    weight: '',
-    value: '',
-    isCritical: false,
-    hasDeficiency: false,
-    deficiencyWeight: '',
-    deficiencyDescription: ''
-});
-
-const normalizeCriterion = (criterion) => {
-    const isCritical = Boolean(criterion?.isCritical);
-    const rawWeight = Number(criterion?.weight || 0);
-    const deficiency = criterion?.deficiency && typeof criterion.deficiency === 'object'
-        ? {
-            weight: Number(criterion.deficiency.weight || 0),
-            description: String(criterion.deficiency.description || '')
-        }
-        : null;
-
-    return {
-        name: String(criterion?.name || ''),
-        weight: isCritical ? 0 : (Number.isFinite(rawWeight) ? rawWeight : 0),
-        isCritical,
-        value: String(criterion?.value || ''),
-        deficiency: deficiency && Number.isFinite(deficiency.weight) && deficiency.weight > 0
-            ? deficiency
-            : null
-    };
-};
-
-const normalizeDirections = (directions = []) => (
-    (Array.isArray(directions) ? directions : []).map((direction, index) => ({
-        id: direction?.id ?? null,
-        _localId: String(direction?.id ?? `direction-${index}-${String(direction?.name || 'new').trim().toLowerCase()}`),
-        name: String(direction?.name || ''),
-        hasFileUpload: direction?.hasFileUpload !== false,
-        criteria: Array.isArray(direction?.criteria) ? direction.criteria.map(normalizeCriterion) : [],
-        isActive: direction?.isActive !== false
-    }))
-);
-
-const serializeDirections = (directions = []) => (
-    (Array.isArray(directions) ? directions : []).map((direction) => ({
-        name: String(direction?.name || '').trim(),
-        hasFileUpload: direction?.hasFileUpload !== false,
-        criteria: (Array.isArray(direction?.criteria) ? direction.criteria : []).map((criterion) => ({
-            name: String(criterion?.name || '').trim(),
-            weight: criterion?.isCritical ? 0 : Number(criterion?.weight || 0),
-            isCritical: Boolean(criterion?.isCritical),
-            value: String(criterion?.value || '').trim() || 'Нет описания',
-            deficiency: criterion?.deficiency && Number(criterion.deficiency.weight || 0) > 0
-                ? {
-                    weight: Number(criterion.deficiency.weight || 0),
-                    description: String(criterion.deficiency.description || '').trim() || 'Нет описания'
-                }
-                : null
-        }))
-    }))
-);
-
-const getWeightedTotal = (direction) => (
-    (Array.isArray(direction?.criteria) ? direction.criteria : [])
-        .filter((criterion) => !criterion?.isCritical)
-        .reduce((sum, criterion) => sum + Number(criterion?.weight || 0), 0)
-);
-
-const getDirectionMetrics = (direction) => {
-    const criteria = Array.isArray(direction?.criteria) ? direction.criteria : [];
-    const weightedCriteria = criteria.filter((criterion) => !criterion?.isCritical);
-    const weightedTotal = getWeightedTotal(direction);
-    const criticalCount = criteria.filter((criterion) => criterion?.isCritical).length;
-    const deficiencyCount = criteria.filter((criterion) => criterion?.deficiency).length;
-    const issues = [];
-
-    if (!String(direction?.name || '').trim()) issues.push('Нужно название направления');
-    if (criteria.length === 0) issues.push('Нет критериев');
-    if (weightedCriteria.length > 0 && weightedTotal !== 100) issues.push(`Вес: ${weightedTotal}/100`);
-
-    return {
-        criteriaCount: criteria.length,
-        weightedCount: weightedCriteria.length,
-        weightedTotal,
-        criticalCount,
-        deficiencyCount,
-        isBalanced: weightedCriteria.length === 0 || weightedTotal === 100,
-        issues
-    };
-};
-
-const scoreToneClass = (weightedTotal, weightedCount) => {
-    if (weightedCount === 0) return 'text-slate-500';
-    if (weightedTotal === 100) return 'text-emerald-600';
-    if (weightedTotal > 100) return 'text-red-600';
-    return 'text-amber-600';
-};
-
-const MonitoringScaleView = ({
-    directions = [],
-    loading = false,
-    onRefresh,
-    onSave,
-    showToast,
-    canEdit = true
-}) => {
-    const tempDirectionIdRef = useRef(1);
-    const sourceDirections = useMemo(() => normalizeDirections(directions), [directions]);
-    const [draftDirections, setDraftDirections] = useState(sourceDirections);
-    const [selectedDirectionId, setSelectedDirectionId] = useState(sourceDirections[0]?._localId || '');
-    const [searchQuery, setSearchQuery] = useState('');
-    const [activeFilter, setActiveFilter] = useState('all');
-    const [criterionDraft, setCriterionDraft] = useState(createEmptyCriterionDraft());
+const MonitoringScaleSection = ({ initialDirections, onSave }) => {
+    const [directions, setDirections] = useState(initialDirections || []);
+    const [newDirectionName, setNewDirectionName] = useState('');
+    const [newDirectionFileUpload, setNewDirectionFileUpload] = useState(true);
+    const [editingDirectionIndex, setEditingDirectionIndex] = useState(null);
+    const [isEditingDirection, setIsEditingDirection] = useState(false);
+    const [selectedDirectionIndex, setSelectedDirectionIndex] = useState(0);
+    const [newCriterionName, setNewCriterionName] = useState('');
+    const [newCriterionWeight, setNewCriterionWeight] = useState('');
+    const [newCriterionValue, setNewCriterionValue] = useState('');
+    const [newCriterionCritical, setNewCriterionCritical] = useState(false);
     const [editingCriterionIndex, setEditingCriterionIndex] = useState(null);
+    const [isEditingCriterion, setIsEditingCriterion] = useState(false);
+    const [activeTab, setActiveTab] = useState('directions');
+    const [isLoading, setIsLoading] = useState(false);
+    const [newCriterionHasDeficiency, setNewCriterionHasDeficiency] = useState(false);
+    const [newDeficiencyWeight, setNewDeficiencyWeight] = useState('');
+    const [newDeficiencyDescription, setNewDeficiencyDescription] = useState('');
+    const [toasts, setToasts] = useState([]);
 
-    const notify = (message, type = 'info') => {
-        if (typeof showToast === 'function') {
-            showToast(message, type);
-            return;
-        }
-        if (type === 'error') {
-            console.error(message);
-            return;
-        }
-        console.warn(message);
+    const showToast = (message, type = 'success') => {
+        const id = Date.now();
+        setToasts(prev => [...prev, { id, message, type, closing: false }]);
+        setTimeout(() => {
+            setToasts(prev => prev.map(t => t.id === id ? { ...t, closing: true } : t));
+            setTimeout(() => removeToast(id), 300);
+        }, 5000);
     };
 
-    useEffect(() => {
-        setDraftDirections(sourceDirections);
-        setSelectedDirectionId((prev) => {
-            if (sourceDirections.length === 0) return '';
-            if (sourceDirections.some((direction) => direction._localId === prev)) return prev;
+    const removeToast = (id) => {
+        setToasts(prev => prev.filter(toast => toast.id !== id));
+    };
 
-            const previousDirection = draftDirections.find((direction) => direction._localId === prev);
-            if (previousDirection?.id != null) {
-                const byId = sourceDirections.find((direction) => Number(direction.id) === Number(previousDirection.id));
-                if (byId) return byId._localId;
-            }
-            if (previousDirection?.name) {
-                const byName = sourceDirections.find((direction) => direction.name === previousDirection.name);
-                if (byName) return byName._localId;
-            }
-            return sourceDirections[0]._localId;
-        });
-    }, [sourceDirections]);
-
-    const selectedDirection = useMemo(
-        () => draftDirections.find((direction) => direction._localId === selectedDirectionId) || null,
-        [draftDirections, selectedDirectionId]
-    );
-
-    useEffect(() => {
-        setCriterionDraft(createEmptyCriterionDraft());
-        setEditingCriterionIndex(null);
-    }, [selectedDirectionId]);
-
-    const selectedMetrics = useMemo(() => getDirectionMetrics(selectedDirection), [selectedDirection]);
-
-    const sourceSerialized = useMemo(
-        () => JSON.stringify(serializeDirections(sourceDirections)),
-        [sourceDirections]
-    );
-    const draftSerialized = useMemo(
-        () => JSON.stringify(serializeDirections(draftDirections)),
-        [draftDirections]
-    );
-    const hasUnsavedChanges = sourceSerialized !== draftSerialized;
-
-    const aggregateStats = useMemo(() => {
-        const metrics = draftDirections.map((direction) => getDirectionMetrics(direction));
-        return {
-            directionsCount: draftDirections.length,
-            criteriaCount: metrics.reduce((sum, item) => sum + item.criteriaCount, 0),
-            criticalCount: metrics.reduce((sum, item) => sum + item.criticalCount, 0),
-            deficiencyCount: metrics.reduce((sum, item) => sum + item.deficiencyCount, 0),
-            balancedCount: metrics.filter((item) => item.isBalanced).length,
-            issuesCount: metrics.reduce((sum, item) => sum + item.issues.length, 0)
-        };
-    }, [draftDirections]);
-
-    const visibleDirections = useMemo(() => {
-        const query = searchQuery.trim().toLowerCase();
-        return draftDirections.filter((direction) => {
-            const metrics = getDirectionMetrics(direction);
-            const searchableText = [
-                direction.name,
-                ...(Array.isArray(direction.criteria) ? direction.criteria.map((criterion) => criterion?.name || '') : [])
-            ].join(' ').toLowerCase();
-
-            const matchesQuery = !query || searchableText.includes(query);
-            const matchesFilter =
-                activeFilter === 'all' ||
-                (activeFilter === 'files' && direction.hasFileUpload) ||
-                (activeFilter === 'issues' && metrics.issues.length > 0);
-
-            return matchesQuery && matchesFilter;
-        });
-    }, [activeFilter, draftDirections, searchQuery]);
-
-    const updateSelectedDirection = (updater) => {
-        if (!selectedDirectionId) return;
-        setDraftDirections((prev) => prev.map((direction) => (
-            direction._localId === selectedDirectionId ? updater(direction) : direction
-        )));
+    const totalWeight = (directionIndex) => {
+        return directions[directionIndex]?.criteria
+            .filter(criterion => !criterion.isCritical)
+            .reduce((sum, c) => sum + Number(c.weight), 0) || 0;
     };
 
     const handleAddDirection = () => {
-        const localId = `temp-direction-${tempDirectionIdRef.current++}`;
-        setDraftDirections((prev) => [
-            ...prev,
-            { id: null, _localId: localId, name: '', hasFileUpload: true, criteria: [], isActive: true }
-        ]);
-        setSelectedDirectionId(localId);
+        if (!newDirectionName) {
+            showToast('Пожалуйста, введите название направления.', 'error');
+            return;
+        }
+        setDirections([...directions, { name: newDirectionName, hasFileUpload: newDirectionFileUpload, criteria: [] }]);
+        setNewDirectionName('');
+        setNewDirectionFileUpload(true);
+        setIsEditingDirection(false);
+        setEditingDirectionIndex(null);
+        setSelectedDirectionIndex(directions.length);
     };
 
-    const handleDeleteDirection = (direction) => {
-        if (!direction) return;
-        const directionName = String(direction.name || 'без названия').trim() || 'без названия';
-        const isConfirmed = typeof window === 'undefined'
-            ? true
-            : window.confirm(`Удалить направление «${directionName}» со всеми критериями?`);
+    const handleEditDirection = () => {
+        if (!newDirectionName) {
+            showToast('Пожалуйста, введите название направления.', 'error');
+            return;
+        }
+        setDirections(directions.map((direction, index) =>
+            index === editingDirectionIndex
+                ? { ...direction, name: newDirectionName, hasFileUpload: newDirectionFileUpload }
+                : direction
+        ));
+        setNewDirectionName('');
+        setNewDirectionFileUpload(true);
+        setIsEditingDirection(false);
+        setEditingDirectionIndex(null);
+    };
 
-        if (!isConfirmed) return;
+    const handleStartEditDirection = (index) => {
+        setNewDirectionName(directions[index].name);
+        setNewDirectionFileUpload(directions[index].hasFileUpload);
+        setEditingDirectionIndex(index);
+        setIsEditingDirection(true);
+        setSelectedDirectionIndex(index);
+    };
 
-        setDraftDirections((prev) => {
-            const nextDirections = prev.filter((item) => item._localId !== direction._localId);
-            if (selectedDirectionId === direction._localId) {
-                setSelectedDirectionId(nextDirections[0]?._localId || '');
+    const handleDeleteDirection = (index) => {
+        setDirections(directions.filter((_, i) => i !== index));
+        if (selectedDirectionIndex === index) {
+            setSelectedDirectionIndex(directions.length - 1 > 0 ? 0 : 0);
+        }
+        if (editingDirectionIndex === index) {
+            setNewDirectionName('');
+            setNewDirectionFileUpload(true);
+            setIsEditingDirection(false);
+            setEditingDirectionIndex(null);
+        }
+    };
+
+    const handleAddCriterion = () => {
+        if (!newCriterionName) {
+            showToast('Пожалуйста, введите название критерия.', 'error');
+            return;
+        }
+        if (!newCriterionCritical) {
+            if (!newCriterionWeight) {
+                showToast('Пожалуйста, введите вес для некритического критерия.', 'error');
+                return;
             }
-            return nextDirections;
-        });
+            const weight = Number(newCriterionWeight);
+            if (isNaN(weight) || weight <= 0) {
+                showToast('Вес должен быть положительным числом.', 'error');
+                return;
+            }
+            if (totalWeight(selectedDirectionIndex) + weight > 100) {
+                showToast('Общий вес некритических критериев не может превышать 100.', 'error');
+                return;
+            }
+            if (newCriterionHasDeficiency) {
+                const defWeight = Number(newDeficiencyWeight);
+                if (isNaN(defWeight) || defWeight <= 0 || defWeight > weight) {
+                    showToast('Вес недочета должен быть больше 0 и меньше веса критерия.', 'error');
+                    return;
+                }
+            }
+        }
+        setDirections(directions.map((direction, index) => {
+            if (index === selectedDirectionIndex) {
+                return {
+                    ...direction,
+                    criteria: [...direction.criteria, {
+                        name: newCriterionName,
+                        weight: newCriterionCritical ? 0 : Number(newCriterionWeight),
+                        isCritical: newCriterionCritical,
+                        value: newCriterionValue || 'Нет описания',
+                        deficiency: newCriterionHasDeficiency ? {
+                            weight: Number(newDeficiencyWeight),
+                            description: newDeficiencyDescription || 'Нет описания'
+                        } : null
+                    }]
+                };
+            }
+            return direction;
+        }));
+        resetCriterionForm();
     };
 
-    const resetCriterionEditor = () => {
-        setCriterionDraft(createEmptyCriterionDraft());
-        setEditingCriterionIndex(null);
+    const handleEditCriterion = () => {
+        if (!newCriterionName) {
+            showToast('Пожалуйста, введите название критерия.', 'error');
+            return;
+        }
+        if (!newCriterionCritical) {
+            if (!newCriterionWeight) {
+                showToast('Пожалуйста, введите вес для некритического критерия.', 'error');
+                return;
+            }
+            const weight = Number(newCriterionWeight);
+            if (isNaN(weight) || weight <= 0) {
+                showToast('Вес должен быть положительным числом.', 'error');
+                return;
+            }
+            const newTotalWeight = totalWeight(selectedDirectionIndex) -
+                (directions[selectedDirectionIndex].criteria[editingCriterionIndex]?.isCritical ? 0 :
+                    directions[selectedDirectionIndex].criteria[editingCriterionIndex]?.weight || 0) + weight;
+            if (newTotalWeight > 100) {
+                showToast('Общий вес некритических критериев не может превышать 100.', 'error');
+                return;
+            }
+        }
+        setDirections(directions.map((direction, index) => {
+            if (index === selectedDirectionIndex) {
+                return {
+                    ...direction,
+                    criteria: direction.criteria.map((criterion, i) =>
+                        i === editingCriterionIndex ? {
+                            name: newCriterionName,
+                            weight: newCriterionCritical ? 0 : Number(newCriterionWeight),
+                            isCritical: newCriterionCritical,
+                            value: newCriterionValue || 'Нет описания',
+                            deficiency: newCriterionHasDeficiency ? {
+                                weight: Number(newDeficiencyWeight),
+                                description: newDeficiencyDescription || 'Нет описания'
+                            } : null
+                        } : criterion
+                    )
+                };
+            }
+            return direction;
+        }));
+        resetCriterionForm();
     };
 
-    const validateCriterionDraft = () => {
-        if (!selectedDirection) {
-            notify('Сначала выберите направление.', 'error');
-            return null;
+    const handleStartEditCriterion = (index) => {
+        const criterion = directions[selectedDirectionIndex].criteria[index];
+        setNewCriterionName(criterion.name);
+        setNewCriterionWeight(criterion.isCritical ? '' : criterion.weight);
+        setNewCriterionValue(criterion.value);
+        setNewCriterionCritical(criterion.isCritical);
+
+        if (criterion.deficiency) {
+            setNewCriterionHasDeficiency(true);
+            setNewDeficiencyWeight(criterion.deficiency.weight);
+            setNewDeficiencyDescription(criterion.deficiency.description);
+        } else {
+            setNewCriterionHasDeficiency(false);
+            setNewDeficiencyWeight('');
+            setNewDeficiencyDescription('');
         }
 
-        const name = criterionDraft.name.trim();
-        if (!name) {
-            notify('Введите название критерия.', 'error');
-            return null;
-        }
-
-        const baseCriterion = editingCriterionIndex != null
-            ? selectedDirection.criteria[editingCriterionIndex]
-            : null;
-        const reservedWeight = baseCriterion && !baseCriterion.isCritical ? Number(baseCriterion.weight || 0) : 0;
-        const currentWeightedTotal = getWeightedTotal(selectedDirection) - reservedWeight;
-
-        let normalizedWeight = 0;
-        if (!criterionDraft.isCritical) {
-            normalizedWeight = Number(criterionDraft.weight);
-            if (!Number.isFinite(normalizedWeight) || normalizedWeight <= 0) {
-                notify('Вес критерия должен быть больше 0.', 'error');
-                return null;
-            }
-            if (currentWeightedTotal + normalizedWeight > 100) {
-                notify(`Сумма весов в направлении не может превышать 100. Доступно: ${Math.max(0, 100 - currentWeightedTotal)}%.`, 'error');
-                return null;
-            }
-        }
-
-        let deficiency = null;
-        if (!criterionDraft.isCritical && criterionDraft.hasDeficiency) {
-            const deficiencyWeight = Number(criterionDraft.deficiencyWeight);
-            if (!Number.isFinite(deficiencyWeight) || deficiencyWeight <= 0) {
-                notify('Вес недочета должен быть больше 0.', 'error');
-                return null;
-            }
-            if (deficiencyWeight > normalizedWeight) {
-                notify('Вес недочета не может быть больше веса критерия.', 'error');
-                return null;
-            }
-            deficiency = {
-                weight: deficiencyWeight,
-                description: criterionDraft.deficiencyDescription.trim() || 'Нет описания'
-            };
-        }
-
-        return {
-            name,
-            weight: criterionDraft.isCritical ? 0 : normalizedWeight,
-            isCritical: criterionDraft.isCritical,
-            value: criterionDraft.value.trim() || 'Нет описания',
-            deficiency
-        };
-    };
-
-    const handleSubmitCriterion = () => {
-        const nextCriterion = validateCriterionDraft();
-        if (!nextCriterion) return;
-
-        updateSelectedDirection((direction) => {
-            const criteria = Array.isArray(direction.criteria) ? [...direction.criteria] : [];
-            if (editingCriterionIndex != null) {
-                criteria[editingCriterionIndex] = nextCriterion;
-            } else {
-                criteria.push(nextCriterion);
-            }
-            return { ...direction, criteria };
-        });
-
-        resetCriterionEditor();
-    };
-
-    const handleEditCriterion = (criterion, index) => {
-        setCriterionDraft({
-            name: String(criterion?.name || ''),
-            weight: criterion?.isCritical ? '' : String(criterion?.weight ?? ''),
-            value: String(criterion?.value || ''),
-            isCritical: Boolean(criterion?.isCritical),
-            hasDeficiency: Boolean(criterion?.deficiency),
-            deficiencyWeight: criterion?.deficiency ? String(criterion.deficiency.weight ?? '') : '',
-            deficiencyDescription: criterion?.deficiency ? String(criterion.deficiency.description || '') : ''
-        });
         setEditingCriterionIndex(index);
+        setIsEditingCriterion(true);
     };
 
     const handleDeleteCriterion = (index) => {
-        if (!selectedDirection) return;
-        const criterionName = selectedDirection.criteria[index]?.name || 'без названия';
-        const isConfirmed = typeof window === 'undefined'
-            ? true
-            : window.confirm(`Удалить критерий «${criterionName}»?`);
-        if (!isConfirmed) return;
-
-        updateSelectedDirection((direction) => ({
-            ...direction,
-            criteria: direction.criteria.filter((_, criterionIndex) => criterionIndex !== index)
+        setDirections(directions.map((direction, i) => {
+            if (i === selectedDirectionIndex) {
+                return {
+                    ...direction,
+                    criteria: direction.criteria.filter((_, j) => j !== index)
+                };
+            }
+            return direction;
         }));
-
         if (editingCriterionIndex === index) {
-            resetCriterionEditor();
+            resetCriterionForm();
         }
     };
 
-    const validateBeforeSave = () => {
-        const cleanedDirections = serializeDirections(draftDirections);
-        if (cleanedDirections.length === 0) {
-            notify('Добавьте хотя бы одно направление.', 'error');
-            return null;
-        }
-
-        const duplicateNames = new Set();
-        const seenNames = new Set();
-        cleanedDirections.forEach((direction) => {
-            const normalizedName = direction.name.toLowerCase();
-            if (!normalizedName) return;
-            if (seenNames.has(normalizedName)) {
-                duplicateNames.add(direction.name);
-            } else {
-                seenNames.add(normalizedName);
-            }
-        });
-
-        if (duplicateNames.size > 0) {
-            notify(`Повторяются названия направлений: ${Array.from(duplicateNames).join(', ')}.`, 'error');
-            return null;
-        }
-
-        for (const direction of cleanedDirections) {
-            if (!direction.name) {
-                notify('У каждого направления должно быть название.', 'error');
-                return null;
-            }
-
-            const weightedCriteria = direction.criteria.filter((criterion) => !criterion.isCritical);
-            const weightedTotal = weightedCriteria.reduce((sum, criterion) => sum + Number(criterion.weight || 0), 0);
-            if (weightedCriteria.length > 0 && weightedTotal !== 100) {
-                notify(`В направлении «${direction.name}» сумма весов должна быть ровно 100. Сейчас: ${weightedTotal}.`, 'error');
-                return null;
-            }
-        }
-
-        return cleanedDirections;
+    const resetCriterionForm = () => {
+        setNewCriterionName('');
+        setNewCriterionWeight('');
+        setNewCriterionValue('');
+        setNewCriterionCritical(false);
+        setNewCriterionHasDeficiency(false);
+        setNewDeficiencyWeight('');
+        setNewDeficiencyDescription('');
+        setEditingCriterionIndex(null);
+        setIsEditingCriterion(false);
     };
 
     const handleSave = async () => {
-        const cleanedDirections = validateBeforeSave();
-        if (!cleanedDirections || typeof onSave !== 'function') return;
-        await onSave(cleanedDirections);
+        const invalidDirection = directions.find((direction, index) =>
+            direction.criteria.some(c => !c.isCritical) && totalWeight(index) !== 100
+        );
+        if (invalidDirection) {
+            showToast(`Общий вес некритических критериев в "${invalidDirection.name}" должен равняться 100. Текущий: ${totalWeight(directions.indexOf(invalidDirection))}/100`, 'error');
+            return;
+        }
+        setIsLoading(true);
+        try {
+            await onSave(directions);
+            showToast('Мониторинговая шкала успешно сохранена', 'success');
+        } catch (error) {
+            console.error('Error saving directions:', error);
+            showToast('Не удалось сохранить. Пожалуйста, попробуйте снова.', 'error');
+        } finally {
+            setIsLoading(false);
+        }
     };
 
-    const remainingWeight = useMemo(() => {
-        if (!selectedDirection) return 100;
-        const originalCriterion = editingCriterionIndex != null
-            ? selectedDirection.criteria[editingCriterionIndex]
-            : null;
-        const reservedWeight = originalCriterion && !originalCriterion.isCritical ? Number(originalCriterion.weight || 0) : 0;
-        return Math.max(0, 100 - (getWeightedTotal(selectedDirection) - reservedWeight));
-    }, [editingCriterionIndex, selectedDirection]);
-
     return (
-        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-            <div className="px-6 py-5 border-b border-slate-200 bg-gradient-to-r from-slate-50 via-white to-slate-50">
-                <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
-                    <div>
-                        <div className="flex items-center gap-3">
-                            <div className="w-11 h-11 rounded-2xl bg-blue-50 text-blue-600 border border-blue-100 flex items-center justify-center">
-                                <FaIcon className="fas fa-sliders-h text-lg" />
-                            </div>
-                            <div>
-                                <h2 className="text-xl font-semibold text-slate-900">Мониторинговая шкала</h2>
-                                <p className="text-sm text-slate-500 mt-0.5">
-                                    Полноценный рабочий раздел для направлений, критериев и контроля веса шкалы.
-                                </p>
-                            </div>
-                        </div>
-                        {loading && (
-                            <p className="mt-3 text-xs font-medium text-blue-600 flex items-center gap-2">
-                                <FaIcon className="fas fa-spinner fa-spin" />
-                                Обновляем данные шкалы...
-                            </p>
-                        )}
-                    </div>
-
-                    <div className="flex flex-wrap gap-2">
-                        <button
-                            type="button"
-                            onClick={() => onRefresh?.()}
-                            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 transition"
-                        >
-                            <FaIcon className="fas fa-rotate-right" />
-                            Обновить
-                        </button>
-                        <button
-                            type="button"
-                            onClick={handleAddDirection}
-                            disabled={!canEdit}
-                            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 transition disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                            <FaIcon className="fas fa-plus" />
-                            Добавить направление
-                        </button>
-                        <button
-                            type="button"
-                            onClick={() => { void handleSave(); }}
-                            disabled={!canEdit || !hasUnsavedChanges || loading}
-                            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-blue-600 text-white hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                            <FaIcon className="fas fa-save" />
-                            Сохранить шкалу
-                        </button>
-                    </div>
-                </div>
-
-                <div className="mt-5 flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-                    <div className="relative w-full xl:max-w-md">
-                        <FaIcon className="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm" />
-                        <input
-                            type="text"
-                            value={searchQuery}
-                            onChange={(event) => setSearchQuery(event.target.value)}
-                            placeholder="Поиск по направлениям и критериям..."
-                            className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-slate-200 bg-white text-sm text-slate-700 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                        />
-                    </div>
-
-                    <div className="flex flex-wrap items-center gap-2">
-                        {FILTER_ITEMS.map((filter) => (
-                            <button
-                                key={filter.id}
-                                type="button"
-                                onClick={() => setActiveFilter(filter.id)}
-                                className={`px-3 py-2 rounded-xl text-sm font-medium transition ${
-                                    activeFilter === filter.id
-                                        ? 'bg-slate-900 text-white shadow-sm'
-                                        : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'
-                                }`}
-                            >
-                                {filter.label}
-                            </button>
-                        ))}
-                    </div>
-                </div>
-            </div>
-
-            <div className="bg-slate-100 flex flex-col lg:flex-row gap-px border-b border-slate-200">
-                {[
-                    {
-                        label: 'Направления',
-                        value: aggregateStats.directionsCount,
-                        sub: 'активных блоков шкалы',
-                        icon: 'fas fa-layer-group',
-                        tone: 'text-blue-600 bg-blue-50'
-                    },
-                    {
-                        label: 'Критерии',
-                        value: aggregateStats.criteriaCount,
-                        sub: `${aggregateStats.criticalCount} критических`,
-                        icon: 'fas fa-list-check',
-                        tone: 'text-emerald-600 bg-emerald-50'
-                    },
-                    {
-                        label: 'Сбалансированы',
-                        value: `${aggregateStats.balancedCount}/${aggregateStats.directionsCount || 0}`,
-                        sub: 'с весом 100/100',
-                        icon: 'fas fa-scale-balanced',
-                        tone: 'text-violet-600 bg-violet-50'
-                    },
-                    {
-                        label: 'Проблемы',
-                        value: aggregateStats.issuesCount,
-                        sub: `${aggregateStats.deficiencyCount} недочетов в шкале`,
-                        icon: 'fas fa-triangle-exclamation',
-                        tone: 'text-amber-600 bg-amber-50'
+        <div className="monitoring-scale-section">
+            <style>{`
+                @import url('https://fonts.googleapis.com/css2?family=Crimson+Pro:wght@400;600;700&family=Work+Sans:wght@300;400;500;600&display=swap');
+                
+                .monitoring-scale-section {
+                    min-height: 100vh;
+                    background: linear-gradient(135deg, #f8f9fc 0%, #eef1f7 100%);
+                    font-family: 'Work Sans', sans-serif;
+                    color: #1a2332;
+                    position: relative;
+                    overflow: hidden;
+                }
+                
+                .monitoring-scale-section::before {
+                    content: '';
+                    position: fixed;
+                    top: -50%;
+                    right: -20%;
+                    width: 800px;
+                    height: 800px;
+                    background: radial-gradient(circle, rgba(99, 102, 241, 0.08) 0%, transparent 70%);
+                    border-radius: 50%;
+                    pointer-events: none;
+                    animation: float 20s ease-in-out infinite;
+                }
+                
+                .monitoring-scale-section::after {
+                    content: '';
+                    position: fixed;
+                    bottom: -30%;
+                    left: -10%;
+                    width: 600px;
+                    height: 600px;
+                    background: radial-gradient(circle, rgba(139, 92, 246, 0.06) 0%, transparent 70%);
+                    border-radius: 50%;
+                    pointer-events: none;
+                    animation: float 25s ease-in-out infinite reverse;
+                }
+                
+                @keyframes float {
+                    0%, 100% { transform: translate(0, 0) rotate(0deg); }
+                    33% { transform: translate(30px, -30px) rotate(120deg); }
+                    66% { transform: translate(-20px, 20px) rotate(240deg); }
+                }
+                
+                .content-wrapper {
+                    position: relative;
+                    z-index: 1;
+                    display: flex;
+                    min-height: 100vh;
+                }
+                
+                .sidebar {
+                    width: 280px;
+                    background: rgba(255, 255, 255, 0.95);
+                    backdrop-filter: blur(20px);
+                    border-right: 1px solid rgba(99, 102, 241, 0.1);
+                    padding: 2rem 0;
+                    position: sticky;
+                    top: 0;
+                    height: 100vh;
+                    overflow-y: auto;
+                    animation: slideInLeft 0.6s ease-out;
+                }
+                
+                @keyframes slideInLeft {
+                    from {
+                        opacity: 0;
+                        transform: translateX(-30px);
                     }
-                ].map((item) => (
-                    <div key={item.label} className="flex-1 min-w-0 bg-white px-6 py-4 flex items-center gap-3">
-                        <div className={`w-10 h-10 rounded-2xl flex items-center justify-center border border-current/10 ${item.tone}`}>
-                            <FaIcon className={item.icon} />
+                    to {
+                        opacity: 1;
+                        transform: translateX(0);
+                    }
+                }
+                
+                .sidebar-header {
+                    padding: 0 2rem 2rem;
+                    border-bottom: 1px solid rgba(99, 102, 241, 0.1);
+                }
+                
+                .sidebar-title {
+                    font-family: 'Crimson Pro', serif;
+                    font-size: 1.75rem;
+                    font-weight: 700;
+                    color: #1a2332;
+                    margin-bottom: 0.5rem;
+                    letter-spacing: -0.02em;
+                }
+                
+                .sidebar-subtitle {
+                    font-size: 0.875rem;
+                    color: #64748b;
+                    font-weight: 300;
+                }
+                
+                .nav-tabs {
+                    padding: 1.5rem 1rem;
+                }
+                
+                .nav-tab {
+                    display: flex;
+                    align-items: center;
+                    padding: 0.875rem 1rem;
+                    margin-bottom: 0.5rem;
+                    border-radius: 12px;
+                    font-size: 0.9375rem;
+                    font-weight: 500;
+                    color: #64748b;
+                    cursor: pointer;
+                    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+                    border: 1px solid transparent;
+                }
+                
+                .nav-tab:hover {
+                    background: rgba(99, 102, 241, 0.05);
+                    color: #4f46e5;
+                    transform: translateX(4px);
+                }
+                
+                .nav-tab.active {
+                    background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+                    color: white;
+                    border: 1px solid rgba(255, 255, 255, 0.2);
+                    box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+                }
+                
+                .nav-tab-icon {
+                    width: 20px;
+                    height: 20px;
+                    margin-right: 0.75rem;
+                }
+                
+                .main-content {
+                    flex: 1;
+                    padding: 3rem;
+                    animation: fadeInUp 0.8s ease-out 0.2s both;
+                }
+                
+                @keyframes fadeInUp {
+                    from {
+                        opacity: 0;
+                        transform: translateY(20px);
+                    }
+                    to {
+                        opacity: 1;
+                        transform: translateY(0);
+                    }
+                }
+                
+                .page-header {
+                    margin-bottom: 2.5rem;
+                }
+                
+                .page-title {
+                    font-family: 'Crimson Pro', serif;
+                    font-size: 2.5rem;
+                    font-weight: 700;
+                    color: #1a2332;
+                    margin-bottom: 0.75rem;
+                    letter-spacing: -0.03em;
+                }
+                
+                .page-description {
+                    font-size: 1rem;
+                    color: #64748b;
+                    max-width: 600px;
+                    line-height: 1.6;
+                }
+                
+                .card {
+                    background: white;
+                    border-radius: 20px;
+                    padding: 2rem;
+                    margin-bottom: 1.5rem;
+                    border: 1px solid rgba(99, 102, 241, 0.08);
+                    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.02), 0 8px 24px rgba(99, 102, 241, 0.04);
+                    transition: all 0.3s ease;
+                }
+                
+                .card:hover {
+                    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.04), 0 12px 32px rgba(99, 102, 241, 0.08);
+                    transform: translateY(-2px);
+                }
+                
+                .card-title {
+                    font-family: 'Crimson Pro', serif;
+                    font-size: 1.375rem;
+                    font-weight: 600;
+                    color: #1a2332;
+                    margin-bottom: 1.5rem;
+                    display: flex;
+                    align-items: center;
+                }
+                
+                .card-title-icon {
+                    width: 24px;
+                    height: 24px;
+                    margin-right: 0.75rem;
+                    color: #6366f1;
+                }
+                
+                .form-group {
+                    margin-bottom: 1.5rem;
+                }
+                
+                .form-label {
+                    display: block;
+                    font-size: 0.875rem;
+                    font-weight: 600;
+                    color: #475569;
+                    margin-bottom: 0.5rem;
+                    letter-spacing: 0.01em;
+                }
+                
+                .form-input {
+                    width: 100%;
+                    padding: 0.875rem 1rem;
+                    border: 2px solid #e2e8f0;
+                    border-radius: 12px;
+                    font-size: 0.9375rem;
+                    color: #1a2332;
+                    transition: all 0.2s ease;
+                    background: white;
+                }
+                
+                .form-input:focus {
+                    outline: none;
+                    border-color: #6366f1;
+                    box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.1);
+                }
+                
+                .form-input::placeholder {
+                    color: #94a3b8;
+                }
+                
+                .form-textarea {
+                    width: 100%;
+                    padding: 0.875rem 1rem;
+                    border: 2px solid #e2e8f0;
+                    border-radius: 12px;
+                    font-size: 0.9375rem;
+                    color: #1a2332;
+                    transition: all 0.2s ease;
+                    background: white;
+                    resize: vertical;
+                    min-height: 100px;
+                    font-family: 'Work Sans', sans-serif;
+                }
+                
+                .form-textarea:focus {
+                    outline: none;
+                    border-color: #6366f1;
+                    box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.1);
+                }
+                
+                .checkbox-wrapper {
+                    display: flex;
+                    align-items: center;
+                    padding: 0.75rem;
+                    background: #f8fafc;
+                    border-radius: 10px;
+                    margin-bottom: 1rem;
+                    transition: all 0.2s ease;
+                }
+                
+                .checkbox-wrapper:hover {
+                    background: #f1f5f9;
+                }
+                
+                .checkbox-input {
+                    width: 20px;
+                    height: 20px;
+                    margin-right: 0.75rem;
+                    cursor: pointer;
+                    accent-color: #6366f1;
+                }
+                
+                .checkbox-label {
+                    font-size: 0.9375rem;
+                    color: #475569;
+                    cursor: pointer;
+                    user-select: none;
+                }
+                
+                .button {
+                    padding: 0.875rem 1.75rem;
+                    border: none;
+                    border-radius: 12px;
+                    font-size: 0.9375rem;
+                    font-weight: 600;
+                    cursor: pointer;
+                    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+                    display: inline-flex;
+                    align-items: center;
+                    justify-content: center;
+                    gap: 0.5rem;
+                }
+                
+                .button-primary {
+                    background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+                    color: white;
+                    box-shadow: 0 2px 8px rgba(99, 102, 241, 0.3);
+                }
+                
+                .button-primary:hover:not(:disabled) {
+                    box-shadow: 0 4px 16px rgba(99, 102, 241, 0.4);
+                    transform: translateY(-2px);
+                }
+                
+                .button-primary:active:not(:disabled) {
+                    transform: translateY(0);
+                }
+                
+                .button-primary:disabled {
+                    opacity: 0.6;
+                    cursor: not-allowed;
+                }
+                
+                .button-secondary {
+                    background: white;
+                    color: #6366f1;
+                    border: 2px solid #e2e8f0;
+                }
+                
+                .button-secondary:hover {
+                    background: #f8fafc;
+                    border-color: #6366f1;
+                }
+                
+                .button-ghost {
+                    background: transparent;
+                    color: #64748b;
+                    border: 2px solid #e2e8f0;
+                }
+                
+                .button-ghost:hover {
+                    background: #f8fafc;
+                    border-color: #cbd5e1;
+                }
+                
+                .button-success {
+                    background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+                    color: white;
+                    box-shadow: 0 2px 8px rgba(16, 185, 129, 0.3);
+                }
+                
+                .button-success:hover {
+                    box-shadow: 0 4px 16px rgba(16, 185, 129, 0.4);
+                    transform: translateY(-2px);
+                }
+                
+                .button-group {
+                    display: flex;
+                    gap: 0.75rem;
+                    flex-wrap: wrap;
+                }
+                
+                .item-list {
+                    display: grid;
+                    gap: 0.75rem;
+                    max-height: 500px;
+                    overflow-y: auto;
+                    padding-right: 0.5rem;
+                }
+                
+                .item-list::-webkit-scrollbar {
+                    width: 8px;
+                }
+                
+                .item-list::-webkit-scrollbar-track {
+                    background: #f1f5f9;
+                    border-radius: 10px;
+                }
+                
+                .item-list::-webkit-scrollbar-thumb {
+                    background: #cbd5e1;
+                    border-radius: 10px;
+                }
+                
+                .item-list::-webkit-scrollbar-thumb:hover {
+                    background: #94a3b8;
+                }
+                
+                .list-item {
+                    display: flex;
+                    align-items: center;
+                    justify-content: space-between;
+                    padding: 1rem 1.25rem;
+                    background: #f8fafc;
+                    border: 2px solid #e2e8f0;
+                    border-radius: 12px;
+                    transition: all 0.3s ease;
+                    animation: slideIn 0.4s ease-out;
+                }
+                
+                @keyframes slideIn {
+                    from {
+                        opacity: 0;
+                        transform: translateX(-20px);
+                    }
+                    to {
+                        opacity: 1;
+                        transform: translateX(0);
+                    }
+                }
+                
+                .list-item:hover {
+                    background: white;
+                    border-color: #cbd5e1;
+                    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+                }
+                
+                .list-item-content {
+                    display: flex;
+                    align-items: center;
+                    gap: 0.75rem;
+                    flex: 1;
+                }
+                
+                .list-item-icon {
+                    width: 36px;
+                    height: 36px;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    border-radius: 10px;
+                    flex-shrink: 0;
+                }
+                
+                .icon-file {
+                    background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+                    color: white;
+                }
+                
+                .icon-no-file {
+                    background: #e2e8f0;
+                    color: #64748b;
+                }
+                
+                .icon-critical {
+                    background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+                    color: white;
+                }
+                
+                .icon-normal {
+                    background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+                    color: white;
+                }
+                
+                .list-item-text {
+                    flex: 1;
+                }
+                
+                .list-item-title {
+                    font-size: 0.9375rem;
+                    font-weight: 600;
+                    color: #1a2332;
+                    margin-bottom: 0.125rem;
+                }
+                
+                .list-item-meta {
+                    font-size: 0.8125rem;
+                    color: #64748b;
+                }
+                
+                .list-item-actions {
+                    display: flex;
+                    gap: 0.5rem;
+                }
+                
+                .icon-button {
+                    width: 36px;
+                    height: 36px;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    border: none;
+                    border-radius: 10px;
+                    cursor: pointer;
+                    transition: all 0.2s ease;
+                    background: transparent;
+                }
+                
+                .icon-button:hover {
+                    transform: scale(1.1);
+                }
+                
+                .icon-button-edit {
+                    color: #3b82f6;
+                }
+                
+                .icon-button-edit:hover {
+                    background: rgba(59, 130, 246, 0.1);
+                }
+                
+                .icon-button-delete {
+                    color: #ef4444;
+                }
+                
+                .icon-button-delete:hover {
+                    background: rgba(239, 68, 68, 0.1);
+                }
+                
+                .empty-state {
+                    text-align: center;
+                    padding: 3rem 2rem;
+                    color: #94a3b8;
+                }
+                
+                .empty-state-icon {
+                    width: 64px;
+                    height: 64px;
+                    margin: 0 auto 1rem;
+                    opacity: 0.3;
+                }
+                
+                .empty-state-text {
+                    font-size: 0.9375rem;
+                    font-style: italic;
+                }
+                
+                .weight-indicator {
+                    display: inline-flex;
+                    align-items: center;
+                    padding: 0.375rem 0.875rem;
+                    background: white;
+                    border: 2px solid #e2e8f0;
+                    border-radius: 20px;
+                    font-size: 0.875rem;
+                    font-weight: 600;
+                    gap: 0.5rem;
+                    margin-top: 1rem;
+                }
+                
+                .weight-indicator.valid {
+                    border-color: #10b981;
+                    background: rgba(16, 185, 129, 0.05);
+                    color: #059669;
+                }
+                
+                .weight-indicator.invalid {
+                    border-color: #ef4444;
+                    background: rgba(239, 68, 68, 0.05);
+                    color: #dc2626;
+                }
+                
+                .save-bar {
+                    position: sticky;
+                    bottom: 0;
+                    left: 0;
+                    right: 0;
+                    background: rgba(255, 255, 255, 0.98);
+                    backdrop-filter: blur(20px);
+                    border-top: 1px solid rgba(99, 102, 241, 0.1);
+                    padding: 1.5rem 3rem;
+                    margin: 3rem -3rem -3rem;
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                    box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.04);
+                    animation: slideUp 0.4s ease-out;
+                }
+                
+                @keyframes slideUp {
+                    from {
+                        opacity: 0;
+                        transform: translateY(20px);
+                    }
+                    to {
+                        opacity: 1;
+                        transform: translateY(0);
+                    }
+                }
+                
+                .save-bar-info {
+                    font-size: 0.875rem;
+                    color: #64748b;
+                }
+                
+                .deficiency-badge {
+                    display: inline-flex;
+                    align-items: center;
+                    padding: 0.25rem 0.625rem;
+                    background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+                    color: white;
+                    border-radius: 12px;
+                    font-size: 0.75rem;
+                    font-weight: 600;
+                    margin-left: 0.5rem;
+                }
+                
+                .select-input {
+                    width: 100%;
+                    padding: 0.875rem 1rem;
+                    border: 2px solid #e2e8f0;
+                    border-radius: 12px;
+                    font-size: 0.9375rem;
+                    color: #1a2332;
+                    background: white;
+                    cursor: pointer;
+                    transition: all 0.2s ease;
+                }
+                
+                .select-input:focus {
+                    outline: none;
+                    border-color: #6366f1;
+                    box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.1);
+                }
+                
+                .select-input:disabled {
+                    background: #f1f5f9;
+                    cursor: not-allowed;
+                    opacity: 0.6;
+                }
+            `}</style>
+
+            <div className="content-wrapper">
+                {/* Sidebar Navigation */}
+                <div className="sidebar">
+                    <div className="sidebar-header">
+                        <h1 className="sidebar-title">Мониторинг</h1>
+                        <p className="sidebar-subtitle">Система оценки качества</p>
+                    </div>
+
+                    <div className="nav-tabs">
+                        <div
+                            className={`nav-tab ${activeTab === 'directions' ? 'active' : ''}`}
+                            onClick={() => setActiveTab('directions')}
+                        >
+                            <svg className="nav-tab-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                            </svg>
+                            Направления
                         </div>
-                        <div className="min-w-0">
-                            <div className="text-xs uppercase tracking-[0.18em] text-slate-500 font-semibold">{item.label}</div>
-                            <div className="text-2xl font-semibold text-slate-900 leading-none mt-1">{item.value}</div>
-                            <div className="text-xs text-slate-500 mt-1">{item.sub}</div>
+
+                        <div
+                            className={`nav-tab ${activeTab === 'criteria' ? 'active' : ''}`}
+                            onClick={() => setActiveTab('criteria')}
+                        >
+                            <svg className="nav-tab-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
+                            </svg>
+                            Критерии оценки
                         </div>
                     </div>
-                ))}
-            </div>
+                </div>
 
-            <div className="grid grid-cols-1 xl:grid-cols-[340px_minmax(0,1fr)]">
-                <aside className="border-r border-slate-200 bg-slate-50/70">
-                    <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
-                        <div>
-                            <h3 className="text-sm font-semibold text-slate-900">Направления шкалы</h3>
-                            <p className="text-xs text-slate-500 mt-0.5">{visibleDirections.length} из {draftDirections.length}</p>
-                        </div>
-                        {hasUnsavedChanges && (
-                            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-amber-50 text-amber-700 border border-amber-200 text-xs font-semibold">
-                                <FaIcon className="fas fa-pen" />
-                                Есть изменения
-                            </span>
-                        )}
-                    </div>
-
-                    <div className="max-h-[calc(100vh-320px)] overflow-y-auto">
-                        {loading && draftDirections.length === 0 ? (
-                            <div className="p-4 space-y-3">
-                                {Array.from({ length: 4 }).map((_, index) => (
-                                    <div key={index} className="rounded-2xl border border-slate-200 bg-white p-4 animate-pulse">
-                                        <div className="h-4 w-2/3 rounded bg-slate-200" />
-                                        <div className="h-3 w-full rounded bg-slate-100 mt-3" />
-                                        <div className="h-2 w-full rounded-full bg-slate-100 mt-4" />
-                                    </div>
-                                ))}
-                            </div>
-                        ) : visibleDirections.length === 0 ? (
-                            <div className="px-5 py-10 text-center">
-                                <div className="w-14 h-14 mx-auto rounded-2xl bg-slate-100 text-slate-400 flex items-center justify-center">
-                                    <FaIcon className="fas fa-folder-open" />
-                                </div>
-                                <h4 className="mt-4 text-sm font-semibold text-slate-900">Ничего не найдено</h4>
-                                <p className="mt-1 text-sm text-slate-500">
-                                    Сбросьте поиск или добавьте новое направление для этой шкалы.
+                {/* Main Content */}
+                <div className="main-content">
+                    {activeTab === 'directions' && (
+                        <>
+                            <div className="page-header">
+                                <h2 className="page-title">Направления мониторинга</h2>
+                                <p className="page-description">
+                                    Создавайте и управляйте направлениями для структурированной оценки качества работы.
+                                    Каждое направление может содержать набор критериев с индивидуальными весами.
                                 </p>
                             </div>
-                        ) : (
-                            <div className="p-4 space-y-3">
-                                {visibleDirections.map((direction) => {
-                                    const metrics = getDirectionMetrics(direction);
-                                    const isSelected = direction._localId === selectedDirectionId;
-                                    return (
-                                        <button
-                                            key={direction._localId}
-                                            type="button"
-                                            onClick={() => setSelectedDirectionId(direction._localId)}
-                                            className={`w-full text-left rounded-2xl border p-4 transition ${
-                                                isSelected
-                                                    ? 'border-blue-300 bg-blue-50/70 shadow-sm'
-                                                    : 'border-slate-200 bg-white hover:border-slate-300 hover:shadow-sm'
-                                            }`}
-                                        >
-                                            <div className="flex items-start justify-between gap-3">
-                                                <div className="min-w-0">
-                                                    <div className="text-sm font-semibold text-slate-900 truncate">
-                                                        {direction.name.trim() || 'Новое направление'}
-                                                    </div>
-                                                    <div className="text-xs text-slate-500 mt-1 flex flex-wrap gap-2">
-                                                        <span>{metrics.criteriaCount} критериев</span>
-                                                        <span>{metrics.criticalCount} критических</span>
-                                                        <span>{metrics.deficiencyCount} недочетов</span>
-                                                    </div>
-                                                </div>
-                                                <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-semibold ${
-                                                    direction.hasFileUpload
-                                                        ? 'bg-blue-100 text-blue-700'
-                                                        : 'bg-slate-100 text-slate-600'
-                                                }`}>
-                                                    <FaIcon className={direction.hasFileUpload ? 'fas fa-file-arrow-up' : 'fas fa-file-circle-minus'} />
-                                                    {direction.hasFileUpload ? 'Файл' : 'Без файла'}
-                                                </span>
-                                            </div>
 
-                                            <div className="mt-4">
-                                                <div className="flex items-center justify-between text-xs font-medium">
-                                                    <span className="text-slate-500">Вес некритических критериев</span>
-                                                    <span className={scoreToneClass(metrics.weightedTotal, metrics.weightedCount)}>
-                                                        {metrics.weightedCount > 0 ? `${metrics.weightedTotal}/100` : 'не используется'}
-                                                    </span>
-                                                </div>
-                                                <div className="mt-2 h-2 rounded-full bg-slate-100 overflow-hidden">
-                                                    <div
-                                                        className={`h-full rounded-full ${
-                                                            metrics.weightedCount === 0
-                                                                ? 'bg-slate-300'
-                                                                : metrics.weightedTotal === 100
-                                                                    ? 'bg-emerald-500'
-                                                                    : metrics.weightedTotal > 100
-                                                                        ? 'bg-red-500'
-                                                                        : 'bg-amber-500'
-                                                        }`}
-                                                        style={{ width: `${Math.min(100, Math.max(0, metrics.weightedTotal))}%` }}
-                                                    />
-                                                </div>
-                                            </div>
+                            {/* Direction Form Card */}
+                            <div className="card">
+                                <h3 className="card-title">
+                                    <svg className="card-title-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                                    </svg>
+                                    {isEditingDirection ? 'Редактирование направления' : 'Новое направление'}
+                                </h3>
 
-                                            <div className="mt-3 min-h-[20px]">
-                                                {metrics.issues.length > 0 ? (
-                                                    <div className="text-xs text-amber-700 flex items-center gap-2">
-                                                        <FaIcon className="fas fa-circle-exclamation" />
-                                                        {metrics.issues[0]}
-                                                    </div>
-                                                ) : (
-                                                    <div className="text-xs text-emerald-700 flex items-center gap-2">
-                                                        <FaIcon className="fas fa-circle-check" />
-                                                        Направление готово к сохранению
-                                                    </div>
-                                                )}
-                                            </div>
-                                        </button>
-                                    );
-                                })}
-                            </div>
-                        )}
-                    </div>
-                </aside>
-
-                <section className="min-w-0 bg-white">
-                    {!selectedDirection ? (
-                        <div className="px-6 py-16 text-center">
-                            <div className="w-16 h-16 mx-auto rounded-3xl bg-slate-100 text-slate-400 flex items-center justify-center">
-                                <FaIcon className="fas fa-sliders" />
-                            </div>
-                            <h3 className="mt-5 text-lg font-semibold text-slate-900">Выберите направление</h3>
-                            <p className="mt-2 text-sm text-slate-500 max-w-md mx-auto">
-                                Слева отображается список направлений. После выбора можно редактировать параметры направления,
-                                добавлять критерии и следить за балансом весов в одной рабочей области.
-                            </p>
-                        </div>
-                    ) : (
-                        <div className="p-6 space-y-6">
-                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                                <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
-                                    <div className="text-xs uppercase tracking-[0.16em] text-slate-500 font-semibold">Текущее направление</div>
-                                    <div className="mt-2 text-lg font-semibold text-slate-900">
-                                        {selectedDirection.name.trim() || 'Новое направление'}
-                                    </div>
-                                    <div className="mt-2 text-sm text-slate-500">
-                                        {selectedDirection.hasFileUpload ? 'Требует загрузку файла при оценке' : 'Работает без загрузки файла'}
-                                    </div>
-                                </div>
-                                <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
-                                    <div className="text-xs uppercase tracking-[0.16em] text-slate-500 font-semibold">Вес шкалы</div>
-                                    <div className={`mt-2 text-lg font-semibold ${scoreToneClass(selectedMetrics.weightedTotal, selectedMetrics.weightedCount)}`}>
-                                        {selectedMetrics.weightedCount > 0 ? `${selectedMetrics.weightedTotal}/100` : 'Без весовых критериев'}
-                                    </div>
-                                    <div className="mt-2 text-sm text-slate-500">
-                                        {selectedMetrics.isBalanced ? 'Баланс в порядке' : 'Нужно довести сумму до 100'}
-                                    </div>
-                                </div>
-                                <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
-                                    <div className="text-xs uppercase tracking-[0.16em] text-slate-500 font-semibold">Состав критериев</div>
-                                    <div className="mt-2 text-lg font-semibold text-slate-900">
-                                        {selectedMetrics.criteriaCount} шт.
-                                    </div>
-                                    <div className="mt-2 text-sm text-slate-500">
-                                        {selectedMetrics.criticalCount} критических, {selectedMetrics.deficiencyCount} с недочетами
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div className="grid grid-cols-1 2xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] gap-6">
-                                <div className="rounded-2xl border border-slate-200 overflow-hidden">
-                                    <div className="px-5 py-4 border-b border-slate-200 bg-slate-50 flex items-center justify-between gap-3">
-                                        <div>
-                                            <h3 className="text-sm font-semibold text-slate-900">Параметры направления</h3>
-                                            <p className="text-xs text-slate-500 mt-0.5">Название, работа с файлами и быстрые действия.</p>
-                                        </div>
-                                        <button
-                                            type="button"
-                                            onClick={() => handleDeleteDirection(selectedDirection)}
-                                            disabled={!canEdit}
-                                            className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-red-200 bg-red-50 text-red-700 hover:bg-red-100 transition disabled:opacity-50 disabled:cursor-not-allowed"
-                                        >
-                                            <FaIcon className="fas fa-trash" />
-                                            Удалить
-                                        </button>
-                                    </div>
-
-                                    <div className="p-5 space-y-5">
-                                        <div>
-                                            <label className="block text-sm font-medium text-slate-700 mb-2">Название направления</label>
-                                            <input
-                                                type="text"
-                                                value={selectedDirection.name}
-                                                onChange={(event) => updateSelectedDirection((direction) => ({ ...direction, name: event.target.value }))}
-                                                disabled={!canEdit}
-                                                placeholder="Например, Вежливость и скрипт"
-                                                className="w-full px-4 py-3 rounded-xl border border-slate-200 bg-white text-sm text-slate-700 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-slate-50"
-                                            />
-                                        </div>
-
-                                        <label className="flex items-start gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 cursor-pointer">
-                                            <input
-                                                type="checkbox"
-                                                checked={selectedDirection.hasFileUpload}
-                                                onChange={(event) => updateSelectedDirection((direction) => ({ ...direction, hasFileUpload: event.target.checked }))}
-                                                disabled={!canEdit}
-                                                className="mt-1 h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-                                            />
-                                            <span>
-                                                <span className="block text-sm font-medium text-slate-800">Требовать загрузку файла</span>
-                                                <span className="block text-xs text-slate-500 mt-1">
-                                                    Включите, если при оценке по этому направлению обязательно нужен файл или аудио.
-                                                </span>
-                                            </span>
-                                        </label>
-
-                                        <div className="rounded-2xl border border-dashed border-slate-300 bg-white px-4 py-4">
-                                            <div className="flex items-start justify-between gap-3">
-                                                <div>
-                                                    <div className="text-sm font-semibold text-slate-900">Проверка перед сохранением</div>
-                                                    <div className="text-xs text-slate-500 mt-1">
-                                                        Для направлений с весовыми критериями сумма должна быть ровно 100.
-                                                    </div>
-                                                </div>
-                                                <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold ${
-                                                    selectedMetrics.isBalanced ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'
-                                                }`}>
-                                                    <FaIcon className={selectedMetrics.isBalanced ? 'fas fa-check' : 'fas fa-clock'} />
-                                                    {selectedMetrics.isBalanced ? 'Готово' : 'Нужно проверить'}
-                                                </span>
-                                            </div>
-                                            <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
-                                                <div className="rounded-xl bg-slate-50 px-3 py-3">
-                                                    <div className="text-xs text-slate-500">Весовые критерии</div>
-                                                    <div className="mt-1 font-semibold text-slate-900">{selectedMetrics.weightedCount}</div>
-                                                </div>
-                                                <div className="rounded-xl bg-slate-50 px-3 py-3">
-                                                    <div className="text-xs text-slate-500">Сумма веса</div>
-                                                    <div className={`mt-1 font-semibold ${scoreToneClass(selectedMetrics.weightedTotal, selectedMetrics.weightedCount)}`}>
-                                                        {selectedMetrics.weightedTotal}
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </div>
+                                <div className="form-group">
+                                    <label className="form-label">Название направления</label>
+                                    <input
+                                        type="text"
+                                        value={newDirectionName}
+                                        onChange={(e) => setNewDirectionName(e.target.value)}
+                                        placeholder="Например: Техническая документация"
+                                        className="form-input"
+                                    />
                                 </div>
 
-                                <div className="rounded-2xl border border-slate-200 overflow-hidden">
-                                    <div className="px-5 py-4 border-b border-slate-200 bg-slate-50 flex items-center justify-between gap-3">
-                                        <div>
-                                            <h3 className="text-sm font-semibold text-slate-900">
-                                                {editingCriterionIndex != null ? 'Редактирование критерия' : 'Новый критерий'}
-                                            </h3>
-                                            <p className="text-xs text-slate-500 mt-0.5">
-                                                Добавляйте обычные, критические критерии и недочеты без выхода из раздела.
-                                            </p>
-                                        </div>
-                                        {editingCriterionIndex != null && (
-                                            <button
-                                                type="button"
-                                                onClick={resetCriterionEditor}
-                                                className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 transition"
-                                            >
-                                                <FaIcon className="fas fa-xmark" />
-                                                Отмена
-                                            </button>
+                                <div className="checkbox-wrapper">
+                                    <input
+                                        type="checkbox"
+                                        checked={newDirectionFileUpload}
+                                        onChange={(e) => setNewDirectionFileUpload(e.target.checked)}
+                                        className="checkbox-input"
+                                        id="fileUploadCheckbox"
+                                    />
+                                    <label htmlFor="fileUploadCheckbox" className="checkbox-label">
+                                        Требуется загрузка файла для этого направления
+                                    </label>
+                                </div>
+
+                                <div className="button-group">
+                                    <button
+                                        onClick={isEditingDirection ? handleEditDirection : handleAddDirection}
+                                        className={isEditingDirection ? 'button button-primary' : 'button button-success'}
+                                    >
+                                        {isEditingDirection ? (
+                                            <>
+                                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
+                                                </svg>
+                                                Сохранить изменения
+                                            </>
+                                        ) : (
+                                            <>
+                                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                                                </svg>
+                                                Добавить направление
+                                            </>
                                         )}
-                                    </div>
-
-                                    <div className="p-5 space-y-4">
-                                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                                            <div>
-                                                <label className="block text-sm font-medium text-slate-700 mb-2">Название критерия</label>
-                                                <input
-                                                    type="text"
-                                                    value={criterionDraft.name}
-                                                    onChange={(event) => setCriterionDraft((prev) => ({ ...prev, name: event.target.value }))}
-                                                    disabled={!canEdit}
-                                                    placeholder="Например, Проверил потребность"
-                                                    className="w-full px-4 py-3 rounded-xl border border-slate-200 bg-white text-sm text-slate-700 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-slate-50"
-                                                />
-                                            </div>
-
-                                            <div>
-                                                <label className="block text-sm font-medium text-slate-700 mb-2">
-                                                    {criterionDraft.isCritical ? 'Вес не требуется' : `Вес критерия (доступно до ${remainingWeight}%)`}
-                                                </label>
-                                                <input
-                                                    type="number"
-                                                    value={criterionDraft.weight}
-                                                    onChange={(event) => setCriterionDraft((prev) => ({ ...prev, weight: event.target.value }))}
-                                                    disabled={!canEdit || criterionDraft.isCritical}
-                                                    min="1"
-                                                    placeholder={criterionDraft.isCritical ? 'Критический критерий' : 'Введите вес'}
-                                                    className="w-full px-4 py-3 rounded-xl border border-slate-200 bg-white text-sm text-slate-700 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-slate-50"
-                                                />
-                                            </div>
-                                        </div>
-
-                                        <div>
-                                            <label className="block text-sm font-medium text-slate-700 mb-2">Описание критерия</label>
-                                            <textarea
-                                                rows={4}
-                                                value={criterionDraft.value}
-                                                onChange={(event) => setCriterionDraft((prev) => ({ ...prev, value: event.target.value }))}
-                                                disabled={!canEdit}
-                                                placeholder="Подробно опишите, как должен оцениваться критерий."
-                                                className="w-full px-4 py-3 rounded-xl border border-slate-200 bg-white text-sm text-slate-700 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 resize-y disabled:bg-slate-50"
-                                            />
-                                        </div>
-
-                                        <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
-                                            <label className="flex items-start gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 cursor-pointer flex-1">
-                                                <input
-                                                    type="checkbox"
-                                                    checked={criterionDraft.isCritical}
-                                                    onChange={(event) => setCriterionDraft((prev) => ({
-                                                        ...prev,
-                                                        isCritical: event.target.checked,
-                                                        weight: event.target.checked ? '' : prev.weight,
-                                                        hasDeficiency: event.target.checked ? false : prev.hasDeficiency,
-                                                        deficiencyWeight: event.target.checked ? '' : prev.deficiencyWeight,
-                                                        deficiencyDescription: event.target.checked ? '' : prev.deficiencyDescription
-                                                    }))}
-                                                    disabled={!canEdit}
-                                                    className="mt-1 h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-                                                />
-                                                <span>
-                                                    <span className="block text-sm font-medium text-slate-800">Критический критерий</span>
-                                                    <span className="block text-xs text-slate-500 mt-1">
-                                                        Ошибка по такому критерию обнуляет результат и не использует отдельный вес.
-                                                    </span>
-                                                </span>
-                                            </label>
-
-                                            <label className={`flex items-start gap-3 rounded-2xl border px-4 py-3 cursor-pointer flex-1 ${
-                                                criterionDraft.isCritical ? 'border-slate-200 bg-slate-50 opacity-60' : 'border-slate-200 bg-slate-50'
-                                            }`}>
-                                                <input
-                                                    type="checkbox"
-                                                    checked={criterionDraft.hasDeficiency}
-                                                    onChange={(event) => setCriterionDraft((prev) => ({
-                                                        ...prev,
-                                                        hasDeficiency: event.target.checked,
-                                                        deficiencyWeight: event.target.checked ? prev.deficiencyWeight : '',
-                                                        deficiencyDescription: event.target.checked ? prev.deficiencyDescription : ''
-                                                    }))}
-                                                    disabled={!canEdit || criterionDraft.isCritical}
-                                                    className="mt-1 h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-                                                />
-                                                <span>
-                                                    <span className="block text-sm font-medium text-slate-800">Добавить недочет</span>
-                                                    <span className="block text-xs text-slate-500 mt-1">
-                                                        Для мягкой ошибки можно задать отдельный штраф и пояснение.
-                                                    </span>
-                                                </span>
-                                            </label>
-                                        </div>
-
-                                        {criterionDraft.hasDeficiency && !criterionDraft.isCritical && (
-                                            <div className="grid grid-cols-1 lg:grid-cols-[180px_minmax(0,1fr)] gap-4 rounded-2xl border border-amber-200 bg-amber-50/70 p-4">
-                                                <div>
-                                                    <label className="block text-sm font-medium text-amber-900 mb-2">Вес недочета</label>
-                                                    <input
-                                                        type="number"
-                                                        min="1"
-                                                        value={criterionDraft.deficiencyWeight}
-                                                        onChange={(event) => setCriterionDraft((prev) => ({ ...prev, deficiencyWeight: event.target.value }))}
-                                                        disabled={!canEdit}
-                                                        className="w-full px-4 py-3 rounded-xl border border-amber-200 bg-white text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-amber-400"
-                                                    />
-                                                </div>
-                                                <div>
-                                                    <label className="block text-sm font-medium text-amber-900 mb-2">Описание недочета</label>
-                                                    <textarea
-                                                        rows={3}
-                                                        value={criterionDraft.deficiencyDescription}
-                                                        onChange={(event) => setCriterionDraft((prev) => ({ ...prev, deficiencyDescription: event.target.value }))}
-                                                        disabled={!canEdit}
-                                                        placeholder="Когда ставится недочет и чем он отличается от полной ошибки."
-                                                        className="w-full px-4 py-3 rounded-xl border border-amber-200 bg-white text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-amber-400 resize-y"
-                                                    />
-                                                </div>
-                                            </div>
-                                        )}
-
-                                        <div className="flex flex-wrap gap-3">
-                                            <button
-                                                type="button"
-                                                onClick={handleSubmitCriterion}
-                                                disabled={!canEdit}
-                                                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-blue-600 text-white hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
-                                            >
-                                                <FaIcon className={editingCriterionIndex != null ? 'fas fa-floppy-disk' : 'fas fa-plus'} />
-                                                {editingCriterionIndex != null ? 'Сохранить изменения' : 'Добавить критерий'}
-                                            </button>
-                                            <div className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-100 text-slate-600 text-sm">
-                                                <FaIcon className="fas fa-circle-info" />
-                                                Свободный вес для обычных критериев: {remainingWeight}%
-                                            </div>
-                                        </div>
-                                    </div>
+                                    </button>
+                                    {isEditingDirection && (
+                                        <button
+                                            onClick={() => {
+                                                setNewDirectionName('');
+                                                setNewDirectionFileUpload(true);
+                                                setIsEditingDirection(false);
+                                                setEditingDirectionIndex(null);
+                                            }}
+                                            className="button button-ghost"
+                                        >
+                                            Отмена
+                                        </button>
+                                    )}
                                 </div>
                             </div>
 
-                            <div className="rounded-2xl border border-slate-200 overflow-hidden">
-                                <div className="px-5 py-4 border-b border-slate-200 bg-slate-50 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                                    <div>
-                                        <h3 className="text-sm font-semibold text-slate-900">Критерии направления</h3>
-                                        <p className="text-xs text-slate-500 mt-0.5">
-                                            Табличный обзор по критериям, весу, статусу и описанию.
-                                        </p>
-                                    </div>
-                                    <div className="flex flex-wrap gap-2 text-xs">
-                                        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-slate-100 text-slate-600 font-semibold">
-                                            <FaIcon className="fas fa-list" />
-                                            {selectedMetrics.criteriaCount} всего
-                                        </span>
-                                        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-red-50 text-red-700 font-semibold">
-                                            <FaIcon className="fas fa-bolt" />
-                                            {selectedMetrics.criticalCount} критических
-                                        </span>
-                                        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-amber-50 text-amber-700 font-semibold">
-                                            <FaIcon className="fas fa-triangle-exclamation" />
-                                            {selectedMetrics.deficiencyCount} недочетов
-                                        </span>
-                                    </div>
-                                </div>
+                            {/* Directions List Card */}
+                            <div className="card">
+                                <h3 className="card-title">
+                                    <svg className="card-title-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 6h16M4 10h16M4 14h16M4 18h16" />
+                                    </svg>
+                                    Список направлений ({directions.length})
+                                </h3>
 
-                                {selectedDirection.criteria.length === 0 ? (
-                                    <div className="px-6 py-14 text-center">
-                                        <div className="w-14 h-14 mx-auto rounded-2xl bg-slate-100 text-slate-400 flex items-center justify-center">
-                                            <FaIcon className="fas fa-list-check" />
-                                        </div>
-                                        <h4 className="mt-4 text-sm font-semibold text-slate-900">Критерии еще не добавлены</h4>
-                                        <p className="mt-1 text-sm text-slate-500">
-                                            Начните с первого критерия справа. Здесь сразу появится удобная таблица для работы со шкалой.
-                                        </p>
+                                {directions.length === 0 ? (
+                                    <div className="empty-state">
+                                        <svg className="empty-state-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                        </svg>
+                                        <p className="empty-state-text">Нет добавленных направлений. Создайте первое направление выше.</p>
                                     </div>
                                 ) : (
-                                    <div className="overflow-x-auto">
-                                        <table className="w-full min-w-[760px]">
-                                            <thead className="bg-slate-50">
-                                                <tr className="border-b border-slate-200">
-                                                    <th className="px-5 py-3 text-left text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">Критерий</th>
-                                                    <th className="px-5 py-3 text-left text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">Тип</th>
-                                                    <th className="px-5 py-3 text-left text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">Вес</th>
-                                                    <th className="px-5 py-3 text-left text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">Недочет</th>
-                                                    <th className="px-5 py-3 text-left text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">Описание</th>
-                                                    <th className="px-5 py-3 text-right text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">Действия</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                {selectedDirection.criteria.map((criterion, index) => (
-                                                    <tr key={`${criterion.name}-${index}`} className="border-b border-slate-100 last:border-b-0 hover:bg-slate-50/70 transition">
-                                                        <td className="px-5 py-4 align-top">
-                                                            <div className="font-medium text-slate-900">{criterion.name}</div>
-                                                        </td>
-                                                        <td className="px-5 py-4 align-top">
-                                                            <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold ${
-                                                                criterion.isCritical
-                                                                    ? 'bg-red-50 text-red-700'
-                                                                    : 'bg-emerald-50 text-emerald-700'
-                                                            }`}>
-                                                                <FaIcon className={criterion.isCritical ? 'fas fa-shield-halved' : 'fas fa-scale-balanced'} />
-                                                                {criterion.isCritical ? 'Критический' : 'Обычный'}
-                                                            </span>
-                                                        </td>
-                                                        <td className="px-5 py-4 align-top">
-                                                            <span className={`font-semibold ${criterion.isCritical ? 'text-slate-500' : 'text-slate-900'}`}>
-                                                                {criterion.isCritical ? '0' : `${criterion.weight}%`}
-                                                            </span>
-                                                        </td>
-                                                        <td className="px-5 py-4 align-top">
-                                                            {criterion.deficiency ? (
-                                                                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-amber-50 text-amber-700 text-xs font-semibold">
-                                                                    <FaIcon className="fas fa-minus-circle" />
-                                                                    {criterion.deficiency.weight}%
-                                                                </span>
-                                                            ) : (
-                                                                <span className="text-xs text-slate-400">Нет</span>
-                                                            )}
-                                                        </td>
-                                                        <td className="px-5 py-4 align-top">
-                                                            <div className="text-sm text-slate-600 whitespace-pre-wrap break-words max-w-[420px]">
-                                                                {criterion.value || 'Нет описания'}
-                                                            </div>
-                                                            {criterion.deficiency?.description && (
-                                                                <div className="mt-2 text-xs text-amber-700 whitespace-pre-wrap break-words max-w-[420px]">
-                                                                    Недочет: {criterion.deficiency.description}
-                                                                </div>
-                                                            )}
-                                                        </td>
-                                                        <td className="px-5 py-4 align-top">
-                                                            <div className="flex items-center justify-end gap-2">
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={() => handleEditCriterion(criterion, index)}
-                                                                    disabled={!canEdit}
-                                                                    className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 transition disabled:opacity-50 disabled:cursor-not-allowed"
-                                                                >
-                                                                    <FaIcon className="fas fa-pen" />
-                                                                    Править
-                                                                </button>
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={() => handleDeleteCriterion(index)}
-                                                                    disabled={!canEdit}
-                                                                    className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-red-200 bg-red-50 text-red-700 hover:bg-red-100 transition disabled:opacity-50 disabled:cursor-not-allowed"
-                                                                >
-                                                                    <FaIcon className="fas fa-trash" />
-                                                                    Удалить
-                                                                </button>
-                                                            </div>
-                                                        </td>
-                                                    </tr>
-                                                ))}
-                                            </tbody>
-                                        </table>
+                                    <div className="item-list">
+                                        {directions.map((direction, index) => (
+                                            <div key={index} className="list-item">
+                                                <div className="list-item-content">
+                                                    <div className={`list-item-icon ${direction.hasFileUpload ? 'icon-file' : 'icon-no-file'}`}>
+                                                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d={direction.hasFileUpload ? 'M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12' : 'M9 12h6m-3-3v6'} />
+                                                        </svg>
+                                                    </div>
+                                                    <div className="list-item-text">
+                                                        <div className="list-item-title">{direction.name}</div>
+                                                        <div className="list-item-meta">
+                                                            {direction.hasFileUpload ? 'Требуется файл' : 'Файл не требуется'} • {direction.criteria.length} критериев
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                                <div className="list-item-actions">
+                                                    <button
+                                                        onClick={() => handleStartEditDirection(index)}
+                                                        className="icon-button icon-button-edit"
+                                                        title="Редактировать"
+                                                    >
+                                                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.29 2.29 0 113.232 3.232L6.5 20.5l-3.5 1 1-3.5L17.768 4.232z" />
+                                                        </svg>
+                                                    </button>
+                                                    <button
+                                                        onClick={() => handleDeleteDirection(index)}
+                                                        className="icon-button icon-button-delete"
+                                                        title="Удалить"
+                                                    >
+                                                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                                        </svg>
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        ))}
                                     </div>
                                 )}
                             </div>
+                        </>
+                    )}
 
-                            <div className="rounded-2xl border border-slate-200 bg-slate-50 px-5 py-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                                <div className="text-sm text-slate-600">
-                                    {hasUnsavedChanges
-                                        ? 'Есть несохраненные изменения в шкале. После сохранения список обновится с актуальными id от сервера.'
-                                        : 'Изменений нет. Шкала синхронизирована с сервером.'}
-                                </div>
-                                <div className="flex flex-wrap gap-2">
-                                    <button
-                                        type="button"
-                                        onClick={() => onRefresh?.()}
-                                        className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 transition"
+                    {activeTab === 'criteria' && (
+                        <>
+                            <div className="page-header">
+                                <h2 className="page-title">Критерии оценки</h2>
+                                <p className="page-description">
+                                    Добавляйте критерии для выбранного направления. Общий вес некритических критериев должен составлять 100%.
+                                </p>
+                            </div>
+
+                            {/* Direction Selector Card */}
+                            <div className="card">
+                                <h3 className="card-title">
+                                    <svg className="card-title-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+                                    </svg>
+                                    Выберите направление
+                                </h3>
+
+                                <div className="form-group">
+                                    <select
+                                        value={selectedDirectionIndex}
+                                        onChange={(e) => setSelectedDirectionIndex(Number(e.target.value))}
+                                        className="select-input"
+                                        disabled={directions.length === 0}
                                     >
-                                        <FaIcon className="fas fa-rotate-right" />
-                                        Обновить данные
-                                    </button>
-                                    <button
-                                        type="button"
-                                        onClick={() => { void handleSave(); }}
-                                        disabled={!canEdit || !hasUnsavedChanges || loading}
-                                        className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-blue-600 text-white hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
-                                    >
-                                        <FaIcon className="fas fa-save" />
-                                        Сохранить изменения
-                                    </button>
+                                        {directions.length === 0 ? (
+                                            <option value="">Нет доступных направлений</option>
+                                        ) : (
+                                            directions.map((direction, index) => (
+                                                <option key={index} value={index}>{direction.name}</option>
+                                            ))
+                                        )}
+                                    </select>
                                 </div>
                             </div>
-                        </div>
+
+                            {/* Criterion Form Card */}
+                            <div className="card">
+                                <h3 className="card-title">
+                                    <svg className="card-title-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                                    </svg>
+                                    {isEditingCriterion ? 'Редактирование критерия' : 'Новый критерий'}
+                                </h3>
+
+                                <div className="form-group">
+                                    <label className="form-label">Название критерия</label>
+                                    <input
+                                        type="text"
+                                        value={newCriterionName}
+                                        onChange={(e) => setNewCriterionName(e.target.value)}
+                                        placeholder="Например: Полнота документации"
+                                        className="form-input"
+                                        disabled={directions.length === 0}
+                                    />
+                                </div>
+
+                                {!newCriterionCritical && (
+                                    <div className="form-group">
+                                        <label className="form-label">Вес критерия (%)</label>
+                                        <input
+                                            type="number"
+                                            value={newCriterionWeight}
+                                            onChange={(e) => setNewCriterionWeight(e.target.value)}
+                                            placeholder="0-100"
+                                            min="1"
+                                            max="100"
+                                            className="form-input"
+                                            disabled={directions.length === 0}
+                                        />
+                                    </div>
+                                )}
+
+                                <div className="form-group">
+                                    <label className="form-label">Описание критерия</label>
+                                    <textarea
+                                        value={newCriterionValue}
+                                        onChange={(e) => setNewCriterionValue(e.target.value)}
+                                        placeholder="Подробное описание критерия оценки..."
+                                        className="form-textarea"
+                                        disabled={directions.length === 0}
+                                    />
+                                </div>
+
+                                <div className="checkbox-wrapper">
+                                    <input
+                                        type="checkbox"
+                                        checked={newCriterionCritical}
+                                        onChange={(e) => {
+                                            setNewCriterionCritical(e.target.checked);
+                                            if (e.target.checked) setNewCriterionWeight('');
+                                        }}
+                                        className="checkbox-input"
+                                        id="criticalCheckbox"
+                                        disabled={directions.length === 0}
+                                    />
+                                    <label htmlFor="criticalCheckbox" className="checkbox-label">
+                                        Критичный критерий (устанавливает оценку в 0 при ошибке)
+                                    </label>
+                                </div>
+
+                                <div className="checkbox-wrapper">
+                                    <input
+                                        type="checkbox"
+                                        checked={newCriterionHasDeficiency}
+                                        onChange={(e) => {
+                                            setNewCriterionHasDeficiency(e.target.checked);
+                                            if (!e.target.checked) {
+                                                setNewDeficiencyWeight('');
+                                                setNewDeficiencyDescription('');
+                                            }
+                                        }}
+                                        className="checkbox-input"
+                                        id="deficiencyCheckbox"
+                                        disabled={directions.length === 0}
+                                    />
+                                    <label htmlFor="deficiencyCheckbox" className="checkbox-label">
+                                        Добавить недочет (частичное снижение оценки)
+                                    </label>
+                                </div>
+
+                                {newCriterionHasDeficiency && (
+                                    <>
+                                        <div className="form-group">
+                                            <label className="form-label">Вес недочета (%)</label>
+                                            <input
+                                                type="number"
+                                                value={newDeficiencyWeight}
+                                                onChange={(e) => setNewDeficiencyWeight(e.target.value)}
+                                                placeholder="0-100"
+                                                min="1"
+                                                className="form-input"
+                                            />
+                                        </div>
+
+                                        <div className="form-group">
+                                            <label className="form-label">Описание недочета</label>
+                                            <textarea
+                                                value={newDeficiencyDescription}
+                                                onChange={(e) => setNewDeficiencyDescription(e.target.value)}
+                                                placeholder="Описание недочета..."
+                                                className="form-textarea"
+                                                rows={3}
+                                            />
+                                        </div>
+                                    </>
+                                )}
+
+                                <div className="button-group">
+                                    <button
+                                        onClick={isEditingCriterion ? handleEditCriterion : handleAddCriterion}
+                                        className={isEditingCriterion ? 'button button-primary' : 'button button-success'}
+                                        disabled={directions.length === 0}
+                                    >
+                                        {isEditingCriterion ? (
+                                            <>
+                                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
+                                                </svg>
+                                                Сохранить изменения
+                                            </>
+                                        ) : (
+                                            <>
+                                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                                                </svg>
+                                                Добавить критерий
+                                            </>
+                                        )}
+                                    </button>
+                                    {isEditingCriterion && (
+                                        <button
+                                            onClick={resetCriterionForm}
+                                            className="button button-ghost"
+                                        >
+                                            Отмена
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+
+                            {/* Criteria List Card */}
+                            {directions.length > 0 && (
+                                <div className="card">
+                                    <h3 className="card-title">
+                                        <svg className="card-title-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
+                                        </svg>
+                                        Список критериев ({directions[selectedDirectionIndex]?.criteria.length || 0})
+                                    </h3>
+
+                                    {directions[selectedDirectionIndex]?.criteria.length === 0 ? (
+                                        <div className="empty-state">
+                                            <svg className="empty-state-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+                                            </svg>
+                                            <p className="empty-state-text">Нет критериев для этого направления. Добавьте первый критерий выше.</p>
+                                        </div>
+                                    ) : (
+                                        <>
+                                            <div className="item-list">
+                                                {directions[selectedDirectionIndex].criteria.map((criterion, critIndex) => (
+                                                    <div key={critIndex} className="list-item">
+                                                        <div className="list-item-content">
+                                                            <div className={`list-item-icon ${criterion.isCritical ? 'icon-critical' : 'icon-normal'}`}>
+                                                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d={criterion.isCritical ? 'M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z' : 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z'} />
+                                                                </svg>
+                                                            </div>
+                                                            <div className="list-item-text">
+                                                                <div className="list-item-title">
+                                                                    {criterion.name}
+                                                                    {criterion.deficiency && (
+                                                                        <span className="deficiency-badge">
+                                                                            Недочет: {criterion.deficiency.weight}%
+                                                                        </span>
+                                                                    )}
+                                                                </div>
+                                                                <div className="list-item-meta">
+                                                                    {criterion.isCritical ? 'Критичный критерий' : `Вес: ${criterion.weight}%`}
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                        <div className="list-item-actions">
+                                                            <button
+                                                                onClick={() => handleStartEditCriterion(critIndex)}
+                                                                className="icon-button icon-button-edit"
+                                                                title="Редактировать"
+                                                            >
+                                                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.29 2.29 0 113.232 3.232L6.5 20.5l-3.5 1 1-3.5L17.768 4.232z" />
+                                                                </svg>
+                                                            </button>
+                                                            <button
+                                                                onClick={() => handleDeleteCriterion(critIndex)}
+                                                                className="icon-button icon-button-delete"
+                                                                title="Удалить"
+                                                            >
+                                                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                                                </svg>
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+
+                                            <div className={`weight-indicator ${totalWeight(selectedDirectionIndex) === 100 || !directions[selectedDirectionIndex].criteria.some(c => !c.isCritical) ? 'valid' : 'invalid'}`}>
+                                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d={totalWeight(selectedDirectionIndex) === 100 || !directions[selectedDirectionIndex].criteria.some(c => !c.isCritical) ? 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z' : 'M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z'} />
+                                                </svg>
+                                                Общий вес: {totalWeight(selectedDirectionIndex)}/100
+                                            </div>
+                                        </>
+                                    )}
+                                </div>
+                            )}
+                        </>
                     )}
-                </section>
+
+                    {/* Save Bar */}
+                    <div className="save-bar">
+                        <div className="save-bar-info">
+                            {directions.length} направлений • {directions.reduce((sum, d) => sum + d.criteria.length, 0)} критериев
+                        </div>
+                        <div className="button-group">
+                            <button
+                                onClick={handleSave}
+                                disabled={isLoading}
+                                className="button button-primary"
+                            >
+                                {isLoading ? (
+                                    <>
+                                        <FaIcon className="fas fa-spinner fa-spin" />
+                                        Сохранение...
+                                    </>
+                                ) : (
+                                    <>
+                                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
+                                        </svg>
+                                        Сохранить изменения
+                                    </>
+                                )}
+                            </button>
+                        </div>
+                    </div>
+                </div>
             </div>
+
+            <ToastContainer toasts={toasts} removeToast={removeToast} setToasts={setToasts} />
         </div>
     );
 };
 
-export default MonitoringScaleView;
+export default MonitoringScaleSection;
