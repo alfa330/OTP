@@ -3,7 +3,6 @@ import axios from 'axios';
 import FaIcon from '../common/FaIcon';
 
 const EMPTY_DESCRIPTION = 'Нет описания';
-const STEPS = ['Основное', 'Вес и тип', 'Описание'];
 
 const TONE_STYLES = {
   blue: { iconBg: '#dbeafe', iconColor: '#2563eb', titleColor: '#1d4ed8', valueColor: '#111827' },
@@ -97,33 +96,6 @@ const useToast = () => {
   return { toasts, show, remove };
 };
 
-const StepBar = ({ current }) => (
-  <div className="msv-stepbar">
-    {STEPS.map((label, index) => {
-      const isDone = index < current;
-      const isActive = index === current;
-
-      return (
-        <React.Fragment key={label}>
-          <div className="msv-step">
-            <div
-              className={`msv-step-badge${isDone ? ' is-done' : ''}${isActive ? ' is-active' : ''}`}
-            >
-              {isDone ? <Icon icon="fa-check" size={12} /> : index + 1}
-            </div>
-            <span className={`msv-step-label${isDone ? ' is-done' : ''}${isActive ? ' is-active' : ''}`}>
-              {label}
-            </span>
-          </div>
-          {index < STEPS.length - 1 && (
-            <div className={`msv-step-divider${isDone ? ' is-done' : ''}`} />
-          )}
-        </React.Fragment>
-      );
-    })}
-  </div>
-);
-
 const EmptyState = ({ icon, text, hint }) => (
   <div className="msv-empty">
     <div className="msv-empty-icon">
@@ -174,8 +146,7 @@ export default function MonitoringScaleView({
   const [dirName, setDirName] = useState('');
   const [dirFile, setDirFile] = useState(true);
   const [editingDir, setEditingDir] = useState(null);
-  const [wizardOpen, setWizardOpen] = useState(false);
-  const [wizardStep, setWizardStep] = useState(0);
+  const [criterionMode, setCriterionMode] = useState('view');
   const [editingCrit, setEditingCrit] = useState(null);
   const [critName, setCritName] = useState('');
   const [critCritical, setCritCritical] = useState(false);
@@ -226,7 +197,7 @@ export default function MonitoringScaleView({
     setEditingDir(null);
   };
 
-  const resetWizard = () => {
+  const resetCriterionForm = () => {
     setCritName('');
     setCritCritical(false);
     setCritWeight('');
@@ -235,7 +206,6 @@ export default function MonitoringScaleView({
     setDefWeight('');
     setDefDesc('');
     setEditingCrit(null);
-    setWizardStep(0);
   };
 
   const loadDirections = async ({ quiet = false } = {}) => {
@@ -284,6 +254,11 @@ export default function MonitoringScaleView({
     const criteriaLength = directions[selectedDir]?.criteria?.length || 0;
     setSelectedCrit((prev) => clampIndex(prev, criteriaLength));
   }, [directions, selectedDir]);
+
+  useEffect(() => {
+    setCriterionMode('view');
+    resetCriterionForm();
+  }, [selectedDir]);
 
   useEffect(() => {
     if (!canUseApi) return undefined;
@@ -373,51 +348,59 @@ export default function MonitoringScaleView({
     }
   };
 
-  const openWizard = (criterionIndex = null) => {
-    if (!canEdit || !directions[selectedDir]) return;
-
-    if (criterionIndex !== null) {
-      const criterion = directions[selectedDir]?.criteria?.[criterionIndex];
-      if (!criterion) return;
-      setCritName(criterion.name);
-      setCritCritical(Boolean(criterion.isCritical));
-      setCritWeight(criterion.isCritical ? '' : String(criterion.weight));
-      setCritValue(criterion.value === EMPTY_DESCRIPTION ? '' : criterion.value);
-      if (criterion.deficiency && !criterion.isCritical) {
-        setCritHasDef(true);
-        setDefWeight(String(criterion.deficiency.weight));
-        setDefDesc(
-          criterion.deficiency.description === EMPTY_DESCRIPTION
-            ? ''
-            : criterion.deficiency.description
-        );
-      } else {
-        setCritHasDef(false);
-        setDefWeight('');
-        setDefDesc('');
-      }
-      setEditingCrit(criterionIndex);
-      setSelectedCrit(criterionIndex);
+  const fillCriterionForm = (criterion) => {
+    if (!criterion) return;
+    setCritName(criterion.name || '');
+    setCritCritical(Boolean(criterion.isCritical));
+    setCritWeight(criterion.isCritical ? '' : String(criterion.weight ?? ''));
+    setCritValue(criterion.value === EMPTY_DESCRIPTION ? '' : criterion.value || '');
+    if (criterion.deficiency && !criterion.isCritical) {
+      setCritHasDef(true);
+      setDefWeight(String(criterion.deficiency.weight ?? ''));
+      setDefDesc(
+        criterion.deficiency.description === EMPTY_DESCRIPTION
+          ? ''
+          : criterion.deficiency.description || ''
+      );
     } else {
-      resetWizard();
+      setCritHasDef(false);
+      setDefWeight('');
+      setDefDesc('');
     }
-
-    setWizardStep(0);
-    setWizardOpen(true);
   };
 
-  const closeWizard = () => {
-    setWizardOpen(false);
-    resetWizard();
+  const startCreateCriterion = () => {
+    if (!canEdit || !directions[selectedDir]) return;
+    resetCriterionForm();
+    setCriterionMode('create');
   };
 
-  const nextStep = () => {
-    if (wizardStep === 0 && !critName.trim()) {
+  const startEditCriterion = (criterionIndex = selectedCrit) => {
+    if (!canEdit || !directions[selectedDir]) return;
+    const criterion = directions[selectedDir]?.criteria?.[criterionIndex];
+    if (!criterion) return;
+    fillCriterionForm(criterion);
+    setEditingCrit(criterionIndex);
+    setSelectedCrit(criterionIndex);
+    setCriterionMode('edit');
+  };
+
+  const cancelCriterionEditor = () => {
+    setCriterionMode('view');
+    resetCriterionForm();
+  };
+
+  const saveCriterion = () => {
+    if (!canEdit || !directions[selectedDir]) return;
+    const isEditing = criterionMode === 'edit' && editingCrit !== null;
+    const trimmedName = critName.trim();
+
+    if (!trimmedName) {
       notify('Введите название критерия.', 'error');
       return;
     }
 
-    if (wizardStep === 1 && !critCritical) {
+    if (!critCritical) {
       if (!critWeight) {
         notify('Введите вес критерия.', 'error');
         return;
@@ -430,7 +413,7 @@ export default function MonitoringScaleView({
       }
 
       const currentWeight =
-        editingCrit !== null && !directions[selectedDir]?.criteria?.[editingCrit]?.isCritical
+        isEditing && !directions[selectedDir]?.criteria?.[editingCrit]?.isCritical
           ? directions[selectedDir]?.criteria?.[editingCrit]?.weight || 0
           : 0;
       const usedWeight = totalWeight(selectedDir) - currentWeight;
@@ -440,12 +423,6 @@ export default function MonitoringScaleView({
         return;
       }
     }
-
-    setWizardStep((prev) => prev + 1);
-  };
-
-  const saveCriterion = () => {
-    if (!canEdit || !directions[selectedDir]) return;
 
     if (critHasDef && !critCritical) {
       const deficiencyWeight = Number(defWeight);
@@ -461,7 +438,7 @@ export default function MonitoringScaleView({
     }
 
     const nextCriterion = {
-      name: critName.trim(),
+      name: trimmedName,
       weight: critCritical ? 0 : Number(critWeight),
       isCritical: critCritical,
       value: critValue.trim() || EMPTY_DESCRIPTION,
@@ -479,7 +456,7 @@ export default function MonitoringScaleView({
         if (directionIndex !== selectedDir) return direction;
 
         const nextCriteria =
-          editingCrit !== null
+          isEditing
             ? direction.criteria.map((criterion, criterionIndex) =>
                 criterionIndex === editingCrit ? nextCriterion : criterion
               )
@@ -488,12 +465,10 @@ export default function MonitoringScaleView({
         return { ...direction, criteria: nextCriteria };
       })
     );
-    setSelectedCrit(
-      editingCrit !== null ? editingCrit : directions[selectedDir]?.criteria?.length || 0
-    );
-
-    notify(editingCrit !== null ? 'Критерий обновлён.' : 'Критерий добавлен.');
-    closeWizard();
+    setSelectedCrit(isEditing ? editingCrit : directions[selectedDir]?.criteria?.length || 0);
+    setCriterionMode('view');
+    resetCriterionForm();
+    notify(isEditing ? 'Критерий обновлён.' : 'Критерий добавлен.');
   };
 
   const deleteCrit = (index) => {
@@ -513,6 +488,8 @@ export default function MonitoringScaleView({
       if (prev === index) return Math.max(index - 1, 0);
       return prev;
     });
+    setCriterionMode('view');
+    resetCriterionForm();
   };
 
   const handleSave = async () => {
@@ -564,9 +541,21 @@ export default function MonitoringScaleView({
 
   const selectedDirection = directions[selectedDir] || null;
   const selectedDirectionWeight = selectedDirection ? totalWeight(selectedDir) : 0;
-  const hasCriteria = Boolean(selectedDirection?.criteria?.length);
   const hasNonCritical = Boolean(selectedDirection?.criteria?.some((criterion) => !criterion.isCritical));
   const activeCriterion = selectedDirection?.criteria?.[selectedCrit] || null;
+  const isCriterionEditing = criterionMode === 'edit' && editingCrit !== null;
+  const isCriterionCreating = criterionMode === 'create';
+  const currentEditingCriterion =
+    isCriterionEditing && selectedDirection?.criteria?.[editingCrit]
+      ? selectedDirection.criteria[editingCrit]
+      : null;
+  const availableCriterionWeight = selectedDirection
+    ? 100 -
+      totalWeight(selectedDir) +
+      (isCriterionEditing && currentEditingCriterion && !currentEditingCriterion.isCritical
+        ? Number(currentEditingCriterion.weight || 0)
+        : 0)
+    : 0;
   const uploadRequiredCount = directions.filter((direction) => direction.hasFileUpload).length;
   const validatedDirections = weightedDirectionsCount(directions);
 
@@ -604,10 +593,8 @@ export default function MonitoringScaleView({
         .msv-card-head,
         .dir-item-main,
         .dir-item-meta,
-        .crit-head,
         .crit-actions,
         .msv-toast,
-        .msv-step,
         .msv-summary-card,
         .toggle-row,
         .btn-primary,
@@ -771,8 +758,7 @@ export default function MonitoringScaleView({
         }
 
         .msv-form-grid,
-        .msv-criteria-layout,
-        .msv-modal-grid {
+        .msv-criteria-layout {
           display: grid;
           gap: 14px;
         }
@@ -1300,6 +1286,37 @@ export default function MonitoringScaleView({
           color: #9a3412;
         }
 
+        .msv-criterion-editor {
+          display: grid;
+          gap: 12px;
+        }
+
+        .msv-criterion-actions {
+          display: flex;
+          gap: 10px;
+          flex-wrap: wrap;
+          margin-top: 4px;
+        }
+
+        .msv-criteria-empty {
+          padding: 14px;
+          border-radius: 12px;
+          border: 1px dashed #cbd5e1;
+          background: #ffffff;
+          font-size: 13px;
+          color: #64748b;
+          line-height: 1.5;
+          text-align: center;
+        }
+
+        .msv-criteria-add {
+          margin-top: 4px;
+        }
+
+        .msv-criteria-add .btn-primary {
+          width: 100%;
+        }
+
         .msv-empty {
           text-align: center;
           padding: 36px 18px;
@@ -1334,145 +1351,9 @@ export default function MonitoringScaleView({
           line-height: 1.6;
         }
 
-        .wiz-backdrop {
-          position: fixed;
-          inset: 0;
-          z-index: 100;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          padding: 16px;
-          background: rgba(15, 23, 42, 0.45);
-          backdrop-filter: blur(4px);
-        }
-
-        .wiz-card {
-          width: min(860px, 100%);
-          max-height: calc(100vh - 32px);
-          overflow-y: auto;
-          background: #ffffff;
-          border-radius: 24px;
-          padding: 24px;
-          box-shadow: 0 28px 80px rgba(15, 23, 42, 0.22);
-        }
-
-        .wiz-head {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 12px;
-          margin-bottom: 20px;
-        }
-
-        .wiz-head h2 {
-          margin: 0;
-          font-size: 18px;
-          font-weight: 700;
-        }
-
-        .msv-stepbar {
-          display: flex;
-          align-items: flex-start;
-          gap: 0;
-          margin-bottom: 24px;
-          overflow-x: auto;
-          padding-bottom: 4px;
-        }
-
-        .msv-step {
-          flex-direction: column;
-          justify-content: flex-start;
-          gap: 6px;
-          min-width: 110px;
-          text-align: center;
-        }
-
-        .msv-step-badge {
-          width: 30px;
-          height: 30px;
-          border-radius: 999px;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          margin: 0 auto;
-          font-size: 12px;
-          font-weight: 700;
-          background: #f1f5f9;
-          color: #64748b;
-          border: 2px solid #e5e7eb;
-          transition: all .2s ease;
-        }
-
-        .msv-step-badge.is-active {
-          background: #2563eb;
-          color: #ffffff;
-          border-color: #bfdbfe;
-        }
-
-        .msv-step-badge.is-done {
-          background: #16a34a;
-          color: #ffffff;
-          border-color: #bbf7d0;
-        }
-
-        .msv-step-label {
-          font-size: 12px;
-          font-weight: 600;
-          color: #94a3b8;
-          white-space: nowrap;
-        }
-
-        .msv-step-label.is-active {
-          color: #1d4ed8;
-        }
-
-        .msv-step-label.is-done {
-          color: #15803d;
-        }
-
-        .msv-step-divider {
-          flex: 1;
-          min-width: 40px;
-          height: 2px;
-          border-radius: 999px;
-          background: #e5e7eb;
-          margin: 14px 8px 0;
-        }
-
-        .msv-step-divider.is-done {
-          background: #bbf7d0;
-        }
-
-        .msv-modal-grid {
-          grid-template-columns: 1fr;
-        }
-
-        .msv-help {
-          padding: 12px 14px;
-          border-radius: 14px;
-          border: 1px solid #e5e7eb;
-          background: #f8fafc;
-          color: #64748b;
-          font-size: 13px;
-          line-height: 1.65;
-        }
-
-        .msv-help p {
-          margin: 0;
-        }
-
         .msv-indent {
           padding-left: 14px;
           border-left: 2px solid #fed7aa;
-        }
-
-        .wiz-footer {
-          display: flex;
-          justify-content: space-between;
-          gap: 12px;
-          margin-top: 24px;
-          padding-top: 16px;
-          border-top: 1px solid #e5e7eb;
         }
 
         .msv-toast-stack {
@@ -1525,14 +1406,14 @@ export default function MonitoringScaleView({
         @media (max-width: 767px) {
           .msv-header-actions,
           .msv-form-actions,
-          .wiz-footer,
+          .msv-criterion-actions,
           .msv-toolbar {
             width: 100%;
           }
 
           .msv-header-actions > *,
           .msv-form-actions > *,
-          .wiz-footer > * {
+          .msv-criterion-actions > * {
             flex: 1 1 100%;
           }
 
@@ -1555,9 +1436,6 @@ export default function MonitoringScaleView({
             white-space: normal;
           }
 
-          .wiz-footer {
-            flex-direction: column-reverse;
-          }
         }
 
         @media (min-width: 768px) {
@@ -1578,9 +1456,6 @@ export default function MonitoringScaleView({
             overflow: auto;
           }
 
-          .msv-modal-grid {
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-          }
         }
 
         @media (min-width: 1100px) {
@@ -1603,9 +1478,6 @@ export default function MonitoringScaleView({
             grid-template-columns: minmax(340px, 380px) minmax(0, 1fr);
           }
 
-          .wiz-card {
-            width: min(960px, 100%);
-          }
         }
       `}</style>
 
@@ -1765,13 +1637,19 @@ export default function MonitoringScaleView({
                     <div
                       key={`${direction.id || 'direction'}-${index}`}
                       className={`dir-item${selectedDir === index ? ' selected' : ''}`}
-                      onClick={() => setSelectedDir(index)}
+                      onClick={() => {
+                        setSelectedDir(index);
+                        setCriterionMode('view');
+                        resetCriterionForm();
+                      }}
                       role="button"
                       tabIndex={0}
                       onKeyDown={(event) => {
                         if (event.key === 'Enter' || event.key === ' ') {
                           event.preventDefault();
                           setSelectedDir(index);
+                          setCriterionMode('view');
+                          resetCriterionForm();
                         }
                       }}
                     >
@@ -1853,6 +1731,8 @@ export default function MonitoringScaleView({
                   onChange={(event) => {
                     setSelectedDir(Number(event.target.value));
                     setSelectedCrit(0);
+                    setCriterionMode('view');
+                    resetCriterionForm();
                   }}
                   disabled={!directions.length}
                 >
@@ -1868,15 +1748,6 @@ export default function MonitoringScaleView({
                 </select>
               </div>
 
-              <button
-                type="button"
-                className="btn-primary"
-                disabled={!directions.length || !canEdit}
-                onClick={() => openWizard()}
-              >
-                <Icon icon="fa-circle-plus" size={14} />
-                Добавить критерий
-              </button>
             </div>
 
             {selectedDirection ? (
@@ -1922,61 +1793,221 @@ export default function MonitoringScaleView({
                 text="Загружаем критерии"
                 hint="Получаем данные по шкале с сервера."
               />
-            ) : !hasCriteria ? (
+            ) : directions.length === 0 ? (
               <EmptyState
                 icon="fa-list-check"
-                text={directions.length === 0 ? 'Сначала добавьте направление' : 'Критериев пока нет'}
-                hint={
-                  directions.length === 0
-                    ? 'Без направления критерии добавить нельзя.'
-                    : 'Нажмите «Добавить критерий», чтобы заполнить шкалу.'
-                }
+                text="Сначала добавьте направление"
+                hint="Без направления критерии добавить нельзя."
               />
             ) : (
               <div className="msv-criteria-layout">
                 <div className="msv-criteria-list">
-                  {selectedDirection.criteria.map((criterion, index) => {
-                    const previewText =
-                      criterion.value && criterion.value !== EMPTY_DESCRIPTION
-                        ? criterion.value
-                        : criterion.deficiency?.description &&
-                          criterion.deficiency.description !== EMPTY_DESCRIPTION
-                          ? criterion.deficiency.description
-                          : EMPTY_DESCRIPTION;
+                  {selectedDirection.criteria.length ? (
+                    selectedDirection.criteria.map((criterion, index) => {
+                      const previewText =
+                        criterion.value && criterion.value !== EMPTY_DESCRIPTION
+                          ? criterion.value
+                          : criterion.deficiency?.description &&
+                            criterion.deficiency.description !== EMPTY_DESCRIPTION
+                            ? criterion.deficiency.description
+                            : EMPTY_DESCRIPTION;
 
-                    return (
-                      <button
-                        key={`${criterion.name}-${index}`}
-                        type="button"
-                        className={`crit-row${index === selectedCrit ? ' is-active' : ''}`}
-                        onClick={() => setSelectedCrit(index)}
-                      >
-                        <div className="crit-row-head">
-                          <span className="crit-row-name">
-                            {criterion.name || `Критерий ${index + 1}`}
-                          </span>
-                          <span className={`chip ${criterion.isCritical ? 'amber' : 'emerald'}`}>
-                            <Icon
-                              icon={criterion.isCritical ? 'fa-triangle-exclamation' : 'fa-bullseye'}
-                              size={10}
-                            />
-                            {criterion.isCritical ? 'Критичный' : `${criterion.weight}%`}
-                          </span>
-                        </div>
-                        <p
-                          className={`crit-row-desc${
-                            previewText === EMPTY_DESCRIPTION ? ' is-placeholder' : ''
-                          }`}
+                      return (
+                        <button
+                          key={`${criterion.name}-${index}`}
+                          type="button"
+                          className={`crit-row${index === selectedCrit ? ' is-active' : ''}`}
+                          onClick={() => {
+                            setSelectedCrit(index);
+                            if (criterionMode !== 'view') {
+                              setCriterionMode('view');
+                              resetCriterionForm();
+                            }
+                          }}
                         >
-                          {previewText}
-                        </p>
+                          <div className="crit-row-head">
+                            <span className="crit-row-name">
+                              {criterion.name || `Критерий ${index + 1}`}
+                            </span>
+                            <span className={`chip ${criterion.isCritical ? 'amber' : 'emerald'}`}>
+                              <Icon
+                                icon={criterion.isCritical ? 'fa-triangle-exclamation' : 'fa-bullseye'}
+                                size={10}
+                              />
+                              {criterion.isCritical ? 'Критичный' : `${criterion.weight}%`}
+                            </span>
+                          </div>
+                          <p
+                            className={`crit-row-desc${
+                              previewText === EMPTY_DESCRIPTION ? ' is-placeholder' : ''
+                            }`}
+                          >
+                            {previewText}
+                          </p>
+                        </button>
+                      );
+                    })
+                  ) : (
+                    <div className="msv-criteria-empty">
+                      Критериев пока нет. Добавьте первый критерий ниже.
+                    </div>
+                  )}
+
+                  {canEdit ? (
+                    <div className="msv-criteria-add">
+                      <button
+                        type="button"
+                        className="btn-primary"
+                        onClick={startCreateCriterion}
+                        disabled={!selectedDirection}
+                      >
+                        <Icon icon="fa-circle-plus" size={14} />
+                        Добавить критерий
                       </button>
-                    );
-                  })}
+                    </div>
+                  ) : null}
                 </div>
 
-                {activeCriterion ? (
-                  <div className="msv-criterion-panel">
+                <div className="msv-criterion-panel">
+                  {isCriterionCreating || isCriterionEditing ? (
+                    <div className="msv-criterion-editor">
+                      <div className="msv-form-grid">
+                        <div>
+                          <label className="field-label">
+                            Название критерия <span style={{ color: '#ef4444' }}>*</span>
+                          </label>
+                          <input
+                            type="text"
+                            value={critName}
+                            onChange={(event) => setCritName(event.target.value)}
+                            placeholder="Например: полнота ответа..."
+                            autoFocus
+                          />
+                        </div>
+
+                        <label className="toggle-row">
+                          <input
+                            type="checkbox"
+                            checked={critCritical}
+                            onChange={(event) => {
+                              const isChecked = event.target.checked;
+                              setCritCritical(isChecked);
+                              if (isChecked) {
+                                setCritWeight('');
+                                setCritHasDef(false);
+                                setDefWeight('');
+                                setDefDesc('');
+                              }
+                            }}
+                          />
+                          <div>
+                            <span className="toggle-row-title">Критичный критерий</span>
+                            <span className="toggle-row-hint">
+                              Ошибка по такому критерию автоматически обнуляет итоговую оценку.
+                            </span>
+                          </div>
+                        </label>
+
+                        {!critCritical ? (
+                          <div>
+                            <label className="field-label">
+                              Вес <span style={{ color: '#ef4444' }}>*</span>
+                            </label>
+                            <input
+                              type="number"
+                              value={critWeight}
+                              onChange={(event) => setCritWeight(event.target.value)}
+                              placeholder={`Доступно: ${availableCriterionWeight}`}
+                              min="1"
+                              max="100"
+                            />
+                          </div>
+                        ) : null}
+
+                        {!critCritical ? (
+                          <label className="toggle-row">
+                            <input
+                              type="checkbox"
+                              checked={critHasDef}
+                              onChange={(event) => {
+                                const isChecked = event.target.checked;
+                                setCritHasDef(isChecked);
+                                if (!isChecked) {
+                                  setDefWeight('');
+                                  setDefDesc('');
+                                }
+                              }}
+                            />
+                            <div>
+                              <span className="toggle-row-title">Есть недочет</span>
+                              <span className="toggle-row-hint">
+                                Для частичной ошибки можно указать отдельный сниженный вес.
+                              </span>
+                            </div>
+                          </label>
+                        ) : null}
+
+                        {critHasDef && !critCritical ? (
+                          <div className="msv-indent">
+                            <label className="field-label">Вес недочета</label>
+                            <input
+                              type="number"
+                              value={defWeight}
+                              onChange={(event) => setDefWeight(event.target.value)}
+                              placeholder={`1 – ${critWeight || '...'}`}
+                              min="1"
+                            />
+                          </div>
+                        ) : null}
+
+                        <div>
+                          <label className="field-label">Описание критерия</label>
+                          <textarea
+                            value={critValue}
+                            onChange={(event) => setCritValue(event.target.value)}
+                            placeholder="Подробно опишите, что проверяется и как оценивается..."
+                            style={{ minHeight: 130 }}
+                          />
+                        </div>
+
+                        {critHasDef && !critCritical ? (
+                          <div className="msv-indent">
+                            <label className="field-label">Описание недочета</label>
+                            <textarea
+                              value={defDesc}
+                              onChange={(event) => setDefDesc(event.target.value)}
+                              placeholder="Опишите, как выглядит частичная ошибка..."
+                              style={{ minHeight: 96 }}
+                            />
+                          </div>
+                        ) : null}
+                      </div>
+
+                      <div className="msv-criterion-actions">
+                        <button type="button" className="btn-ghost" onClick={cancelCriterionEditor}>
+                          <Icon icon="fa-xmark" size={14} />
+                          Отмена
+                        </button>
+                        {isCriterionEditing ? (
+                          <button
+                            type="button"
+                            className="btn-ghost"
+                            onClick={() => {
+                              deleteCrit(editingCrit);
+                            }}
+                          >
+                            <Icon icon="fa-trash-can" size={14} />
+                            Удалить
+                          </button>
+                        ) : null}
+                        <button type="button" className="btn-primary" onClick={saveCriterion}>
+                          <Icon icon={isCriterionEditing ? 'fa-check' : 'fa-circle-plus'} size={14} />
+                          {isCriterionEditing ? 'Сохранить' : 'Добавить'}
+                        </button>
+                      </div>
+                    </div>
+                  ) : activeCriterion ? (
+                    <>
                     <div className="msv-criterion-head">
                       <div className="crit-main">
                         <div
@@ -2027,8 +2058,8 @@ export default function MonitoringScaleView({
                           <button
                             type="button"
                             className="icon-btn"
-                            onClick={() => openWizard(selectedCrit)}
-                            title="Редактировать"
+                            onClick={() => startEditCriterion(selectedCrit)}
+                            title="Редактировать в блоке"
                           >
                             <Icon icon="fa-pen-to-square" size={13} />
                           </button>
@@ -2087,191 +2118,20 @@ export default function MonitoringScaleView({
                         </p>
                       </div>
                     ) : null}
-                  </div>
-                ) : null}
+                    </>
+                  ) : (
+                    <EmptyState
+                      icon="fa-list-check"
+                      text="Выберите критерий"
+                      hint="Нажмите на критерий слева, чтобы посмотреть или отредактировать его."
+                    />
+                  )}
+                </div>
               </div>
             )}
           </div>
         )}
       </div>
-
-      {wizardOpen ? (
-        <div className="wiz-backdrop" onClick={(event) => event.target === event.currentTarget && closeWizard()}>
-          <div className="wiz-card">
-            <div className="wiz-head">
-              <h2>{editingCrit !== null ? 'Редактировать критерий' : 'Новый критерий'}</h2>
-              <button type="button" className="icon-btn" onClick={closeWizard}>
-                <Icon icon="fa-xmark" size={15} />
-              </button>
-            </div>
-
-            <StepBar current={wizardStep} />
-
-            {wizardStep === 0 ? (
-              <div className="msv-modal-grid">
-                <div>
-                  <label className="field-label">
-                    Название критерия <span style={{ color: '#ef4444' }}>*</span>
-                  </label>
-                  <input
-                    type="text"
-                    value={critName}
-                    onChange={(event) => setCritName(event.target.value)}
-                    placeholder="Например: полнота ответа..."
-                    autoFocus
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter') nextStep();
-                    }}
-                  />
-                </div>
-
-                <div className="msv-help">
-                  <p>
-                    Название должно коротко и понятно объяснять, что именно оценивается по этому пункту.
-                  </p>
-                </div>
-              </div>
-            ) : null}
-
-            {wizardStep === 1 ? (
-              <div className="msv-form-grid">
-                <label className="toggle-row">
-                  <input
-                    type="checkbox"
-                    checked={critCritical}
-                    onChange={(event) => {
-                      const isChecked = event.target.checked;
-                      setCritCritical(isChecked);
-                      if (isChecked) {
-                        setCritWeight('');
-                        setCritHasDef(false);
-                        setDefWeight('');
-                        setDefDesc('');
-                      }
-                    }}
-                  />
-                  <div>
-                    <span className="toggle-row-title">Критичный критерий</span>
-                    <span className="toggle-row-hint">
-                      Ошибка по такому критерию автоматически обнуляет итоговую оценку.
-                    </span>
-                  </div>
-                </label>
-
-                {!critCritical ? (
-                  <div>
-                    <label className="field-label">
-                      Вес <span style={{ color: '#ef4444' }}>*</span>
-                    </label>
-                    <input
-                      type="number"
-                      value={critWeight}
-                      onChange={(event) => setCritWeight(event.target.value)}
-                      placeholder={`Доступно: ${
-                        100 -
-                        totalWeight(selectedDir) +
-                        (editingCrit !== null &&
-                        !directions[selectedDir]?.criteria?.[editingCrit]?.isCritical
-                          ? directions[selectedDir]?.criteria?.[editingCrit]?.weight || 0
-                          : 0)
-                      }`}
-                      min="1"
-                      max="100"
-                      autoFocus
-                    />
-                  </div>
-                ) : null}
-
-                {!critCritical ? (
-                  <label className="toggle-row">
-                    <input
-                      type="checkbox"
-                      checked={critHasDef}
-                      onChange={(event) => {
-                        const isChecked = event.target.checked;
-                        setCritHasDef(isChecked);
-                        if (!isChecked) {
-                          setDefWeight('');
-                          setDefDesc('');
-                        }
-                      }}
-                    />
-                    <div>
-                      <span className="toggle-row-title">Есть недочёт</span>
-                      <span className="toggle-row-hint">
-                        Для частичной ошибки можно указать отдельный сниженный вес.
-                      </span>
-                    </div>
-                  </label>
-                ) : null}
-
-                {critHasDef && !critCritical ? (
-                  <div className="msv-indent">
-                    <label className="field-label">Вес недочёта</label>
-                    <input
-                      type="number"
-                      value={defWeight}
-                      onChange={(event) => setDefWeight(event.target.value)}
-                      placeholder={`1 – ${critWeight || '...'}`}
-                      min="1"
-                    />
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-
-            {wizardStep === 2 ? (
-              <div className="msv-form-grid">
-                <div>
-                  <label className="field-label">Описание критерия</label>
-                  <textarea
-                    value={critValue}
-                    onChange={(event) => setCritValue(event.target.value)}
-                    placeholder="Подробно опишите, что проверяется и как оценивается..."
-                    style={{ minHeight: 140 }}
-                    autoFocus
-                  />
-                </div>
-
-                {critHasDef && !critCritical ? (
-                  <div className="msv-indent">
-                    <label className="field-label">Описание недочёта</label>
-                    <textarea
-                      value={defDesc}
-                      onChange={(event) => setDefDesc(event.target.value)}
-                      placeholder="Опишите, как выглядит частичная ошибка..."
-                      style={{ minHeight: 96 }}
-                    />
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-
-            <div className="wiz-footer">
-              <button
-                type="button"
-                className="btn-ghost"
-                onClick={wizardStep === 0 ? closeWizard : () => setWizardStep((prev) => prev - 1)}
-              >
-                <Icon icon={wizardStep === 0 ? 'fa-xmark' : 'fa-angle-left'} size={14} />
-                {wizardStep === 0 ? 'Отмена' : 'Назад'}
-              </button>
-
-              {wizardStep < STEPS.length - 1 ? (
-                <button type="button" className="btn-primary" onClick={nextStep}>
-                  Далее
-                  <Icon icon="fa-angle-right" size={14} />
-                </button>
-              ) : (
-                <button type="button" className="btn-primary" onClick={saveCriterion}>
-                  <Icon icon={editingCrit !== null ? 'fa-check' : 'fa-circle-plus'} size={14} />
-                  {editingCrit !== null ? 'Сохранить' : 'Добавить'}
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
-      ) : null}
 
       <Toast toasts={toasts} remove={remove} />
     </>
