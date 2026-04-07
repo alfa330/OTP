@@ -10,6 +10,7 @@ import SurveysView from './components/surveys/SurveysView';
 import TechnicalIssuesView from './components/technical/TechnicalIssuesView';
 import RecruitingView from './components/recruiting/RecruitingView';
 import LmsView from './components/lms/LmsView';
+import MonitoringScaleView from './components/monitoring/MonitoringScaleView';
 import FaIcon from './components/common/FaIcon';
 import AuthEntranceSplash from './components/common/AuthEntranceSplash';
 import OrazAitSplash from './components/common/OrazAitSplash';
@@ -48,7 +49,6 @@ const lazyWithRetry = (importer) =>
         }
     });
 
-const MonitoringScaleModal = lazyWithRetry(() => import('./components/modals/MonitoringScaleModal'));
 const DisputeModal = lazyWithRetry(() => import('./components/modals/DisputeModal'));
 const HistoryModal = lazyWithRetry(() => import('./components/modals/HistoryModal'));
 const UserEditModal = lazyWithRetry(() => import('./components/modals/UserEditModal'));
@@ -22888,7 +22888,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 new_password: '',
                 confirm_password: ''
             });
-            const [showMonitoringScaleModal, setShowMonitoringScaleModal] = useState(false);
             const [directions, setDirections] = useState([]);
             const [selectedMonth, setSelectedMonth] = useState(() => getStoredValue('selectedMonth', currentMonth));
             const [users, setUsers] = useState([]);
@@ -26210,7 +26209,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     );
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
-                        setDirections(newDirections);
+                        const updatedDirections = Array.isArray(data.directions)
+                            ? data.directions.filter((direction) => direction?.isActive !== false)
+                            : newDirections;
+                        setDirections(updatedDirections);
                         showToast('Directions saved successfully', 'success');
                     } else {
                         showToast(data.error || 'Failed to save directions', 'error');
@@ -29417,7 +29419,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </button>
                                         </li>
                                         <li>
-                                            <button onClick={() => {fetchDirections(); setShowMonitoringScaleModal(true); setMobileMenuOpen(false);}} className="w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3">
+                                            <button
+                                                onClick={(e) => handleSidebarViewNavigation(e, 'monitoring_scale', { onNavigate: () => fetchDirections() })}
+                                                className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'monitoring_scale' ? 'bg-blue-700' : ''}`}
+                                            >
                                                 <FaIcon className="fas fa-sliders-h"></FaIcon> <span className="sidebar-text">Мониторинговая шкала</span>
                                             </button>
                                         </li>
@@ -30452,17 +30457,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         ) : null}
                                     </div>
                                     )}
-                                {showMonitoringScaleModal && (
-                                    <Suspense fallback={null}>
-                                        <MonitoringScaleModal
-                                            isOpen={showMonitoringScaleModal}
-                                            onClose={() => setShowMonitoringScaleModal(false)}
-                                            onSave={saveDirections}
-                                            initialDirections={directions}
-                                        />
-                                    </Suspense>
-                                )}
-
                                 {showAiMonthlyFeedbackModal && (
                                 <MonthlyFeedbackModal
                                     title={aiMonthlyFeedbackTitle}
@@ -31230,6 +31224,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 </div>
                                 )}
                                 {( view === "contests" && (<ContestsApp user={user} operators={users} directions={directions} />))}
+                                {( view === "monitoring_scale" && (
+                                    <MonitoringScaleView
+                                        directions={directions}
+                                        loading={isLoading}
+                                        onRefresh={fetchDirections}
+                                        onSave={saveDirections}
+                                        showToast={showToast}
+                                        canEdit={isAdminLikeRoleFn(user?.role)}
+                                    />
+                                ))}
                                 {( view === "trainings" && (<TrainingsView user={user} operators={users} showToast={showToast} apiBaseUrl={API_BASE_URL} />))}
                                 {( view === "technical_issues" && (<TechnicalIssuesView user={user} operators={users} directions={directions} showToast={showToast} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} />))}
                                 {( view === "tasks" && (<TasksView user={user} showToast={showToast} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} />))}
