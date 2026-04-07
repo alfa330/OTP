@@ -18155,7 +18155,7 @@ def lms_admin_attempts():
                     ta.id, ta.assignment_id, ta.test_id, ta.user_id, u.name, u.role,
                     ta.attempt_no, ta.status, ta.score_percent, ta.passed,
                     ta.started_at, ta.finished_at, ta.duration_seconds,
-                    t.title, a.course_id, c.title
+                    t.title, COALESCE(t.is_final, FALSE), a.course_id, c.title
                 FROM lms_test_attempts ta
                 JOIN users u ON u.id = ta.user_id
                 JOIN lms_tests t ON t.id = ta.test_id
@@ -18184,8 +18184,9 @@ def lms_admin_attempts():
                     "finished_at": row[11].isoformat() if row[11] else None,
                     "duration_seconds": int(row[12] or 0) if row[12] is not None else None,
                     "test_title": row[13],
-                    "course_id": int(row[14]),
-                    "course_title": row[15]
+                    "is_final": bool(row[14]) if row[14] is not None else False,
+                    "course_id": int(row[15]),
+                    "course_title": row[16]
                 })
 
         return jsonify({"status": "success", "attempts": attempts}), 200
