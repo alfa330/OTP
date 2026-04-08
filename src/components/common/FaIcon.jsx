@@ -247,6 +247,7 @@ const TOKEN_TO_ICON = {
     'fa-random': 'Shuffle',
     'fa-redo': 'RotateCw',
     'fa-rotate': 'RotateCw',
+    'fa-undo': 'RotateCw',
     'fa-running': 'Footprints',
     'fa-save': 'Save',
     'fa-search': 'Search',
@@ -296,6 +297,8 @@ const TOKEN_TO_ICON = {
     'fa-user-times': 'UserX',
     'fa-users': 'Users',
     'fa-users-cog': 'Users',
+    'fa-people-group': 'Users',
+    'fa-plus-circle': 'Plus',
     'fa-video-slash': 'VideoOff',
     'fa-xmark': 'X'
 };
