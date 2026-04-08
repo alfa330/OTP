@@ -1176,7 +1176,7 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
     const configuredMinutes = Math.max(0, Number(test?.time_limit_minutes || test?.time_limit || 0));
     const configuredSeconds = Math.max(0, Number(test?.time_limit_seconds || 0));
     const timeLimitSeconds = configuredSeconds > 0 ? configuredSeconds : (configuredMinutes > 0 ? configuredMinutes * 60 : 0);
-    const fallbackMinutes = Math.max(10, Math.ceil((Number(test?.question_count || 0) || 1) * 1.5));
+    const fallbackMinutes = Math.max(1, Math.ceil((Number(test?.question_count || 0) || 1) * 1.5));
     const displayMinutes = timeLimitSeconds > 0 ? Math.max(1, Math.round(timeLimitSeconds / 60)) : fallbackMinutes;
     let testStatus = "not_started";
     if (passedAny) testStatus = "completed";
@@ -1259,10 +1259,8 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
         lessons.push(mappedTest);
         // Добавляем длительность теста в общее время курса
         durationSeconds += Math.max(0, Number(mappedTest.durationSeconds || 0));
-        if (!mappedTest.isFinal) {
-          progressItemsTotal += 1;
-          if (mappedTest.status === "completed") progressItemsCompleted += 1;
-        }
+        progressItemsTotal += 1;
+        if (mappedTest.status === "completed") progressItemsCompleted += 1;
         if (mappedTest.status !== "completed") progressionLocked = true;
       });
 
@@ -1292,10 +1290,8 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
       targetModule.lessons.push(mappedTest);
       // Добавляем длительность финального теста к общему времени
       durationSeconds += Math.max(0, Number(mappedTest.durationSeconds || 0));
-      if (!mappedTest.isFinal) {
-        progressItemsTotal += 1;
-        if (mappedTest.status === "completed") progressItemsCompleted += 1;
-      }
+      progressItemsTotal += 1;
+      if (mappedTest.status === "completed") progressItemsCompleted += 1;
       if (mappedTest.status !== "completed") progressionLocked = true;
     });
   }
@@ -4418,7 +4414,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
               if (quizQuestions.length > 0) {
                 const maxQuizQuestions = Math.max(1, quizQuestions.length);
                 const quizQuestionsPerTest = Math.max(1, Math.min(maxQuizQuestions, Number(lessonItem?.quizQuestionsPerTest || maxQuizQuestions)));
-                const defaultQuizMinutes = Math.max(10, Math.ceil(quizQuestionsPerTest * 1.5));
+                const defaultQuizMinutes = Math.max(1, Math.ceil(quizQuestionsPerTest * 1.5));
                 const quizTimeLimitMinutes = Math.max(1, Number(lessonItem?.quizTimeLimitMinutes || defaultQuizMinutes));
                 const quizPassingScore = Math.max(1, Math.min(100, Number(lessonItem?.quizPassingScore || settings.passingScore || 80)));
                 const lessonAttemptRaw = Number(lessonItem?.quizAttemptLimit || attemptLimit);
