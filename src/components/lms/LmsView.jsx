@@ -5398,8 +5398,8 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
             ))}
             <button onClick={addModule} className="w-full border-2 border-dashed border-slate-200 hover:border-indigo-300 rounded-2xl py-4 text-sm text-slate-500 hover:text-indigo-600 flex items-center justify-center gap-2 transition-all font-medium"><Plus size={16} /> Добавить модуль</button>
           </div>
-          <div className="xl:col-span-3 2xl:col-span-8">
-            <div className={`bg-white rounded-2xl border border-slate-200 ${builderLessonPanelMode === "operator" ? "p-0 overflow-hidden" : "p-5 sticky top-24"}`}>
+          <div className="xl:col-span-3 2xl:col-span-8 xl:self-start">
+            <div className={`bg-white rounded-2xl border border-slate-200 xl:sticky xl:top-24 xl:max-h-[calc(100vh-7rem)] xl:overflow-y-auto overflow-x-hidden custom-scrollbar ${builderLessonPanelMode === "operator" ? "p-0" : "p-5"}`}>
               {selectedLessonModel ? (
                 <>
                   <div className={`${builderLessonPanelMode === "operator" ? "px-4 py-3 border-b border-slate-200 bg-white sticky top-0 z-20" : "mb-4"}`}>
