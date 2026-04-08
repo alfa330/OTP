@@ -1101,6 +1101,13 @@ const mapHomeCourseToView = (course) => {
   const skills = Array.isArray(course?.skills)
     ? course.skills.map((item) => String(item || "").trim()).filter(Boolean)
     : [];
+  // Теперь бекенд честно отдаёт сумму секунд (уроки + тесты), берём её.
+  // Иначе фолбэк по количеству уроков.
+  const apiDurationSeconds = Number(course?.total_duration_seconds || 0);
+  const fallbackMinutes = totalLessons * 15;
+  const durationLabel = apiDurationSeconds > 0
+    ? formatDurationLabel(apiDurationSeconds)
+    : formatDurationLabel(fallbackMinutes * 60);
   return {
     id: courseId,
     assignmentId: Number(course?.assignment_id || 0) || null,
@@ -1112,7 +1119,7 @@ const mapHomeCourseToView = (course) => {
     color: visual.color,
     description: String(course?.description || ""),
     skills,
-    duration: formatDurationLabel(totalLessons * 15 * 60),
+    duration: durationLabel,
     lessons: totalLessons,
     modules: 0,
     progress,
@@ -1250,6 +1257,8 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
         const moduleHasIncompleteLesson = lessons.some((item) => item.type !== "quiz" && item.status !== "completed");
         const mappedTest = mapTestLesson(test, progressionLocked || moduleHasIncompleteLesson);
         lessons.push(mappedTest);
+        // Добавляем длительность теста в общее время курса
+        durationSeconds += Math.max(0, Number(mappedTest.durationSeconds || 0));
         if (!mappedTest.isFinal) {
           progressItemsTotal += 1;
           if (mappedTest.status === "completed") progressItemsCompleted += 1;
@@ -1281,6 +1290,8 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
     unboundTests.forEach((test) => {
       const mappedTest = mapTestLesson(test, progressionLocked);
       targetModule.lessons.push(mappedTest);
+      // Добавляем длительность финального теста к общему времени
+      durationSeconds += Math.max(0, Number(mappedTest.durationSeconds || 0));
       if (!mappedTest.isFinal) {
         progressItemsTotal += 1;
         if (mappedTest.status === "completed") progressItemsCompleted += 1;
@@ -1330,11 +1341,12 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
     color: visual.color,
     description: String(coursePayload?.description || fallbackCourse?.description || ""),
     skills: versionSkills.length ? versionSkills : (Array.isArray(fallbackCourse?.skills) ? fallbackCourse.skills : []),
+    // Длительность — автоматическая сумма всех уроков + тестов
     duration: formatDurationLabel(durationSeconds),
     lessons: lessonsCountWithTests,
     modules: modulesData.length,
     progress: Math.max(0, Math.min(100, progressPercent)),
-    deadline: assignment?.due_at || fallbackCourse?.deadline || null,
+    deadline: assignment?.due_at || null,
     mandatory: Boolean(fallbackCourse?.mandatory),
     status,
     rating: Number(fallbackCourse?.rating || 0),
@@ -3883,11 +3895,10 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
   const [settings, setSettings] = useState({
     title: "",
     description: "",
-    category: "Безопасность",
+    category: "",
     mandatory: false,
     passingScore: 80,
     maxAttempts: 3,
-    deadline: "",
     questionsPerTest: 5,
     finalTestTimeLimitMinutes: 20,
     randomOrder: true,
@@ -3897,6 +3908,10 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
     coverBlobPath: "",
     skills: [],
   });
+  const [customCategories, setCustomCategories] = useState([]);
+  const [categoryDropdownOpen, setCategoryDropdownOpen] = useState(false);
+  const [newCategoryInput, setNewCategoryInput] = useState("");
+  const categoryDropdownRef = useRef(null);
   const [newSkill, setNewSkill] = useState("");
   const [lessonMaterialLink, setLessonMaterialLink] = useState("");
   const [selectedLessonId, setSelectedLessonId] = useState(null);
@@ -3942,6 +3957,17 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
   useEffect(() => {
     setOperatorEditField(null);
   }, [selectedLessonId, builderLessonPanelMode]);
+
+  useEffect(() => {
+    if (!categoryDropdownOpen) return;
+    const handleOutsideClick = (e) => {
+      if (categoryDropdownRef.current && !categoryDropdownRef.current.contains(e.target)) {
+        setCategoryDropdownOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleOutsideClick);
+    return () => document.removeEventListener("mousedown", handleOutsideClick);
+  }, [categoryDropdownOpen]);
 
   const addModule = () => setModules((prev) => [...prev, { id: Date.now(), title: `Модуль ${prev.length + 1}`, expanded: true, lessons: [] }]);
   const toggleModule = (id) => setModules((prev) => prev.map((moduleItem) => moduleItem.id === id ? { ...moduleItem, expanded: !moduleItem.expanded } : moduleItem));
@@ -4541,6 +4567,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
           category: String(settings.category || "").trim(),
           pass_threshold: Number(settings.passingScore || 80),
           attempt_limit: attemptLimit,
+          duration_minutes: null,
           cover_url: String(settings.coverUrl || "").trim() || null,
           cover_bucket: String(settings.coverBucket || "").trim() || null,
           cover_blob_path: String(settings.coverBlobPath || "").trim() || null,
@@ -5158,11 +5185,90 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                     minHeight={140}
                   />
                 </div>
-                <div>
+                <div className="relative" ref={categoryDropdownRef}>
                   <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Категория</label>
-                  <select value={settings.category} onChange={e => setSettings(p => ({ ...p, category: e.target.value }))} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 focus:outline-none focus:border-indigo-400 transition-all">
-                    <option>Безопасность</option><option>Менеджмент</option><option>Soft Skills</option><option>Финансы</option><option>Аналитика</option>
-                  </select>
+                  <button
+                    type="button"
+                    onClick={() => setCategoryDropdownOpen((prev) => !prev)}
+                    className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-left flex items-center justify-between gap-2 focus:outline-none focus:border-indigo-400 transition-all hover:border-slate-300"
+                  >
+                    <span className={settings.category ? "text-slate-900" : "text-slate-400"}>
+                      {settings.category || "Выберите или создайте категорию..."}
+                    </span>
+                    <ChevronDown size={14} className={`text-slate-400 transition-transform flex-shrink-0 ${categoryDropdownOpen ? "rotate-180" : ""}`} />
+                  </button>
+                  {categoryDropdownOpen && (
+                    <div className="absolute z-50 left-0 right-0 top-full mt-1.5 bg-white border border-slate-200 rounded-xl shadow-lg overflow-hidden">
+                      <div className="max-h-48 overflow-y-auto custom-scrollbar">
+                        {customCategories.length === 0 && (
+                          <div className="px-4 py-3 text-xs text-slate-400 text-center">Нет категорий — добавьте первую</div>
+                        )}
+                        {customCategories.map((cat) => (
+                          <div key={cat} className="flex items-center gap-1 px-1">
+                            <button
+                              type="button"
+                              onClick={() => { setSettings((p) => ({ ...p, category: cat })); setCategoryDropdownOpen(false); }}
+                              className={`flex-1 text-left px-3 py-2.5 text-sm rounded-lg transition-colors ${
+                                settings.category === cat
+                                  ? "bg-indigo-50 text-indigo-700 font-semibold"
+                                  : "text-slate-700 hover:bg-slate-50"
+                              }`}
+                            >
+                              {cat}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setCustomCategories((prev) => prev.filter((c) => c !== cat));
+                                if (settings.category === cat) setSettings((p) => ({ ...p, category: "" }));
+                              }}
+                              className="p-1.5 text-slate-300 hover:text-red-500 rounded-lg hover:bg-red-50 transition-colors flex-shrink-0"
+                              title="Удалить категорию"
+                            >
+                              <X size={12} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="border-t border-slate-100 p-2">
+                        <div className="flex gap-1.5">
+                          <input
+                            value={newCategoryInput}
+                            onChange={(e) => setNewCategoryInput(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                const val = newCategoryInput.trim();
+                                if (val && !customCategories.includes(val)) {
+                                  setCustomCategories((prev) => [...prev, val]);
+                                  setSettings((p) => ({ ...p, category: val }));
+                                  setNewCategoryInput("");
+                                  setCategoryDropdownOpen(false);
+                                }
+                              }
+                            }}
+                            placeholder="Новая категория..."
+                            className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-700 placeholder-slate-400 focus:outline-none focus:border-indigo-400 transition-all"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const val = newCategoryInput.trim();
+                              if (val && !customCategories.includes(val)) {
+                                setCustomCategories((prev) => [...prev, val]);
+                                setSettings((p) => ({ ...p, category: val }));
+                                setNewCategoryInput("");
+                                setCategoryDropdownOpen(false);
+                              }
+                            }}
+                            className="px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg transition-colors text-xs font-semibold flex items-center gap-1"
+                          >
+                            <Plus size={12} /> Добавить
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
                 <div>
                   <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Обложка курса</label>
@@ -5228,9 +5334,12 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                     <div className={`w-4 h-4 bg-white rounded-full absolute top-1 transition-all ${settings.mandatory ? "left-7" : "left-1"} shadow-sm`} />
                   </button>
                 </div>
-                <div>
-                  <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Дедлайн</label>
-                  <input type="date" value={settings.deadline} onChange={e => setSettings(p => ({ ...p, deadline: e.target.value }))} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 focus:outline-none focus:border-indigo-400 transition-all" />
+                <div className="flex items-center justify-between p-3.5 bg-slate-50 border border-slate-200 rounded-xl">
+                  <div className="flex items-center gap-2 text-xs text-slate-500">
+                    <Clock size={13} className="text-slate-400" />
+                    <span>Общая длительность</span>
+                  </div>
+                  <span className="text-xs font-semibold text-slate-700">Рассчитывается автоматически</span>
                 </div>
                 <div>
                   <label className="text-xs font-semibold text-slate-600 mb-3 block">Проходной балл: <span className="text-indigo-600">{settings.passingScore}%</span></label>
@@ -6025,6 +6134,8 @@ function AdminView({
       lessons: 0,
     };
     const progressPercent = stat.total > 0 ? Math.round(stat.progressSum / stat.total) : 0;
+    // Длительность автоматически из количества уроков
+    const adminDuration = stat.lessons > 0 ? `${stat.lessons} уроков` : "—";
     return {
       id: Number(item?.id || index + 1),
       title: item?.title || `Курс #${item?.id || index + 1}`,
@@ -6032,7 +6143,7 @@ function AdminView({
       cover: visual.cover,
       color: visual.color,
       mandatory: false,
-      duration: stat.lessons > 0 ? `${stat.lessons} уроков` : "—",
+      duration: adminDuration,
       lessons: stat.lessons || 0,
       maxAttempts: Number(item?.default_attempt_limit || 3),
       attemptsUsed: 0,
