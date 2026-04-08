@@ -6731,7 +6731,7 @@ function AdminView({
                       </div>
                     </div>
 
-                    <div className="p-6 space-y-6 bg-slate-50/50 flex-1">
+                    <div className="p-6 space-y-6 bg-slate-50/50 flex-1 overflow-y-auto custom-scrollbar">
                       <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
                         <div className="bg-white rounded-xl border border-slate-100 p-4 shadow-sm transition-all hover:border-slate-200">
                           <p className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5">Уроки курса</p>
