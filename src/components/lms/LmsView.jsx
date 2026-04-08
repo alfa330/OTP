@@ -5276,8 +5276,8 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                         <div key={l.id} onClick={() => setSelectedLessonId(selectedLessonId === l.id ? null : l.id)} className={`flex items-center gap-3 p-3 rounded-xl border-2 cursor-pointer transition-all ${selectedLessonId === l.id ? "border-indigo-300 bg-indigo-50" : "border-transparent hover:border-slate-200 hover:bg-slate-50"}`}>
                           <GripVertical size={13} className="text-slate-300 cursor-grab flex-shrink-0" />
                           <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${l.type === "video" ? "bg-blue-100 text-blue-600" : l.type === "text" ? "bg-emerald-100 text-emerald-600" : "bg-violet-100 text-violet-600"}`}><LIcon size={14} /></div>
-                          <input value={l.title} onChange={e => setModules(p => p.map(m => m.id === mod.id ? { ...m, lessons: m.lessons.map(ls => ls.id === l.id ? { ...ls, title: e.target.value } : ls) } : m))} onClick={e => e.stopPropagation()} className="flex-1 text-sm font-medium text-slate-800 bg-transparent focus:outline-none" />
-                          <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
+                          <input value={l.title} onChange={e => setModules(p => p.map(m => m.id === mod.id ? { ...m, lessons: m.lessons.map(ls => ls.id === l.id ? { ...ls, title: e.target.value } : ls) } : m))} onClick={(e) => e.stopPropagation()} className="flex-1 text-sm font-medium text-slate-800 bg-transparent focus:outline-none" />
+                          <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
                             {types.map(t => (
                               <button key={t.id} onClick={() => applyLessonType(l.id, t.id)} className={`text-[10px] px-2 py-1 rounded-lg font-semibold transition-colors ${l.type === t.id ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-500 hover:bg-slate-200"}`}>{t.label}</button>
                             ))}
@@ -5907,6 +5907,7 @@ function AdminView({
   const [selectedEmployeeCourseKey, setSelectedEmployeeCourseKey] = useState(null);
   const [employeeCourseDeadlines, setEmployeeCourseDeadlines] = useState({});
   const [assigningCourseId, setAssigningCourseId] = useState(null);
+  const [isAssignCourseModalOpen, setIsAssignCourseModalOpen] = useState(false);
   const tabs = [
     { id: "analytics", label: "Аналитика", icon: BarChart2 },
     { id: "employees", label: "Сотрудники", icon: Users },
@@ -6183,9 +6184,11 @@ function AdminView({
       if (selectedEmployeeId != null) setSelectedEmployeeId(null);
       return;
     }
-    const exists = filteredEmployeeRows.some((item) => Number(item?.id || 0) === Number(selectedEmployeeId || 0));
-    if (!exists) {
-      setSelectedEmployeeId(Number(filteredEmployeeRows[0]?.id || 0) || null);
+    if (selectedEmployeeId != null) {
+      const exists = filteredEmployeeRows.some((item) => Number(item?.id || 0) === Number(selectedEmployeeId || 0));
+      if (!exists) {
+        setSelectedEmployeeId(null);
+      }
     }
   }, [tab, filteredEmployeeRows, selectedEmployeeId]);
 
@@ -6615,6 +6618,12 @@ function AdminView({
                 <span className="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-xl bg-slate-50 border border-slate-100 text-slate-700"><BookOpen size={14} className="text-indigo-500" /> {selectedEmployee.courses} курсов</span>
                 <span className="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-xl bg-emerald-50 border border-emerald-100 text-emerald-800"><CheckCircle size={14} className="text-emerald-600" /> {selectedEmployee.completed} завершено</span>
                 <span className="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-xl bg-violet-50 border border-violet-100 text-violet-800"><Target size={14} className="text-violet-600" /> {selectedEmployee.avgScore}% ср. балл</span>
+                <button 
+                  onClick={() => setIsAssignCourseModalOpen(true)}
+                  className="inline-flex items-center gap-1.5 text-xs font-bold px-4 py-2 rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 transition-colors shadow-sm ml-2"
+                >
+                  <Plus size={14} /> Назначить курс
+                </button>
               </div>
             </div>
 
@@ -6661,47 +6670,7 @@ function AdminView({
                   </div>
                 </div>
 
-                <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
-                  <h3 className="text-sm font-semibold text-slate-900 mb-1">Назначение курса</h3>
-                  <p className="text-[11px] text-slate-500 mb-4 leading-relaxed">Выберите курс для назначения или обновления дедлайна</p>
-                  <div className="space-y-3 max-h-[350px] overflow-y-auto pr-1">
-                    {safeAdminCourses.length === 0 && (
-                      <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-xs text-slate-500 text-center">
-                        Нет доступных курсов
-                      </div>
-                    )}
-                    {safeAdminCourses.map((courseItem) => {
-                      const courseId = Number(courseItem?.id || 0);
-                      const assignmentRow = selectedEmployeeAssignmentsByCourse.get(courseId) || null;
-                      const assignmentStatus = assignmentRow ? (statusConfig[mapAdminProgressRowToUiStatus(assignmentRow)] || statusConfig.not_started) : null;
-                      const deadlineValue = getEmployeeCourseDeadline(courseId, assignmentRow);
-                      const isAssigning = assigningCourseId === courseId;
-                      return (
-                        <div key={courseId} className="rounded-xl border border-slate-100 p-3 bg-slate-50/50 hover:bg-slate-50 transition-colors">
-                          <div className="flex items-start justify-between gap-3">
-                            <p className="text-xs font-medium text-slate-800 leading-tight flex-1">{courseItem?.title || `Курс #${courseId}`}</p>
-                            {assignmentStatus && <span className={`text-[9px] px-1.5 py-0.5 rounded-md font-semibold flex-shrink-0 ${assignmentStatus.bg} ${assignmentStatus.text}`}>{assignmentStatus.label}</span>}
-                          </div>
-                          <div className="mt-2.5 flex items-center gap-2">
-                            <input
-                              type="date"
-                              value={deadlineValue}
-                              onChange={(event) => handleEmployeeCourseDeadlineChange(courseId, event.target.value)}
-                              className="w-full max-w-[125px] px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-[11px] text-slate-700 focus:outline-none focus:border-indigo-400 transition-all shadow-sm"
-                            />
-                            <button
-                              onClick={() => { void handleAssignCourseForSelectedEmployee(courseItem); }}
-                              disabled={isAssigning || !courseId}
-                              className="flex-1 px-2.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white text-[11px] font-semibold rounded-lg transition-colors flex items-center justify-center gap-1.5 shadow-sm"
-                            >
-                              {isAssigning ? "..." : (assignmentRow ? "Обновить" : "Назначить")}
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
+
               </div>
 
               <div className="xl:col-span-7 flex flex-col h-full min-h-[400px]">
@@ -6814,6 +6783,60 @@ function AdminView({
                   )}
                 </div>
               </div>
+
+
+            {isAssignCourseModalOpen && (
+              <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm transition-all duration-200" onClick={() => setIsAssignCourseModalOpen(false)}>
+                <div className="bg-white rounded-2xl border border-slate-200 shadow-xl w-full max-w-md max-h-[90vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200" onClick={(e) => e.stopPropagation()}>
+                  <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50 relative z-10">
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-900">Назначить курс</h3>
+                      <p className="text-[11px] text-slate-500 mt-0.5">Обучение для: {selectedEmployee.name}</p>
+                    </div>
+                    <button onClick={() => setIsAssignCourseModalOpen(false)} className="text-slate-400 hover:text-slate-600 transition-colors bg-white rounded-lg p-2 border border-slate-200 hover:bg-slate-50 shadow-sm">
+                      <X size={16} />
+                    </button>
+                  </div>
+                  <div className="p-6 overflow-y-auto custom-scrollbar bg-slate-50/50 flex-1 space-y-3 relative z-0">
+                    {safeAdminCourses.length === 0 && (
+                      <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-xs text-slate-500 text-center">
+                        Нет доступных курсов
+                      </div>
+                    )}
+                    {safeAdminCourses.map((courseItem) => {
+                      const courseId = Number(courseItem?.id || 0);
+                      const assignmentRow = selectedEmployeeAssignmentsByCourse.get(courseId) || null;
+                      const assignmentStatus = assignmentRow ? (statusConfig[mapAdminProgressRowToUiStatus(assignmentRow)] || statusConfig.not_started) : null;
+                      const deadlineValue = getEmployeeCourseDeadline(courseId, assignmentRow);
+                      const isAssigning = assigningCourseId === courseId;
+                      return (
+                        <div key={courseId} className="rounded-xl border border-slate-100 p-3 bg-white hover:bg-slate-50 transition-colors shadow-sm">
+                          <div className="flex items-start justify-between gap-3">
+                            <p className="text-xs font-semibold text-slate-800 leading-tight flex-1">{courseItem?.title || `Курс #${courseId}`}</p>
+                            {assignmentStatus && <span className={`text-[9px] px-1.5 py-0.5 rounded-md font-semibold flex-shrink-0 ${assignmentStatus.bg} ${assignmentStatus.text}`}>{assignmentStatus.label}</span>}
+                          </div>
+                          <div className="mt-3 flex items-center gap-2">
+                            <input
+                              type="date"
+                              value={deadlineValue}
+                              onChange={(event) => handleEmployeeCourseDeadlineChange(courseId, event.target.value)}
+                              className="w-full max-w-[130px] px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-[11px] text-slate-700 focus:outline-none focus:border-indigo-400 transition-all"
+                            />
+                            <button
+                              onClick={() => { void handleAssignCourseForSelectedEmployee(courseItem); }}
+                              disabled={isAssigning || !courseId}
+                              className="flex-1 px-2.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white text-[11px] font-semibold rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                            >
+                              {isAssigning ? "..." : (assignmentRow ? "Обновить" : "Назначить")}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            )}
             </div>
           )}
         </div>
