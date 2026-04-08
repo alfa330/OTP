@@ -14353,6 +14353,7 @@ def _lms_admin_assignment_stats_tx(cursor, where_clauses=None, params=None):
                 u.name AS user_name,
                 u.role AS user_role,
                 a.status,
+                a.created_at AS assigned_at,
                 a.due_at,
                 a.started_at,
                 a.completed_at,
@@ -14435,7 +14436,8 @@ def _lms_admin_assignment_stats_tx(cursor, where_clauses=None, params=None):
             COALESCE(ts.total_tests, 0) AS total_tests,
             COALESCE(ts.passed_tests, 0) AS passed_tests,
             COALESCE(ts.total_intermediate_tests, 0) AS total_intermediate_tests,
-            COALESCE(ts.passed_intermediate_tests, 0) AS passed_intermediate_tests
+            COALESCE(ts.passed_intermediate_tests, 0) AS passed_intermediate_tests,
+            fa.assigned_at
         FROM filtered_assignments fa
         LEFT JOIN lesson_stats ls
           ON ls.assignment_id = fa.id
@@ -14488,7 +14490,8 @@ def _lms_admin_assignment_stats_tx(cursor, where_clauses=None, params=None):
             "total_tests": total_tests,
             "passed_tests": passed_tests,
             "total_intermediate_tests": total_intermediate_tests,
-            "passed_intermediate_tests": passed_intermediate_tests
+            "passed_intermediate_tests": passed_intermediate_tests,
+            "assigned_at": row[18].isoformat() if row[18] else None
         })
     return payload
 

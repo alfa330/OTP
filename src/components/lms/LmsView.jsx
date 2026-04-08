@@ -6464,6 +6464,7 @@ function AdminView({
         courseId: Number(row?.course_id || 0),
         title: String(row?.course_title || `Курс #${row?.course_id || "-"}`),
         status: uiStatus,
+        assignedAt: row?.assigned_at || null,
         deadline: row?.due_at || null,
         completedAt,
         progress: clampLmsProgress(row?.progress_percent),
@@ -6503,6 +6504,14 @@ function AdminView({
   const selectedEmployeeCourseStatus = selectedEmployeeCourseItem
     ? (statusConfig[selectedEmployeeCourseItem.status] || statusConfig.not_started)
     : null;
+  const selectedEmployeeCourseStatusLabel = (() => {
+    if (!selectedEmployeeCourseStatus) return "";
+    if (!isCompletedLmsStatus(selectedEmployeeCourseItem?.status)) return selectedEmployeeCourseStatus.label;
+    const completedAtLabel = formatDateTimeLabel(selectedEmployeeCourseItem?.completedAt);
+    return completedAtLabel
+      ? `${selectedEmployeeCourseStatus.label}: ${completedAtLabel}`
+      : selectedEmployeeCourseStatus.label;
+  })();
   const selectedEmployeeCourseDeadlineInfo = selectedEmployeeCourseItem?.deadline
     ? formatDeadlineForStatus(selectedEmployeeCourseItem.deadline, selectedEmployeeCourseItem.status)
     : null;
@@ -6901,7 +6910,7 @@ function AdminView({
                       <div className="flex items-center gap-2 flex-wrap">
                         {selectedEmployeeCourseStatus && (
                           <span className={`text-xs font-semibold px-2.5 py-1 rounded-md ${selectedEmployeeCourseStatus.bg} ${selectedEmployeeCourseStatus.text}`}>
-                            {selectedEmployeeCourseStatus.label}
+                            {selectedEmployeeCourseStatusLabel}
                           </span>
                         )}
                         {selectedEmployeeCourseDeadlineInfo && (
@@ -6909,9 +6918,9 @@ function AdminView({
                             Дедлайн: {selectedEmployeeCourseDeadlineInfo.label}
                           </span>
                         )}
-                        {selectedEmployeeCourseItem.completedAt && (
-                          <span className="text-xs font-medium px-2.5 py-1 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-100">
-                            Completed: {formatDateTimeLabel(selectedEmployeeCourseItem.completedAt)}
+                        {selectedEmployeeCourseItem.assignedAt && (
+                          <span className="text-xs font-medium px-2.5 py-1 rounded-md bg-blue-50 text-blue-700 border border-blue-100">
+                            Назначен: {formatDateTimeLabel(selectedEmployeeCourseItem.assignedAt)}
                           </span>
                         )}
                       </div>
