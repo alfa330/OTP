@@ -5902,6 +5902,7 @@ function AdminView({
 }) {
   const [deletingCourseId, setDeletingCourseId] = useState(null);
   const [employeeSearch, setEmployeeSearch] = useState("");
+  const [employeeAssignedCourseSearch, setEmployeeAssignedCourseSearch] = useState("");
   const [employeeDeptFilter, setEmployeeDeptFilter] = useState("all");
   const [selectedEmployeeId, setSelectedEmployeeId] = useState(null);
   const [selectedEmployeeCourseKey, setSelectedEmployeeCourseKey] = useState(null);
@@ -6597,6 +6598,7 @@ function AdminView({
                 onClick={() => {
                   setSelectedEmployeeId(null);
                   setSelectedEmployeeCourseKey(null);
+                  setEmployeeAssignedCourseSearch("");
                 }}
                 className="flex items-center gap-2 text-sm font-medium text-slate-500 hover:text-indigo-600 transition-colors bg-white px-4 py-2 border border-slate-200 rounded-xl w-fit shadow-sm"
               >
@@ -6630,16 +6632,40 @@ function AdminView({
             <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
               <div className="xl:col-span-5 flex flex-col gap-6 sticky top-6">
                 <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden flex flex-col shadow-sm">
-                  <div className="p-5 border-b border-slate-100">
+                  <div className="p-5 border-b border-slate-100 space-y-3">
                     <h3 className="text-sm font-semibold text-slate-900">Назначенные курсы</h3>
+                    <div className="relative">
+                      <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                      <input
+                        value={employeeAssignedCourseSearch}
+                        onChange={(e) => setEmployeeAssignedCourseSearch(e.target.value)}
+                        placeholder="Поиск по курсам..."
+                        className="w-full pl-9 pr-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs placeholder-slate-400 focus:outline-none focus:border-indigo-400 transition-all"
+                      />
+                    </div>
                   </div>
-                  <div className="max-h-[450px] overflow-y-auto p-5 space-y-3 w-full bg-slate-50/50 custom-scrollbar">
-                    {selectedEmployeeCourseAnalyticsRows.length === 0 && (
-                      <div className="rounded-xl border border-dashed border-slate-200 bg-white px-4 py-8 text-sm text-slate-500 text-center">
-                        По сотруднику пока нет назначенных курсов
-                      </div>
-                    )}
-                    {selectedEmployeeCourseAnalyticsRows.map((courseItem) => {
+                  <div className="h-[600px] xl:h-[750px] flex-1 overflow-y-auto p-5 space-y-3 w-full bg-slate-50/50 custom-scrollbar">
+                    {(() => {
+                      const lowerSearch = employeeAssignedCourseSearch.trim().toLowerCase();
+                      const filteredCourses = selectedEmployeeCourseAnalyticsRows.filter(c => c.title.toLowerCase().includes(lowerSearch));
+                      
+                      if (selectedEmployeeCourseAnalyticsRows.length === 0) {
+                        return (
+                          <div className="rounded-xl border border-dashed border-slate-200 bg-white px-4 py-8 text-sm text-slate-500 text-center shadow-sm">
+                            По сотруднику пока нет назначенных курсов
+                          </div>
+                        );
+                      }
+                      
+                      if (filteredCourses.length === 0) {
+                        return (
+                          <div className="rounded-xl border border-dashed border-slate-200 bg-white px-4 py-8 text-sm text-slate-500 text-center shadow-sm">
+                            По запросу ничего не найдено
+                          </div>
+                        );
+                      }
+
+                      return filteredCourses.map((courseItem) => {
                       const st = statusConfig[courseItem.status] || statusConfig.not_started;
                       const deadlineInfo = courseItem.deadline ? formatDeadline(courseItem.deadline) : null;
                       const isSelectedCourse = selectedEmployeeCourseKey === courseItem.rowKey;
@@ -6666,7 +6692,7 @@ function AdminView({
                           </div>
                         </button>
                       );
-                    })}
+                    })})()}
                   </div>
                 </div>
 
@@ -6744,7 +6770,7 @@ function AdminView({
                           </div>
                         ) : (
                           <div className="space-y-3">
-                            {selectedEmployeeCourseItem.tests.map((testItem) => (
+                            {[...selectedEmployeeCourseItem.tests].reverse().map((testItem) => (
                               <div key={testItem.key} className="bg-white rounded-xl border border-slate-100 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-sm overflow-hidden relative">
                                 {testItem.passed && <div className="absolute top-0 left-0 w-1 h-full bg-emerald-500"></div>}
                                 {!testItem.passed && testItem.attempts > 0 && <div className="absolute top-0 left-0 w-1 h-full bg-amber-500"></div>}
