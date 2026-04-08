@@ -6502,7 +6502,8 @@ function AdminView({
 
       {tab === "employees" && (
         <div className="space-y-6">
-          <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+          {!selectedEmployee ? (
+            <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden flex flex-col">
             <div className="px-6 py-4 border-b border-slate-100 flex items-center gap-3">
               <div className="relative flex-1 max-w-xs">
                 <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
@@ -6525,10 +6526,11 @@ function AdminView({
               </select>
               <span className="text-xs text-slate-400">{filteredEmployeeRows.length} сотрудников</span>
             </div>
-            <table className="w-full">
-              <thead>
-                <tr className="bg-slate-50 border-b border-slate-100">
-                  {["Сотрудник", "Отдел", "Назначено", "Завершено", "Ср. балл", "Попытки", "Время тестов", "Просрочено"].map(h => (
+            <div className="max-h-[600px] overflow-y-auto custom-scrollbar w-full">
+              <table className="w-full relative">
+                <thead className="sticky top-0 z-10 bg-slate-50 shadow-sm">
+                  <tr className="border-b border-slate-100">
+                    {["Сотрудник", "Отдел", "Назначено", "Завершено", "Ср. балл", "Попытки", "Время тестов", "Просрочено"].map(h => (
                     <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">{h}</th>
                   ))}
                 </tr>
@@ -6583,160 +6585,235 @@ function AdminView({
               </tbody>
             </table>
           </div>
+        </div>
+        ) : (
+          <div className="space-y-6">
+            <div>
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedEmployeeId(null);
+                  setSelectedEmployeeCourseKey(null);
+                }}
+                className="flex items-center gap-2 text-sm font-medium text-slate-500 hover:text-indigo-600 transition-colors bg-white px-4 py-2 border border-slate-200 rounded-xl w-fit shadow-sm"
+              >
+                <ArrowLeft size={16} /> Назад к списку сотрудников
+              </button>
+            </div>
 
-          {selectedEmployee ? (
-            <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
-              <div className="xl:col-span-8 bg-white rounded-2xl border border-slate-200 p-6 space-y-5">
-                <div className="flex items-start justify-between gap-4">
-                  <div>
-                    <p className="text-xs uppercase tracking-wider text-slate-400">Карточка сотрудника</p>
-                    <h3 className="text-lg font-semibold text-slate-900 mt-1">{selectedEmployee.name}</h3>
-                    <p className="text-sm text-slate-500 mt-0.5">{selectedEmployee.dept} • Активность: {selectedEmployee.lastActive || "—"}</p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="inline-flex items-center gap-1 text-xs font-semibold px-3 py-1.5 rounded-full bg-indigo-50 text-indigo-700"><BookOpen size={12} /> {selectedEmployee.courses} курсов</span>
-                    <span className="inline-flex items-center gap-1 text-xs font-semibold px-3 py-1.5 rounded-full bg-emerald-50 text-emerald-700"><CheckCircle size={12} /> {selectedEmployee.completed} завершено</span>
-                    <span className="inline-flex items-center gap-1 text-xs font-semibold px-3 py-1.5 rounded-full bg-violet-50 text-violet-700"><Target size={12} /> {selectedEmployee.avgScore}%</span>
-                  </div>
+            <div className="bg-white rounded-2xl border border-slate-200 p-6 flex flex-col md:flex-row items-start md:items-center justify-between gap-6 shadow-sm">
+              <div className="flex items-center gap-4">
+                <div className="w-14 h-14 rounded-full bg-gradient-to-br from-indigo-400 to-violet-500 flex items-center justify-center text-white text-xl font-semibold flex-shrink-0">
+                  {String(selectedEmployee.name || "").split(" ").map((w) => w[0]).join("").slice(0, 2)}
                 </div>
-
-                <div className="space-y-3">
-                  {selectedEmployeeCourseAnalyticsRows.length === 0 && (
-                    <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-500 text-center">
-                      По сотруднику пока нет назначенных курсов
-                    </div>
-                  )}
-                  {selectedEmployeeCourseAnalyticsRows.map((courseItem) => {
-                    const st = statusConfig[courseItem.status] || statusConfig.not_started;
-                    const deadlineInfo = courseItem.deadline ? formatDeadline(courseItem.deadline) : null;
-                    const isSelectedCourse = selectedEmployeeCourseKey === courseItem.rowKey;
-                    return (
-                      <button
-                        key={courseItem.rowKey}
-                        type="button"
-                        onClick={() => setSelectedEmployeeCourseKey(courseItem.rowKey)}
-                        className={`w-full text-left rounded-xl border p-4 transition-colors ${isSelectedCourse ? "border-indigo-300 bg-indigo-50/60" : "border-slate-200 hover:bg-slate-50"}`}
-                      >
-                        <div className="flex items-start justify-between gap-4">
-                          <div className="min-w-0">
-                            <p className="text-sm font-semibold text-slate-900 truncate">{courseItem.title}</p>
-                            <div className="mt-1 flex items-center gap-2 flex-wrap">
-                              <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${st.bg} ${st.text}`}>{st.label}</span>
-                              {deadlineInfo && (
-                                <span className={`text-[11px] font-medium px-2 py-0.5 rounded-full ${deadlineInfo.overdue ? "bg-red-50 text-red-600" : deadlineInfo.urgent ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-600"}`}>Дедлайн: {deadlineInfo.label}</span>
-                              )}
-                            </div>
-                          </div>
-                          <div className="text-right"><p className="text-xs text-slate-400">Прогресс</p><p className="text-sm font-bold text-slate-800">{courseItem.progress}%</p></div>
-                        </div>
-                      </button>
-                    );
-                  })}
+                <div>
+                  <h3 className="text-xl font-bold text-slate-900">{selectedEmployee.name}</h3>
+                  <p className="text-sm text-slate-500 mt-0.5">{selectedEmployee.dept} • Активность: {selectedEmployee.lastActive || "—"}</p>
                 </div>
-
-                {selectedEmployeeCourseItem ? (
-                  <div className="rounded-xl border border-slate-200 p-4">
-                    <div className="flex items-start justify-between gap-4">
-                      <div className="min-w-0">
-                        <p className="text-sm font-semibold text-slate-900 truncate">{selectedEmployeeCourseItem.title}</p>
-                        <div className="mt-1 flex items-center gap-2 flex-wrap">
-                          {selectedEmployeeCourseStatus && (
-                            <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${selectedEmployeeCourseStatus.bg} ${selectedEmployeeCourseStatus.text}`}>
-                              {selectedEmployeeCourseStatus.label}
-                            </span>
-                          )}
-                          {selectedEmployeeCourseDeadlineInfo && (
-                            <span className={`text-[11px] font-medium px-2 py-0.5 rounded-full ${selectedEmployeeCourseDeadlineInfo.overdue ? "bg-red-50 text-red-600" : selectedEmployeeCourseDeadlineInfo.urgent ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-600"}`}>
-                              Дедлайн: {selectedEmployeeCourseDeadlineInfo.label}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-2 mt-4">
-                      <div className="rounded-lg bg-slate-50 px-3 py-2"><p className="text-[10px] text-slate-400">Уроки</p><p className="text-xs font-semibold text-slate-700">{selectedEmployeeCourseItem.completedLessons}/{selectedEmployeeCourseItem.totalLessons}</p></div>
-                      <div className="rounded-lg bg-slate-50 px-3 py-2"><p className="text-[10px] text-slate-400">Тесты</p><p className="text-xs font-semibold text-slate-700">{selectedEmployeeCourseItem.passedTests}/{selectedEmployeeCourseItem.totalTests}</p></div>
-                      <div className="rounded-lg bg-slate-50 px-3 py-2"><p className="text-[10px] text-slate-400">Промежуточные</p><p className="text-xs font-semibold text-slate-700">{selectedEmployeeCourseItem.passedIntermediateTests}/{selectedEmployeeCourseItem.totalIntermediateTests}</p></div>
-                      <div className="rounded-lg bg-slate-50 px-3 py-2"><p className="text-[10px] text-slate-400">Средний балл</p><p className="text-xs font-semibold text-slate-700">{selectedEmployeeCourseItem.avgTestScore == null ? "—" : `${selectedEmployeeCourseItem.avgTestScore}%`}</p></div>
-                      <div className="rounded-lg bg-slate-50 px-3 py-2"><p className="text-[10px] text-slate-400">Итоговый тест</p><p className="text-xs font-semibold text-slate-700">{selectedEmployeeCourseItem.finalTestScore == null ? "—" : `${selectedEmployeeCourseItem.finalTestScore}%`}</p></div>
-                      <div className="rounded-lg bg-slate-50 px-3 py-2"><p className="text-[10px] text-slate-400">Время тестов</p><p className="text-xs font-semibold text-slate-700">{selectedEmployeeCourseItem.testDuration}</p></div>
-                    </div>
-
-                    <div className="mt-4">
-                      <p className="text-xs font-semibold text-slate-600 mb-2">Баллы по тестам</p>
-                      {selectedEmployeeCourseItem.tests.length === 0 ? (
-                        <p className="text-xs text-slate-400">Попыток по тестам пока нет</p>
-                      ) : (
-                        <div className="space-y-2">
-                          {selectedEmployeeCourseItem.tests.map((testItem) => (
-                            <div key={testItem.key} className="flex items-center justify-between gap-3 rounded-lg border border-slate-100 px-3 py-2">
-                              <div className="min-w-0">
-                                <p className="text-xs text-slate-700 truncate">{testItem.title}</p>
-                                <p className="text-[11px] text-slate-400">Попыток: {testItem.attempts}{testItem.passed ? " • пройден" : ""}{testItem.isFinal ? " • итоговый" : ""}</p>
-                              </div>
-                              <div className="text-right">
-                                <p className="text-[11px] text-slate-400">Лучший / последний</p>
-                                <p className="text-xs font-semibold text-slate-700">{testItem.bestScore == null ? "—" : `${testItem.bestScore}%`} / {testItem.lastScore == null ? "—" : `${testItem.lastScore}%`}</p>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                ) : selectedEmployeeCourseAnalyticsRows.length > 0 ? (
-                  <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-500 text-center">
-                    Выберите курс в списке выше, чтобы открыть подробную аналитику по этому сотруднику.
-                  </div>
-                ) : null}
               </div>
-
-              <div className="xl:col-span-4 bg-white rounded-2xl border border-slate-200 p-6">
-                <h3 className="text-sm font-semibold text-slate-900">Назначение курса с дедлайном</h3>
-                <p className="text-xs text-slate-500 mt-1 mb-4">Настраивайте дедлайн отдельно для каждого курса и назначайте сразу из карточки сотрудника.</p>
-                <div className="space-y-3 max-h-[640px] overflow-y-auto pr-1">
-                  {safeAdminCourses.length === 0 && (
-                    <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-5 text-xs text-slate-500 text-center">
-                      Нет доступных курсов для назначения
-                    </div>
-                  )}
-                  {safeAdminCourses.map((courseItem) => {
-                    const courseId = Number(courseItem?.id || 0);
-                    const assignmentRow = selectedEmployeeAssignmentsByCourse.get(courseId) || null;
-                    const assignmentStatus = assignmentRow ? (statusConfig[mapAdminProgressRowToUiStatus(assignmentRow)] || statusConfig.not_started) : null;
-                    const deadlineValue = getEmployeeCourseDeadline(courseId, assignmentRow);
-                    const isAssigning = assigningCourseId === courseId;
-                    return (
-                      <div key={courseId} className="rounded-xl border border-slate-200 p-3">
-                        <div className="flex items-start justify-between gap-3">
-                          <p className="text-xs font-semibold text-slate-800 leading-5">{courseItem?.title || `Курс #${courseId}`}</p>
-                          {assignmentStatus && <span className={`text-[10px] px-2 py-0.5 rounded-full font-semibold ${assignmentStatus.bg} ${assignmentStatus.text}`}>{assignmentStatus.label}</span>}
-                        </div>
-                        <div className="mt-3 flex items-center gap-2">
-                          <input
-                            type="date"
-                            value={deadlineValue}
-                            onChange={(event) => handleEmployeeCourseDeadlineChange(courseId, event.target.value)}
-                            className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-700 focus:outline-none focus:border-indigo-400 transition-all"
-                          />
-                          <button
-                            onClick={() => { void handleAssignCourseForSelectedEmployee(courseItem); }}
-                            disabled={isAssigning || !courseId}
-                            className="px-3 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs font-semibold rounded-lg transition-colors inline-flex items-center gap-1.5"
-                          >
-                            <UserCheck size={12} /> {isAssigning ? "..." : (assignmentRow ? "Переназначить" : "Назначить")}
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
+              <div className="flex flex-wrap items-center gap-2 md:justify-end">
+                <span className="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-xl bg-slate-50 border border-slate-100 text-slate-700"><BookOpen size={14} className="text-indigo-500" /> {selectedEmployee.courses} курсов</span>
+                <span className="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-xl bg-emerald-50 border border-emerald-100 text-emerald-800"><CheckCircle size={14} className="text-emerald-600" /> {selectedEmployee.completed} завершено</span>
+                <span className="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-xl bg-violet-50 border border-violet-100 text-violet-800"><Target size={14} className="text-violet-600" /> {selectedEmployee.avgScore}% ср. балл</span>
               </div>
             </div>
-          ) : (
-            <div className="bg-white rounded-2xl border border-slate-200 px-6 py-10 text-center text-sm text-slate-500">
-              Выберите сотрудника в таблице выше, чтобы открыть аналитику по курсам и назначение с дедлайнами.
+
+            <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
+              <div className="xl:col-span-5 flex flex-col gap-6 sticky top-6">
+                <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden flex flex-col shadow-sm">
+                  <div className="p-5 border-b border-slate-100">
+                    <h3 className="text-sm font-semibold text-slate-900">Назначенные курсы</h3>
+                  </div>
+                  <div className="max-h-[450px] overflow-y-auto p-5 space-y-3 w-full bg-slate-50/50 custom-scrollbar">
+                    {selectedEmployeeCourseAnalyticsRows.length === 0 && (
+                      <div className="rounded-xl border border-dashed border-slate-200 bg-white px-4 py-8 text-sm text-slate-500 text-center">
+                        По сотруднику пока нет назначенных курсов
+                      </div>
+                    )}
+                    {selectedEmployeeCourseAnalyticsRows.map((courseItem) => {
+                      const st = statusConfig[courseItem.status] || statusConfig.not_started;
+                      const deadlineInfo = courseItem.deadline ? formatDeadline(courseItem.deadline) : null;
+                      const isSelectedCourse = selectedEmployeeCourseKey === courseItem.rowKey;
+                      return (
+                        <button
+                          key={courseItem.rowKey}
+                          type="button"
+                          onClick={() => setSelectedEmployeeCourseKey(courseItem.rowKey)}
+                          className={`w-full text-left rounded-xl border p-4 transition-all shadow-sm ${isSelectedCourse ? "border-indigo-400 bg-indigo-50/60 ring-2 ring-indigo-100" : "border-slate-200 bg-white hover:border-indigo-300"}`}
+                        >
+                          <div className="flex items-start justify-between gap-3 mb-2">
+                            <p className={`text-sm font-semibold truncate flex-1 ${isSelectedCourse ? 'text-indigo-900' : 'text-slate-800'}`}>{courseItem.title}</p>
+                            <div className="text-right flex-shrink-0">
+                              <p className="text-sm font-bold text-slate-800">{courseItem.progress}%</p>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-md ${st.bg} ${st.text}`}>{st.label}</span>
+                            {deadlineInfo && (
+                              <span className={`text-[10px] font-medium px-2 py-0.5 rounded-md ${deadlineInfo.overdue ? "bg-red-50 text-red-600" : deadlineInfo.urgent ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-600"}`}>
+                                Дедлайн: {deadlineInfo.label}
+                              </span>
+                            )}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+                  <h3 className="text-sm font-semibold text-slate-900 mb-1">Назначение курса</h3>
+                  <p className="text-[11px] text-slate-500 mb-4 leading-relaxed">Выберите курс для назначения или обновления дедлайна</p>
+                  <div className="space-y-3 max-h-[350px] overflow-y-auto pr-1">
+                    {safeAdminCourses.length === 0 && (
+                      <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-xs text-slate-500 text-center">
+                        Нет доступных курсов
+                      </div>
+                    )}
+                    {safeAdminCourses.map((courseItem) => {
+                      const courseId = Number(courseItem?.id || 0);
+                      const assignmentRow = selectedEmployeeAssignmentsByCourse.get(courseId) || null;
+                      const assignmentStatus = assignmentRow ? (statusConfig[mapAdminProgressRowToUiStatus(assignmentRow)] || statusConfig.not_started) : null;
+                      const deadlineValue = getEmployeeCourseDeadline(courseId, assignmentRow);
+                      const isAssigning = assigningCourseId === courseId;
+                      return (
+                        <div key={courseId} className="rounded-xl border border-slate-100 p-3 bg-slate-50/50 hover:bg-slate-50 transition-colors">
+                          <div className="flex items-start justify-between gap-3">
+                            <p className="text-xs font-medium text-slate-800 leading-tight flex-1">{courseItem?.title || `Курс #${courseId}`}</p>
+                            {assignmentStatus && <span className={`text-[9px] px-1.5 py-0.5 rounded-md font-semibold flex-shrink-0 ${assignmentStatus.bg} ${assignmentStatus.text}`}>{assignmentStatus.label}</span>}
+                          </div>
+                          <div className="mt-2.5 flex items-center gap-2">
+                            <input
+                              type="date"
+                              value={deadlineValue}
+                              onChange={(event) => handleEmployeeCourseDeadlineChange(courseId, event.target.value)}
+                              className="w-full max-w-[125px] px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-[11px] text-slate-700 focus:outline-none focus:border-indigo-400 transition-all shadow-sm"
+                            />
+                            <button
+                              onClick={() => { void handleAssignCourseForSelectedEmployee(courseItem); }}
+                              disabled={isAssigning || !courseId}
+                              className="flex-1 px-2.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white text-[11px] font-semibold rounded-lg transition-colors flex items-center justify-center gap-1.5 shadow-sm"
+                            >
+                              {isAssigning ? "..." : (assignmentRow ? "Обновить" : "Назначить")}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+
+              <div className="xl:col-span-7 flex flex-col h-full min-h-[400px]">
+                {!selectedEmployeeCourseItem ? (
+                  <div className="bg-white rounded-2xl border border-slate-200 p-8 h-full min-h-[500px] flex items-center justify-center shadow-sm">
+                    <div className="text-center max-w-sm">
+                      <div className="w-16 h-16 bg-slate-50 rounded-full flex items-center justify-center mx-auto mb-4 border border-slate-100 shadow-sm">
+                        <BarChart2 size={24} className="text-indigo-300" />
+                      </div>
+                      <h4 className="text-sm font-semibold text-slate-700 mb-1.5">Детализация курса</h4>
+                      <p className="text-xs text-slate-500 leading-relaxed">
+                        Для просмотра детальной статистики и истории прохождения тестов, выберите курс из списка слева.
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden flex flex-col h-full shadow-sm">
+                    <div className="p-6 border-b border-slate-100 bg-white">
+                      <p className="text-[10px] font-semibold text-indigo-600 uppercase tracking-widest mb-1.5">Аналитика курса</p>
+                      <h3 className="text-lg font-bold text-slate-900 leading-tight mb-3">{selectedEmployeeCourseItem.title}</h3>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        {selectedEmployeeCourseStatus && (
+                          <span className={`text-xs font-semibold px-2.5 py-1 rounded-md ${selectedEmployeeCourseStatus.bg} ${selectedEmployeeCourseStatus.text}`}>
+                            {selectedEmployeeCourseStatus.label}
+                          </span>
+                        )}
+                        {selectedEmployeeCourseDeadlineInfo && (
+                          <span className={`text-xs font-medium px-2.5 py-1 rounded-md ${selectedEmployeeCourseDeadlineInfo.overdue ? "bg-red-50 text-red-700 border border-red-100" : selectedEmployeeCourseDeadlineInfo.urgent ? "bg-amber-50 text-amber-800 border border-amber-100" : "bg-slate-50 text-slate-600 border border-slate-200"}`}>
+                            Дедлайн: {selectedEmployeeCourseDeadlineInfo.label}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="p-6 space-y-6 bg-slate-50/50 flex-1">
+                      <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
+                        <div className="bg-white rounded-xl border border-slate-100 p-4 shadow-sm transition-all hover:border-slate-200">
+                          <p className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5">Уроки курса</p>
+                          <p className="text-sm font-bold text-slate-800">{selectedEmployeeCourseItem.completedLessons} <span className="text-slate-400 font-medium text-xs">/ {selectedEmployeeCourseItem.totalLessons} зав.</span></p>
+                        </div>
+                        <div className="bg-white rounded-xl border border-slate-100 p-4 shadow-sm transition-all hover:border-slate-200">
+                          <p className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5">Все тесты</p>
+                          <p className="text-sm font-bold text-slate-800">{selectedEmployeeCourseItem.passedTests} <span className="text-slate-400 font-medium text-xs">/ {selectedEmployeeCourseItem.totalTests} пройд.</span></p>
+                        </div>
+                        <div className="bg-white rounded-xl border border-slate-100 p-4 shadow-sm transition-all hover:border-slate-200">
+                          <p className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5">Промежуточные</p>
+                          <p className="text-sm font-bold text-slate-800">{selectedEmployeeCourseItem.passedIntermediateTests} <span className="text-slate-400 font-medium text-xs">/ {selectedEmployeeCourseItem.totalIntermediateTests} пройд.</span></p>
+                        </div>
+                        <div className="bg-white rounded-xl border border-slate-100 p-4 shadow-sm transition-all hover:border-slate-200">
+                          <p className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5">Время на тесты</p>
+                          <p className="text-sm font-bold text-slate-800">{selectedEmployeeCourseItem.testDuration}</p>
+                        </div>
+                        <div className="bg-white rounded-xl border border-slate-100 p-4 shadow-sm transition-all hover:border-slate-200">
+                          <p className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5">Ср. балл</p>
+                          <p className={`text-sm font-bold ${selectedEmployeeCourseItem.avgTestScore >= 80 ? 'text-emerald-600' : 'text-slate-800'}`}>{selectedEmployeeCourseItem.avgTestScore == null ? "—" : `${selectedEmployeeCourseItem.avgTestScore}%`}</p>
+                        </div>
+                        <div className="bg-white rounded-xl border border-slate-100 p-4 shadow-sm transition-all hover:border-slate-200">
+                          <p className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5">Итоговый тест</p>
+                          <p className={`text-sm font-bold ${selectedEmployeeCourseItem.finalTestScore >= 80 ? 'text-emerald-600' : 'text-slate-800'}`}>{selectedEmployeeCourseItem.finalTestScore == null ? "—" : `${selectedEmployeeCourseItem.finalTestScore}%`}</p>
+                        </div>
+                      </div>
+
+                      <div>
+                        <h4 className="text-sm font-semibold text-slate-900 mb-3.5 flex items-center gap-2">
+                          <HelpCircle size={15} className="text-indigo-500" />
+                          История прохождения тестов
+                        </h4>
+                        {selectedEmployeeCourseItem.tests.length === 0 ? (
+                          <div className="rounded-xl border border-slate-100 bg-white px-4 py-8 text-center text-sm text-slate-500 shadow-sm">
+                            Сотрудник пока не приступал к тестам в этом курсе
+                          </div>
+                        ) : (
+                          <div className="space-y-3">
+                            {selectedEmployeeCourseItem.tests.map((testItem) => (
+                              <div key={testItem.key} className="bg-white rounded-xl border border-slate-100 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-sm overflow-hidden relative">
+                                {testItem.passed && <div className="absolute top-0 left-0 w-1 h-full bg-emerald-500"></div>}
+                                {!testItem.passed && testItem.attempts > 0 && <div className="absolute top-0 left-0 w-1 h-full bg-amber-500"></div>}
+                                
+                                <div className="flex-1 min-w-0 pl-1">
+                                  <div className="flex items-center gap-2 mb-1.5">
+                                    <p className="text-sm font-semibold text-slate-900 truncate">{testItem.title}</p>
+                                    {testItem.isFinal && <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-violet-100 text-violet-700 uppercase tracking-widest flex-shrink-0">Итоговый</span>}
+                                  </div>
+                                  <div className="flex items-center gap-3 text-xs">
+                                    <span className="text-slate-500">Попыток: <strong className="text-slate-700">{testItem.attempts}</strong></span>
+                                    <span className="text-slate-300">•</span>
+                                    <span className={testItem.passed ? "text-emerald-600 font-semibold" : "text-amber-600 font-semibold"}>
+                                      {testItem.passed ? "Пройден" : "Не пройден"}
+                                    </span>
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-5 bg-slate-50 rounded-lg px-4 py-2.5 border border-slate-100">
+                                  <div>
+                                    <p className="text-[10px] text-slate-400 mb-0.5 uppercase tracking-wider">Последний</p>
+                                    <p className="text-sm font-semibold text-slate-800">{testItem.lastScore == null ? "—" : `${testItem.lastScore}%`}</p>
+                                  </div>
+                                  <div className="h-7 w-px bg-slate-200"></div>
+                                  <div>
+                                    <p className="text-[10px] text-slate-400 mb-0.5 uppercase tracking-wider">Лучший</p>
+                                    <p className="text-sm font-bold text-indigo-600">{testItem.bestScore == null ? "—" : `${testItem.bestScore}%`}</p>
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                  )}
+                </div>
+              </div>
             </div>
           )}
         </div>
