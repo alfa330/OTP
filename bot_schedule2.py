@@ -1,4 +1,4 @@
-﻿import logging
+import logging
 import os
 import threading
 import asyncio
@@ -15647,12 +15647,28 @@ def lms_home():
                 course_version_id = int(row[2]) if row[2] is not None else None
 
                 cursor.execute("""
-                    SELECT COUNT(*)
+                    SELECT
+                        COUNT(*),
+                        COALESCE(SUM(l.duration_seconds), 0)
                     FROM lms_lessons l
                     JOIN lms_modules m ON m.id = l.module_id
                     WHERE m.course_version_id = %s
                 """, (course_version_id,))
-                total_lessons = int(cursor.fetchone()[0] or 0)
+                lessons_row = cursor.fetchone()
+                total_lessons = int(lessons_row[0] or 0)
+                lessons_duration_seconds = int(lessons_row[1] or 0)
+
+                cursor.execute("""
+                    SELECT COALESCE(SUM(
+                        COALESCE(time_limit_seconds, time_limit_minutes * 60, 0)
+                    ), 0)
+                    FROM lms_tests
+                    WHERE course_version_id = %s
+                      AND status <> 'archived'
+                """, (course_version_id,))
+                tests_duration_seconds = int(cursor.fetchone()[0] or 0)
+
+                total_duration_seconds = lessons_duration_seconds + tests_duration_seconds
 
                 cursor.execute("""
                     SELECT COUNT(*)
@@ -15734,6 +15750,7 @@ def lms_home():
                     "progress_percent": progress_percent,
                     "completed_lessons": completed_lessons,
                     "total_lessons": total_lessons,
+                    "total_duration_seconds": total_duration_seconds,
                     "completed_intermediate_tests": completed_intermediate_tests,
                     "total_intermediate_tests": total_intermediate_tests,
                     "best_score": float(best_score_raw) if best_score_raw is not None else None,
