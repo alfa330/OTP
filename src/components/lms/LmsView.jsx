@@ -957,6 +957,52 @@ const formatDeadline = (date) => {
   return { label: d.toLocaleDateString("ru-RU", { day: "numeric", month: "short" }), urgent: false, overdue: false };
 };
 
+const parseLmsDate = (value) => {
+  if (!value) return null;
+  const parsed = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+
+const normalizeLmsDeadlineDate = (value) => {
+  const parsed = parseLmsDate(value);
+  if (!parsed) return null;
+  const isMidnight = (
+    parsed.getHours() === 0
+    && parsed.getMinutes() === 0
+    && parsed.getSeconds() === 0
+    && parsed.getMilliseconds() === 0
+  );
+  if (!isMidnight) return parsed;
+  const endOfDay = new Date(parsed);
+  endOfDay.setHours(23, 59, 59, 999);
+  return endOfDay;
+};
+
+const resolveDeadlineStatusByDates = ({ dueAt, completedAt, fallbackStatus }) => {
+  const completed = parseLmsDate(completedAt);
+  const effectiveDueAt = normalizeLmsDeadlineDate(dueAt);
+  if (completed) {
+    if (effectiveDueAt && completed.getTime() > effectiveDueAt.getTime()) return "orange";
+    return "green";
+  }
+  if (effectiveDueAt && Date.now() > effectiveDueAt.getTime()) return "red";
+  const fallback = String(fallbackStatus || "").trim().toLowerCase();
+  if (fallback === "green" || fallback === "orange" || fallback === "red") return fallback;
+  return null;
+};
+
+const formatDateTimeLabel = (value) => {
+  const parsed = parseLmsDate(value);
+  if (!parsed) return "";
+  return parsed.toLocaleString("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+};
+
 const formatDeadlineForStatus = (date, status) => {
   if (!date) return null;
   const base = formatDeadline(date);
@@ -1027,7 +1073,15 @@ const clampLmsProgress = (value) => Math.max(0, Math.min(100, Number(value) || 0
 
 const isCompletedLmsStatus = (status) => status === "completed" || status === "completed_late";
 
-const mapAdminProgressRowToUiStatus = (row) => mapAssignmentStatusToUi(row?.status, row?.deadline_status);
+const mapAdminProgressRowToUiStatus = (row) => {
+  const statusNorm = String(row?.status || "").trim().toLowerCase();
+  const deadlineStatus = resolveDeadlineStatusByDates({
+    dueAt: row?.due_at,
+    completedAt: row?.completed_at,
+    fallbackStatus: statusNorm === "completed" ? null : row?.deadline_status,
+  });
+  return mapAssignmentStatusToUi(statusNorm, deadlineStatus);
+};
 
 const resolveAdminCourseAggregateStatus = (stat = {}) => {
   const total = Math.max(0, Number(stat?.total || 0));
@@ -6397,7 +6451,12 @@ function AdminView({
         (sum, item) => sum + Math.max(0, Number(item?.duration_seconds || 0)),
         0
       );
-      const uiStatus = mapAdminProgressRowToUiStatus(row);
+      const derivedCompletedAt = attemptsForAssignment
+        .map((item) => parseLmsDate(item?.finished_at || item?.started_at))
+        .filter(Boolean)
+        .sort((a, b) => b.getTime() - a.getTime())[0];
+      const completedAt = row?.completed_at || (derivedCompletedAt ? derivedCompletedAt.toISOString() : null);
+      const uiStatus = mapAdminProgressRowToUiStatus({ ...row, completed_at: completedAt });
 
       return {
         rowKey: `${assignmentId || 0}:${Number(row?.course_id || 0)}`,
@@ -6406,6 +6465,7 @@ function AdminView({
         title: String(row?.course_title || `Курс #${row?.course_id || "-"}`),
         status: uiStatus,
         deadline: row?.due_at || null,
+        completedAt,
         progress: clampLmsProgress(row?.progress_percent),
         completedLessons: Math.max(0, Number(row?.completed_lessons || 0)),
         totalLessons: Math.max(0, Number(row?.total_lessons || 0)),
@@ -6847,6 +6907,11 @@ function AdminView({
                         {selectedEmployeeCourseDeadlineInfo && (
                           <span className={`text-xs font-medium px-2.5 py-1 rounded-md ${selectedEmployeeCourseDeadlineInfo.overdue ? "bg-red-50 text-red-700 border border-red-100" : selectedEmployeeCourseDeadlineInfo.urgent ? "bg-amber-50 text-amber-800 border border-amber-100" : "bg-slate-50 text-slate-600 border border-slate-200"}`}>
                             Дедлайн: {selectedEmployeeCourseDeadlineInfo.label}
+                          </span>
+                        )}
+                        {selectedEmployeeCourseItem.completedAt && (
+                          <span className="text-xs font-medium px-2.5 py-1 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-100">
+                            Completed: {formatDateTimeLabel(selectedEmployeeCourseItem.completedAt)}
                           </span>
                         )}
                       </div>
