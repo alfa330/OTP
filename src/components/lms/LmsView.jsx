@@ -3863,12 +3863,12 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
     title: "Новый урок",
     type: "video",
     description: "",
-    durationSeconds: 15 * 60,
+    durationSeconds: "",
     completionThreshold: 95,
     contentText: "",
     materials: [],
     quizQuestionsPerTest: 5,
-    quizTimeLimitMinutes: 20,
+    quizTimeLimitMinutes: "",
     quizPassingScore: 80,
     quizAttemptLimit: 3,
     quizRandomOrder: true,
@@ -4511,12 +4511,9 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
               description,
               lesson_type: lessonType,
               position: lessonIndex + 1,
-              duration_seconds: Math.max(
-                lessonType === "video" ? 1 : 30,
-                Number(lessonItem?.durationSeconds || (lessonType === "video" ? 15 * 60 : 8 * 60))
-              ),
+              duration_seconds: Number(lessonItem?.durationSeconds) || 0,
               allow_fast_forward: false,
-              completion_threshold: Math.max(1, Math.min(100, Number(lessonItem?.completionThreshold || 95))),
+              completion_threshold: Number(lessonItem?.completionThreshold) || 95,
               content_text: contentText || null,
               materials: mappedMaterials.map((item, idx) => ({ ...item, position: idx + 1 })),
             };
@@ -4543,7 +4540,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
       pass_threshold: Number(settings.passingScore || 80),
       attempt_limit: attemptLimit,
       is_final: true,
-      time_limit_minutes: Math.max(1, Number(settings.finalTestTimeLimitMinutes || 20)),
+      time_limit_minutes: Number(settings.finalTestTimeLimitMinutes) || 0,
       question_count: Math.max(1, Math.min(finalQuestionPayload.length, Number(settings.questionsPerTest || finalQuestionPayload.length))),
       random_order: settings.randomOrder !== false,
       show_explanations: settings.showExplanations !== false,
@@ -4716,16 +4713,16 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
     updateLessonById(lessonId, (prev) => {
       if (normalizedType === "quiz") {
         const currentQuestions = Array.isArray(prev?.quizQuestions) ? prev.quizQuestions : [];
-        const defaultMinutes = Math.max(1, Number(prev?.quizTimeLimitMinutes || 20));
+        const defaultMinutes = prev?.quizTimeLimitMinutes || "";
         return {
           ...prev,
           type: "quiz",
           completionThreshold: 100,
-          durationSeconds: Math.max(60, defaultMinutes * 60),
-          quizQuestionsPerTest: Math.max(1, Number(prev?.quizQuestionsPerTest || 5)),
+          durationSeconds: defaultMinutes ? Number(defaultMinutes) * 60 : "",
+          quizQuestionsPerTest: prev?.quizQuestionsPerTest || 5,
           quizTimeLimitMinutes: defaultMinutes,
-          quizPassingScore: Math.max(1, Math.min(100, Number(prev?.quizPassingScore || settings.passingScore || 80))),
-          quizAttemptLimit: Math.max(1, Number(prev?.quizAttemptLimit || fallbackAttemptLimit)),
+          quizPassingScore: prev?.quizPassingScore || settings.passingScore || 80,
+          quizAttemptLimit: prev?.quizAttemptLimit || fallbackAttemptLimit,
           quizRandomOrder: prev?.quizRandomOrder !== false,
           quizShowExplanations: prev?.quizShowExplanations !== false,
           quizQuestions: currentQuestions.length > 0 ? currentQuestions : [createQuestionTemplate("single")],
@@ -4733,9 +4730,9 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
         };
       }
       if (normalizedType === "text") {
-        return { ...prev, type: "text", completionThreshold: 100 };
+        return { ...prev, type: "text", completionThreshold: 100, durationSeconds: prev?.durationSeconds || "" };
       }
-      return { ...prev, type: "video" };
+      return { ...prev, type: "video", durationSeconds: prev?.durationSeconds || "" };
     });
   }, [updateLessonById, settings.maxAttempts, settings.passingScore, createQuestionTemplate]);
 
@@ -4961,26 +4958,26 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                   <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Параметры теста</p>
                   <div className="grid grid-cols-2 gap-2">
                     {[
-                      { id: "quiz-questions-per-test", label: "Вопросов в попытке", value: Math.max(1, Number(selectedLessonModel.quizQuestionsPerTest || 1)), onSave: (next) => updateLessonById(selectedLessonModel.id, { quizQuestionsPerTest: Math.max(1, next) }) },
-                      { id: "quiz-time-limit", label: "Лимит времени (мин)", value: Math.max(1, Number(selectedLessonModel.quizTimeLimitMinutes || 20)), onSave: (next) => updateLessonById(selectedLessonModel.id, { quizTimeLimitMinutes: Math.max(1, next), durationSeconds: Math.max(60, Math.max(1, next) * 60) }) },
-                      { id: "quiz-passing-score", label: "Проходной балл (%)", value: Math.max(1, Math.min(100, Number(selectedLessonModel.quizPassingScore || settings.passingScore || 80))), onSave: (next) => updateLessonById(selectedLessonModel.id, { quizPassingScore: Math.max(1, Math.min(100, next)) }) },
-                      { id: "quiz-attempt-limit", label: "Попыток", value: Math.max(1, Number(selectedLessonModel.quizAttemptLimit || 1)), onSave: (next) => updateLessonById(selectedLessonModel.id, { quizAttemptLimit: Math.max(1, next) }) },
+                      { id: "quiz-questions-per-test", label: "Вопросов в попытке", value: selectedLessonModel.quizQuestionsPerTest || "", onSave: (next) => updateLessonById(selectedLessonModel.id, { quizQuestionsPerTest: next === "" ? "" : Math.max(1, Number(next)) }) },
+                      { id: "quiz-time-limit", label: "Лимит времени (мин)", value: selectedLessonModel.quizTimeLimitMinutes !== undefined ? selectedLessonModel.quizTimeLimitMinutes : "", onSave: (next) => updateLessonById(selectedLessonModel.id, { quizTimeLimitMinutes: next === "" ? "" : Math.max(1, Number(next)), durationSeconds: next === "" ? "" : Math.max(1, Number(next)) * 60 }) },
+                      { id: "quiz-passing-score", label: "Проходной балл (%)", value: selectedLessonModel.quizPassingScore || "", onSave: (next) => updateLessonById(selectedLessonModel.id, { quizPassingScore: next === "" ? "" : Math.max(1, Math.min(100, Number(next))) }) },
+                      { id: "quiz-attempt-limit", label: "Попыток", value: selectedLessonModel.quizAttemptLimit || "", onSave: (next) => updateLessonById(selectedLessonModel.id, { quizAttemptLimit: next === "" ? "" : Math.max(1, Number(next)) }) },
                     ].map((item) => (
                       <div key={item.id} className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
                         <p className="text-[10px] uppercase tracking-wide text-slate-400">{item.label}</p>
                         {operatorEditField === item.id ? (
                           <input
                             type="number"
-                            min={1}
-                            value={item.value}
-                            onChange={(e) => item.onSave(Number(e.target.value || 1))}
+                            min={0}
+                            value={item.value !== null ? item.value : ""}
+                            onChange={(e) => item.onSave(e.target.value)}
                             onBlur={() => setOperatorEditField(null)}
                             autoFocus
                             className="w-full mt-1 text-xs font-semibold text-slate-800 bg-transparent border-b border-indigo-300 focus:outline-none"
                           />
                         ) : (
                           <button type="button" onClick={() => setOperatorEditField(item.id)} className="text-left text-xs font-semibold text-slate-800 mt-1">
-                            {item.value}
+                            {item.value || "—"}
                           </button>
                         )}
                       </div>
@@ -5453,8 +5450,8 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                               type="number"
                               min={1}
                               max={Math.max(1, selectedLessonQuizQuestions.length)}
-                              value={Math.max(1, Number(selectedLessonModel.quizQuestionsPerTest || 1))}
-                              onChange={(e) => updateLessonById(selectedLessonModel.id, { quizQuestionsPerTest: Math.max(1, Number(e.target.value || 1)) })}
+                              value={selectedLessonModel.quizQuestionsPerTest || ""}
+                              onChange={(e) => updateLessonById(selectedLessonModel.id, { quizQuestionsPerTest: e.target.value === "" ? "" : Math.max(1, Number(e.target.value)) })}
                               className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 focus:outline-none focus:border-indigo-400 transition-all"
                             />
                           </div>
@@ -5463,10 +5460,10 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                             <input
                               type="number"
                               min={1}
-                              value={Math.max(1, Number(selectedLessonModel.quizTimeLimitMinutes || 20))}
+                              value={selectedLessonModel.quizTimeLimitMinutes || ""}
                               onChange={(e) => {
-                                const nextMinutes = Math.max(1, Number(e.target.value || 20));
-                                updateLessonById(selectedLessonModel.id, { quizTimeLimitMinutes: nextMinutes, durationSeconds: Math.max(60, nextMinutes * 60) });
+                                const nextMinutes = e.target.value === "" ? "" : Math.max(1, Number(e.target.value));
+                                updateLessonById(selectedLessonModel.id, { quizTimeLimitMinutes: nextMinutes, durationSeconds: nextMinutes === "" ? "" : nextMinutes * 60 });
                               }}
                               className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 focus:outline-none focus:border-indigo-400 transition-all"
                             />
@@ -5477,8 +5474,8 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                               type="number"
                               min={1}
                               max={100}
-                              value={Math.max(1, Math.min(100, Number(selectedLessonModel.quizPassingScore || settings.passingScore || 80)))}
-                              onChange={(e) => updateLessonById(selectedLessonModel.id, { quizPassingScore: Math.max(1, Math.min(100, Number(e.target.value || 80))) })}
+                              value={selectedLessonModel.quizPassingScore || ""}
+                              onChange={(e) => updateLessonById(selectedLessonModel.id, { quizPassingScore: e.target.value === "" ? "" : Math.max(1, Math.min(100, Number(e.target.value))) })}
                               className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 focus:outline-none focus:border-indigo-400 transition-all"
                             />
                           </div>
@@ -5487,8 +5484,8 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                             <input
                               type="number"
                               min={1}
-                              value={Math.max(1, Number(selectedLessonModel.quizAttemptLimit || 1))}
-                              onChange={(e) => updateLessonById(selectedLessonModel.id, { quizAttemptLimit: Math.max(1, Number(e.target.value || 1)) })}
+                              value={selectedLessonModel.quizAttemptLimit || ""}
+                              onChange={(e) => updateLessonById(selectedLessonModel.id, { quizAttemptLimit: e.target.value === "" ? "" : Math.max(1, Number(e.target.value)) })}
                               className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 focus:outline-none focus:border-indigo-400 transition-all"
                             />
                           </div>
@@ -5608,13 +5605,13 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                       <>
                         <div className="grid grid-cols-2 gap-3">
                           <div>
-                            <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Длительность</label>
+                            <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Длительность (сек)</label>
                             {selectedLessonModel.type === "text" ? (
                               <input
                                 type="number"
-                                min={30}
-                                value={Math.max(30, Number(selectedLessonModel.durationSeconds || 0))}
-                                onChange={(e) => updateLessonById(selectedLessonModel.id, { durationSeconds: Math.max(30, Number(e.target.value || 0)) })}
+                                min={0}
+                                value={selectedLessonModel.durationSeconds !== undefined ? selectedLessonModel.durationSeconds : ""}
+                                onChange={(e) => updateLessonById(selectedLessonModel.id, { durationSeconds: e.target.value === "" ? "" : Math.max(0, Number(e.target.value)) })}
                                 className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 focus:outline-none focus:border-indigo-400 transition-all"
                               />
                             ) : (
@@ -5631,8 +5628,8 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                               type="number"
                               min={1}
                               max={100}
-                              value={Math.max(1, Math.min(100, Number(selectedLessonModel.completionThreshold || 95)))}
-                              onChange={(e) => updateLessonById(selectedLessonModel.id, { completionThreshold: Math.max(1, Math.min(100, Number(e.target.value || 95))) })}
+                              value={selectedLessonModel.completionThreshold || ""}
+                              onChange={(e) => updateLessonById(selectedLessonModel.id, { completionThreshold: e.target.value === "" ? "" : Math.max(1, Math.min(100, Number(e.target.value))) })}
                               className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 focus:outline-none focus:border-indigo-400 transition-all"
                             />
                           </div>
@@ -5814,7 +5811,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
               </div>
               <div>
                 <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Лимит времени (мин)</label>
-                <input type="number" value={Math.max(1, Number(settings.finalTestTimeLimitMinutes || 20))} onChange={e => setSettings(p => ({ ...p, finalTestTimeLimitMinutes: Math.max(1, Number(e.target.value || 20)) }))} className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-center focus:outline-none focus:border-indigo-400 transition-all" />
+                <input type="number" value={settings.finalTestTimeLimitMinutes || ""} onChange={e => setSettings(p => ({ ...p, finalTestTimeLimitMinutes: e.target.value === "" ? "" : Math.max(0, Number(e.target.value)) }))} className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-center focus:outline-none focus:border-indigo-400 transition-all" />
               </div>
               <div>
                 <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Проходной балл</label>
