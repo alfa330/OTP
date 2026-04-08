@@ -125,6 +125,36 @@ const isMassiveReason = (reason) => {
     return MASS_KEYWORDS.some((kw) => lower.includes(kw));
 };
 
+// ─── Duration helpers ─────────────────────────────────────────────────────────
+
+const parseTimeMinutes = (timeStr) => {
+    if (!timeStr) return null;
+    const parts = String(timeStr).split(':');
+    if (parts.length < 2) return null;
+    const h = parseInt(parts[0], 10);
+    const m = parseInt(parts[1], 10);
+    if (Number.isNaN(h) || Number.isNaN(m)) return null;
+    return h * 60 + m;
+};
+
+const calcDurationMinutes = (startTime, endTime) => {
+    const start = parseTimeMinutes(startTime);
+    const end   = parseTimeMinutes(endTime);
+    if (start === null || end === null) return null;
+    let diff = end - start;
+    if (diff < 0) diff += 24 * 60; // spans midnight
+    return diff;
+};
+
+const formatDuration = (minutes) => {
+    if (minutes === null || minutes < 0) return '—';
+    const h = Math.floor(minutes / 60);
+    const m = minutes % 60;
+    if (h === 0) return `${m} мин`;
+    if (m === 0) return `${h} ч`;
+    return `${h} ч ${m} мин`;
+};
+
 const getDaysInMonth = (year, month) => new Date(year, month + 1, 0).getDate();
 const getFirstDayOfWeek = (year, month) => {
     const day = new Date(year, month, 1).getDay();
@@ -738,6 +768,112 @@ const AddIssueModal = memo(function AddIssueModal({
     );
 });
 
+// ─── AnalyticsPanel ─────────────────────────────────────────────────────────
+
+const REASON_COLORS = [
+    '#3b82f6', '#6366f1', '#8b5cf6', '#ec4899',
+    '#f59e0b', '#10b981', '#06b6d4', '#ef4444',
+    '#84cc16', '#f97316',
+];
+
+const AnalyticsPanel = memo(function AnalyticsPanel({ rows }) {
+    const stats = useMemo(() => {
+        const map = new Map();
+        for (const row of rows) {
+            const reason = String(row?.reason || '—').trim();
+            const dur = calcDurationMinutes(row?.start_time, row?.end_time);
+            if (!map.has(reason)) {
+                map.set(reason, { reason, totalMinutes: 0, count: 0, operatorSet: new Set() });
+            }
+            const entry = map.get(reason);
+            entry.count += 1;
+            if (dur !== null && dur >= 0) entry.totalMinutes += dur;
+            if (row?.operator_name) entry.operatorSet.add(row.operator_name);
+        }
+        const arr = Array.from(map.values())
+            .map((e) => ({ ...e, operators: e.operatorSet.size }))
+            .sort((a, b) => b.totalMinutes - a.totalMinutes || b.count - a.count);
+        const maxMinutes = Math.max(...arr.map((e) => e.totalMinutes), 1);
+        return { items: arr, maxMinutes };
+    }, [rows]);
+
+    const totalMinutes = useMemo(() => stats.items.reduce((s, e) => s + e.totalMinutes, 0), [stats]);
+    const totalCount   = rows.length;
+
+    if (rows.length === 0) return null;
+
+    return (
+        <div className="mb-10 rounded-xl border-2 border-blue-200 bg-white shadow-lg overflow-hidden">
+            <div className="px-5 py-3 border-b border-blue-100 bg-gradient-to-r from-blue-50 to-indigo-50 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2 text-sm font-bold uppercase tracking-wide text-blue-900">
+                    <FaIcon className="fas fa-chart-bar" style={{ width: '1em', height: '1em' }} />
+                    Аналитика по причинам
+                </div>
+                <div className="flex flex-wrap gap-2">
+                    <span className="inline-flex items-center gap-1 rounded-full bg-blue-100 border border-blue-200 px-3 py-0.5 text-xs font-semibold text-blue-800">
+                        <FaIcon className="fas fa-clock" style={{ width: '0.8em', height: '0.8em' }} />
+                        Всего: {formatDuration(totalMinutes)}
+                    </span>
+                    <span className="inline-flex items-center gap-1 rounded-full bg-indigo-100 border border-indigo-200 px-3 py-0.5 text-xs font-semibold text-indigo-800">
+                        <FaIcon className="fas fa-list" style={{ width: '0.8em', height: '0.8em' }} />
+                        Инцидентов: {totalCount}
+                    </span>
+                    <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 border border-slate-200 px-3 py-0.5 text-xs font-semibold text-slate-700">
+                        <FaIcon className="fas fa-tools" style={{ width: '0.8em', height: '0.8em' }} />
+                        Причин: {stats.items.length}
+                    </span>
+                </div>
+            </div>
+
+            <div className="p-5 space-y-4">
+                {stats.items.map((entry, i) => {
+                    const pct = stats.maxMinutes > 0 ? (entry.totalMinutes / stats.maxMinutes) * 100 : 0;
+                    const totalPct = totalMinutes > 0 ? ((entry.totalMinutes / totalMinutes) * 100).toFixed(1) : '0.0';
+                    const color = REASON_COLORS[i % REASON_COLORS.length];
+                    const massive = isMassiveReason(entry.reason);
+                    return (
+                        <div key={entry.reason}>
+                            <div className="flex items-center justify-between gap-2 mb-1">
+                                <div className="flex items-center gap-2 min-w-0">
+                                    <span className="shrink-0 h-2.5 w-2.5 rounded-full" style={{ backgroundColor: color }} />
+                                    {massive && (
+                                        <span className="shrink-0 rounded-full bg-amber-100 border border-amber-300 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-widest text-amber-700">
+                                            Масс.
+                                        </span>
+                                    )}
+                                    <span className="text-xs font-medium text-gray-700 truncate" title={entry.reason}>{entry.reason}</span>
+                                </div>
+                                <div className="flex items-center gap-3 shrink-0">
+                                    <span className="text-xs font-bold text-gray-800 w-16 text-right">{formatDuration(entry.totalMinutes)}</span>
+                                    <span className="text-[11px] text-gray-400 w-8 text-right">{entry.count} сл.</span>
+                                    <span className="text-[11px] font-bold text-blue-600 w-10 text-right">{totalPct}%</span>
+                                </div>
+                            </div>
+                            <div className="relative h-5 w-full rounded-full bg-gray-100 overflow-hidden">
+                                <div
+                                    className="absolute inset-y-0 left-0 rounded-full transition-all duration-700 ease-out"
+                                    style={{ width: `${pct}%`, backgroundColor: color, opacity: 0.85 }}
+                                />
+                                {pct > 8 && (
+                                    <div className="absolute inset-0 flex items-center px-2.5">
+                                        <span className="text-[11px] font-semibold text-white drop-shadow-sm">{formatDuration(entry.totalMinutes)}</span>
+                                    </div>
+                                )}
+                            </div>
+                            <div className="flex gap-4 mt-0.5">
+                                <span className="text-[10px] text-gray-400">Операторов: {entry.operators}</span>
+                                {entry.count > 0 && (
+                                    <span className="text-[10px] text-gray-400">Ср. длит: {formatDuration(Math.round(entry.totalMinutes / entry.count))}</span>
+                                )}
+                            </div>
+                        </div>
+                    );
+                })}
+            </div>
+        </div>
+    );
+});
+
 // ─── TechnicalIssueRow ────────────────────────────────────────────────────────
 
 const TechnicalIssueRow = memo(function TechnicalIssueRow({ item, canDelete, isDeleting, onDelete, isEven }) {
@@ -1268,6 +1404,9 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
                     )}
                 </div>
             </div>
+
+                {/* ── Analytics panel ── */}
+                {!loading && rows.length > 0 && <AnalyticsPanel rows={rows} />}
         </>
     );
 };
