@@ -12766,8 +12766,8 @@ class Database:
         request_id = int(request_id)
         responder_operator_id = int(responder_operator_id)
         action_norm = str(action or '').strip().lower()
-        if action_norm not in ('accept', 'reject'):
-            raise ValueError("action must be 'accept' or 'reject'")
+        if action_norm not in ('accept', 'reject', 'cancel'):
+            raise ValueError("action must be 'accept', 'reject' or 'cancel'")
 
         response_comment_norm = None
         if response_comment is not None:
@@ -12822,10 +12822,30 @@ class Database:
 
             requester_operator_id = int(requester_operator_id)
             target_operator_id = int(target_operator_id)
-            if responder_operator_id != target_operator_id:
-                raise ValueError("Только получатель запроса может принять или отклонить замену")
             if str(current_status) != 'pending':
                 raise ValueError(f"Запрос уже обработан (статус: {current_status})")
+
+            if action_norm == 'cancel':
+                if responder_operator_id != requester_operator_id:
+                    raise ValueError("Только отправитель запроса может отменить замену")
+                cursor.execute(
+                    """
+                    UPDATE work_shift_swap_requests
+                    SET status = 'cancelled',
+                        response_comment = %s,
+                        responded_by = %s,
+                        responded_at = CURRENT_TIMESTAMP,
+                        accepted_at = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    """,
+                    (response_comment_norm, responder_operator_id, request_id)
+                )
+                row = self._select_shift_swap_request_by_id_tx(cursor, request_id)
+                return self._serialize_shift_swap_request_row(row)
+
+            if responder_operator_id != target_operator_id:
+                raise ValueError("Только получатель запроса может принять или отклонить замену")
 
             if action_norm == 'reject':
                 cursor.execute(

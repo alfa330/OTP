@@ -12468,14 +12468,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const handleRespondSwapRequest = async (requestItem, action) => {
                 const requestId = Number(requestItem?.id || 0);
                 const actionNorm = String(action || '').toLowerCase();
-                if (!requestId || !['accept', 'reject'].includes(actionNorm)) return;
+                if (!requestId || !['accept', 'reject', 'cancel'].includes(actionNorm)) return;
                 if (swapRespondingId) return;
-                if (actionNorm === 'reject') {
+                if (actionNorm === 'reject' || actionNorm === 'cancel') {
                     const requestMode = String(requestItem?.exchangeMode || '').toLowerCase();
                     const isExchangeRequest = requestMode.includes('exchange') || (Array.isArray(requestItem?.targetSegments) && requestItem.targetSegments.length > 0);
                     const ok = typeof window === 'undefined'
                         ? true
-                        : window.confirm(isExchangeRequest ? 'Отклонить запрос на обмен?' : 'Отклонить запрос на замену?');
+                        : window.confirm(
+                            actionNorm === 'cancel'
+                                ? (isExchangeRequest ? 'Отменить отправленный запрос на обмен?' : 'Отменить отправленный запрос на замену?')
+                                : (isExchangeRequest ? 'Отклонить запрос на обмен?' : 'Отклонить запрос на замену?')
+                        );
                     if (!ok) return;
                 }
                 try {
@@ -12500,6 +12504,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         const isExchangeRequest = requestMode.includes('exchange') || (Array.isArray(requestItem?.targetSegments) && requestItem.targetSegments.length > 0);
                         notifySwapMessage(isExchangeRequest ? 'Запрос принят, смены обменяны' : 'Запрос принят, замена применена', 'success');
                         setMyScheduleReloadNonce(v => v + 1);
+                    } else if (actionNorm === 'cancel') {
+                        notifySwapMessage('Запрос отменен', 'success');
                     } else {
                         notifySwapMessage('Запрос отклонен', 'success');
                     }
@@ -14768,6 +14774,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 const periodLabel = formatSwapIntervalLabel(req);
                                                                 const requestMode = String(req?.exchangeMode || '').toLowerCase();
                                                                 const isExchangeRequest = requestMode.includes('exchange') || (Array.isArray(req?.targetSegments) && req.targetSegments.length > 0);
+                                                                const isRespondingThis = Number(swapRespondingId) === Number(req?.id);
                                                                 return (
                                                                     <div key={`swap-out-${req?.id}`} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
                                                                         <div className="flex flex-wrap items-start justify-between gap-2">
@@ -14799,6 +14806,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         {req?.responseComment && req?.status !== 'pending' && (
                                                                             <div className="mt-2 text-xs text-slate-600">
                                                                                 Ответ: {req.responseComment}
+                                                                            </div>
+                                                                        )}
+                                                                        {req?.status === 'pending' && (
+                                                                            <div className="mt-3 flex items-center gap-2">
+                                                                                <button
+                                                                                    type="button"
+                                                                                    onClick={() => handleRespondSwapRequest(req, 'cancel')}
+                                                                                    disabled={!!swapRespondingId}
+                                                                                    className={`px-3 py-1.5 rounded-md text-xs font-medium ${
+                                                                                        isRespondingThis
+                                                                                            ? 'bg-slate-200 text-slate-500'
+                                                                                            : 'bg-amber-500 text-white hover:bg-amber-600'
+                                                                                    }`}
+                                                                                >
+                                                                                    {isRespondingThis ? 'Обработка...' : 'Отменить'}
+                                                                                </button>
                                                                             </div>
                                                                         )}
                                                                     </div>
