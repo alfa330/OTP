@@ -14439,10 +14439,12 @@ def _lms_admin_assignment_stats_tx(cursor, where_clauses=None, params=None):
         deadline_status = row[11] or _lms_deadline_status(row[8], row[10])
         total_lessons = int(row[12] or 0)
         completed_lessons = int(row[13] or 0)
+        total_tests = int(row[14] or 0)
+        passed_tests = int(row[15] or 0)
         total_intermediate_tests = int(row[16] or 0)
         passed_intermediate_tests = int(row[17] or 0)
-        progress_total_items = total_lessons + total_intermediate_tests
-        progress_completed_items = completed_lessons + passed_intermediate_tests
+        progress_total_items = total_lessons + total_tests
+        progress_completed_items = completed_lessons + passed_tests
         progress_percent = 0.0
         if row[7] == 'completed':
             progress_percent = 100.0
@@ -14464,8 +14466,8 @@ def _lms_admin_assignment_stats_tx(cursor, where_clauses=None, params=None):
             "total_lessons": total_lessons,
             "completed_lessons": completed_lessons,
             "progress_percent": progress_percent,
-            "total_tests": int(row[14] or 0),
-            "passed_tests": int(row[15] or 0),
+            "total_tests": total_tests,
+            "passed_tests": passed_tests,
             "total_intermediate_tests": total_intermediate_tests,
             "passed_intermediate_tests": passed_intermediate_tests
         })
@@ -15542,7 +15544,9 @@ def _lms_course_structure_tx(cursor, course_id, course_version_id):
     material_rows = cursor.fetchall()
 
     cursor.execute("""
-        SELECT id, module_id, title, description, pass_threshold, attempt_limit, is_final, status
+        SELECT
+            id, module_id, title, description, pass_threshold, attempt_limit,
+            time_limit_minutes, is_final, status
         FROM lms_tests
         WHERE course_version_id = %s
           AND status <> 'archived'
@@ -15593,8 +15597,9 @@ def _lms_course_structure_tx(cursor, course_id, course_version_id):
             "description": row[3],
             "pass_threshold": float(row[4] if row[4] is not None else LMS_DEFAULT_PASS_THRESHOLD),
             "attempt_limit": int(row[5] if row[5] is not None else LMS_DEFAULT_ATTEMPT_LIMIT),
-            "is_final": bool(row[6]),
-            "status": row[7],
+            "time_limit_minutes": int(row[6]) if row[6] is not None else None,
+            "is_final": bool(row[7]),
+            "status": row[8],
             "question_count": question_count
         })
 
@@ -15693,6 +15698,27 @@ def lms_home():
                     FROM lms_tests
                     WHERE course_version_id = %s
                       AND status <> 'archived'
+                """, (course_version_id,))
+                total_tests = int(cursor.fetchone()[0] or 0)
+
+                cursor.execute("""
+                    SELECT COUNT(DISTINCT ta.test_id)
+                    FROM lms_test_attempts ta
+                    JOIN lms_tests t ON t.id = ta.test_id
+                    WHERE ta.assignment_id = %s
+                      AND ta.user_id = %s
+                      AND ta.status = 'finished'
+                      AND ta.passed = TRUE
+                      AND t.course_version_id = %s
+                      AND t.status <> 'archived'
+                """, (assignment_id, requester_id, course_version_id))
+                completed_tests = int(cursor.fetchone()[0] or 0)
+
+                cursor.execute("""
+                    SELECT COUNT(*)
+                    FROM lms_tests
+                    WHERE course_version_id = %s
+                      AND status <> 'archived'
                       AND COALESCE(is_final, FALSE) = FALSE
                 """, (course_version_id,))
                 total_intermediate_tests = int(cursor.fetchone()[0] or 0)
@@ -15728,8 +15754,8 @@ def lms_home():
                 """, (assignment_id,))
                 cert_row = cursor.fetchone()
 
-                progress_total_items = total_lessons + total_intermediate_tests
-                progress_completed_items = completed_lessons + completed_intermediate_tests
+                progress_total_items = total_lessons + total_tests
+                progress_completed_items = completed_lessons + completed_tests
 
                 progress_percent = 0.0
                 if row[3] == 'completed':
@@ -15760,6 +15786,8 @@ def lms_home():
                     "completed_lessons": completed_lessons,
                     "total_lessons": total_lessons,
                     "total_duration_seconds": total_duration_seconds,
+                    "completed_tests": completed_tests,
+                    "total_tests": total_tests,
                     "completed_intermediate_tests": completed_intermediate_tests,
                     "total_intermediate_tests": total_intermediate_tests,
                     "best_score": float(best_score_raw) if best_score_raw is not None else None,
@@ -16404,7 +16432,8 @@ def lms_test_start(test_id):
                     t.id as test_id,
                     t.title,
                     COALESCE(t.pass_threshold, cv.pass_threshold, c.default_pass_threshold, %s),
-                    COALESCE(t.attempt_limit, cv.attempt_limit, c.default_attempt_limit, %s)
+                    COALESCE(t.attempt_limit, cv.attempt_limit, c.default_attempt_limit, %s),
+                    t.time_limit_minutes
                 FROM lms_tests t
                 JOIN lms_course_versions cv ON cv.id = t.course_version_id
                 JOIN lms_courses c ON c.id = cv.course_id
@@ -16503,7 +16532,8 @@ def lms_test_start(test_id):
                 "assignment_id": assignment_id,
                 "test_id": int(test_id),
                 "pass_threshold": pass_threshold,
-                "attempt_limit": attempt_limit
+                "attempt_limit": attempt_limit,
+                "time_limit_minutes": int(row[8]) if row[8] is not None else None
             },
             "questions": questions
         }), 200
@@ -17137,12 +17167,17 @@ def lms_admin_courses():
                     test_module_id = test.get('module_id')
                     if test_module_id not in created_module_ids:
                         test_module_id = None
+                    raw_time_limit_minutes = test.get('time_limit_minutes')
+                    if raw_time_limit_minutes in (None, ''):
+                        raw_time_limit_minutes = test.get('time_limit')
+                    parsed_time_limit_minutes = _lms_to_int(raw_time_limit_minutes, 0)
+                    test_time_limit_minutes = parsed_time_limit_minutes if parsed_time_limit_minutes > 0 else None
                     cursor.execute("""
                         INSERT INTO lms_tests (
                             course_version_id, module_id, title, description, pass_threshold,
-                            attempt_limit, is_final, status, created_at
+                            attempt_limit, time_limit_minutes, is_final, status, created_at
                         )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, 'draft', %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'draft', %s)
                         RETURNING id
                     """, (
                         version_id,
@@ -17151,6 +17186,7 @@ def lms_admin_courses():
                         str(test.get('description') or '').strip() or None,
                         min(100.0, max(0.0, _lms_to_float(test.get('pass_threshold'), pass_threshold))),
                         max(1, _lms_to_int(test.get('attempt_limit'), attempt_limit)),
+                        test_time_limit_minutes,
                         _lms_parse_bool(test.get('is_final'), True),
                         now
                     ))
