@@ -12228,6 +12228,56 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 serializeSwapTargetSegmentsForPayload,
                 timeStrToMinutesSafe
             ]);
+            const resolveSwapDraftAbsoluteRange = useCallback((draft) => {
+                const swapDate = String(draft?.swapDate || '').trim();
+                const startTime = String(draft?.startTime || '').trim();
+                const endTime = String(draft?.endTime || '').trim();
+                const endDate = String(draft?.endDate || swapDate).trim() || swapDate;
+                if (!swapDate || !startTime || !endTime || !endDate) return null;
+
+                const parsedRange = parseSwapRangeWithDates(swapDate, startTime, endDate, endTime);
+                if (!parsedRange?.isValid) return null;
+
+                const startMin = Number(parsedRange.startMin);
+                const endMin = Number(parsedRange.endMin);
+                if (!Number.isFinite(startMin) || !Number.isFinite(endMin) || endMin <= startMin) return null;
+
+                let baseDate = null;
+                try {
+                    baseDate = parseDateStr(swapDate);
+                } catch (_e) {
+                    return null;
+                }
+                if (!(baseDate instanceof Date) || Number.isNaN(baseDate.getTime())) return null;
+
+                const baseUtcMs = Date.UTC(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate());
+                const startUtcMs = baseUtcMs + (startMin * 60000);
+                const endUtcMs = baseUtcMs + (endMin * 60000);
+                if (!Number.isFinite(startUtcMs) || !Number.isFinite(endUtcMs) || endUtcMs <= startUtcMs) return null;
+
+                return {
+                    startUtcMs,
+                    endUtcMs
+                };
+            }, [parseSwapRangeWithDates]);
+            const findSwapDraftOverlapPair = useCallback((drafts) => {
+                const list = Array.isArray(drafts) ? drafts : [];
+                for (let i = 0; i < list.length; i += 1) {
+                    const leftRange = resolveSwapDraftAbsoluteRange(list[i]);
+                    if (!leftRange) continue;
+                    for (let j = i + 1; j < list.length; j += 1) {
+                        const rightRange = resolveSwapDraftAbsoluteRange(list[j]);
+                        if (!rightRange) continue;
+                        if (leftRange.startUtcMs < rightRange.endUtcMs && rightRange.startUtcMs < leftRange.endUtcMs) {
+                            return {
+                                first: list[i],
+                                second: list[j]
+                            };
+                        }
+                    }
+                }
+                return null;
+            }, [resolveSwapDraftAbsoluteRange]);
             const getSwapDraftSignature = useCallback((draft) => {
                 const requestType = normalizeSwapRequestType(draft?.requestType);
                 const targetOperatorId = Number(draft?.targetOperatorId || 0);
@@ -12256,9 +12306,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const draft = buildSwapDraftFromCurrentForm({ notifyErrors: true });
                 if (!draft) return;
                 const draftSignature = getSwapDraftSignature(draft);
-                const exists = (Array.isArray(swapDraftRequests) ? swapDraftRequests : []).some(item => getSwapDraftSignature(item) === draftSignature);
+                const draftList = Array.isArray(swapDraftRequests) ? swapDraftRequests : [];
+                const exists = draftList.some(item => getSwapDraftSignature(item) === draftSignature);
                 if (exists) {
                     notifySwapMessage('Такой запрос уже добавлен в список', 'warning');
+                    return;
+                }
+                const overlapPair = findSwapDraftOverlapPair([...draftList, draft]);
+                if (overlapPair) {
+                    notifySwapMessage('Нельзя добавить запрос: интервал пересекается с другим запросом в списке', 'warning');
                     return;
                 }
                 setSwapDraftRequests(prev => {
@@ -12316,6 +12372,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const currentDraft = buildSwapDraftFromCurrentForm({ notifyErrors: true });
                     if (!currentDraft) return;
                     requestsToSend = [currentDraft];
+                }
+                const overlapPair = findSwapDraftOverlapPair(requestsToSend);
+                if (overlapPair) {
+                    notifySwapMessage('В списке есть пересекающиеся интервалы. Уберите пересечения перед отправкой.', 'warning');
+                    return;
                 }
 
                 try {
