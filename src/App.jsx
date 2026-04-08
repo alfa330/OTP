@@ -6614,6 +6614,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [swapRespondingId, setSwapRespondingId] = useState(null);
             const [showSwapCreateModal, setShowSwapCreateModal] = useState(false);
             const [showSwapTargetSegmentsModal, setShowSwapTargetSegmentsModal] = useState(false);
+            const [swapExchangeChoiceModal, setSwapExchangeChoiceModal] = useState({
+                open: false,
+                swapDate: '',
+                endDate: '',
+                startTime: '',
+                endTime: ''
+            });
             const [swapForm, setSwapForm] = useState({
                 swapDate: '',
                 endDate: '',
@@ -6698,6 +6705,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const plannerStatusAnomalyInputRef = useRef(null);
             const plannerTopActionsMenuRef = useRef(null);
             const swapExchangePromptHandledRef = useRef(new Set());
+            const swapExchangeChoiceResolveRef = useRef(null);
             const plannerUiStateStorageKey = useMemo(
                 () => `otp.work_schedules.ui_state.${user?.login || user?.name || user?.role || 'anonymous'}`,
                 [user?.login, user?.name, user?.role]
@@ -11667,10 +11675,51 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const buildSwapPromptKey = useCallback((swapDateValue, endDateValue, startTimeValue, endTimeValue) => (
                 `${String(swapDateValue || '').trim()}|${String(endDateValue || '').trim()}|${String(startTimeValue || '').trim()}|${String(endTimeValue || '').trim()}`
             ), []);
+            const closeSwapExchangeChoiceModal = useCallback((exchangeConfirmed = false) => {
+                setSwapExchangeChoiceModal(prev => (
+                    prev?.open
+                        ? { ...prev, open: false }
+                        : prev
+                ));
+                const resolver = swapExchangeChoiceResolveRef.current;
+                swapExchangeChoiceResolveRef.current = null;
+                if (typeof resolver === 'function') {
+                    resolver(!!exchangeConfirmed);
+                }
+            }, []);
+            const openSwapExchangeChoiceModalPrompt = useCallback((context = {}) => {
+                const swapDate = String(context?.swapDate || '').trim();
+                const endDate = String(context?.endDate || swapDate).trim() || swapDate;
+                const startTime = String(context?.startTime || '').trim();
+                const endTime = String(context?.endTime || '').trim();
+
+                return new Promise(resolve => {
+                    const previousResolver = swapExchangeChoiceResolveRef.current;
+                    if (typeof previousResolver === 'function') {
+                        previousResolver(false);
+                    }
+                    swapExchangeChoiceResolveRef.current = resolve;
+                    setSwapExchangeChoiceModal({
+                        open: true,
+                        swapDate,
+                        endDate,
+                        startTime,
+                        endTime
+                    });
+                });
+            }, []);
+            useEffect(() => () => {
+                const resolver = swapExchangeChoiceResolveRef.current;
+                swapExchangeChoiceResolveRef.current = null;
+                if (typeof resolver === 'function') {
+                    resolver(false);
+                }
+            }, []);
             useEffect(() => {
                 if (!showSwapCreateModal) return;
                 if (isSwapExchangeMode) return;
                 if (!currentSwapFullShiftMatch) return;
+                let cancelled = false;
                 const key = buildSwapPromptKey(
                     swapForm.swapDate,
                     swapTimeValidation.effectiveEndDate || swapForm.endDate || swapForm.swapDate,
@@ -11681,16 +11730,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const handledSet = swapExchangePromptHandledRef.current;
                 if (handledSet.has(key)) return;
                 handledSet.add(key);
-                const confirmExchange = (typeof window === 'undefined')
-                    ? false
-                    : window.confirm('Вы выбрали полную смену. Вы хотите обменяться сменами?');
-                if (!confirmExchange) return;
-                setSwapForm(prev => ({
-                    ...prev,
-                    requestType: 'exchange',
-                    targetOperatorId: '',
-                    targetSegments: []
-                }));
+                (async () => {
+                    const confirmExchange = await openSwapExchangeChoiceModalPrompt({
+                        swapDate: swapForm.swapDate,
+                        endDate: swapTimeValidation.effectiveEndDate || swapForm.endDate || swapForm.swapDate,
+                        startTime: swapForm.startTime,
+                        endTime: swapForm.endTime
+                    });
+                    if (cancelled || !confirmExchange) return;
+                    setSwapForm(prev => ({
+                        ...prev,
+                        requestType: 'exchange',
+                        targetOperatorId: '',
+                        targetSegments: []
+                    }));
+                })();
+                return () => {
+                    cancelled = true;
+                };
             }, [
                 showSwapCreateModal,
                 isSwapExchangeMode,
@@ -11700,7 +11757,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 swapForm.endDate,
                 swapForm.startTime,
                 swapForm.endTime,
-                swapTimeValidation.effectiveEndDate
+                swapTimeValidation.effectiveEndDate,
+                openSwapExchangeChoiceModalPrompt
             ]);
             useEffect(() => {
                 if (isSwapExchangeMode) return;
@@ -12516,7 +12574,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setSwapRespondingId(null);
                 }
             };
-            const handleSelectOwnSwapSegmentFromTimeline = useCallback((segment) => {
+            const handleSelectOwnSwapSegmentFromTimeline = useCallback(async (segment) => {
                 const swapDate = String(swapForm.swapDate || '').trim();
                 const startMin = Number(segment?.start);
                 const endMin = Number(segment?.end);
@@ -12533,9 +12591,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const handledSet = swapExchangePromptHandledRef.current;
                     if (!handledSet.has(promptKey)) {
                         handledSet.add(promptKey);
-                        const confirmExchange = (typeof window === 'undefined')
-                            ? false
-                            : window.confirm(`Вы выбрали полную смену ${formatDateRuShort(swapDate)} ${startTime} — ${endTime}. Вы хотите обменяться сменами?`);
+                        const confirmExchange = await openSwapExchangeChoiceModalPrompt({
+                            swapDate,
+                            endDate,
+                            startTime,
+                            endTime
+                        });
                         nextRequestType = confirmExchange ? 'exchange' : 'replacement';
                     }
                 }
@@ -12555,9 +12616,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 buildSwapPromptKey,
                 findOwnFullShiftMatchForRange,
                 normalizeSwapRequestType,
-                formatDateRuShort
+                openSwapExchangeChoiceModalPrompt
             ]);
-            const handleOpenSwapModalForOwnShift = useCallback((dayCard, seg) => {
+            const handleOpenSwapModalForOwnShift = useCallback(async (dayCard, seg) => {
                 const swapDate = String(dayCard?.date || '').trim();
                 const startTime = String(seg?.start || '').trim();
                 const endTime = String(seg?.end || '').trim();
@@ -12571,8 +12632,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (Number.isFinite(startMin) && Number.isFinite(endMin) && endMin <= startMin) {
                     endDate = todayDateStr(addDays(parseDateStr(swapDate), 1));
                 }
-                const promptText = `Вы выбрали полную смену ${formatDateRuShort(swapDate)} ${startTime} — ${endTime}${endDate !== swapDate ? ' (+1 день)' : ''}. Вы хотите обменяться сменами?`;
-                const exchangeConfirmed = (typeof window === 'undefined') ? false : window.confirm(promptText);
+                const exchangeConfirmed = await openSwapExchangeChoiceModalPrompt({
+                    swapDate,
+                    endDate,
+                    startTime,
+                    endTime
+                });
                 const promptKey = buildSwapPromptKey(swapDate, endDate, startTime, endTime);
                 if (promptKey) {
                     swapExchangePromptHandledRef.current.add(promptKey);
@@ -12593,7 +12658,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }));
                 setShowSwapTargetSegmentsModal(false);
                 setShowSwapCreateModal(true);
-            }, [formatDateRuShort, notifySwapMessage, timeStrToMinutesSafe, buildSwapPromptKey]);
+            }, [notifySwapMessage, timeStrToMinutesSafe, buildSwapPromptKey, openSwapExchangeChoiceModalPrompt]);
             const loadSwapJournal = useCallback(async (monthValue = swapJournalMonth) => {
                 const month = String(monthValue || '').trim();
                 if (!month) return;
@@ -14655,6 +14720,68 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             </div>
                                                         </>
                                                     )}
+                                                </div>
+                                            </SimpleModal>
+                                            <SimpleModal
+                                                open={!!swapExchangeChoiceModal.open}
+                                                onClose={() => closeSwapExchangeChoiceModal(false)}
+                                                panelClassName="sm:w-[560px] max-w-[calc(100vw-1rem)] p-0 sm:rounded-xl"
+                                            >
+                                                <div className="p-4 sm:p-5 space-y-4">
+                                                    <div className="flex items-start justify-between gap-3 pb-2 border-b border-slate-200">
+                                                        <div className="min-w-0">
+                                                            <div className="text-sm font-semibold text-slate-900">Выбор типа запроса</div>
+                                                            <div className="text-xs text-slate-500 mt-1">
+                                                                {formatSwapDateTimeRangeLabel(
+                                                                    swapExchangeChoiceModal.swapDate,
+                                                                    swapExchangeChoiceModal.startTime,
+                                                                    swapExchangeChoiceModal.endTime,
+                                                                    swapExchangeChoiceModal.endDate
+                                                                ) || 'Выбрана полная смена'}
+                                                            </div>
+                                                        </div>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => closeSwapExchangeChoiceModal(false)}
+                                                            className="w-8 h-8 rounded-md border border-slate-300 text-slate-500 hover:bg-slate-100 inline-flex items-center justify-center"
+                                                            aria-label="Закрыть выбор типа запроса"
+                                                        >
+                                                            <FaIcon className="fas fa-times text-sm"></FaIcon>
+                                                        </button>
+                                                    </div>
+                                                    <div className="text-sm text-slate-700">
+                                                        Вы выбрали полную смену. Уточните, хотите сделать обычную замену или именно обмен сменами.
+                                                    </div>
+                                                    <div className="space-y-2">
+                                                        <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2.5">
+                                                            <div className="text-sm font-semibold text-slate-900">Обычная замена</div>
+                                                            <div className="text-xs text-slate-600 mt-1">
+                                                                Вы передаете свою смену. Встречную смену коллеги выбирать не нужно.
+                                                            </div>
+                                                        </div>
+                                                        <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2.5">
+                                                            <div className="text-sm font-semibold text-emerald-900">Обмен сменами</div>
+                                                            <div className="text-xs text-emerald-800 mt-1">
+                                                                Вы передаете свою смену и выбираете смены коллеги, которые получаете взамен.
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                    <div className="flex items-center justify-end gap-2 pt-1">
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => closeSwapExchangeChoiceModal(false)}
+                                                            className="px-3 py-1.5 rounded-md border border-slate-300 bg-white text-xs font-medium text-slate-700 hover:bg-slate-100"
+                                                        >
+                                                            Обычная замена
+                                                        </button>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => closeSwapExchangeChoiceModal(true)}
+                                                            className="px-3 py-1.5 rounded-md bg-emerald-600 text-white text-xs font-medium hover:bg-emerald-700"
+                                                        >
+                                                            Выбрать обмен
+                                                        </button>
+                                                    </div>
                                                 </div>
                                             </SimpleModal>
 
