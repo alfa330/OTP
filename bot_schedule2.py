@@ -14319,11 +14319,22 @@ def _lms_parse_datetime(value):
 
 
 def _lms_deadline_status(due_at, completed_at):
+    effective_due_at = due_at
+    if isinstance(due_at, datetime):
+        # Legacy/handmade deadlines sometimes come as date-only (00:00:00).
+        # Treat them as inclusive end-of-day to avoid false "late" states.
+        if (
+            due_at.hour == 0
+            and due_at.minute == 0
+            and due_at.second == 0
+            and due_at.microsecond == 0
+        ):
+            effective_due_at = due_at.replace(hour=23, minute=59, second=59, microsecond=999999)
     if completed_at:
-        if due_at and completed_at > due_at:
+        if effective_due_at and completed_at > effective_due_at:
             return 'orange'
         return 'green'
-    if due_at and _lms_now() > due_at:
+    if effective_due_at and _lms_now() > effective_due_at:
         return 'red'
     return None
 
@@ -14436,7 +14447,15 @@ def _lms_admin_assignment_stats_tx(cursor, where_clauses=None, params=None):
 
     payload = []
     for row in rows:
-        deadline_status = row[11] or _lms_deadline_status(row[8], row[10])
+        status_norm = str(row[7] or '').strip().lower()
+        computed_deadline_status = _lms_deadline_status(row[8], row[10])
+        stored_deadline_status = str(row[11] or '').strip().lower() or None
+        if status_norm == 'completed':
+            # For completed assignments always trust actual timestamps first.
+            # This prevents stale completion_color_status from showing false "completed_late".
+            deadline_status = computed_deadline_status or (stored_deadline_status if stored_deadline_status in ('green', 'orange') else None)
+        else:
+            deadline_status = computed_deadline_status or stored_deadline_status
         total_lessons = int(row[12] or 0)
         completed_lessons = int(row[13] or 0)
         total_tests = int(row[14] or 0)

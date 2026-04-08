@@ -957,6 +957,23 @@ const formatDeadline = (date) => {
   return { label: d.toLocaleDateString("ru-RU", { day: "numeric", month: "short" }), urgent: false, overdue: false };
 };
 
+const formatDeadlineForStatus = (date, status) => {
+  if (!date) return null;
+  const base = formatDeadline(date);
+  if (!base) return null;
+  const statusNorm = String(status || "").trim().toLowerCase();
+  const completedStatus = statusNorm === "completed" || statusNorm === "completed_late";
+  if (!completedStatus) return base;
+  const parsed = new Date(date);
+  return {
+    label: Number.isNaN(parsed.getTime())
+      ? base.label
+      : parsed.toLocaleDateString("ru-RU", { day: "numeric", month: "short" }),
+    urgent: false,
+    overdue: false,
+  };
+};
+
 // Проверка правильности ответа
 function isAnswerCorrect(question, userAnswer) {
   if (question.type === "single" || question.type === "bool") {
@@ -6427,7 +6444,7 @@ function AdminView({
     ? (statusConfig[selectedEmployeeCourseItem.status] || statusConfig.not_started)
     : null;
   const selectedEmployeeCourseDeadlineInfo = selectedEmployeeCourseItem?.deadline
-    ? formatDeadline(selectedEmployeeCourseItem.deadline)
+    ? formatDeadlineForStatus(selectedEmployeeCourseItem.deadline, selectedEmployeeCourseItem.status)
     : null;
 
   const getEmployeeCourseDeadline = (courseId, assignmentRow) => {
@@ -6771,7 +6788,7 @@ function AdminView({
 
                       return filteredCourses.map((courseItem) => {
                       const st = statusConfig[courseItem.status] || statusConfig.not_started;
-                      const deadlineInfo = courseItem.deadline ? formatDeadline(courseItem.deadline) : null;
+                      const deadlineInfo = courseItem.deadline ? formatDeadlineForStatus(courseItem.deadline, courseItem.status) : null;
                       const isSelectedCourse = selectedEmployeeCourseKey === courseItem.rowKey;
                       return (
                         <button
