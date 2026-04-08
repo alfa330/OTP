@@ -15665,11 +15665,15 @@ def lms_home():
 
                 cursor.execute("""
                     SELECT COALESCE(SUM(
-                        COALESCE(time_limit_seconds, time_limit_minutes * 60, 0)
+                        COALESCE(
+                            NULLIF(to_jsonb(t) ->> 'time_limit_seconds', '')::INTEGER,
+                            t.time_limit_minutes * 60,
+                            0
+                        )
                     ), 0)
-                    FROM lms_tests
-                    WHERE course_version_id = %s
-                      AND status <> 'archived'
+                    FROM lms_tests t
+                    WHERE t.course_version_id = %s
+                      AND t.status <> 'archived'
                 """, (course_version_id,))
                 tests_duration_seconds = int(cursor.fetchone()[0] or 0)
 
