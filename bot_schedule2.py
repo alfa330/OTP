@@ -10966,7 +10966,7 @@ def respond_shift_swap_request():
     Body:
       {
         "request_id": int,
-        "action": "accept" | "reject",
+        "action": "accept" | "reject" | "cancel",
         "comment": "optional"
       }
     """
@@ -10989,7 +10989,12 @@ def respond_shift_swap_request():
             response_comment=response_comment
         )
         action_norm = str(action).strip().lower()
-        message = "Swap request accepted" if action_norm == 'accept' else "Swap request rejected"
+        if action_norm == 'accept':
+            message = "Swap request accepted"
+        elif action_norm == 'reject':
+            message = "Swap request rejected"
+        else:
+            message = "Swap request cancelled"
         return jsonify({
             "message": message,
             "request": updated_request
