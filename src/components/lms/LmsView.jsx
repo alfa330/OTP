@@ -2542,7 +2542,7 @@ function LessonView({
             <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden"><div className="h-full bg-indigo-500 rounded-full" style={{ width: `${course.progress}%` }} /></div>
           </div>
         </div>
-        <div className="flex-1 min-h-0 overflow-y-auto pb-20">
+        <div className="flex-1 min-h-0 overflow-y-auto pb-20 custom-scrollbar">
           {course.modules_data.map((mod, moduleIndex) => (
             <div key={mod.id}>
               <div className="px-4 py-3 bg-slate-50 border-b border-slate-100">
@@ -2577,7 +2577,7 @@ function LessonView({
       </div>
 
       {/* Main content */}
-      <div className="flex-1 min-h-0 overflow-y-auto bg-slate-50">
+      <div className="flex-1 min-h-0 overflow-y-auto bg-slate-50 custom-scrollbar">
         <div className="sticky top-0 z-10 bg-white border-b border-slate-200 px-6 py-3 flex items-center gap-3">
           <button onClick={() => setSidebarOpen(!sidebarOpen)} className="p-2 rounded-lg hover:bg-slate-100 text-slate-500 transition-colors"><AlignLeft size={16} /></button>
           <div className="flex-1">
@@ -4910,7 +4910,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                 </button>
               )}
             </div>
-            <div className="overflow-y-auto max-h-[62vh]">
+            <div className="overflow-y-auto max-h-[62vh] custom-scrollbar">
               {modules.map((moduleItem, moduleIndex) => (
                 <div key={moduleItem.id}>
                   <div className="px-4 py-3 bg-slate-50 border-b border-slate-100">
