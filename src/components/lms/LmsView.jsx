@@ -1509,6 +1509,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
   const [courses, setCourses] = useState([]);
   const [certificates, setCertificates] = useState([]);
   const [notifications, setNotifications] = useState([]);
+  const [markingAllNotificationsRead, setMarkingAllNotificationsRead] = useState(false);
   const [adminCourses, setAdminCourses] = useState([]);
   const [adminAnalytics, setAdminAnalytics] = useState(null);
   const [adminProgressRows, setAdminProgressRows] = useState([]);
@@ -1802,6 +1803,44 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
     }
   }, [apiRoot, canUseLearnerApi, lmsRequest, emitToast]);
 
+  const markAllNotificationsRead = useCallback(async () => {
+    if (markingAllNotificationsRead) return;
+    const unreadIds = (Array.isArray(notifications) ? notifications : [])
+      .filter((item) => !item?.read)
+      .map((item) => Number(item?.id || 0))
+      .filter((id) => id > 0);
+
+    if (unreadIds.length === 0) return;
+
+    setNotifications((prev) => prev.map((item) => (item?.read ? item : { ...item, read: true })));
+
+    if (!apiRoot || !canUseLearnerApi) return;
+
+    setMarkingAllNotificationsRead(true);
+    try {
+      const results = await Promise.allSettled(
+        unreadIds.map((notificationId) =>
+          lmsRequest(`/api/lms/notifications/${notificationId}/read`, { method: "POST" })
+        )
+      );
+      const failedCount = results.filter((result) => result.status === "rejected").length;
+      if (failedCount > 0) {
+        emitToast(`Не удалось отметить ${failedCount} уведомл.`, "error");
+        await loadLearnerDashboard();
+      }
+    } finally {
+      setMarkingAllNotificationsRead(false);
+    }
+  }, [
+    markingAllNotificationsRead,
+    notifications,
+    apiRoot,
+    canUseLearnerApi,
+    lmsRequest,
+    emitToast,
+    loadLearnerDashboard,
+  ]);
+
   const downloadCertificate = useCallback(async (certificate) => {
     if (!certificate?.id || !apiRoot || !canUseLearnerApi) return;
     try {
@@ -1956,6 +1995,10 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
     setView("admin");
     setAdminTab("analytics");
   };
+  const unreadNotificationsCount = useMemo(
+    () => (Array.isArray(notifications) ? notifications.filter((item) => !item?.read).length : 0),
+    [notifications]
+  );
   const isLessonLayout = view === "lesson" && Boolean(selectedLesson) && Boolean(selectedCourse);
 
   return (
@@ -1968,6 +2011,12 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
         navToAdmin={navToAdmin}
         canToggleAdmin={canUseManagerApi}
         canGoCatalog={canGoCatalog}
+        unreadNotificationsCount={unreadNotificationsCount}
+        notifications={notifications}
+        notificationsLoading={loadingHome}
+        onNotificationRead={markNotificationRead}
+        onMarkAllNotificationsRead={markAllNotificationsRead}
+        markingAllNotificationsRead={markingAllNotificationsRead}
       />
       <main className={isLessonLayout ? "pt-16 h-screen overflow-hidden" : "pt-16"}>
         {homeError && canUseLearnerApi && (
@@ -2053,9 +2102,100 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
 
 // ─── TOP NAVIGATION ───────────────────────────────────────────────────────────
 
-function TopNav({ view, goBack, isAdmin, setIsAdmin, navToAdmin, canToggleAdmin = true, canGoCatalog = true }) {
+function TopNav({
+  view,
+  goBack,
+  isAdmin,
+  setIsAdmin,
+  navToAdmin,
+  canToggleAdmin = true,
+  canGoCatalog = true,
+  unreadNotificationsCount = 0,
+  notifications = [],
+  notificationsLoading = false,
+  onNotificationRead,
+  onMarkAllNotificationsRead,
+  markingAllNotificationsRead = false,
+}) {
+  const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
+  const notificationDropdownRef = useRef(null);
+  const notificationTriggerRef = useRef(null);
   const showBack = ["course", "lesson", "builder"].includes(view) || (view === "admin" && canGoCatalog);
   const backLabels = { course: "Все курсы", lesson: "Курс", builder: "Все курсы", admin: "Все курсы" };
+  const safeNotifications = Array.isArray(notifications) ? notifications : [];
+  const topNotifications = useMemo(
+    () =>
+      [...safeNotifications]
+        .sort((left, right) => {
+          const leftTs = left?.createdAt ? Date.parse(left.createdAt) : 0;
+          const rightTs = right?.createdAt ? Date.parse(right.createdAt) : 0;
+          return rightTs - leftTs;
+        })
+        .slice(0, 8),
+    [safeNotifications]
+  );
+  const unreadCount = Math.max(0, Number(unreadNotificationsCount || 0));
+  const unreadBadgeLabel = unreadCount > 99 ? "99+" : String(unreadCount);
+  const canOpenNotifications = canGoCatalog;
+  const canMarkAllRead =
+    unreadCount > 0 && typeof onMarkAllNotificationsRead === "function" && !markingAllNotificationsRead;
+  const iconMap = {
+    deadline: AlertCircle,
+    completed: CheckCircle,
+    assigned: BookOpen,
+    certificate: Award,
+  };
+  const colorMap = {
+    deadline: "text-amber-600 bg-amber-50",
+    completed: "text-emerald-600 bg-emerald-50",
+    assigned: "text-indigo-600 bg-indigo-50",
+    certificate: "text-violet-600 bg-violet-50",
+  };
+
+  useEffect(() => {
+    if (!isNotificationsOpen) return;
+    const handleMouseDown = (event) => {
+      const target = event.target;
+      if (notificationDropdownRef.current?.contains(target)) return;
+      if (notificationTriggerRef.current?.contains(target)) return;
+      setIsNotificationsOpen(false);
+    };
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") {
+        setIsNotificationsOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleMouseDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handleMouseDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isNotificationsOpen]);
+
+  useEffect(() => {
+    if (!canOpenNotifications && isNotificationsOpen) {
+      setIsNotificationsOpen(false);
+    }
+  }, [canOpenNotifications, isNotificationsOpen]);
+
+  const handleNotificationButtonClick = () => {
+    if (!canOpenNotifications) return;
+    setIsNotificationsOpen((prev) => !prev);
+  };
+
+  const handleNotificationItemClick = (notification) => {
+    const notificationId = Number(notification?.id || 0);
+    if (!notification?.read && notificationId > 0 && typeof onNotificationRead === "function") {
+      void onNotificationRead(notificationId);
+    }
+  };
+
+  const handleMarkAllRead = () => {
+    if (!canMarkAllRead) return;
+    void onMarkAllNotificationsRead();
+  };
+
   return (
     <header
       className="fixed top-0 right-0 z-40 bg-white border-b border-slate-200 h-16"
@@ -2089,10 +2229,108 @@ function TopNav({ view, goBack, isAdmin, setIsAdmin, navToAdmin, canToggleAdmin 
           >
             <Shield size={12} /> {canToggleAdmin ? (isAdmin ? "Режим админа" : "Сотрудник") : "LMS"}
           </button>
-          <div className="relative">
-            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center text-white text-xs font-semibold">АИ</div>
-            <div className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 bg-emerald-500 rounded-full border-2 border-white" />
-          </div>
+          {canOpenNotifications && (
+            <div className="relative">
+              <button
+                ref={notificationTriggerRef}
+                type="button"
+                onClick={handleNotificationButtonClick}
+                className={`relative inline-flex h-9 min-w-9 items-center justify-center rounded-xl border bg-white px-2.5 text-slate-600 transition-colors ${isNotificationsOpen ? "border-indigo-300 text-indigo-700 bg-indigo-50" : "border-slate-200 hover:border-indigo-300 hover:text-indigo-700 hover:bg-indigo-50"}`}
+                title={unreadCount > 0 ? `Уведомления: ${unreadCount} непрочитанных` : "Уведомления"}
+                aria-label={unreadCount > 0 ? `Уведомления, ${unreadCount} непрочитанных` : "Уведомления"}
+                aria-expanded={isNotificationsOpen}
+              >
+                <Bell size={16} />
+                {unreadCount > 0 && (
+                  <span className="absolute -top-1.5 -right-1.5 min-w-5 h-5 px-1 rounded-full bg-rose-500 text-white text-[10px] font-semibold leading-5 shadow-sm shadow-rose-500/30">
+                    {unreadBadgeLabel}
+                  </span>
+                )}
+              </button>
+
+              {isNotificationsOpen && (
+                <div
+                  ref={notificationDropdownRef}
+                  className="absolute top-full right-0 mt-2 w-[360px] max-w-[calc(100vw-1rem)] rounded-2xl border border-slate-200 bg-white shadow-xl shadow-slate-900/10 overflow-hidden"
+                >
+                  <div className="px-4 py-3 border-b border-slate-100 bg-slate-50/80">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-xs font-semibold text-slate-800">Уведомления</p>
+                      <button
+                        type="button"
+                        onClick={handleMarkAllRead}
+                        disabled={!canMarkAllRead}
+                        className="text-[11px] font-medium text-indigo-600 hover:text-indigo-700 disabled:text-slate-400 disabled:cursor-not-allowed"
+                      >
+                        {markingAllNotificationsRead ? "Отмечаем..." : "Отметить прочитанным все"}
+                      </button>
+                    </div>
+                    <p className="text-[10px] text-slate-500 mt-1">
+                      {unreadCount > 0 ? `Непрочитанных: ${unreadCount}` : "Все уведомления прочитаны"}
+                    </p>
+                  </div>
+
+                  <div className="max-h-[320px] overflow-y-auto custom-scrollbar">
+                    {notificationsLoading && safeNotifications.length === 0 ? (
+                      <div className="p-3 space-y-2">
+                        {Array.from({ length: 4 }).map((_, idx) => (
+                          <div key={`top-nav-notification-skeleton-${idx}`} className="rounded-xl border border-slate-100 p-3 space-y-2">
+                            <SkeletonBlock className="w-7 h-3.5" />
+                            <SkeletonBlock className="w-11/12 h-3" />
+                            <SkeletonBlock className="w-24 h-2.5" />
+                          </div>
+                        ))}
+                      </div>
+                    ) : topNotifications.length === 0 ? (
+                      <div className="px-4 py-8 text-center text-[11px] text-slate-500">
+                        Уведомлений пока нет
+                      </div>
+                    ) : (
+                      <div className="p-2">
+                        {topNotifications.map((notification) => {
+                          const Icon = iconMap[notification?.type] || Bell;
+                          const iconClass = colorMap[notification?.type] || "text-slate-600 bg-slate-100";
+                          const notificationId = Number(notification?.id || 0);
+                          return (
+                            <button
+                              type="button"
+                              key={notificationId || `top-notification-${notification?.title || "item"}`}
+                              onClick={() => handleNotificationItemClick(notification)}
+                              className={`w-full text-left rounded-xl border p-3 mb-1.5 last:mb-0 transition-all ${notification?.read ? "border-slate-100 bg-white" : "border-indigo-100 bg-indigo-50/40 hover:bg-indigo-50"}`}
+                            >
+                              <div className="flex items-start gap-2.5">
+                                <span className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${iconClass}`}>
+                                  <Icon size={14} />
+                                </span>
+                                <span className="flex-1 min-w-0">
+                                  <span className="flex items-start justify-between gap-2">
+                                    <span className="text-[12px] font-semibold text-slate-800 leading-4">
+                                      {notification?.title || "Уведомление LMS"}
+                                    </span>
+                                    {!notification?.read && (
+                                      <span className="w-2 h-2 rounded-full bg-indigo-500 flex-shrink-0 mt-1" />
+                                    )}
+                                  </span>
+                                  {!!notification?.message && (
+                                    <span className="block mt-0.5 text-[11px] text-slate-500 leading-4 truncate">
+                                      {notification.message}
+                                    </span>
+                                  )}
+                                  <span className="block mt-1 text-[10px] text-slate-400">
+                                    {notification?.time || ""}
+                                  </span>
+                                </span>
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </header>
