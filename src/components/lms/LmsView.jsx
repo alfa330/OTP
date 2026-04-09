@@ -6016,7 +6016,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                 <input value={assignmentSearch} onChange={(e) => setAssignmentSearch(e.target.value)} placeholder="Поиск по имени или роли..." className="w-full pl-9 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm placeholder-slate-400 focus:outline-none focus:border-indigo-400 transition-all" />
               </div>
             </div>
-            <div className="space-y-2 max-h-80 overflow-y-auto">
+            <div className="space-y-2 max-h-80 overflow-y-auto custom-scrollbar">
               {filteredLearners.length === 0 && (
                 <div className="text-xs text-slate-400 py-6 text-center">Сотрудники не найдены</div>
               )}
