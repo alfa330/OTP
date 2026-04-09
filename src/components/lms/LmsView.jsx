@@ -15,9 +15,19 @@ import {
 import "react-quill/dist/quill.snow.css";
 import "./LmsRichText.css";
 
-const SkeletonBlock = ({ className = "" }) => (
-  <div className={`animate-pulse rounded-xl bg-slate-200/80 ${className}`.trim()} />
-);
+const SkeletonBlock = ({ className = "", delay }) => {
+  const randomDelayRef = useRef(Math.floor(Math.random() * 220));
+  const delayValue = Number(delay);
+  const resolvedDelay = Number.isFinite(delayValue) ? Math.max(0, delayValue) : randomDelayRef.current;
+
+  return (
+    <span
+      aria-hidden="true"
+      className={`lms-skeleton-block block ${className}`.trim()}
+      style={{ "--lms-skeleton-delay": `${resolvedDelay}ms` }}
+    />
+  );
+};
 
 // ─── MOCK DATA ────────────────────────────────────────────────────────────────
 
