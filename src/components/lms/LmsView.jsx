@@ -9,7 +9,7 @@ import {
   PlayCircle, AlignLeft, Layers, ChevronLeft, Eye,
   BookMarked, Zap, ToggleLeft, ToggleRight, LayoutGrid, List, Percent,
   UserCheck, RefreshCw, ClipboardList, PlusCircle, LogOut, ChevronUp,
-  Save, Image, Link2, FileCheck, Pause, Volume2, Maximize, AlertTriangle,
+  Save, Image, Link2, FileCheck, Volume2, Maximize, AlertTriangle,
   XCircle, CheckSquare, Square, Type, ToggleRight as RadioIcon
 } from "lucide-react";
 import "react-quill/dist/quill.snow.css";
@@ -890,7 +890,10 @@ function RichTextEditor({
         ref={quillRef}
         theme="snow"
         value={prepareRichTextValue(value)}
-        onChange={(html) => onChange?.(normalizeRichTextValue(html))}
+        onChange={(html, _delta, source) => {
+          if (source !== "user") return;
+          onChange?.(normalizeRichTextValue(html));
+        }}
         placeholder={placeholder}
         modules={richTextModules}
         formats={RICH_TEXT_FORMATS}
@@ -1094,6 +1097,17 @@ const mapAssignmentStatusToUi = (assignmentStatus, deadlineStatus) => {
   return "not_started";
 };
 
+const resolveCourseMandatoryFlag = (courseLike = {}) => {
+  const assignmentId = Number(courseLike?.assignmentId || courseLike?.assignment_id || 0);
+  if (assignmentId > 0) return true;
+  const explicitMandatory =
+    courseLike?.mandatory ??
+    courseLike?.is_mandatory ??
+    courseLike?.required ??
+    courseLike?.is_required;
+  return Boolean(explicitMandatory);
+};
+
 const clampLmsProgress = (value) => Math.max(0, Math.min(100, Number(value) || 0));
 
 const isCompletedLmsStatus = (status) => status === "completed" || status === "completed_late";
@@ -1189,6 +1203,7 @@ const toDateInputValue = (value) => {
 
 const mapHomeCourseToView = (course) => {
   const courseId = Number(course?.course_id || 0);
+  const assignmentId = Number(course?.assignment_id || 0);
   const visual = pickCourseVisual(courseId, course?.category);
   const totalLessons = Math.max(0, Number(course?.total_lessons || 0));
   const completedLessons = Math.max(0, Number(course?.completed_lessons || 0));
@@ -1204,9 +1219,22 @@ const mapHomeCourseToView = (course) => {
   const durationLabel = apiDurationSeconds > 0
     ? formatDurationLabel(apiDurationSeconds)
     : formatDurationLabel(fallbackMinutes * 60);
+  const deadlineStatus = resolveDeadlineStatusByDates({
+    dueAt: course?.due_at,
+    completedAt: course?.completed_at,
+    fallbackStatus: String(course?.status || "").trim().toLowerCase() === "completed" ? null : course?.deadline_status,
+  });
+  const deadlineValue = course?.due_at || course?.deadline || course?.dueAt || null;
+  const mandatory = resolveCourseMandatoryFlag({
+    assignmentId,
+    mandatory: course?.mandatory,
+    is_mandatory: course?.is_mandatory,
+    required: course?.required,
+    is_required: course?.is_required,
+  });
   return {
     id: courseId,
-    assignmentId: Number(course?.assignment_id || 0) || null,
+    assignmentId: assignmentId || null,
     courseVersionId: Number(course?.course_version_id || 0) || null,
     title: String(course?.title || "Без названия"),
     category: String(course?.category || "Без категории"),
@@ -1220,9 +1248,9 @@ const mapHomeCourseToView = (course) => {
     modules: 0,
     progress,
     completedLessons,
-    deadline: course?.due_at || null,
-    mandatory: false,
-    status: mapAssignmentStatusToUi(course?.status, course?.deadline_status),
+    deadline: deadlineValue,
+    mandatory,
+    status: mapAssignmentStatusToUi(course?.status, deadlineStatus),
     rating: course?.best_score ? Math.max(1, Math.min(5, Number(course.best_score) / 20)) : 0,
     reviews: 0,
     passingScore: 80,
@@ -1255,6 +1283,21 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
     const prev = testsByModule.get(key) || [];
     prev.push(test);
     testsByModule.set(key, prev);
+  });
+
+  const assignmentId = Number(assignment?.id || fallbackCourse?.assignmentId || 0);
+  const courseDeadline = assignment?.due_at || fallbackCourse?.deadline || null;
+  const assignmentDeadlineStatus = resolveDeadlineStatusByDates({
+    dueAt: courseDeadline,
+    completedAt: assignment?.completed_at,
+    fallbackStatus: String(assignment?.status || "").trim().toLowerCase() === "completed" ? null : assignment?.deadline_status,
+  });
+  const mandatory = resolveCourseMandatoryFlag({
+    assignmentId,
+    mandatory: assignment?.mandatory ?? fallbackCourse?.mandatory,
+    is_mandatory: assignment?.is_mandatory,
+    required: assignment?.required,
+    is_required: assignment?.is_required,
   });
 
   let progressionLocked = false;
@@ -1397,7 +1440,7 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
     ? 100
     : (progressItemsTotal > 0 ? Math.round((progressItemsCompleted / progressItemsTotal) * 100) : 0);
 
-  let status = mapAssignmentStatusToUi(assignment?.status, assignment?.deadline_status);
+  let status = mapAssignmentStatusToUi(assignment?.status, assignmentDeadlineStatus);
   if (status !== "completed" && courseAttemptTests.length > 0 && regularLessonsTotal > 0 && regularLessonsCompleted >= regularLessonsTotal) {
     const hasFailedRequiredTest = courseAttemptTests.some((test) => {
       const testState = testProgress?.[test.id] || testProgress?.[String(test.id)] || {};
@@ -1424,7 +1467,7 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
 
   return {
     id: courseId,
-    assignmentId: Number(assignment?.id || fallbackCourse?.assignmentId || 0) || null,
+    assignmentId: assignmentId || null,
     courseVersionId: Number(coursePayload?.course_version?.id || fallbackCourse?.courseVersionId || 0) || null,
     title: String(coursePayload?.title || fallbackCourse?.title || "Без названия"),
     category: String(coursePayload?.category || fallbackCourse?.category || "Без категории"),
@@ -1438,8 +1481,8 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
     lessons: lessonsCountWithTests,
     modules: modulesData.length,
     progress: Math.max(0, Math.min(100, progressPercent)),
-    deadline: assignment?.due_at || null,
-    mandatory: Boolean(fallbackCourse?.mandatory),
+    deadline: courseDeadline,
+    mandatory,
     status,
     rating: Number(fallbackCourse?.rating || 0),
     reviews: Number(fallbackCourse?.reviews || 0),
@@ -2355,7 +2398,8 @@ function CatalogView({
     const isCompleted = c.status === "completed" || c.status === "completed_late";
     const matchesTab = tab === "available" ? !isCompleted : isCompleted;
     const matchesSearch = c.title.toLowerCase().includes(searchQuery.toLowerCase()) || c.category.toLowerCase().includes(searchQuery.toLowerCase());
-    const matchesFilter = filter === "all" || (filter === "mandatory" && c.mandatory) || c.status === filter;
+    const isMandatory = resolveCourseMandatoryFlag(c);
+    const matchesFilter = filter === "all" || (filter === "mandatory" && isMandatory) || c.status === filter;
     return matchesTab && matchesSearch && matchesFilter;
   }).sort((a, b) => {
     if (sortBy === "deadline") {
@@ -2551,6 +2595,7 @@ function CatalogView({
 function CourseCard({ course, onClick, busy = false }) {
   const st = statusConfig[course.status] || statusConfig.not_started;
   const dl = course.deadline ? formatDeadline(course.deadline) : null;
+  const isMandatory = resolveCourseMandatoryFlag(course);
   const attemptsLeft = Math.max(0, Number(course.maxAttempts || 0) - Number(course.attemptsUsed || 0));
 
   return (
@@ -2562,7 +2607,7 @@ function CourseCard({ course, onClick, busy = false }) {
           <span className="text-5xl">{course.cover}</span>
         )}
         <div className="absolute inset-0 bg-black/10" />
-        {course.mandatory && (
+        {isMandatory && (
           <div className="absolute top-3 left-3 bg-white/20 backdrop-blur-sm text-white text-[10px] font-semibold px-2 py-1 rounded-full border border-white/30 z-10">Обязательный</div>
         )}
         {course.status === "completed" && (
@@ -2616,6 +2661,8 @@ function CourseCard({ course, onClick, busy = false }) {
 
 function CourseListItem({ course, onClick, busy = false }) {
   const st = statusConfig[course.status] || statusConfig.not_started;
+  const dl = course.deadline ? formatDeadline(course.deadline) : null;
+  const isMandatory = resolveCourseMandatoryFlag(course);
   return (
     <div onClick={() => !busy && onClick?.()} className={`bg-white rounded-2xl border border-slate-200 p-5 flex items-center gap-5 transition-all group ${busy ? "opacity-70 cursor-wait" : "cursor-pointer hover:shadow-sm hover:border-slate-300"}`}>
       <div className={`w-14 h-14 rounded-xl bg-gradient-to-br ${course.color} flex items-center justify-center text-2xl flex-shrink-0 overflow-hidden`}>
@@ -2628,7 +2675,7 @@ function CourseListItem({ course, onClick, busy = false }) {
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 mb-1">
           <span className="text-[10px] font-semibold text-indigo-600 uppercase tracking-wider">{course.category}</span>
-          {course.mandatory && <span className="text-[10px] font-semibold text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full">Обязательный</span>}
+          {isMandatory && <span className="text-[10px] font-semibold text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full">Обязательный</span>}
         </div>
         <h3 className="text-sm font-semibold text-slate-900 group-hover:text-indigo-700 transition-colors truncate">{course.title}</h3>
         <div className="flex items-center gap-3 text-xs text-slate-500 mt-1">
@@ -2638,6 +2685,12 @@ function CourseListItem({ course, onClick, busy = false }) {
             <span className="flex items-center gap-1"><RefreshCw size={11} /> {Math.max(0, Number(course.maxAttempts || 0) - Number(course.attemptsUsed || 0))} поп.</span>
           )}
         </div>
+        {dl && (
+          <div className={`mt-1.5 flex items-center gap-1 text-[11px] ${dl.overdue ? "text-red-600" : dl.urgent ? "text-amber-600" : "text-slate-500"}`}>
+            <Calendar size={11} />
+            {dl.overdue ? `Просрочен ${Math.abs(Math.ceil((new Date(course.deadline) - new Date()) / 86400000))} дн` : `До ${dl.label}`}
+          </div>
+        )}
       </div>
       {course.status !== "completed" && course.status !== "not_started" && (
         <div className="w-32">
@@ -2659,6 +2712,7 @@ function CourseDetail({ course, onStartLesson }) {
   const [openModules, setOpenModules] = useState([course?.modules_data?.[0]?.id || 1]);
   const toggleModule = (id) => setOpenModules(p => p.includes(id) ? p.filter(x => x !== id) : [...p, id]);
   const dl = course.deadline ? formatDeadline(course.deadline) : null;
+  const isMandatory = resolveCourseMandatoryFlag(course);
   const firstLesson = course.modules_data[0]?.lessons[0];
   const attemptsLeft = Math.max(0, Number(course.maxAttempts || 0) - Number(course.attemptsUsed || 0));
 
@@ -2677,7 +2731,7 @@ function CourseDetail({ course, onStartLesson }) {
         <div className="relative z-10 max-w-2xl 2xl:max-w-3xl">
           <div className="flex items-center gap-2 mb-4">
             <span className="text-xs font-semibold text-white/70 uppercase tracking-wider">{course.category}</span>
-            {course.mandatory && <span className="text-xs font-semibold bg-white/20 text-white px-2.5 py-1 rounded-full">Обязательный</span>}
+            {isMandatory && <span className="text-xs font-semibold bg-white/20 text-white px-2.5 py-1 rounded-full">Обязательный</span>}
           </div>
           <h1 className="text-3xl font-bold text-white mb-4 leading-tight tracking-tight">{course.title}</h1>
           <RichTextContent
@@ -3392,23 +3446,6 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
           </div>
         )}
       </div>
-
-      <div className="flex items-center gap-4 mb-6 p-4 bg-white rounded-xl border border-slate-200">
-        <button
-          type="button"
-          onClick={togglePlayback}
-          disabled={!videoUrl}
-          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed text-xs font-semibold text-slate-700 transition-colors"
-        >
-          {playing ? <Pause size={13} /> : <Play size={13} />}
-          {playing ? "Пауза" : "Воспроизвести"}
-        </button>
-        <div className="flex items-center gap-2 text-xs text-slate-500"><Eye size={13} /> Просмотрено: {Math.round(progress)}%</div>
-        <div className="flex items-center gap-2 text-xs text-emerald-600 font-medium"><CheckCircle size={13} /> Засчитывается только реальное время</div>
-        <div className="ml-auto text-xs text-slate-500 flex items-center gap-2"><Clock size={13} /> {formatVideoClock(currentSeconds)} / {formatVideoClock(safeTotalSeconds)}</div>
-        {completed && <div className="flex items-center gap-1.5 text-xs text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-full font-semibold"><CheckCircle size={12} /> Урок завершён</div>}
-      </div>
-
       {!completed && (
         <div className="mb-6 flex justify-end">
           <button
@@ -3432,7 +3469,7 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
         </div>
         <div className="p-5">
           {activeTab === "transcript" && (
-            <div className="text-sm text-slate-600 leading-relaxed">
+            <div className="max-h-[420px] overflow-y-auto custom-scrollbar pr-2 text-sm text-slate-600 leading-relaxed">
               {transcriptText ? (
                 <RichTextContent value={transcriptText} />
               ) : (
@@ -3573,7 +3610,7 @@ function ApiQuizSection({ quizView, setQuizView, answers, setAnswers, course, le
 
   const submitAnswersBeforeFinish = useCallback(async () => {
     if (!attempt?.id || !Array.isArray(questions) || questions.length === 0) return;
-    const requests = questions
+    const answerItems = questions
       .map((question) => {
         const userAnswer = answers[question.id];
         const hasAnswer = question.type === "multiple"
@@ -3582,17 +3619,33 @@ function ApiQuizSection({ quizView, setQuizView, answers, setAnswers, course, le
             ? Boolean(String(userAnswer || "").trim())
             : userAnswer !== undefined && userAnswer !== null && userAnswer !== "";
         if (!hasAnswer) return null;
-        return lmsRequest(`/api/lms/tests/attempts/${attempt.id}/answer`, {
-          method: "PATCH",
-          body: {
-            question_id: question.id,
-            answer_payload: buildAnswerPayloadForApi(question, userAnswer),
-          },
-        });
+        return {
+          question_id: question.id,
+          answer_payload: buildAnswerPayloadForApi(question, userAnswer),
+        };
       })
       .filter(Boolean);
-    if (requests.length === 0) return;
-    await Promise.all(requests);
+    if (answerItems.length === 0) return;
+
+    try {
+      await lmsRequest(`/api/lms/tests/attempts/${attempt.id}/answers`, {
+        method: "PATCH",
+        body: { answers: answerItems },
+      });
+    } catch (bulkError) {
+      const errorText = String(bulkError?.message || "").toLowerCase();
+      const canFallback = errorText.includes("404") || errorText.includes("method") || errorText.includes("not found");
+      if (!canFallback) throw bulkError;
+
+      // Backward compatibility: older backends may not have /answers endpoint yet.
+      const requests = answerItems.map((item) => (
+        lmsRequest(`/api/lms/tests/attempts/${attempt.id}/answer`, {
+          method: "PATCH",
+          body: item,
+        })
+      ));
+      await Promise.all(requests);
+    }
   }, [attempt?.id, questions, answers, lmsRequest]);
 
   const finishApiQuiz = useCallback(async (auto = false) => {
@@ -5157,6 +5210,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
       return (
         <div className="space-y-2">
           <RichTextEditor
+            key={`lesson-${selectedLessonId || "none"}-${fieldId}`}
             value={value || ""}
             onChange={onChange}
             placeholder={placeholder}
@@ -5870,6 +5924,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                     <div>
                       <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Описание урока</label>
                       <RichTextEditor
+                        key={`lesson-${selectedLessonModel.id}-description`}
                         value={selectedLessonModel.description || ""}
                         onChange={(next) => updateLessonById(selectedLessonModel.id, { description: next })}
                         onImageUpload={handleRichTextImageUpload}
@@ -6076,6 +6131,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                           <div>
                             <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Текст урока</label>
                             <RichTextEditor
+                              key={`lesson-${selectedLessonModel.id}-text-content`}
                               value={selectedLessonModel.contentText || ""}
                               onChange={(next) => updateLessonById(selectedLessonModel.id, { contentText: next })}
                               onImageUpload={handleRichTextImageUpload}
@@ -6091,6 +6147,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                             <div>
                               <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Транскрипт видео</label>
                               <RichTextEditor
+                                key={`lesson-${selectedLessonModel.id}-video-transcript`}
                                 value={selectedLessonModel.contentText || ""}
                                 onChange={(next) => updateLessonById(selectedLessonModel.id, { contentText: next })}
                                 onImageUpload={handleRichTextImageUpload}
@@ -7590,7 +7647,4 @@ function AdminView({
     </div>
   );
 }
-
-
-
 
