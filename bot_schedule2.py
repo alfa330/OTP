@@ -9,6 +9,7 @@ import hashlib
 import base64
 import hmac
 import secrets
+import random
 import jwt
 from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -15247,6 +15248,21 @@ def _lms_fetch_test_questions_tx(cursor, test_id, include_correct=False):
     return questions
 
 
+def _lms_parse_question_ids(raw_value):
+    raw_list = _lms_parse_json(raw_value, [])
+    if not isinstance(raw_list, list):
+        return []
+    out = []
+    for value in raw_list:
+        try:
+            parsed = int(value)
+        except Exception:
+            continue
+        if parsed > 0 and parsed not in out:
+            out.append(parsed)
+    return out
+
+
 def _lms_extract_selected_option_ids(answer_payload):
     selected = []
     payload = answer_payload
@@ -15308,7 +15324,7 @@ def _lms_answer_to_matching_map(answer_payload):
 def _lms_finalize_attempt_tx(cursor, attempt_id, user_id):
     cursor.execute("""
         SELECT
-            ta.id, ta.assignment_id, ta.test_id, ta.user_id, ta.status, ta.started_at,
+            ta.id, ta.assignment_id, ta.test_id, ta.user_id, ta.status, ta.started_at, ta.question_ids,
             t.title, t.pass_threshold, t.attempt_limit
         FROM lms_test_attempts ta
         JOIN lms_tests t ON t.id = ta.test_id
@@ -15338,6 +15354,13 @@ def _lms_finalize_attempt_tx(cursor, attempt_id, user_id):
         }
 
     questions = _lms_fetch_test_questions_tx(cursor, int(attempt[2]), include_correct=True)
+    selected_question_ids = _lms_parse_question_ids(attempt[6])
+    if selected_question_ids:
+        question_map = {int(item.get('id')): item for item in questions}
+        selected_questions = [question_map[qid] for qid in selected_question_ids if qid in question_map]
+        if selected_questions:
+            questions = selected_questions
+
     cursor.execute("""
         SELECT question_id, answer_payload
         FROM lms_test_attempt_answers
@@ -15457,7 +15480,7 @@ def _lms_finalize_attempt_tx(cursor, attempt_id, user_id):
     if total_points > 0:
         score_percent = round((scored_points / total_points) * 100.0, 2)
 
-    pass_threshold = float(attempt[7] if attempt[7] is not None else LMS_DEFAULT_PASS_THRESHOLD)
+    pass_threshold = float(attempt[8] if attempt[8] is not None else LMS_DEFAULT_PASS_THRESHOLD)
     passed = score_percent >= pass_threshold
     finished_at = _lms_now()
     started_at = attempt[5]
@@ -15572,7 +15595,7 @@ def _lms_course_structure_tx(cursor, course_id, course_version_id):
     cursor.execute("""
         SELECT
             id, module_id, title, description, pass_threshold, attempt_limit,
-            time_limit_minutes, is_final, status
+            time_limit_minutes, question_count, random_order, is_final, status
         FROM lms_tests
         WHERE course_version_id = %s
           AND status <> 'archived'
@@ -15615,7 +15638,11 @@ def _lms_course_structure_tx(cursor, course_id, course_version_id):
     for row in tests_rows:
         test_id = int(row[0])
         cursor.execute("SELECT COUNT(*) FROM lms_questions WHERE test_id = %s", (test_id,))
-        question_count = int(cursor.fetchone()[0] or 0)
+        question_bank_count = int(cursor.fetchone()[0] or 0)
+        configured_question_count = _lms_to_int(row[7], 0)
+        effective_question_count = question_bank_count
+        if configured_question_count > 0:
+            effective_question_count = min(question_bank_count, configured_question_count)
         tests.append({
             "id": test_id,
             "module_id": int(row[1]) if row[1] is not None else None,
@@ -15624,9 +15651,11 @@ def _lms_course_structure_tx(cursor, course_id, course_version_id):
             "pass_threshold": float(row[4] if row[4] is not None else LMS_DEFAULT_PASS_THRESHOLD),
             "attempt_limit": int(row[5] if row[5] is not None else LMS_DEFAULT_ATTEMPT_LIMIT),
             "time_limit_minutes": int(row[6]) if row[6] is not None else None,
-            "is_final": bool(row[7]),
-            "status": row[8],
-            "question_count": question_count
+            "question_count": effective_question_count,
+            "question_bank_count": question_bank_count,
+            "random_order": _lms_parse_bool(row[8], True),
+            "is_final": bool(row[9]),
+            "status": row[10]
         })
 
     version_settings = _lms_parse_json(header[12], {})
@@ -16459,7 +16488,9 @@ def lms_test_start(test_id):
                     t.title,
                     COALESCE(t.pass_threshold, cv.pass_threshold, c.default_pass_threshold, %s),
                     COALESCE(t.attempt_limit, cv.attempt_limit, c.default_attempt_limit, %s),
-                    t.time_limit_minutes
+                    t.time_limit_minutes,
+                    t.question_count,
+                    COALESCE(t.random_order, TRUE)
                 FROM lms_tests t
                 JOIN lms_course_versions cv ON cv.id = t.course_version_id
                 JOIN lms_courses c ON c.id = cv.course_id
@@ -16509,7 +16540,7 @@ def lms_test_start(test_id):
                 }), 409
 
             cursor.execute("""
-                SELECT id, attempt_no
+                SELECT id, attempt_no, question_ids
                 FROM lms_test_attempts
                 WHERE assignment_id = %s
                   AND test_id = %s
@@ -16522,6 +16553,7 @@ def lms_test_start(test_id):
             if active_attempt:
                 attempt_id = int(active_attempt[0])
                 attempt_no = int(active_attempt[1])
+                stored_question_ids = _lms_parse_question_ids(active_attempt[2])
             else:
                 cursor.execute("""
                     SELECT COUNT(*)
@@ -16541,14 +16573,46 @@ def lms_test_start(test_id):
                 attempt_no = attempts_used + 1
                 cursor.execute("""
                     INSERT INTO lms_test_attempts (
-                        assignment_id, test_id, user_id, attempt_no, status, started_at
+                        assignment_id, test_id, user_id, attempt_no, status, started_at, question_ids
                     )
-                    VALUES (%s, %s, %s, %s, 'in_progress', %s)
+                    VALUES (%s, %s, %s, %s, 'in_progress', %s, '[]'::jsonb)
                     RETURNING id
                 """, (assignment_id, test_id, requester_id, attempt_no, _lms_now()))
                 attempt_id = int(cursor.fetchone()[0])
+                stored_question_ids = []
 
-            questions = _lms_fetch_test_questions_tx(cursor, test_id, include_correct=False)
+            all_questions = _lms_fetch_test_questions_tx(cursor, test_id, include_correct=False)
+            questions = []
+            if stored_question_ids:
+                question_map = {int(item.get('id')): item for item in all_questions}
+                questions = [question_map[qid] for qid in stored_question_ids if qid in question_map]
+
+            if not questions:
+                configured_question_count = _lms_to_int(row[9], 0)
+                random_order = _lms_parse_bool(row[10], True)
+
+                # Preserve behavior for already-active attempts from legacy versions:
+                # if user has started answering, keep full bank to avoid hidden answered items.
+                cursor.execute("""
+                    SELECT COUNT(*)
+                    FROM lms_test_attempt_answers
+                    WHERE attempt_id = %s
+                """, (attempt_id,))
+                has_any_legacy_answers = int(cursor.fetchone()[0] or 0) > 0
+
+                selected_questions = list(all_questions)
+                if not has_any_legacy_answers:
+                    if random_order and len(selected_questions) > 1:
+                        random.shuffle(selected_questions)
+                    if configured_question_count > 0:
+                        selected_questions = selected_questions[:configured_question_count]
+                questions = selected_questions
+                selected_ids = [int(item.get('id')) for item in selected_questions if int(item.get('id') or 0) > 0]
+                cursor.execute("""
+                    UPDATE lms_test_attempts
+                    SET question_ids = %s::jsonb
+                    WHERE id = %s
+                """, (json.dumps(selected_ids, ensure_ascii=False), attempt_id))
 
         return jsonify({
             "status": "success",
@@ -16559,7 +16623,10 @@ def lms_test_start(test_id):
                 "test_id": int(test_id),
                 "pass_threshold": pass_threshold,
                 "attempt_limit": attempt_limit,
-                "time_limit_minutes": int(row[8]) if row[8] is not None else None
+                "time_limit_minutes": int(row[8]) if row[8] is not None else None,
+                "question_count": len(questions),
+                "configured_question_count": (int(row[9]) if row[9] is not None else None),
+                "random_order": _lms_parse_bool(row[10], True)
             },
             "questions": questions
         }), 200
@@ -16591,7 +16658,7 @@ def lms_test_answer(attempt_id):
     try:
         with db._get_cursor() as cursor:
             cursor.execute("""
-                SELECT id, test_id, status
+                SELECT id, test_id, status, question_ids
                 FROM lms_test_attempts
                 WHERE id = %s AND user_id = %s
                 LIMIT 1
@@ -16601,6 +16668,9 @@ def lms_test_answer(attempt_id):
                 return jsonify({"error": "Attempt not found"}), 404
             if attempt[2] != 'in_progress':
                 return jsonify({"error": "Attempt is not in progress"}), 409
+            selected_question_ids = _lms_parse_question_ids(attempt[3])
+            if selected_question_ids and question_id not in set(selected_question_ids):
+                return jsonify({"error": "Question does not belong to this attempt"}), 404
 
             cursor.execute("""
                 SELECT id
@@ -16631,6 +16701,107 @@ def lms_test_answer(attempt_id):
         return jsonify({"status": "success", "attempt_id": attempt_id, "question_id": question_id}), 200
     except Exception as e:
         logging.exception("Error in /api/lms/tests/attempts/<attempt_id>/answer")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/lms/tests/attempts/<int:attempt_id>/answers', methods=['PATCH'])
+@require_api_key
+def lms_test_answers_bulk(attempt_id):
+    requester_id, _, _, error_response, status_code = _lms_resolve_request('learner')
+    if error_response:
+        return error_response, status_code
+
+    data = request.get_json(silent=True) or {}
+    answers_raw = data.get('answers')
+    if isinstance(answers_raw, dict):
+        answers_raw = [{"question_id": qid, "answer_payload": payload} for qid, payload in answers_raw.items()]
+    if not isinstance(answers_raw, list):
+        return jsonify({"error": "answers must be a list"}), 400
+
+    normalized_items = []
+    by_question_id = {}
+    for item in answers_raw:
+        if not isinstance(item, dict):
+            continue
+        raw_question_id = item.get('question_id', item.get('id'))
+        if raw_question_id in (None, ''):
+            continue
+        try:
+            question_id = int(raw_question_id)
+        except Exception:
+            return jsonify({"error": f"Invalid question_id: {raw_question_id}"}), 400
+
+        raw_answer = item.get('answer_payload', item.get('answer'))
+        if raw_answer is None:
+            raw_answer = {}
+
+        by_question_id[question_id] = raw_answer
+
+    for question_id, answer_payload in by_question_id.items():
+        normalized_items.append((question_id, answer_payload))
+
+    if not normalized_items:
+        return jsonify({"status": "success", "attempt_id": attempt_id, "updated_count": 0}), 200
+
+    try:
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id, test_id, status, question_ids
+                FROM lms_test_attempts
+                WHERE id = %s AND user_id = %s
+                LIMIT 1
+            """, (attempt_id, requester_id))
+            attempt = cursor.fetchone()
+            if not attempt:
+                return jsonify({"error": "Attempt not found"}), 404
+            if attempt[2] != 'in_progress':
+                return jsonify({"error": "Attempt is not in progress"}), 409
+
+            selected_question_ids = _lms_parse_question_ids(attempt[3])
+            if selected_question_ids:
+                allowed_set = set(selected_question_ids)
+                invalid_selected = [qid for qid, _ in normalized_items if qid not in allowed_set]
+                if invalid_selected:
+                    return jsonify({"error": "Some questions do not belong to this attempt", "question_ids": invalid_selected}), 404
+
+            candidate_question_ids = [qid for qid, _ in normalized_items]
+            cursor.execute("""
+                SELECT id
+                FROM lms_questions
+                WHERE test_id = %s
+                  AND id = ANY(%s)
+            """, (int(attempt[1]), candidate_question_ids))
+            valid_question_ids = {int(row[0]) for row in cursor.fetchall()}
+            missing_question_ids = [qid for qid in candidate_question_ids if qid not in valid_question_ids]
+            if missing_question_ids:
+                return jsonify({"error": "Some questions do not belong to this test", "question_ids": missing_question_ids}), 404
+
+            now = _lms_now()
+            for question_id, answer_payload in normalized_items:
+                cursor.execute("""
+                    INSERT INTO lms_test_attempt_answers (
+                        attempt_id, question_id, answer_payload, answered_at
+                    )
+                    VALUES (%s, %s, %s::jsonb, %s)
+                    ON CONFLICT (attempt_id, question_id)
+                    DO UPDATE SET
+                        answer_payload = EXCLUDED.answer_payload,
+                        answered_at = EXCLUDED.answered_at
+                """, (
+                    attempt_id,
+                    question_id,
+                    json.dumps(answer_payload, ensure_ascii=False),
+                    now
+                ))
+
+        return jsonify({
+            "status": "success",
+            "attempt_id": attempt_id,
+            "updated_count": len(normalized_items),
+            "question_ids": [qid for qid, _ in normalized_items]
+        }), 200
+    except Exception as e:
+        logging.exception("Error in /api/lms/tests/attempts/<attempt_id>/answers")
         return jsonify({"error": str(e)}), 500
 
 
@@ -16666,7 +16837,7 @@ def lms_test_result(attempt_id):
                 SELECT
                     ta.id, ta.assignment_id, ta.test_id, ta.attempt_no, ta.status,
                     ta.score_percent, ta.passed, ta.started_at, ta.finished_at, ta.duration_seconds,
-                    t.title, t.pass_threshold
+                    ta.question_ids, t.title, t.pass_threshold
                 FROM lms_test_attempts ta
                 JOIN lms_tests t ON t.id = ta.test_id
                 WHERE ta.id = %s
@@ -16677,29 +16848,44 @@ def lms_test_result(attempt_id):
             if not attempt:
                 return jsonify({"error": "Attempt not found"}), 404
 
+            questions = _lms_fetch_test_questions_tx(cursor, int(attempt[2]), include_correct=False)
+            selected_question_ids = _lms_parse_question_ids(attempt[10])
+            if selected_question_ids:
+                question_map = {int(item.get('id')): item for item in questions}
+                selected_questions = [question_map[qid] for qid in selected_question_ids if qid in question_map]
+                if selected_questions:
+                    questions = selected_questions
+
             cursor.execute("""
                 SELECT
-                    q.id, q.question_type, q.prompt, q.points,
-                    a.answer_payload, a.is_correct, a.points_awarded, a.answered_at
-                FROM lms_questions q
-                LEFT JOIN lms_test_attempt_answers a
-                  ON a.question_id = q.id
-                 AND a.attempt_id = %s
-                WHERE q.test_id = %s
-                ORDER BY q.position ASC, q.id ASC
-            """, (attempt_id, int(attempt[2])))
+                    question_id, answer_payload, is_correct, points_awarded, answered_at
+                FROM lms_test_attempt_answers
+                WHERE attempt_id = %s
+            """, (attempt_id,))
             answer_rows = cursor.fetchall()
+            answer_by_question_id = {
+                int(row[0]): {
+                    "answer_payload": _lms_parse_json(row[1], {}),
+                    "is_correct": (bool(row[2]) if row[2] is not None else None),
+                    "points_awarded": (float(row[3]) if row[3] is not None else None),
+                    "answered_at": row[4].isoformat() if row[4] else None
+                }
+                for row in answer_rows
+            }
+
             answers = []
-            for row in answer_rows:
+            for question in questions:
+                question_id = int(question.get('id') or 0)
+                question_answer = answer_by_question_id.get(question_id, {})
                 answers.append({
-                    "question_id": int(row[0]),
-                    "type": row[1],
-                    "prompt": row[2],
-                    "points_total": float(row[3] or 1.0),
-                    "answer_payload": _lms_parse_json(row[4], {}),
-                    "is_correct": (bool(row[5]) if row[5] is not None else None),
-                    "points_awarded": (float(row[6]) if row[6] is not None else None),
-                    "answered_at": row[7].isoformat() if row[7] else None
+                    "question_id": question_id,
+                    "type": question.get('type'),
+                    "prompt": question.get('prompt'),
+                    "points_total": float(question.get('points') or 1.0),
+                    "answer_payload": question_answer.get("answer_payload", {}),
+                    "is_correct": question_answer.get("is_correct"),
+                    "points_awarded": question_answer.get("points_awarded"),
+                    "answered_at": question_answer.get("answered_at")
                 })
 
             cursor.execute("""
@@ -16724,8 +16910,9 @@ def lms_test_result(attempt_id):
                 "started_at": attempt[7].isoformat() if attempt[7] else None,
                 "finished_at": attempt[8].isoformat() if attempt[8] else None,
                 "duration_seconds": int(attempt[9] or 0),
-                "test_title": attempt[10],
-                "pass_threshold": float(attempt[11] if attempt[11] is not None else LMS_DEFAULT_PASS_THRESHOLD)
+                "question_ids": selected_question_ids,
+                "test_title": attempt[11],
+                "pass_threshold": float(attempt[12] if attempt[12] is not None else LMS_DEFAULT_PASS_THRESHOLD)
             },
             "answers": answers,
             "certificate": (
@@ -17193,17 +17380,28 @@ def lms_admin_courses():
                     test_module_id = test.get('module_id')
                     if test_module_id not in created_module_ids:
                         test_module_id = None
+                    test_metadata = test.get('metadata') if isinstance(test.get('metadata'), dict) else {}
                     raw_time_limit_minutes = test.get('time_limit_minutes')
                     if raw_time_limit_minutes in (None, ''):
                         raw_time_limit_minutes = test.get('time_limit')
                     parsed_time_limit_minutes = _lms_to_int(raw_time_limit_minutes, 0)
                     test_time_limit_minutes = parsed_time_limit_minutes if parsed_time_limit_minutes > 0 else None
+                    raw_question_count = test.get('question_count')
+                    if raw_question_count in (None, ''):
+                        raw_question_count = test_metadata.get('questions_per_test')
+                    parsed_question_count = _lms_to_int(raw_question_count, 0)
+                    test_question_count = parsed_question_count if parsed_question_count > 0 else None
+                    raw_random_order = test.get('random_order')
+                    if raw_random_order in (None, ''):
+                        raw_random_order = test_metadata.get('random_order')
+                    test_random_order = _lms_parse_bool(raw_random_order, True)
                     cursor.execute("""
                         INSERT INTO lms_tests (
                             course_version_id, module_id, title, description, pass_threshold,
-                            attempt_limit, time_limit_minutes, is_final, status, created_at
+                            attempt_limit, time_limit_minutes, question_count, random_order,
+                            is_final, status, created_at
                         )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'draft', %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'draft', %s)
                         RETURNING id
                     """, (
                         version_id,
@@ -17213,6 +17411,8 @@ def lms_admin_courses():
                         min(100.0, max(0.0, _lms_to_float(test.get('pass_threshold'), pass_threshold))),
                         max(1, _lms_to_int(test.get('attempt_limit'), attempt_limit)),
                         test_time_limit_minutes,
+                        test_question_count,
+                        test_random_order,
                         _lms_parse_bool(test.get('is_final'), True),
                         now
                     ))

@@ -1746,6 +1746,8 @@ class Database:
                     pass_threshold NUMERIC(5,2) NOT NULL DEFAULT 80.00 CHECK(pass_threshold >= 0 AND pass_threshold <= 100),
                     attempt_limit INTEGER NOT NULL DEFAULT 3 CHECK(attempt_limit >= 1),
                     time_limit_minutes INTEGER CHECK(time_limit_minutes IS NULL OR time_limit_minutes > 0),
+                    question_count INTEGER CHECK(question_count IS NULL OR question_count >= 1),
+                    random_order BOOLEAN NOT NULL DEFAULT TRUE,
                     is_final BOOLEAN NOT NULL DEFAULT TRUE,
                     status VARCHAR(20) NOT NULL DEFAULT 'draft' CHECK(status IN ('draft', 'published', 'archived')),
                     created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
@@ -1854,6 +1856,7 @@ class Database:
                     started_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
                     finished_at TIMESTAMP,
                     duration_seconds INTEGER,
+                    question_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
                     proctor_flags JSONB NOT NULL DEFAULT '[]'::jsonb,
                     UNIQUE(assignment_id, test_id, attempt_no)
                 );
@@ -1912,6 +1915,14 @@ class Database:
                     details JSONB NOT NULL DEFAULT '{}'::jsonb,
                     created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                 );
+
+                -- LMS compatibility migrations for older databases
+                ALTER TABLE lms_tests
+                    ADD COLUMN IF NOT EXISTS question_count INTEGER;
+                ALTER TABLE lms_tests
+                    ADD COLUMN IF NOT EXISTS random_order BOOLEAN NOT NULL DEFAULT TRUE;
+                ALTER TABLE lms_test_attempts
+                    ADD COLUMN IF NOT EXISTS question_ids JSONB NOT NULL DEFAULT '[]'::jsonb;
 
                 -- LMS indexes
                 CREATE INDEX IF NOT EXISTS idx_lms_courses_status ON lms_courses(status);
