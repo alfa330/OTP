@@ -5,7 +5,7 @@ import {
   BookOpen, Play, CheckCircle, Clock, Award, Bell, Search, ChevronRight,
   ChevronDown, BarChart2, Plus, Minus, Trash2, Edit, Settings, Lock, Star, Download,
   X, Check, AlertCircle, ArrowLeft, Video, FileText, HelpCircle, Upload,
-  Users, TrendingUp, Shield, Target, GripVertical, Filter, Calendar,
+  Users, TrendingUp, Target, GripVertical, Filter, Calendar,
   PlayCircle, AlignLeft, Layers, ChevronLeft, Eye,
   BookMarked, Zap, ToggleLeft, ToggleRight, LayoutGrid, List, Percent,
   UserCheck, RefreshCw, ClipboardList, PlusCircle, LogOut, ChevronUp,
@@ -1500,7 +1500,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
   const [selectedLesson, setSelectedLesson] = useState(null);
   const [catalogTab, setCatalogTab] = useState("available");
   const [searchQuery, setSearchQuery] = useState("");
-  const [isAdmin, setIsAdmin] = useState(canUseManagerApi);
+  const isAdmin = canUseManagerApi;
   const [adminTab, setAdminTab] = useState("analytics");
   const [quizView, setQuizView] = useState("intro");
   const [quizAnswers, setQuizAnswers] = useState({});
@@ -1526,11 +1526,10 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
   const adminLoadPromiseRef = useRef(null);
 
   useEffect(() => {
-    setIsAdmin(canUseManagerApi);
     if (!canUseLearnerApi) {
       setView("admin");
     }
-  }, [canUseLearnerApi, canUseManagerApi]);
+  }, [canUseLearnerApi]);
 
   useEffect(() => {
     showToastRef.current = showToast;
@@ -1990,11 +1989,6 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
     }
   };
 
-  const navToAdmin = () => {
-    if (!canUseManagerApi) return;
-    setView("admin");
-    setAdminTab("analytics");
-  };
   const unreadNotificationsCount = useMemo(
     () => (Array.isArray(notifications) ? notifications.filter((item) => !item?.read).length : 0),
     [notifications]
@@ -2006,10 +2000,6 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
       <TopNav
         view={view}
         goBack={goBack}
-        isAdmin={isAdmin}
-        setIsAdmin={setIsAdmin}
-        navToAdmin={navToAdmin}
-        canToggleAdmin={canUseManagerApi}
         canGoCatalog={canGoCatalog}
         unreadNotificationsCount={unreadNotificationsCount}
         notifications={notifications}
@@ -2105,10 +2095,6 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
 function TopNav({
   view,
   goBack,
-  isAdmin,
-  setIsAdmin,
-  navToAdmin,
-  canToggleAdmin = true,
   canGoCatalog = true,
   unreadNotificationsCount = 0,
   notifications = [],
@@ -2215,20 +2201,6 @@ function TopNav({
           )}
         </div>
         <div className="flex items-center gap-3">
-          {!showBack && canToggleAdmin && (
-            <button onClick={navToAdmin} className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-800 transition-colors px-3 py-1.5 rounded-lg hover:bg-slate-100">
-              <BarChart2 size={15} /> Аналитика
-            </button>
-          )}
-          <button
-            onClick={() => {
-              if (canToggleAdmin) setIsAdmin(!isAdmin);
-            }}
-            disabled={!canToggleAdmin}
-            className={`flex items-center gap-2 text-xs px-3 py-1.5 rounded-full border transition-all ${isAdmin ? "bg-indigo-50 border-indigo-200 text-indigo-700" : "bg-slate-50 border-slate-200 text-slate-600 hover:border-slate-300"} ${!canToggleAdmin ? "opacity-70 cursor-default" : ""}`}
-          >
-            <Shield size={12} /> {canToggleAdmin ? (isAdmin ? "Режим админа" : "Сотрудник") : "LMS"}
-          </button>
           {canOpenNotifications && (
             <div className="relative">
               <button
