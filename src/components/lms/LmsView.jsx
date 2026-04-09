@@ -15,6 +15,10 @@ import {
 import "react-quill/dist/quill.snow.css";
 import "./LmsRichText.css";
 
+const SkeletonBlock = ({ className = "" }) => (
+  <div className={`animate-pulse rounded-xl bg-slate-200/80 ${className}`.trim()} />
+);
+
 // ─── MOCK DATA ────────────────────────────────────────────────────────────────
 
 const COURSES = [
@@ -2001,6 +2005,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
             canUseManagerApi={canUseManagerApi}
             learners={learners}
             adminCourses={adminCourses}
+            loading={loadingAdmin}
             emitToast={emitToast}
             onAfterSave={loadAdminData}
           />
@@ -2099,6 +2104,9 @@ function CatalogView({
   const safeCourses = Array.isArray(courses) ? courses : [];
   const safeCertificates = Array.isArray(certificates) ? certificates : [];
   const safeNotifications = Array.isArray(notifications) ? notifications : [];
+  const isCoursesLoading = loading && safeCourses.length === 0;
+  const isCertificatesLoading = loading && safeCertificates.length === 0;
+  const isNotificationsLoading = loading && safeNotifications.length === 0;
 
   const tabs = [
     { id: "available", label: "Доступные", icon: BookOpen, count: safeCourses.filter((c) => c.status !== "completed" && c.status !== "completed_late").length },
@@ -2160,22 +2168,34 @@ function CatalogView({
       </div>
 
       <div className="grid grid-cols-4 gap-4 mb-8">
-        {[
-          { label: "Назначено курсов", value: String(stats.assigned), icon: BookOpen, color: "text-indigo-600", bg: "bg-indigo-50" },
-          { label: "В процессе", value: String(stats.inProgress), icon: PlayCircle, color: "text-blue-600", bg: "bg-blue-50" },
-          { label: "Завершено", value: String(stats.completed), icon: CheckCircle, color: "text-emerald-600", bg: "bg-emerald-50" },
-          { label: "Просрочено", value: String(stats.overdue), icon: AlertCircle, color: "text-red-600", bg: "bg-red-50" },
-        ].map(s => (
-          <div key={s.label} className="bg-white rounded-2xl border border-slate-200 p-4 flex items-center gap-3">
-            <div className={`w-10 h-10 ${s.bg} rounded-xl flex items-center justify-center flex-shrink-0`}>
-              <s.icon size={18} className={s.color} />
+        {isCoursesLoading ? (
+          Array.from({ length: 4 }).map((_, idx) => (
+            <div key={`catalog-stats-skeleton-${idx}`} className="bg-white rounded-2xl border border-slate-200 p-4 flex items-center gap-3">
+              <SkeletonBlock className="w-10 h-10 flex-shrink-0" />
+              <div className="space-y-2">
+                <SkeletonBlock className="w-12 h-5" />
+                <SkeletonBlock className="w-24 h-3.5" />
+              </div>
             </div>
-            <div>
-              <div className="text-xl font-bold text-slate-900">{s.value}</div>
-              <div className="text-xs text-slate-500">{s.label}</div>
+          ))
+        ) : (
+          [
+            { label: "Назначено курсов", value: String(stats.assigned), icon: BookOpen, color: "text-indigo-600", bg: "bg-indigo-50" },
+            { label: "В процессе", value: String(stats.inProgress), icon: PlayCircle, color: "text-blue-600", bg: "bg-blue-50" },
+            { label: "Завершено", value: String(stats.completed), icon: CheckCircle, color: "text-emerald-600", bg: "bg-emerald-50" },
+            { label: "Просрочено", value: String(stats.overdue), icon: AlertCircle, color: "text-red-600", bg: "bg-red-50" },
+          ].map(s => (
+            <div key={s.label} className="bg-white rounded-2xl border border-slate-200 p-4 flex items-center gap-3">
+              <div className={`w-10 h-10 ${s.bg} rounded-xl flex items-center justify-center flex-shrink-0`}>
+                <s.icon size={18} className={s.color} />
+              </div>
+              <div>
+                <div className="text-xl font-bold text-slate-900">{s.value}</div>
+                <div className="text-xs text-slate-500">{s.label}</div>
+              </div>
             </div>
-          </div>
-        ))}
+          ))
+        )}
       </div>
 
       <div className="flex items-center gap-1 mb-6 bg-slate-100 p-1 rounded-xl w-fit">
@@ -2194,12 +2214,14 @@ function CatalogView({
         <CertificatesView
           certificates={safeCertificates}
           onDownload={onCertificateDownload}
+          loading={isCertificatesLoading}
         />
       )}
       {tab === "notifications" && (
         <NotificationsView
           notifications={safeNotifications}
           onRead={onNotificationRead}
+          loading={isNotificationsLoading}
         />
       )}
 
@@ -2227,7 +2249,42 @@ function CatalogView({
             </div>
           </div>
 
-          {filteredCourses.length === 0 ? (
+          {isCoursesLoading ? (
+            gridView ? (
+              <div className="grid [grid-template-columns:repeat(auto-fill,minmax(290px,1fr))] gap-5">
+                {Array.from({ length: 6 }).map((_, idx) => (
+                  <div key={`catalog-card-skeleton-${idx}`} className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+                    <SkeletonBlock className="h-32 w-full rounded-none" />
+                    <div className="p-5 space-y-3">
+                      <SkeletonBlock className="w-20 h-3" />
+                      <SkeletonBlock className="w-11/12 h-4" />
+                      <SkeletonBlock className="w-8/12 h-3" />
+                      <SkeletonBlock className="w-full h-1.5 rounded-full" />
+                      <div className="flex items-center justify-between pt-1">
+                        <SkeletonBlock className="w-24 h-3.5" />
+                        <SkeletonBlock className="w-24 h-8" />
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="flex flex-col gap-3">
+                {Array.from({ length: 6 }).map((_, idx) => (
+                  <div key={`catalog-list-skeleton-${idx}`} className="bg-white rounded-2xl border border-slate-200 p-5 flex items-center gap-5">
+                    <SkeletonBlock className="w-14 h-14 flex-shrink-0" />
+                    <div className="flex-1 space-y-2">
+                      <SkeletonBlock className="w-24 h-3" />
+                      <SkeletonBlock className="w-9/12 h-4" />
+                      <SkeletonBlock className="w-6/12 h-3" />
+                    </div>
+                    <SkeletonBlock className="w-20 h-6" />
+                    <SkeletonBlock className="w-4 h-4 rounded-md" />
+                  </div>
+                ))}
+              </div>
+            )
+          ) : filteredCourses.length === 0 ? (
             <div className="text-center py-20 text-slate-400"><BookOpen size={40} className="mx-auto mb-3 opacity-30" /><p className="text-sm">Курсы не найдены</p></div>
           ) : gridView ? (
             <div className="grid [grid-template-columns:repeat(auto-fill,minmax(290px,1fr))] gap-5">
@@ -3857,8 +3914,28 @@ function QuizSection({ quizView, setQuizView, answers, setAnswers, course }) {
 
 // ─── CERTIFICATES ─────────────────────────────────────────────────────────────
 
-function CertificatesView({ certificates = [], onDownload }) {
+function CertificatesView({ certificates = [], onDownload, loading = false }) {
   const safeCertificates = Array.isArray(certificates) ? certificates : [];
+  if (loading) {
+    return (
+      <div className="grid [grid-template-columns:repeat(auto-fill,minmax(340px,1fr))] gap-5">
+        {Array.from({ length: 6 }).map((_, idx) => (
+          <div key={`certificate-skeleton-${idx}`} className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+            <SkeletonBlock className="h-36 w-full rounded-none" />
+            <div className="p-5 space-y-3">
+              <SkeletonBlock className="w-9/12 h-4" />
+              <SkeletonBlock className="w-6/12 h-3.5" />
+              <SkeletonBlock className="w-5/12 h-3.5" />
+              <div className="flex gap-2 pt-1">
+                <SkeletonBlock className="h-9 flex-1" />
+                <SkeletonBlock className="h-9 w-10" />
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  }
   return (
     <div>
       {safeCertificates.length === 0 ? (
@@ -3901,12 +3978,34 @@ function CertificatesView({ certificates = [], onDownload }) {
 
 // ─── NOTIFICATIONS ────────────────────────────────────────────────────────────
 
-function NotificationsView({ notifications = [], onRead }) {
+function NotificationsView({ notifications = [], onRead, loading = false }) {
   const iconMap = { deadline: AlertCircle, completed: CheckCircle, assigned: BookOpen, certificate: Award };
   const colorMap = { deadline: "text-amber-600 bg-amber-50", completed: "text-emerald-600 bg-emerald-50", assigned: "text-indigo-600 bg-indigo-50", certificate: "text-violet-600 bg-violet-50" };
   const safeNotifications = Array.isArray(notifications) ? notifications : [];
+  if (loading) {
+    return (
+      <div className="space-y-3 max-w-4xl 2xl:max-w-5xl">
+        {Array.from({ length: 6 }).map((_, idx) => (
+          <div key={`notification-skeleton-${idx}`} className="bg-white rounded-2xl border border-slate-200 p-5 flex items-start gap-4">
+            <SkeletonBlock className="w-10 h-10 flex-shrink-0" />
+            <div className="flex-1 space-y-2.5">
+              <SkeletonBlock className="w-7/12 h-4" />
+              <SkeletonBlock className="w-11/12 h-3.5" />
+              <SkeletonBlock className="w-24 h-3" />
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  }
   return (
     <div className="space-y-3 max-w-4xl 2xl:max-w-5xl">
+      {safeNotifications.length === 0 && (
+        <div className="text-center py-20 text-slate-400">
+          <Bell size={40} className="mx-auto mb-3 opacity-30" />
+          <p className="text-sm">Уведомлений пока нет</p>
+        </div>
+      )}
       {safeNotifications.map(n => {
         const Icon = iconMap[n.type] || Bell;
         const cls = colorMap[n.type] || "text-slate-600 bg-slate-100";
@@ -3930,7 +4029,7 @@ function NotificationsView({ notifications = [], onRead }) {
 
 // ─── COURSE BUILDER ───────────────────────────────────────────────────────────
 
-function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], adminCourses = [], emitToast, onAfterSave }) {
+function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], adminCourses = [], loading = false, emitToast, onAfterSave }) {
   const buildLesson = useCallback((overrides = {}) => ({
     id: Date.now() + Math.floor(Math.random() * 1000),
     title: "Новый урок",
@@ -4677,6 +4776,8 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
   ];
 
   const safeLearners = Array.isArray(learners) ? learners : [];
+  const safeAdminCourses = Array.isArray(adminCourses) ? adminCourses : [];
+  const isBuilderLoading = loading && safeLearners.length === 0 && safeAdminCourses.length === 0;
   const filteredLearners = safeLearners.filter((item) => {
     const query = assignmentSearch.trim().toLowerCase();
     if (!query) return true;
@@ -4699,7 +4800,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
     }
   };
 
-  const effectiveAssignmentCourseId = Number(assignmentCourseId || createdCourseId || adminCourses?.[0]?.id || 0) || null;
+  const effectiveAssignmentCourseId = Number(assignmentCourseId || createdCourseId || safeAdminCourses?.[0]?.id || 0) || null;
 
   const handleAssignSelected = async () => {
     if (!canUseManagerApi) {
@@ -5212,6 +5313,38 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
       </div>
     );
   };
+
+  if (isBuilderLoading) {
+    return (
+      <div className="lms-shell py-8">
+        <div className="flex items-center justify-between mb-8">
+          <div>
+            <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Конструктор курса</h1>
+            <p className="text-sm text-slate-500 mt-0.5">Создание и редактирование учебных материалов</p>
+          </div>
+          <SkeletonBlock className="w-36 h-10" />
+        </div>
+
+        <div className="flex items-center gap-1 mb-8 bg-slate-100 p-1 rounded-xl w-fit">
+          {Array.from({ length: 4 }).map((_, idx) => (
+            <SkeletonBlock key={`builder-tab-skeleton-${idx}`} className="w-28 h-9 rounded-lg" />
+          ))}
+        </div>
+
+        <div className="grid grid-cols-1 xl:grid-cols-2 2xl:grid-cols-[1.2fr_1fr] gap-6">
+          {Array.from({ length: 2 }).map((_, idx) => (
+            <div key={`builder-card-skeleton-${idx}`} className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
+              <SkeletonBlock className="w-40 h-5" />
+              <SkeletonBlock className="w-full h-12" />
+              <SkeletonBlock className="w-full h-12" />
+              <SkeletonBlock className="w-8/12 h-12" />
+              <SkeletonBlock className="w-full h-28" />
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="lms-shell py-8">
@@ -6043,7 +6176,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                   <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Курс для назначения</label>
                   <select value={effectiveAssignmentCourseId || ""} onChange={(e) => setAssignmentCourseId(Number(e.target.value) || null)} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 focus:outline-none focus:border-indigo-400 transition-all">
                     <option value="">Выберите курс</option>
-                    {(Array.isArray(adminCourses) ? adminCourses : []).map((courseItem) => (
+                    {safeAdminCourses.map((courseItem) => (
                       <option key={courseItem.id} value={courseItem.id}>{courseItem.title}</option>
                     ))}
                   </select>
@@ -6098,6 +6231,7 @@ function AdminView({
   const safeProgressRows = Array.isArray(progressRows) ? progressRows : [];
   const safeAttempts = Array.isArray(attempts) ? attempts : [];
   const safeAdminCourses = Array.isArray(adminCourses) ? adminCourses : [];
+  const isAdminLoading = loading && safeAdminCourses.length === 0 && safeProgressRows.length === 0 && safeAttempts.length === 0;
 
   const attemptAggByUser = new Map();
   safeAttempts.forEach((item) => {
@@ -6609,6 +6743,69 @@ function AdminView({
       </div>
 
       {tab === "analytics" && (
+        isAdminLoading ? (
+          <div className="space-y-6">
+            <div className="grid grid-cols-4 gap-4">
+              {Array.from({ length: 4 }).map((_, idx) => (
+                <div key={`admin-analytics-stat-skeleton-${idx}`} className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <SkeletonBlock className="w-28 h-3.5" />
+                    <SkeletonBlock className="w-9 h-9 rounded-xl" />
+                  </div>
+                  <SkeletonBlock className="w-20 h-7" />
+                  <SkeletonBlock className="w-32 h-3" />
+                </div>
+              ))}
+            </div>
+
+            <div className="grid grid-cols-1 xl:grid-cols-3 2xl:grid-cols-12 gap-6">
+              <div className="xl:col-span-2 2xl:col-span-8 bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
+                <SkeletonBlock className="w-40 h-4" />
+                {Array.from({ length: 5 }).map((_, idx) => (
+                  <div key={`admin-analytics-progress-skeleton-${idx}`} className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <SkeletonBlock className="w-48 h-3.5" />
+                      <SkeletonBlock className="w-10 h-3.5" />
+                    </div>
+                    <SkeletonBlock className="w-full h-2 rounded-full" />
+                  </div>
+                ))}
+              </div>
+              <div className="xl:col-span-1 2xl:col-span-4 bg-white rounded-2xl border border-slate-200 p-6 space-y-3">
+                <SkeletonBlock className="w-32 h-4" />
+                {Array.from({ length: 4 }).map((_, idx) => (
+                  <div key={`admin-analytics-status-skeleton-${idx}`} className="flex items-center gap-3">
+                    <SkeletonBlock className="w-2.5 h-2.5 rounded-full" />
+                    <SkeletonBlock className="flex-1 h-3.5" />
+                    <SkeletonBlock className="w-8 h-3.5" />
+                    <SkeletonBlock className="w-16 h-1.5 rounded-full" />
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 xl:grid-cols-2 2xl:grid-cols-12 gap-6">
+              {Array.from({ length: 2 }).map((_, idx) => (
+                <div key={`admin-analytics-list-skeleton-${idx}`} className="2xl:col-span-6 bg-white rounded-2xl border border-slate-200 p-6 space-y-3">
+                  <div className="flex items-center gap-2 mb-1">
+                    <SkeletonBlock className="w-5 h-5 rounded-md" />
+                    <SkeletonBlock className="w-44 h-4" />
+                  </div>
+                  {Array.from({ length: 4 }).map((__, rowIdx) => (
+                    <div key={`admin-analytics-list-row-skeleton-${idx}-${rowIdx}`} className="flex items-center gap-3">
+                      <SkeletonBlock className="w-8 h-8 rounded-lg" />
+                      <div className="flex-1 space-y-1.5">
+                        <SkeletonBlock className="w-8/12 h-3.5" />
+                        <SkeletonBlock className="w-6/12 h-3" />
+                      </div>
+                      <SkeletonBlock className="w-16 h-1.5 rounded-full" />
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : (
         <div>
           <div className="grid grid-cols-4 gap-4 mb-8">
             {[
@@ -6700,9 +6897,37 @@ function AdminView({
             </div>
           </div>
         </div>
+        )
       )}
 
       {tab === "employees" && (
+        isAdminLoading ? (
+          <div className="space-y-4">
+            <div className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3">
+              <div className="flex items-center gap-3">
+                <SkeletonBlock className="h-9 flex-1 max-w-xs" />
+                <SkeletonBlock className="w-36 h-9" />
+                <SkeletonBlock className="w-24 h-3.5" />
+              </div>
+            </div>
+            <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-3">
+              {Array.from({ length: 8 }).map((_, idx) => (
+                <div key={`admin-employees-row-skeleton-${idx}`} className="flex items-center gap-4 border-b border-slate-100 pb-3 last:border-b-0 last:pb-0">
+                  <SkeletonBlock className="w-9 h-9 rounded-full flex-shrink-0" />
+                  <div className="flex-1 grid grid-cols-8 gap-3 items-center">
+                    <SkeletonBlock className="col-span-2 h-3.5" />
+                    <SkeletonBlock className="h-3.5" />
+                    <SkeletonBlock className="h-3.5" />
+                    <SkeletonBlock className="h-3.5" />
+                    <SkeletonBlock className="h-3.5" />
+                    <SkeletonBlock className="h-3.5" />
+                    <SkeletonBlock className="h-3.5" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : (
         <div className="space-y-6">
           {!selectedEmployee ? (
             <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden flex flex-col">
@@ -7069,9 +7294,28 @@ function AdminView({
             </div>
           )}
         </div>
+        )
       )}
 
       {tab === "courses" && (
+        isAdminLoading ? (
+          <div className="space-y-3">
+            {Array.from({ length: 6 }).map((_, idx) => (
+              <div key={`admin-course-skeleton-${idx}`} className="bg-white rounded-2xl border border-slate-200 p-5 flex items-center gap-5">
+                <SkeletonBlock className="w-12 h-12 rounded-xl flex-shrink-0" />
+                <div className="flex-1 space-y-2">
+                  <SkeletonBlock className="w-6/12 h-4" />
+                  <SkeletonBlock className="w-8/12 h-3.5" />
+                </div>
+                <div className="flex items-center gap-3">
+                  <SkeletonBlock className="w-12 h-6" />
+                  <SkeletonBlock className="w-24 h-6 rounded-full" />
+                  <SkeletonBlock className="w-16 h-8" />
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
         <div className="space-y-3">
           {courseRows.map(c => {
             const st = statusConfig[c.status] || statusConfig.not_started;
@@ -7110,6 +7354,7 @@ function AdminView({
             );
           })}
         </div>
+        )
       )}
     </div>
   );
