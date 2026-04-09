@@ -16,14 +16,25 @@ import "react-quill/dist/quill.snow.css";
 import "./LmsRichText.css";
 
 const SkeletonBlock = ({ className = "", delay }) => {
+  const normalizedClassName = String(className || "").trim();
+  const hasRoundedToken = /(^|\s)rounded(?:-[^\s]+)?(?=\s|$)/.test(normalizedClassName);
+  const softenedRoundedClassName = normalizedClassName.replace(
+    /\brounded-(md|lg|xl)\b/g,
+    (_, size) => {
+      if (size === "md") return "rounded-lg";
+      if (size === "lg") return "rounded-xl";
+      return "rounded-2xl";
+    }
+  );
   const randomDelayRef = useRef(Math.floor(Math.random() * 220));
   const delayValue = Number(delay);
   const resolvedDelay = Number.isFinite(delayValue) ? Math.max(0, delayValue) : randomDelayRef.current;
+  const radiusClass = hasRoundedToken ? "" : "rounded-2xl";
 
   return (
     <span
       aria-hidden="true"
-      className={`lms-skeleton-block block ${className}`.trim()}
+      className={`lms-skeleton-block block ${radiusClass} ${softenedRoundedClassName}`.trim()}
       style={{ "--lms-skeleton-delay": `${resolvedDelay}ms` }}
     />
   );
