@@ -4886,9 +4886,9 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
     };
 
     return (
-      <div className="rounded-2xl border border-slate-200 overflow-hidden bg-white h-full min-h-0">
-        <div className="grid grid-cols-1 xl:grid-cols-[290px_minmax(0,1fr)] 2xl:grid-cols-[340px_minmax(0,1fr)] min-h-[72vh] xl:h-[calc(100vh-18rem)] xl:min-h-0">
-          <aside className="border-r border-slate-200 bg-white flex flex-col min-h-0">
+      <div className="rounded-2xl border border-slate-200 overflow-hidden bg-white">
+        <div className="grid grid-cols-1 xl:grid-cols-[290px_minmax(0,1fr)] 2xl:grid-cols-[340px_minmax(0,1fr)] min-h-[72vh]">
+          <aside className="border-r border-slate-200 bg-white">
             <div className="p-4 border-b border-slate-100">
               {operatorEditField === "course-title" ? (
                 <input
@@ -4910,7 +4910,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
                 </button>
               )}
             </div>
-            <div className="overflow-y-auto max-h-[62vh] xl:max-h-none xl:flex-1 custom-scrollbar">
+            <div className="overflow-y-auto max-h-[62vh]">
               {modules.map((moduleItem, moduleIndex) => (
                 <div key={moduleItem.id}>
                   <div className="px-4 py-3 bg-slate-50 border-b border-slate-100">
@@ -4941,7 +4941,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
             </div>
           </aside>
 
-          <div className="bg-slate-50 flex flex-col min-h-0">
+          <div className="bg-slate-50">
             <div className="sticky top-0 z-10 bg-white border-b border-slate-200 px-5 py-3">
               <p className="text-xs text-slate-400">Модуль {selectedLessonLocation.moduleNumber} · Урок {selectedLessonLocation.lessonNumber}</p>
               {operatorEditField === "lesson-title" ? (
@@ -4960,7 +4960,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
               )}
             </div>
 
-            <div className="p-5 space-y-4 overflow-y-auto max-h-[62vh] xl:max-h-none xl:flex-1 custom-scrollbar">
+            <div className="p-5 space-y-4">
               <div className="bg-white rounded-2xl border border-slate-200 p-4">
                 <div className="flex items-center justify-between gap-3 mb-2">
                   <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Описание урока</p>
@@ -5427,7 +5427,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
       {/* STRUCTURE TAB */}
       {tab === "structure" && (
         <div className="grid grid-cols-1 xl:grid-cols-5 2xl:grid-cols-12 gap-6">
-          <div className="xl:col-span-2 2xl:col-span-4 space-y-4 xl:max-h-[calc(100vh-7rem)] xl:overflow-y-auto custom-scrollbar xl:pr-1">
+          <div className="xl:col-span-2 2xl:col-span-4 space-y-4">
             {modules.map(mod => (
               <div key={mod.id} className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
                 <div className="flex items-center gap-3 px-5 py-4 bg-slate-50 border-b border-slate-100">
@@ -5465,8 +5465,8 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
             ))}
             <button onClick={addModule} className="w-full border-2 border-dashed border-slate-200 hover:border-indigo-300 rounded-2xl py-4 text-sm text-slate-500 hover:text-indigo-600 flex items-center justify-center gap-2 transition-all font-medium"><Plus size={16} /> Добавить модуль</button>
           </div>
-          <div className="xl:col-span-3 2xl:col-span-8 xl:self-start xl:min-h-0">
-            <div className={`bg-white rounded-2xl border border-slate-200 xl:sticky xl:top-24 xl:max-h-[calc(100vh-7rem)] xl:min-h-0 xl:overflow-y-auto overflow-x-hidden custom-scrollbar ${builderLessonPanelMode === "operator" ? "p-0" : "p-5"}`}>
+          <div className="xl:col-span-3 2xl:col-span-8 xl:self-start">
+            <div className={`bg-white rounded-2xl border border-slate-200 xl:sticky xl:top-24 xl:max-h-[calc(100vh-7rem)] xl:overflow-y-auto overflow-x-hidden custom-scrollbar ${builderLessonPanelMode === "operator" ? "p-0" : "p-5"}`}>
               {selectedLessonModel ? (
                 <>
                   <div className={`${builderLessonPanelMode === "operator" ? "px-4 py-3 border-b border-slate-200 bg-white sticky top-0 z-20" : "mb-4"}`}>
