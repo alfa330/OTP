@@ -14206,6 +14206,10 @@ LMS_ALLOWED_ACCOUNTS = (
 
 def _lms_is_allowed_account(user_id, role):
     role_norm = _normalize_user_role(role)
+    # Managers (sv/trainer/admin/super_admin) should have LMS access by role.
+    # Keep per-account allowlist for learner-side pilot accounts.
+    if role_norm in LMS_MANAGER_ROLES:
+        return True
     try:
         uid = int(user_id)
     except Exception:
@@ -17419,6 +17423,8 @@ def lms_admin_delete_course(course_id):
     requester_id, _, requester_role, error_response, status_code = _lms_resolve_request('manager')
     if error_response:
         return error_response, status_code
+    if requester_role not in ('sv', 'admin', 'super_admin'):
+        return jsonify({"error": "Only sv/admin roles can delete LMS courses"}), 403
 
     try:
         cleanup_result = {"attempted": 0, "deleted": 0, "failed": []}
