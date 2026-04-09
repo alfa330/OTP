@@ -1466,6 +1466,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
   const role = normalizeLmsRole(user?.role);
   const canUseLearnerApi = role === "operator" || role === "trainee";
   const canUseManagerApi = role === "sv" || role === "trainer" || role === "admin" || role === "super_admin";
+  const canDeleteCourses = role === "sv" || role === "admin" || role === "super_admin";
   const canGoCatalog = canUseLearnerApi;
   const apiRoot = String(apiBaseUrl || "").trim().replace(/\/+$/, "");
 
@@ -1701,6 +1702,10 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
       emitToast("Недостаточно прав для удаления курса", "error");
       return false;
     }
+    if (!canDeleteCourses) {
+      emitToast("Удаление курсов недоступно для вашей роли", "error");
+      return false;
+    }
     if (typeof lmsRequest !== "function") {
       emitToast("LMS API не подключен", "error");
       return false;
@@ -1724,7 +1729,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
       emitToast(`Не удалось удалить курс: ${String(error?.message || "ошибка")}`, "error");
       return false;
     }
-  }, [canUseManagerApi, lmsRequest, emitToast, loadAdminData]);
+  }, [canUseManagerApi, canDeleteCourses, lmsRequest, emitToast, loadAdminData]);
 
   const handleAssignAdminCourseToEmployee = useCallback(async ({ courseId, userId, dueDate, employeeName, courseTitle }) => {
     if (!canUseManagerApi) {
@@ -2012,6 +2017,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
             onOpenBuilder={() => setView("builder")}
             onDeleteCourse={handleDeleteAdminCourse}
             onAssignCourseToEmployee={handleAssignAdminCourseToEmployee}
+            canDeleteCourses={canDeleteCourses}
           />
         )}
       </main>
@@ -6072,6 +6078,7 @@ function AdminView({
   onOpenBuilder,
   onDeleteCourse,
   onAssignCourseToEmployee,
+  canDeleteCourses = true,
 }) {
   const [deletingCourseId, setDeletingCourseId] = useState(null);
   const [employeeSearch, setEmployeeSearch] = useState("");
@@ -6557,6 +6564,7 @@ function AdminView({
   };
 
   const handleDeleteCourse = async (courseItem) => {
+    if (!canDeleteCourses) return;
     const courseId = Number(courseItem?.id || 0);
     if (!courseId || typeof onDeleteCourse !== "function") return;
 
@@ -7086,14 +7094,16 @@ function AdminView({
                   <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${st.bg} ${st.text}`}>{st.label}</span>
                   <div className="flex items-center gap-1">
                     <button className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-colors"><Edit size={15} /></button>
-                    <button
-                      onClick={() => { void handleDeleteCourse(c); }}
-                      disabled={deletingCourseId === c.id}
-                      title={deletingCourseId === c.id ? "Удаляем..." : "Удалить курс"}
-                      className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      {deletingCourseId === c.id ? <Clock size={15} /> : <Trash2 size={15} />}
-                    </button>
+                    {canDeleteCourses && (
+                      <button
+                        onClick={() => { void handleDeleteCourse(c); }}
+                        disabled={deletingCourseId === c.id}
+                        title={deletingCourseId === c.id ? "Удаляем..." : "Удалить курс"}
+                        className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {deletingCourseId === c.id ? <Clock size={15} /> : <Trash2 size={15} />}
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>

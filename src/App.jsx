@@ -165,6 +165,7 @@ const canAccessLmsSectionForUser = (userLike) => {
     const userId = Number(userLike?.id);
     if (!Number.isFinite(userId)) return false;
     return (
+        role === 'trainer' ||
         (role === 'super_admin' && userId === 2) ||
         (role === 'operator' && userId === 56)
     );
@@ -25255,7 +25256,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                 const requestedViewFromUrl = readAppViewFromUrl();
                 if (user.role === 'trainer') {
-                    const trainerAllowedViews = new Set(['surveys', 'manage_operators']);
+                    const trainerAllowedViews = new Set(['surveys', 'manage_operators', 'lms']);
                     if (requestedViewFromUrl && trainerAllowedViews.has(requestedViewFromUrl)) {
                         setView(requestedViewFromUrl);
                         return;
@@ -25275,7 +25276,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, [user?.id, user?.role, canAccessLmsSection]);
 
             useEffect(() => {
-                if (user?.role === 'trainer' && !['surveys', 'manage_operators'].includes(view)) {
+                if (user?.role === 'trainer' && !['surveys', 'manage_operators', 'lms'].includes(view)) {
                     setView('surveys');
                 }
                 if (view === 'lms' && !canAccessLmsSection) {
