@@ -2096,6 +2096,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
             onSelectLesson={openLesson}
             lmsRequest={lmsRequest}
             apiMode={apiMode && canUseLearnerApi}
+            blockTranscriptCopy={canUseLearnerApi}
             onCompleteLesson={handleCompleteLesson}
             onQuizFinished={handleQuizFinished}
             emitToast={emitToast}
@@ -2856,6 +2857,7 @@ function LessonView({
   onSelectLesson,
   lmsRequest,
   apiMode,
+  blockTranscriptCopy,
   onCompleteLesson,
   onQuizFinished,
   emitToast,
@@ -2975,6 +2977,7 @@ function LessonView({
             <VideoLesson
               lesson={lesson}
               apiMode={apiMode}
+              blockTranscriptCopy={blockTranscriptCopy}
               lmsRequest={lmsRequest}
               onCompleteLesson={onCompleteLesson}
               emitToast={emitToast}
@@ -3079,7 +3082,7 @@ function TextLesson({ lesson, onCompleteLesson }) {
 
 // ─── VIDEO LESSON ─────────────────────────────────────────────────────────────
 
-function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast }) {
+function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest, onCompleteLesson, emitToast }) {
   const [playing, setPlaying] = useState(false);
   const [progress, setProgress] = useState(Math.max(0, Math.min(100, Number(lesson?.completionRatio ?? (String(lesson?.status || "").toLowerCase() === "completed" ? 100 : 0)))));
   const [activeTab, setActiveTab] = useState("transcript");
@@ -3375,6 +3378,11 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
     handleComplete();
   }, [progress, completionThreshold, completed, completing, handleComplete]);
 
+  const handleTranscriptCopyAttempt = useCallback((event) => {
+    if (!blockTranscriptCopy) return;
+    event.preventDefault();
+  }, [blockTranscriptCopy]);
+
   return (
     <div>
       {tabHidden && (
@@ -3469,7 +3477,15 @@ function VideoLesson({ lesson, apiMode, lmsRequest, onCompleteLesson, emitToast 
         </div>
         <div className="p-5">
           {activeTab === "transcript" && (
-            <div className="max-h-[420px] overflow-y-auto custom-scrollbar pr-2 text-sm text-slate-600 leading-relaxed">
+            <div
+              className="max-h-[420px] overflow-y-auto custom-scrollbar pr-2 text-sm text-slate-600 leading-relaxed"
+              onCopy={handleTranscriptCopyAttempt}
+              onCut={handleTranscriptCopyAttempt}
+              onContextMenu={handleTranscriptCopyAttempt}
+              onDragStart={handleTranscriptCopyAttempt}
+              onSelectStart={handleTranscriptCopyAttempt}
+              style={blockTranscriptCopy ? { userSelect: "none", WebkitUserSelect: "none" } : undefined}
+            >
               {transcriptText ? (
                 <RichTextContent value={transcriptText} />
               ) : (
