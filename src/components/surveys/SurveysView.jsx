@@ -199,6 +199,32 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
             .filter(Boolean)
             .sort((a, b) => a.name.localeCompare(b.name, 'ru', { sensitivity: 'base' }));
     }, [operators, directionNameById]);
+    const availableOperatorIdSet = useMemo(
+        () => new Set(normalizedOperators.map((operator) => Number(operator.id)).filter(Number.isFinite)),
+        [normalizedOperators]
+    );
+    const sanitizeOperatorIds = useCallback((sourceIds) => {
+        const uniqueIds = [];
+        const seen = new Set();
+        (Array.isArray(sourceIds) ? sourceIds : []).forEach((rawId) => {
+            const id = Number(rawId);
+            if (!Number.isFinite(id) || !availableOperatorIdSet.has(id) || seen.has(id)) return;
+            seen.add(id);
+            uniqueIds.push(id);
+        });
+        return uniqueIds;
+    }, [availableOperatorIdSet]);
+
+    useEffect(() => {
+        setDraft((prev) => {
+            const currentIds = Array.isArray(prev?.operatorIds) ? prev.operatorIds : [];
+            const nextIds = sanitizeOperatorIds(currentIds);
+            if (nextIds.length === currentIds.length && nextIds.every((id, index) => id === Number(currentIds[index]))) {
+                return prev;
+            }
+            return { ...prev, operatorIds: nextIds };
+        });
+    }, [sanitizeOperatorIds]);
 
     const filteredOperators = useMemo(() => {
         const query = operatorQuery.trim().toLowerCase();
@@ -621,17 +647,18 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
             directionIds: (survey?.assignment?.direction_ids || []).map((id) => String(id)).filter(Boolean),
             tenureWeeksMin: survey?.assignment?.tenure_weeks_min != null ? String(survey.assignment.tenure_weeks_min) : '',
             tenureWeeksMax: survey?.assignment?.tenure_weeks_max != null ? String(survey.assignment.tenure_weeks_max) : '',
-            operatorIds: (survey?.assignment?.operator_ids || []).map((id) => Number(id)).filter(Number.isFinite),
+            operatorIds: sanitizeOperatorIds(survey?.assignment?.operator_ids || []),
             questions: clonedQuestions
         });
         setOperatorQuery('');
         setRepeatSourceSurveyId(sourceId);
         setShowBuilder(true);
-    }, [canManage]);
+    }, [canManage, sanitizeOperatorIds]);
 
     const createSurvey = async () => {
         if (!String(draft.title || '').trim()) return notify('Укажите название опроса', 'error');
-        if (!(draft.operatorIds || []).length) return notify('Выберите минимум одного оператора', 'error');
+        const assignmentOperatorIds = sanitizeOperatorIds(draft.operatorIds);
+        if (!assignmentOperatorIds.length) return notify('Выберите минимум одного оператора', 'error');
         const minWeeks = parseWeeksInput(draft.tenureWeeksMin);
         const maxWeeks = parseWeeksInput(draft.tenureWeeksMax);
         if (minWeeks != null && maxWeeks != null && minWeeks > maxWeeks) return notify('Минимальный стаж не может быть больше максимального', 'error');
@@ -691,7 +718,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                 direction_ids: (draft.directionIds || []).map((id) => Number(id)).filter(Number.isFinite),
                 tenure_weeks_min: minWeeks,
                 tenure_weeks_max: maxWeeks,
-                operator_ids: (draft.operatorIds || []).map((id) => Number(id)).filter(Number.isFinite)
+                operator_ids: assignmentOperatorIds
             },
             questions: normalizedQuestions
         };
