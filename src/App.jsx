@@ -33466,7 +33466,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     (salaryData.bonusFilming && !salaryData.bonusFilmingQuantity)
                                                                 }
                                                             >
-                                                                <FaIcon className="fas fa-calculator mr-2"></FaIcon> Рассчетать
+                                                                <FaIcon className="fas fa-calculator mr-2"></FaIcon> Рассчитать
                                                             </button>
                                                             <button
                                                                 onClick={() => setShowPointsTable(!showPointsTable)}
