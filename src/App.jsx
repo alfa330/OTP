@@ -8928,12 +8928,35 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     emitAppToast('Нет дат для экспорта', 'warning');
                     return;
                 }
+                if (Array.isArray(filteredOperators) && filteredOperators.length === 0) {
+                    emitAppToast('По текущим фильтрам нет операторов для экспорта', 'warning');
+                    return;
+                }
                 const sortedDates = [...visibleRange].sort();
                 const startDate = sortedDates[0];
                 const endDate = sortedDates[sortedDates.length - 1];
                 setExcelTransferState(prev => ({ ...prev, exporting: true }));
                 try {
-                    const query = new URLSearchParams({ start_date: startDate, end_date: endDate }).toString();
+                    const queryParams = new URLSearchParams({
+                        start_date: startDate,
+                        end_date: endDate,
+                        view_mode: String(viewMode || 'day')
+                    });
+                    (selectedSupervisors || []).forEach(supervisorId => {
+                        const parsed = Number(supervisorId);
+                        if (Number.isFinite(parsed) && parsed > 0) {
+                            queryParams.append('supervisor_id', String(Math.trunc(parsed)));
+                        }
+                    });
+                    (selectedStatuses || []).forEach(statusValue => {
+                        const normalized = String(statusValue || '').trim();
+                        if (normalized) queryParams.append('status', normalized);
+                    });
+                    (selectedDirections || []).forEach(directionValue => {
+                        const normalized = String(directionValue || '').trim();
+                        if (normalized) queryParams.append('direction', normalized);
+                    });
+                    const query = queryParams.toString();
                     const response = await fetch(`${API_BASE_URL}/api/work_schedules/export_excel?${query}`, {
                         credentials: 'include',
                         headers: withAccessTokenHeader()
@@ -8946,7 +8969,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const url = window.URL.createObjectURL(blob);
                     const a = document.createElement('a');
                     a.href = url;
-                    a.download = `work_schedule_${startDate}_${endDate}.xlsx`;
+                    const modeSuffix = viewMode === 'week' ? 'week' : viewMode === 'month' ? 'month' : 'day';
+                    a.download = `work_schedule_${modeSuffix}_${startDate}_${endDate}.xlsx`;
                     document.body.appendChild(a);
                     a.click();
                     a.remove();
@@ -15489,7 +15513,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 }}
                                                 disabled={excelTransferState.exporting || excelTransferState.importing}
                                                 className="w-full px-3 py-2 rounded-xl border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
-                                                title="Экспортировать график (видимый диапазон дат) в Excel"
+                                                title="Экспортировать график (видимый диапазон, формат День/Неделя/Месяц и активные фильтры) в Excel"
                                             >
                                                 <FaIcon className={`fas ${excelTransferState.exporting ? 'fa-spinner fa-spin' : 'fa-file-excel'}`}></FaIcon>
                                                 {excelTransferState.exporting ? 'Экспорт...' : 'Экспорт Excel'}

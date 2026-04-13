@@ -11902,12 +11902,81 @@ def export_work_schedules_excel():
         if end_date_obj < start_date_obj:
             return jsonify({"error": "end_date must be >= start_date"}), 400
 
+        def _query_list(*names):
+            values = []
+            for name in names:
+                for raw in request.args.getlist(name):
+                    normalized = str(raw or '').strip()
+                    if normalized:
+                        values.append(normalized)
+            return values
+
+        view_mode = str(request.args.get('view_mode') or 'day').strip().lower()
+        if view_mode not in {'day', 'week', 'month'}:
+            view_mode = 'day'
+        view_mode_label = {
+            'day': 'День',
+            'week': 'Неделя',
+            'month': 'Месяц'
+        }.get(view_mode, 'День')
+
+        selected_supervisor_ids = set()
+        for raw_value in _query_list('supervisor_id', 'supervisor_ids'):
+            chunks = [raw_value]
+            if ',' in raw_value:
+                chunks = [chunk.strip() for chunk in raw_value.split(',') if chunk.strip()]
+            for chunk in chunks:
+                try:
+                    parsed = int(chunk)
+                except Exception:
+                    continue
+                if parsed > 0:
+                    selected_supervisor_ids.add(parsed)
+
+        selected_statuses = {
+            str(value).strip().lower()
+            for value in _query_list('status', 'statuses')
+            if str(value).strip()
+        }
+        selected_directions = {
+            str(value).strip()
+            for value in _query_list('direction', 'directions')
+            if str(value).strip()
+        }
+
         operators = db.get_operators_with_shifts(start_date, end_date) or []
+
+        if selected_supervisor_ids:
+            operators = [
+                op for op in operators
+                if int(op.get('supervisor_id') or 0) in selected_supervisor_ids
+            ]
+
+        if selected_statuses:
+            def _status_matches(raw_status):
+                current_status = str(raw_status or '').strip().lower()
+                for selected_status in selected_statuses:
+                    if selected_status == 'bs':
+                        if current_status in {'bs', 'unpaid_leave'}:
+                            return True
+                        continue
+                    if current_status == selected_status:
+                        return True
+                return False
+
+            operators = [op for op in operators if _status_matches(op.get('status'))]
+
+        if selected_directions:
+            operators = [
+                op for op in operators
+                if str(op.get('direction') or '').strip() in selected_directions
+            ]
+
         operators = sorted(operators, key=lambda op: str(op.get('name') or '').lower())
 
         wb = Workbook()
         ws = wb.active
-        ws.title = 'График'
+        ws.title = f'График {view_mode_label}'[:31]
 
         ws.cell(row=1, column=1, value='ФИО')
         ws.cell(row=1, column=2, value='Ставка')
@@ -11916,8 +11985,22 @@ def export_work_schedules_excel():
             cell = ws.cell(row=1, column=idx, value=day_obj)
             cell.number_format = 'DD.MM.YYYY'
 
-        for col_idx in range(1, 3 + len(date_list)):
-            ws.cell(row=1, column=col_idx).font = ws.cell(row=1, column=col_idx).font.copy(bold=True)
+        total_columns = max(2, 2 + len(date_list))
+        thin_side = Side(style='thin', color='D1D5DB')
+        all_cells_border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
+        header_fill = PatternFill(fill_type='solid', fgColor='1F2937')
+        header_font = Font(bold=True, color='FFFFFF')
+        header_alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        data_alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        name_alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
+        zebra_fill = PatternFill(fill_type='solid', fgColor='F8FAFC')
+
+        for col_idx in range(1, total_columns + 1):
+            header_cell = ws.cell(row=1, column=col_idx)
+            header_cell.font = header_font
+            header_cell.fill = header_fill
+            header_cell.alignment = header_alignment
+            header_cell.border = all_cells_border
 
         def _format_shift_cell_segment(shift_item):
             start = _format_schedule_excel_compact_time(shift_item.get('start'))
@@ -11927,7 +12010,9 @@ def export_work_schedules_excel():
         for row_idx, op in enumerate(operators, start=2):
             ws.cell(row=row_idx, column=1, value=op.get('name') or '')
             rate_val = op.get('rate')
-            ws.cell(row=row_idx, column=2, value=rate_val if rate_val is not None else '')
+            rate_cell = ws.cell(row=row_idx, column=2, value=rate_val if rate_val is not None else '')
+            if isinstance(rate_cell.value, (int, float)):
+                rate_cell.number_format = '0.00'
 
             shifts_by_date = op.get('shifts') or {}
             days_off_set = set(op.get('daysOff') or [])
@@ -11942,18 +12027,30 @@ def export_work_schedules_excel():
                 else:
                     ws.cell(row=row_idx, column=col_idx, value='')
 
+            is_even_data_row = ((row_idx - 2) % 2) == 1
+            for col_idx in range(1, total_columns + 1):
+                data_cell = ws.cell(row=row_idx, column=col_idx)
+                data_cell.border = all_cells_border
+                data_cell.alignment = name_alignment if col_idx == 1 else data_alignment
+                if is_even_data_row:
+                    data_cell.fill = zebra_fill
+
         ws.freeze_panes = 'C2'
-        ws.auto_filter.ref = ws.dimensions
+        ws.auto_filter.ref = f"A1:{get_column_letter(total_columns)}{max(1, ws.max_row)}"
+        ws.row_dimensions[1].height = 24
         ws.column_dimensions['A'].width = 36
-        ws.column_dimensions['B'].width = 10
+        ws.column_dimensions['B'].width = 12
         for i in range(len(date_list)):
             col_letter = ws.cell(row=1, column=3 + i).column_letter
-            ws.column_dimensions[col_letter].width = 12
+            ws.column_dimensions[col_letter].width = 13
 
         output = BytesIO()
         wb.save(output)
         output.seek(0)
-        filename = f"work_schedule_{start_date_obj.strftime('%Y%m%d')}_{end_date_obj.strftime('%Y%m%d')}.xlsx"
+        filename = (
+            f"work_schedule_{view_mode}_"
+            f"{start_date_obj.strftime('%Y%m%d')}_{end_date_obj.strftime('%Y%m%d')}.xlsx"
+        )
         return send_file(
             output,
             as_attachment=True,
