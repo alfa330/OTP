@@ -6670,6 +6670,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 startTime: '09:00',
                 endTime: '10:00',
                 reason: '',
+                workplaceNumber: '',
                 comment: ''
             });
             const [plannerTechStatusActionLoading, setPlannerTechStatusActionLoading] = useState(false);
@@ -6686,6 +6687,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 trainingReason: '',
                 trainingCountInHours: true,
                 technicalReason: '',
+                technicalWorkplaceNumber: '',
                 technicalIsMass: false,
                 technicalDirectionIds: []
             });
@@ -9743,6 +9745,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     trainingReason: '',
                     trainingCountInHours: true,
                     technicalReason: '',
+                    technicalWorkplaceNumber: '',
                     technicalIsMass: false,
                     technicalDirectionIds: []
                 });
@@ -9761,6 +9764,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     trainingReason: '',
                     trainingCountInHours: true,
                     technicalReason: '',
+                    technicalWorkplaceNumber: '',
                     technicalIsMass: false,
                     technicalDirectionIds: []
                 });
@@ -9796,6 +9800,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     out.push(intValue);
                 });
                 return out;
+            };
+
+            const plannerNormalizeWorkplaceNumber = (value) => {
+                if (value === null || value === undefined) return null;
+                if (typeof value === 'string' && !value.trim()) return null;
+                const n = Number(value);
+                if (!Number.isFinite(n)) return null;
+                const intValue = Math.trunc(n);
+                if (intValue < 1 || intValue > 30) return null;
+                return intValue;
             };
 
             const submitPlannerOfflineActivityModal = async () => {
@@ -9857,12 +9871,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                     if (activityType === 'technical_reason') {
                         const reason = String(plannerOfflineActivityModalState?.technicalReason || '').trim();
+                        const workplaceRaw = plannerOfflineActivityModalState?.technicalWorkplaceNumber;
+                        const workplaceNumber = plannerNormalizeWorkplaceNumber(workplaceRaw);
                         const isMass = !!plannerOfflineActivityModalState?.technicalIsMass;
                         const selectedDirectionIds = plannerToUniquePositiveIntList(
                             plannerOfflineActivityModalState?.technicalDirectionIds
                         );
                         if (!reason) {
                             setPlannerOfflineActivityModalError('Выберите причину тех.причины.');
+                            return;
+                        }
+                        if (String(workplaceRaw || '').trim() && workplaceNumber === null) {
+                            setPlannerOfflineActivityModalError('Укажите корректный номер РМ (1-30).');
                             return;
                         }
                         if (isMass && selectedDirectionIds.length === 0) {
@@ -9881,6 +9901,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 end_time: endTime,
                                 reason,
                                 comment: comment || null,
+                                workplace_number: workplaceNumber,
                                 operator_ids: isMass ? [] : [operatorId],
                                 direction_ids: isMass ? selectedDirectionIds : []
                             })
@@ -10283,6 +10304,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     startTime: startSeed,
                     endTime: endSeed,
                     reason: String(preset?.reason || '').trim(),
+                    workplaceNumber: String(preset?.workplaceNumber ?? preset?.workplace_number ?? '').trim(),
                     comment: String(preset?.comment || '').trim()
                 });
             };
@@ -10298,6 +10320,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     startTime: '09:00',
                     endTime: '10:00',
                     reason: '',
+                    workplaceNumber: '',
                     comment: ''
                 });
             };
@@ -10315,6 +10338,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const startTime = String(plannerTechStatusModalState?.startTime || '').trim();
                 const endTime = String(plannerTechStatusModalState?.endTime || '').trim();
                 const reason = String(plannerTechStatusModalState?.reason || '').trim();
+                const workplaceRaw = plannerTechStatusModalState?.workplaceNumber;
+                const workplaceNumber = plannerNormalizeWorkplaceNumber(workplaceRaw);
                 const comment = String(plannerTechStatusModalState?.comment || '').trim();
                 const mode = String(plannerTechStatusModalState?.mode || 'confirm_tech_flag').trim();
                 const isBulkConfirm = mode === 'confirm_tech_flag_all';
@@ -10326,6 +10351,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
                 if (!reason) {
                     setPlannerTechStatusModalError('Выберите причину тех.сбоя.');
+                    return;
+                }
+                if (String(workplaceRaw || '').trim() && workplaceNumber === null) {
+                    setPlannerTechStatusModalError('Укажите корректный номер РМ (1-30).');
                     return;
                 }
 
@@ -10396,6 +10425,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 end_time: interval.endTime,
                                 reason,
                                 comment: comment || null,
+                                workplace_number: workplaceNumber,
                                 operator_ids: [operatorId],
                                 direction_ids: []
                             })
@@ -18117,6 +18147,25 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             </div>
 
                             <div>
+                                <label className="block text-xs font-medium text-slate-600 mb-1">Рабочее место (РМ)</label>
+                                <select
+                                    value={plannerTechStatusModalState.workplaceNumber || ''}
+                                    onChange={(e) => updatePlannerTechStatusDraftField('workplaceNumber', e.target.value)}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
+                                >
+                                    <option value="">Не указывать</option>
+                                    {Array.from({ length: 30 }, (_, idx) => {
+                                        const rm = idx + 1;
+                                        return (
+                                            <option key={`planner-tech-status-rm-${rm}`} value={rm}>
+                                                РМ {rm}
+                                            </option>
+                                        );
+                                    })}
+                                </select>
+                            </div>
+
+                            <div>
                                 <label className="block text-xs font-medium text-slate-600 mb-1">Комментарий</label>
                                 <textarea
                                     rows={3}
@@ -18298,6 +18347,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 {technicalReasonOptions.map(reason => (
                                                     <option key={`planner-unified-tech-reason-${reason}`} value={reason}>{reason}</option>
                                                 ))}
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs font-medium text-slate-600 mb-1">Рабочее место (РМ)</label>
+                                            <select
+                                                value={plannerOfflineActivityModalState.technicalWorkplaceNumber || ''}
+                                                onChange={(e) => updatePlannerOfflineActivityDraftField('technicalWorkplaceNumber', e.target.value)}
+                                                className={`w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 ${accentFocusClass}`}
+                                            >
+                                                <option value="">Не указывать</option>
+                                                {Array.from({ length: 30 }, (_, idx) => {
+                                                    const rm = idx + 1;
+                                                    return (
+                                                        <option key={`planner-unified-tech-rm-${rm}`} value={rm}>
+                                                            РМ {rm}
+                                                        </option>
+                                                    );
+                                                })}
                                             </select>
                                         </div>
                                         <label className="inline-flex items-center gap-2 text-sm text-slate-700">
