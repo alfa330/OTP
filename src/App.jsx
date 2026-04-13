@@ -65,6 +65,8 @@ const APP_BASE_URL = import.meta.env.BASE_URL || '/';
 const API_BASE_URL = 'https://otp-2-fos4.onrender.com';
 const AUTH_REFRESH_URL = `${API_BASE_URL}/api/auth/refresh`;
 const CALL_EVALUATION_EMBED_STATE_KEY = 'call_evaluation_embed_state';
+const SUPERVISOR_OPERATORS_SV_FILTER_KEY = 'supervisor_operators_sv_filter';
+const SUPERVISOR_OPERATORS_DIRECTION_FILTER_KEY = 'supervisor_operators_direction_filter';
 const APP_VIEW_QUERY_PARAM = 'view';
 const ACCESS_TOKEN_STORAGE_KEY = 'otp_access_token';
 const REFRESH_TOKEN_STORAGE_KEY = 'otp_refresh_token';
@@ -23273,6 +23275,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [activeUserTab, setActiveUserTab] = useState("active");
             const [activeAdminTab, setActiveAdminTab] = useState("active");
             const [activeOperatorsTab, setActiveOperatorsTab] = useState("active");
+            const [operatorsSvFilter, setOperatorsSvFilter] = useState(() => getStoredValue(SUPERVISOR_OPERATORS_SV_FILTER_KEY, 'all'));
+            const [operatorsDirectionFilter, setOperatorsDirectionFilter] = useState(() => getStoredValue(SUPERVISOR_OPERATORS_DIRECTION_FILTER_KEY, 'all'));
             const [activeSvTab, setActiveSvTab] = useState("active");
             const [activeTrainerTab, setActiveTrainerTab] = useState("active");
             const [dismissingAdminId, setDismissingAdminId] = useState(null);
@@ -23534,6 +23538,33 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const res = fa.localeCompare(fb, 'ru', { sensitivity: 'base' });
             if (res === 0) return nameA.localeCompare(nameB, 'ru', { sensitivity: 'base' });
             return res * dir;
+            };
+
+            const getOperatorSupervisorFilterValue = (operatorRow) => {
+            const rawSupervisorId = operatorRow?.supervisor_id;
+            if (rawSupervisorId === null || typeof rawSupervisorId === 'undefined' || rawSupervisorId === '') {
+                return 'without-supervisor';
+            }
+            return String(rawSupervisorId);
+            };
+
+            const getOperatorDirectionFilterValue = (operatorRow) => {
+            const rawDirectionId = operatorRow?.direction_id;
+            if (rawDirectionId === null || typeof rawDirectionId === 'undefined' || rawDirectionId === '') {
+                return 'without-direction';
+            }
+            return String(rawDirectionId);
+            };
+
+            const getOperatorDirectionLabel = (operatorRow) => {
+            const directionId = getOperatorDirectionFilterValue(operatorRow);
+            if (directionId === 'without-direction') return 'Без направления';
+            return (
+                directions.find((d) => String(d?.id) === directionId)?.name ||
+                operatorRow?.direction_name ||
+                operatorRow?.direction ||
+                'Без направления'
+            );
             };
 
             const getEvaluationPlanMeta = (operatorRow) => {
@@ -25305,6 +25336,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             }, [selectedReportMonth]);
 
+            useEffect(() => {
+                if (!user || !isSupervisorRole(user?.role)) return;
+                try {
+                    localStorage.setItem(SUPERVISOR_OPERATORS_SV_FILTER_KEY, operatorsSvFilter || 'all');
+                } catch (error) {
+                    console.warn('Failed to persist supervisor filter:', error);
+                }
+            }, [operatorsSvFilter, user?.id, user?.role]);
+
+            useEffect(() => {
+                if (!user || !isSupervisorRole(user?.role)) return;
+                try {
+                    localStorage.setItem(SUPERVISOR_OPERATORS_DIRECTION_FILTER_KEY, operatorsDirectionFilter || 'all');
+                } catch (error) {
+                    console.warn('Failed to persist direction filter:', error);
+                }
+            }, [operatorsDirectionFilter, user?.id, user?.role]);
+
             const callEvaluationInitPayload = useMemo(() => ({
                 type: 'CALL_EVALUATION_INIT',
                 user: user ? {
@@ -25482,6 +25531,58 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             ), [users, buildUpcomingBirthdays]);
 
             const isSvRoleForBirthdays = isSupervisorRole(user?.role);
+
+            const supervisorFilterOptions = useMemo(() => {
+                const rows = Array.isArray(svData?.operators) ? svData.operators : [];
+                const map = new Map();
+
+                rows.forEach((op) => {
+                    const id = getOperatorSupervisorFilterValue(op);
+                    const name = String(op?.supervisor_name || '').trim();
+                    if (!map.has(id)) {
+                        map.set(id, name || (id === 'without-supervisor' ? 'Без супервайзера' : `СВ #${id}`));
+                    }
+                });
+
+                (Array.isArray(svList) ? svList : []).forEach((sv) => {
+                    const id = sv?.id == null ? '' : String(sv.id);
+                    if (!id || map.has(id)) return;
+                    map.set(id, String(sv?.name || `СВ #${id}`).trim());
+                });
+
+                return Array.from(map.entries())
+                    .map(([id, name]) => ({ id, name }))
+                    .sort((a, b) => a.name.localeCompare(b.name, 'ru', { sensitivity: 'base' }));
+            }, [svData?.operators, svList]);
+
+            const directionFilterOptions = useMemo(() => {
+                const rows = Array.isArray(svData?.operators) ? svData.operators : [];
+                const map = new Map();
+
+                rows.forEach((op) => {
+                    const id = getOperatorDirectionFilterValue(op);
+                    const name = getOperatorDirectionLabel(op);
+                    if (!map.has(id)) map.set(id, name);
+                });
+
+                return Array.from(map.entries())
+                    .map(([id, name]) => ({ id, name }))
+                    .sort((a, b) => a.name.localeCompare(b.name, 'ru', { sensitivity: 'base' }));
+            }, [svData?.operators, directions]);
+
+            useEffect(() => {
+                if (operatorsSvFilter === 'all') return;
+                if (!supervisorFilterOptions.some((item) => item.id === operatorsSvFilter)) {
+                    setOperatorsSvFilter('all');
+                }
+            }, [operatorsSvFilter, supervisorFilterOptions]);
+
+            useEffect(() => {
+                if (operatorsDirectionFilter === 'all') return;
+                if (!directionFilterOptions.some((item) => item.id === operatorsDirectionFilter)) {
+                    setOperatorsDirectionFilter('all');
+                }
+            }, [operatorsDirectionFilter, directionFilterOptions]);
 
             const manageOperatorsBirthdaySource = useMemo(() => {
                 if (isSvRoleForBirthdays && Array.isArray(users) && users.length > 0) {
@@ -32037,7 +32138,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </div>
 
                                     {/* Tabs */}
-                                    <div className="flex items-center space-x-3 mb-6">
+                                    <div className="flex items-center space-x-3 mb-3">
                                     {(() => {
                                         const all = svData?.operators ?? [];
                                         const activeCount = all.filter(op => op.status === 'working' || op.status === 'unpaid_leave' || !op.status).length;
@@ -32068,15 +32169,65 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     })()}
                                     </div>
 
+                                    <div className="flex flex-wrap items-end gap-3 mb-6">
+                                        <div className="min-w-[220px]">
+                                            <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Супервайзер</label>
+                                            <select
+                                                value={operatorsSvFilter}
+                                                onChange={(e) => setOperatorsSvFilter(e.target.value)}
+                                                className="w-full p-2.5 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                disabled={isLoading || isAdminDataLoading}
+                                            >
+                                                <option value="all">Все супервайзеры</option>
+                                                {supervisorFilterOptions.map((item) => (
+                                                    <option key={item.id} value={item.id}>{item.name}</option>
+                                                ))}
+                                            </select>
+                                        </div>
+                                        <div className="min-w-[220px]">
+                                            <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Направление</label>
+                                            <select
+                                                value={operatorsDirectionFilter}
+                                                onChange={(e) => setOperatorsDirectionFilter(e.target.value)}
+                                                className="w-full p-2.5 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                disabled={isLoading || isAdminDataLoading}
+                                            >
+                                                <option value="all">Все направления</option>
+                                                {directionFilterOptions.map((item) => (
+                                                    <option key={item.id} value={item.id}>{item.name}</option>
+                                                ))}
+                                            </select>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setOperatorsSvFilter('all');
+                                                setOperatorsDirectionFilter('all');
+                                            }}
+                                            className={`px-3 py-2.5 rounded-lg border text-sm transition ${operatorsSvFilter === 'all' && operatorsDirectionFilter === 'all' ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'}`}
+                                            disabled={operatorsSvFilter === 'all' && operatorsDirectionFilter === 'all'}
+                                        >
+                                            Сбросить фильтры
+                                        </button>
+                                    </div>
+
                                     {/* Content */}
                                     {isLoading ? (
                                     <p className="text-center text-gray-600 py-12">Загрузка...</p>
                                     ) : (svData && svData.operators && svData.operators.length > 0) ? (
                                     (() => {
                                         const allOps = svData.operators;
-                                        const filteredOperators = activeOperatorsTab === 'active'
+                                        const byStatusOperators = activeOperatorsTab === 'active'
                                         ? allOps.filter(op => op.status === 'working' || op.status === 'unpaid_leave' || !op.status)
                                         : allOps.filter(op => op.status === 'fired');
+
+                                        const bySupervisorOperators = operatorsSvFilter === 'all'
+                                        ? byStatusOperators
+                                        : byStatusOperators.filter((op) => getOperatorSupervisorFilterValue(op) === operatorsSvFilter);
+
+                                        const filteredOperators = operatorsDirectionFilter === 'all'
+                                        ? bySupervisorOperators
+                                        : bySupervisorOperators.filter((op) => getOperatorDirectionFilterValue(op) === operatorsDirectionFilter);
 
                                         if (filteredOperators.length === 0) {
                                         return <p className="text-center text-gray-600 py-8">Операторы не найдены.</p>;
@@ -32108,7 +32259,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         const grouped = filteredOperators.reduce((acc, op) => {
                                         const opId = Number(op?.id);
                                         if (Number.isFinite(opId) && myOperatorIds.has(opId)) return acc;
-                                        const dirName = directions.find(d => d.id === op.direction_id)?.name || "Без направления";
+                                        const dirName = getOperatorDirectionLabel(op);
                                         if (!acc[dirName]) acc[dirName] = [];
                                         acc[dirName].push(op);
                                         return acc;
