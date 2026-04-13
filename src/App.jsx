@@ -23035,6 +23035,32 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return fallback;
                 }
             };
+            const getStoredMultiFilterValues = (key) => {
+                const fallback = ['all'];
+                const raw = getStoredValue(key, '');
+                if (!raw) return fallback;
+
+                try {
+                    const parsed = JSON.parse(raw);
+                    if (Array.isArray(parsed)) {
+                        const cleaned = Array.from(
+                            new Set(
+                                parsed
+                                    .map((item) => String(item || '').trim())
+                                    .filter(Boolean)
+                            )
+                        );
+                        if (cleaned.includes('all')) return ['all'];
+                        return cleaned.length > 0 ? cleaned : fallback;
+                    }
+                } catch (error) {
+                    // Backward compatibility with older single-value storage.
+                }
+
+                const single = String(raw || '').trim();
+                if (!single || single === 'all') return fallback;
+                return [single];
+            };
 
             const [user, setUser] = useState(null);
             const currentUserRole = normalizeRole(user?.role);
@@ -23275,8 +23301,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [activeUserTab, setActiveUserTab] = useState("active");
             const [activeAdminTab, setActiveAdminTab] = useState("active");
             const [activeOperatorsTab, setActiveOperatorsTab] = useState("active");
-            const [operatorsSvFilter, setOperatorsSvFilter] = useState(() => getStoredValue(SUPERVISOR_OPERATORS_SV_FILTER_KEY, 'all'));
-            const [operatorsDirectionFilter, setOperatorsDirectionFilter] = useState(() => getStoredValue(SUPERVISOR_OPERATORS_DIRECTION_FILTER_KEY, 'all'));
+            const [operatorsSvFilter, setOperatorsSvFilter] = useState(() => getStoredMultiFilterValues(SUPERVISOR_OPERATORS_SV_FILTER_KEY));
+            const [operatorsDirectionFilter, setOperatorsDirectionFilter] = useState(() => getStoredMultiFilterValues(SUPERVISOR_OPERATORS_DIRECTION_FILTER_KEY));
+            const [showOperatorsSvFilterMenu, setShowOperatorsSvFilterMenu] = useState(false);
+            const [showOperatorsDirectionFilterMenu, setShowOperatorsDirectionFilterMenu] = useState(false);
+            const operatorsSvFilterMenuRef = useRef(null);
+            const operatorsDirectionFilterMenuRef = useRef(null);
             const [activeSvTab, setActiveSvTab] = useState("active");
             const [activeTrainerTab, setActiveTrainerTab] = useState("active");
             const [dismissingAdminId, setDismissingAdminId] = useState(null);
@@ -23565,6 +23595,41 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 operatorRow?.direction ||
                 'Без направления'
             );
+            };
+
+            const normalizeOperatorsFilterValues = (values) => {
+            if (!Array.isArray(values) || values.length === 0) return ['all'];
+            const cleaned = Array.from(
+                new Set(
+                    values
+                        .map((item) => String(item || '').trim())
+                        .filter(Boolean)
+                )
+            );
+            if (cleaned.includes('all')) return ['all'];
+            return cleaned.length > 0 ? cleaned : ['all'];
+            };
+
+            const toggleOperatorsFilterValue = (currentValues, value) => {
+            const normalizedValue = String(value || '').trim();
+            if (!normalizedValue || normalizedValue === 'all') return ['all'];
+            const current = normalizeOperatorsFilterValues(currentValues);
+            if (current.includes('all')) return [normalizedValue];
+            if (current.includes(normalizedValue)) {
+                const next = current.filter((item) => item !== normalizedValue);
+                return next.length > 0 ? next : ['all'];
+            }
+            return [...current, normalizedValue];
+            };
+
+            const getOperatorsFilterButtonLabel = (selectedValues, options, allLabel) => {
+            const selected = normalizeOperatorsFilterValues(selectedValues);
+            if (selected.includes('all')) return allLabel;
+            if (selected.length === 1) {
+                const found = options.find((item) => item.id === selected[0]);
+                if (found?.name) return found.name;
+            }
+            return `Выбрано: ${selected.length}`;
             };
 
             const getEvaluationPlanMeta = (operatorRow) => {
@@ -25339,7 +25404,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             useEffect(() => {
                 if (!user || !isSupervisorRole(user?.role)) return;
                 try {
-                    localStorage.setItem(SUPERVISOR_OPERATORS_SV_FILTER_KEY, operatorsSvFilter || 'all');
+                    localStorage.setItem(
+                        SUPERVISOR_OPERATORS_SV_FILTER_KEY,
+                        JSON.stringify(normalizeOperatorsFilterValues(operatorsSvFilter))
+                    );
                 } catch (error) {
                     console.warn('Failed to persist supervisor filter:', error);
                 }
@@ -25348,7 +25416,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             useEffect(() => {
                 if (!user || !isSupervisorRole(user?.role)) return;
                 try {
-                    localStorage.setItem(SUPERVISOR_OPERATORS_DIRECTION_FILTER_KEY, operatorsDirectionFilter || 'all');
+                    localStorage.setItem(
+                        SUPERVISOR_OPERATORS_DIRECTION_FILTER_KEY,
+                        JSON.stringify(normalizeOperatorsFilterValues(operatorsDirectionFilter))
+                    );
                 } catch (error) {
                     console.warn('Failed to persist direction filter:', error);
                 }
@@ -25571,18 +25642,46 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, [svData?.operators, directions]);
 
             useEffect(() => {
-                if (operatorsSvFilter === 'all') return;
-                if (!supervisorFilterOptions.some((item) => item.id === operatorsSvFilter)) {
-                    setOperatorsSvFilter('all');
-                }
+                const normalized = normalizeOperatorsFilterValues(operatorsSvFilter);
+                if (normalized.includes('all')) return;
+                const allowed = new Set(supervisorFilterOptions.map((item) => item.id));
+                const filtered = normalized.filter((id) => allowed.has(id));
+                const next = filtered.length > 0 ? filtered : ['all'];
+                const changed = next.length !== normalized.length || next.some((item, idx) => item !== normalized[idx]);
+                if (changed) setOperatorsSvFilter(next);
             }, [operatorsSvFilter, supervisorFilterOptions]);
 
             useEffect(() => {
-                if (operatorsDirectionFilter === 'all') return;
-                if (!directionFilterOptions.some((item) => item.id === operatorsDirectionFilter)) {
-                    setOperatorsDirectionFilter('all');
-                }
+                const normalized = normalizeOperatorsFilterValues(operatorsDirectionFilter);
+                if (normalized.includes('all')) return;
+                const allowed = new Set(directionFilterOptions.map((item) => item.id));
+                const filtered = normalized.filter((id) => allowed.has(id));
+                const next = filtered.length > 0 ? filtered : ['all'];
+                const changed = next.length !== normalized.length || next.some((item, idx) => item !== normalized[idx]);
+                if (changed) setOperatorsDirectionFilter(next);
             }, [operatorsDirectionFilter, directionFilterOptions]);
+
+            useEffect(() => {
+                const onPointerDown = (event) => {
+                    const target = event.target;
+                    if (
+                        showOperatorsSvFilterMenu &&
+                        operatorsSvFilterMenuRef.current &&
+                        !operatorsSvFilterMenuRef.current.contains(target)
+                    ) {
+                        setShowOperatorsSvFilterMenu(false);
+                    }
+                    if (
+                        showOperatorsDirectionFilterMenu &&
+                        operatorsDirectionFilterMenuRef.current &&
+                        !operatorsDirectionFilterMenuRef.current.contains(target)
+                    ) {
+                        setShowOperatorsDirectionFilterMenu(false);
+                    }
+                };
+                document.addEventListener('mousedown', onPointerDown);
+                return () => document.removeEventListener('mousedown', onPointerDown);
+            }, [showOperatorsSvFilterMenu, showOperatorsDirectionFilterMenu]);
 
             const manageOperatorsBirthdaySource = useMemo(() => {
                 if (isSvRoleForBirthdays && Array.isArray(users) && users.length > 0) {
@@ -32170,42 +32269,98 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </div>
 
                                     <div className="flex flex-wrap items-end gap-3 mb-6">
-                                        <div className="min-w-[220px]">
+                                        <div className="relative min-w-[240px]" ref={operatorsSvFilterMenuRef}>
                                             <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Супервайзер</label>
-                                            <select
-                                                value={operatorsSvFilter}
-                                                onChange={(e) => setOperatorsSvFilter(e.target.value)}
-                                                className="w-full p-2.5 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    if (isLoading || isAdminDataLoading) return;
+                                                    setShowOperatorsDirectionFilterMenu(false);
+                                                    setShowOperatorsSvFilterMenu((prev) => !prev);
+                                                }}
+                                                className={`w-full px-3 py-2.5 border rounded-lg text-left text-sm flex items-center justify-between gap-3 ${isLoading || isAdminDataLoading ? 'bg-gray-50 text-gray-400 border-gray-200 cursor-not-allowed' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'}`}
                                                 disabled={isLoading || isAdminDataLoading}
                                             >
-                                                <option value="all">Все супервайзеры</option>
-                                                {supervisorFilterOptions.map((item) => (
-                                                    <option key={item.id} value={item.id}>{item.name}</option>
-                                                ))}
-                                            </select>
+                                                <span className="truncate">
+                                                    {getOperatorsFilterButtonLabel(operatorsSvFilter, supervisorFilterOptions, 'Все супервайзеры')}
+                                                </span>
+                                                <FaIcon className={`fas fa-chevron-down text-xs transition-transform ${showOperatorsSvFilterMenu ? 'rotate-180' : ''}`} />
+                                            </button>
+                                            {showOperatorsSvFilterMenu && (
+                                                <div className="absolute left-0 right-0 z-40 mt-1 rounded-lg border border-gray-200 bg-white shadow-lg p-2 max-h-64 overflow-auto">
+                                                    <label className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-gray-50 text-sm cursor-pointer">
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={normalizeOperatorsFilterValues(operatorsSvFilter).includes('all')}
+                                                            onChange={() => setOperatorsSvFilter(['all'])}
+                                                        />
+                                                        <span>Все супервайзеры</span>
+                                                    </label>
+                                                    <div className="my-1 border-t border-gray-100" />
+                                                    {supervisorFilterOptions.map((item) => (
+                                                        <label key={item.id} className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-gray-50 text-sm cursor-pointer">
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={normalizeOperatorsFilterValues(operatorsSvFilter).includes(item.id)}
+                                                                onChange={() => setOperatorsSvFilter((prev) => toggleOperatorsFilterValue(prev, item.id))}
+                                                            />
+                                                            <span className="truncate">{item.name}</span>
+                                                        </label>
+                                                    ))}
+                                                </div>
+                                            )}
                                         </div>
-                                        <div className="min-w-[220px]">
+
+                                        <div className="relative min-w-[240px]" ref={operatorsDirectionFilterMenuRef}>
                                             <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Направление</label>
-                                            <select
-                                                value={operatorsDirectionFilter}
-                                                onChange={(e) => setOperatorsDirectionFilter(e.target.value)}
-                                                className="w-full p-2.5 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    if (isLoading || isAdminDataLoading) return;
+                                                    setShowOperatorsSvFilterMenu(false);
+                                                    setShowOperatorsDirectionFilterMenu((prev) => !prev);
+                                                }}
+                                                className={`w-full px-3 py-2.5 border rounded-lg text-left text-sm flex items-center justify-between gap-3 ${isLoading || isAdminDataLoading ? 'bg-gray-50 text-gray-400 border-gray-200 cursor-not-allowed' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'}`}
                                                 disabled={isLoading || isAdminDataLoading}
                                             >
-                                                <option value="all">Все направления</option>
-                                                {directionFilterOptions.map((item) => (
-                                                    <option key={item.id} value={item.id}>{item.name}</option>
-                                                ))}
-                                            </select>
+                                                <span className="truncate">
+                                                    {getOperatorsFilterButtonLabel(operatorsDirectionFilter, directionFilterOptions, 'Все направления')}
+                                                </span>
+                                                <FaIcon className={`fas fa-chevron-down text-xs transition-transform ${showOperatorsDirectionFilterMenu ? 'rotate-180' : ''}`} />
+                                            </button>
+                                            {showOperatorsDirectionFilterMenu && (
+                                                <div className="absolute left-0 right-0 z-40 mt-1 rounded-lg border border-gray-200 bg-white shadow-lg p-2 max-h-64 overflow-auto">
+                                                    <label className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-gray-50 text-sm cursor-pointer">
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={normalizeOperatorsFilterValues(operatorsDirectionFilter).includes('all')}
+                                                            onChange={() => setOperatorsDirectionFilter(['all'])}
+                                                        />
+                                                        <span>Все направления</span>
+                                                    </label>
+                                                    <div className="my-1 border-t border-gray-100" />
+                                                    {directionFilterOptions.map((item) => (
+                                                        <label key={item.id} className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-gray-50 text-sm cursor-pointer">
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={normalizeOperatorsFilterValues(operatorsDirectionFilter).includes(item.id)}
+                                                                onChange={() => setOperatorsDirectionFilter((prev) => toggleOperatorsFilterValue(prev, item.id))}
+                                                            />
+                                                            <span className="truncate">{item.name}</span>
+                                                        </label>
+                                                    ))}
+                                                </div>
+                                            )}
                                         </div>
+
                                         <button
                                             type="button"
                                             onClick={() => {
-                                                setOperatorsSvFilter('all');
-                                                setOperatorsDirectionFilter('all');
+                                                setOperatorsSvFilter(['all']);
+                                                setOperatorsDirectionFilter(['all']);
                                             }}
-                                            className={`px-3 py-2.5 rounded-lg border text-sm transition ${operatorsSvFilter === 'all' && operatorsDirectionFilter === 'all' ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'}`}
-                                            disabled={operatorsSvFilter === 'all' && operatorsDirectionFilter === 'all'}
+                                            className={`px-3 py-2.5 rounded-lg border text-sm transition ${normalizeOperatorsFilterValues(operatorsSvFilter).includes('all') && normalizeOperatorsFilterValues(operatorsDirectionFilter).includes('all') ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'}`}
+                                            disabled={normalizeOperatorsFilterValues(operatorsSvFilter).includes('all') && normalizeOperatorsFilterValues(operatorsDirectionFilter).includes('all')}
                                         >
                                             Сбросить фильтры
                                         </button>
@@ -32221,13 +32376,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         ? allOps.filter(op => op.status === 'working' || op.status === 'unpaid_leave' || !op.status)
                                         : allOps.filter(op => op.status === 'fired');
 
-                                        const bySupervisorOperators = operatorsSvFilter === 'all'
-                                        ? byStatusOperators
-                                        : byStatusOperators.filter((op) => getOperatorSupervisorFilterValue(op) === operatorsSvFilter);
+                                        const selectedSupervisorFilters = normalizeOperatorsFilterValues(operatorsSvFilter);
+                                        const selectedDirectionFilters = normalizeOperatorsFilterValues(operatorsDirectionFilter);
 
-                                        const filteredOperators = operatorsDirectionFilter === 'all'
+                                        const bySupervisorOperators = selectedSupervisorFilters.includes('all')
+                                        ? byStatusOperators
+                                        : byStatusOperators.filter((op) => selectedSupervisorFilters.includes(getOperatorSupervisorFilterValue(op)));
+
+                                        const filteredOperators = selectedDirectionFilters.includes('all')
                                         ? bySupervisorOperators
-                                        : bySupervisorOperators.filter((op) => getOperatorDirectionFilterValue(op) === operatorsDirectionFilter);
+                                        : bySupervisorOperators.filter((op) => selectedDirectionFilters.includes(getOperatorDirectionFilterValue(op)));
 
                                         if (filteredOperators.length === 0) {
                                         return <p className="text-center text-gray-600 py-8">Операторы не найдены.</p>;
