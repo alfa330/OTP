@@ -918,6 +918,7 @@ const WorkplaceVisualizationBlock = memo(function WorkplaceVisualizationBlock({
 
 const WorkplaceAnalyticsPanel = memo(function WorkplaceAnalyticsPanel({ rows }) {
     const [selectedWorkplace, setSelectedWorkplace] = useState(null);
+    const [detailsWorkplace, setDetailsWorkplace] = useState(null);
 
     const workplaceStats = useMemo(() => {
         const buckets = new Map();
@@ -961,7 +962,7 @@ const WorkplaceAnalyticsPanel = memo(function WorkplaceAnalyticsPanel({ rows }) 
                 || b.totalMinutes - a.totalMinutes
                 || a.workplaceNumber - b.workplaceNumber
             ))
-            .slice(0, 5);
+            .slice(0, 10);
 
         const itemsByNumber = new Map(items.map((item) => [item.workplaceNumber, item]));
 
@@ -981,103 +982,159 @@ const WorkplaceAnalyticsPanel = memo(function WorkplaceAnalyticsPanel({ rows }) 
         return workplaceStats.items.find((item) => item.workplaceNumber === selectedWorkplace) || null;
     }, [selectedWorkplace, workplaceStats.items]);
 
+    const detailsEntry = useMemo(() => {
+        if (detailsWorkplace === null) return null;
+        return workplaceStats.items.find((item) => item.workplaceNumber === detailsWorkplace) || null;
+    }, [detailsWorkplace, workplaceStats.items]);
+
+    useEffect(() => {
+        if (detailsWorkplace === null) return undefined;
+        const onKeyDown = (event) => {
+            if (event.key === 'Escape') setDetailsWorkplace(null);
+        };
+        document.addEventListener('keydown', onKeyDown);
+        return () => document.removeEventListener('keydown', onKeyDown);
+    }, [detailsWorkplace]);
+
     if (rows.length === 0) return null;
 
+    const openWorkplaceDetails = (workplaceNumber) => {
+        setSelectedWorkplace(workplaceNumber);
+        setDetailsWorkplace(workplaceNumber);
+    };
+
     return (
-        <div className="rounded-xl border-2 border-rose-200 bg-white shadow-lg overflow-hidden h-full">
-            <div className="px-5 py-3 border-b border-rose-100 bg-gradient-to-r from-rose-50 to-red-50 flex flex-wrap items-center justify-between gap-3">
-                <div className="flex items-center gap-2 text-sm font-bold uppercase tracking-wide text-rose-900">
-                    <FaIcon className="fas fa-th" style={{ width: '1em', height: '1em' }} />
-                    Аналитика по рабочим местам
-                </div>
-                <div className="flex flex-wrap gap-2">
-                    <span className="inline-flex items-center gap-1 rounded-full bg-rose-100 border border-rose-200 px-3 py-0.5 text-xs font-semibold text-rose-800">
-                        <FaIcon className="fas fa-list" style={{ width: '0.8em', height: '0.8em' }} />
-                        Инцидентов: {workplaceStats.totalIncidents}
-                    </span>
-                    <span className="inline-flex items-center gap-1 rounded-full bg-red-100 border border-red-200 px-3 py-0.5 text-xs font-semibold text-red-800">
-                        <FaIcon className="fas fa-desktop" style={{ width: '0.8em', height: '0.8em' }} />
-                        Активных РМ: {workplaceStats.activeCount}
-                    </span>
-                    <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 border border-slate-200 px-3 py-0.5 text-xs font-semibold text-slate-700">
-                        Чем больше инцидентов, тем краснее ячейка.
-                    </span>
-                </div>
-            </div>
-
-            <div className="p-5 space-y-4">
-                <WorkplaceVisualizationBlock
-                    itemsByNumber={workplaceStats.itemsByNumber}
-                    maxIncidents={workplaceStats.maxIncidents}
-                    selectedWorkplace={selectedWorkplace}
-                    onSelectWorkplace={(seatNumber) => {
-                        setSelectedWorkplace((prev) => (prev === seatNumber ? null : seatNumber));
-                    }}
-                />
-
-                {workplaceStats.topItems.length > 0 && (
-                    <div className="flex flex-wrap gap-2">
-                        {workplaceStats.topItems.map((item, idx) => (
-                            <button
-                                key={`top-workplace-${item.workplaceNumber}`}
-                                type="button"
-                                onClick={() => setSelectedWorkplace(item.workplaceNumber)}
-                                className={`inline-flex items-center gap-1 rounded-full border px-3 py-1 text-xs font-semibold transition-colors ${
-                                    item.workplaceNumber === selectedWorkplace
-                                        ? 'border-rose-400 bg-rose-100 text-rose-800'
-                                        : 'border-rose-200 bg-white text-rose-700 hover:bg-rose-50'
-                                }`}
-                            >
-                                #{idx + 1} РМ {item.workplaceNumber}: {item.incidents}
-                            </button>
-                        ))}
+        <>
+            <div className="rounded-xl border-2 border-rose-200 bg-white shadow-lg overflow-hidden h-full">
+                <div className="px-5 py-3 border-b border-rose-100 bg-gradient-to-r from-rose-50 to-red-50 flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-center gap-2 text-sm font-bold uppercase tracking-wide text-rose-900">
+                        <FaIcon className="fas fa-th" style={{ width: '1em', height: '1em' }} />
+                        Аналитика по рабочим местам
                     </div>
-                )}
+                    <div className="flex flex-wrap gap-2">
+                        <span className="inline-flex items-center gap-1 rounded-full bg-rose-100 border border-rose-200 px-3 py-0.5 text-xs font-semibold text-rose-800">
+                            <FaIcon className="fas fa-list" style={{ width: '0.8em', height: '0.8em' }} />
+                            Инцидентов: {workplaceStats.totalIncidents}
+                        </span>
+                        <span className="inline-flex items-center gap-1 rounded-full bg-red-100 border border-red-200 px-3 py-0.5 text-xs font-semibold text-red-800">
+                            <FaIcon className="fas fa-desktop" style={{ width: '0.8em', height: '0.8em' }} />
+                            Активных РМ: {workplaceStats.activeCount}
+                        </span>
+                        <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 border border-slate-200 px-3 py-0.5 text-xs font-semibold text-slate-700">
+                            Нажмите на РМ, чтобы открыть детали.
+                        </span>
+                    </div>
+                </div>
 
-                {selectedEntry && (
-                    <div className="rounded-lg border border-rose-200 bg-rose-50/60 p-4">
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                            <div className="text-sm font-bold text-rose-900">
-                                РМ {selectedEntry.workplaceNumber}: {selectedEntry.incidents} инцидент(ов)
-                            </div>
-                            <div className="text-xs font-semibold text-rose-700">
-                                Суммарно: {formatDuration(selectedEntry.totalMinutes)}
-                            </div>
-                        </div>
+                <div className="p-5 space-y-4">
+                    <WorkplaceVisualizationBlock
+                        itemsByNumber={workplaceStats.itemsByNumber}
+                        maxIncidents={workplaceStats.maxIncidents}
+                        selectedWorkplace={selectedWorkplace}
+                        onSelectWorkplace={openWorkplaceDetails}
+                    />
 
-                        {selectedEntry.rows.length > 0 ? (
-                            <div className="mt-3 space-y-2 max-h-60 overflow-y-auto pr-1">
-                                {selectedEntry.rows.map((row, idx) => {
-                                    const key = row?.id ? `workplace-row-${row.id}` : `workplace-row-${selectedEntry.workplaceNumber}-${idx}`;
-                                    const timeText = (row?.start_time && row?.end_time) ? `${row.start_time} - ${row.end_time}` : '—';
+                    {workplaceStats.topItems.length > 0 && (
+                        <div className="rounded-lg border border-rose-200 bg-rose-50/40 p-3">
+                            <div className="text-xs font-bold uppercase tracking-wide text-rose-900">
+                                Топ РМ по инцидентам
+                            </div>
+                            <div className="mt-2 space-y-1.5">
+                                {workplaceStats.topItems.map((item, idx) => {
+                                    const pct = workplaceStats.maxIncidents > 0
+                                        ? Math.max(6, Math.round((item.incidents / workplaceStats.maxIncidents) * 100))
+                                        : 0;
                                     return (
-                                        <div key={key} className="rounded-md border border-rose-100 bg-white p-2.5 text-xs">
-                                            <div className="font-semibold text-slate-800">
-                                                {row?.date || '—'} • {timeText} • {row?.operator_name || '—'}
+                                        <button
+                                            key={`top-workplace-row-${item.workplaceNumber}`}
+                                            type="button"
+                                            onClick={() => openWorkplaceDetails(item.workplaceNumber)}
+                                            className={`w-full rounded-md border px-2.5 py-2 text-left transition-colors ${
+                                                selectedWorkplace === item.workplaceNumber
+                                                    ? 'border-rose-300 bg-rose-100'
+                                                    : 'border-rose-100 bg-white hover:bg-rose-50'
+                                            }`}
+                                        >
+                                            <div className="flex items-center justify-between gap-2 text-xs">
+                                                <span className="font-semibold text-slate-800">#{idx + 1} • РМ {item.workplaceNumber}</span>
+                                                <span className="font-semibold text-rose-700">{item.incidents} сл.</span>
                                             </div>
-                                            <div className="mt-1 text-slate-700">{row?.reason || '—'}</div>
-                                            {!!row?.comment && (
-                                                <div className="mt-1 text-slate-500 line-clamp-2">Комментарий: {row.comment}</div>
-                                            )}
-                                        </div>
+                                            <div className="mt-1.5 h-1.5 w-full rounded-full bg-rose-100 overflow-hidden">
+                                                <div className="h-full rounded-full bg-rose-500" style={{ width: `${pct}%` }} />
+                                            </div>
+                                            <div className="mt-1 text-[11px] text-slate-500">
+                                                Суммарная длительность: {formatDuration(item.totalMinutes)}
+                                            </div>
+                                        </button>
                                     );
                                 })}
                             </div>
-                        ) : (
-                            <div className="mt-3 rounded-md border border-dashed border-rose-200 bg-white px-3 py-2 text-xs text-slate-500">
-                                Для этого рабочего места инциденты в выбранном периоде не найдены.
-                            </div>
-                        )}
-                    </div>
-                )}
+                        </div>
+                    )}
 
-                {workplaceStats.activeCount === 0 && (
-                    <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-500">
-                        В выбранном периоде нет инцидентов с указанным рабочим местом.
-                    </div>
-                )}
+                    {workplaceStats.activeCount === 0 && (
+                        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-500">
+                            В выбранном периоде нет инцидентов с указанным рабочим местом.
+                        </div>
+                    )}
+                </div>
             </div>
-        </div>
+
+            {detailsEntry && (
+                <div
+                    className="fixed inset-0 z-[100] flex items-center justify-center p-3"
+                    style={{ backgroundColor: 'rgba(15, 23, 42, 0.55)', backdropFilter: 'blur(3px)' }}
+                    onClick={(event) => {
+                        if (event.target === event.currentTarget) setDetailsWorkplace(null);
+                    }}
+                >
+                    <div className="w-full max-w-2xl rounded-xl border border-rose-200 bg-white shadow-2xl">
+                        <div className="flex items-center justify-between gap-2 border-b border-rose-100 px-4 py-3 bg-gradient-to-r from-rose-50 to-red-50">
+                            <div className="text-sm font-bold text-rose-900">
+                                РМ {detailsEntry.workplaceNumber}: {detailsEntry.incidents} инцидент(ов)
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setDetailsWorkplace(null)}
+                                className="h-7 w-7 rounded-md text-slate-400 hover:bg-white/70 hover:text-slate-600 flex items-center justify-center"
+                            >
+                                <FaIcon className="fas fa-times" style={{ width: '0.9em', height: '0.9em' }} />
+                            </button>
+                        </div>
+
+                        <div className="px-4 py-3 border-b border-rose-100 text-xs text-slate-600">
+                            Суммарная длительность: <span className="font-semibold text-slate-800">{formatDuration(detailsEntry.totalMinutes)}</span>
+                        </div>
+
+                        <div className="p-4">
+                            {detailsEntry.rows.length > 0 ? (
+                                <div className="space-y-2 max-h-[56vh] overflow-y-auto pr-1">
+                                    {detailsEntry.rows.map((row, idx) => {
+                                        const key = row?.id ? `workplace-modal-row-${row.id}` : `workplace-modal-row-${detailsEntry.workplaceNumber}-${idx}`;
+                                        const timeText = (row?.start_time && row?.end_time) ? `${row.start_time} - ${row.end_time}` : '—';
+                                        return (
+                                            <div key={key} className="rounded-md border border-rose-100 bg-rose-50/30 p-2.5 text-xs">
+                                                <div className="font-semibold text-slate-800">
+                                                    {row?.date || '—'} • {timeText} • {row?.operator_name || '—'}
+                                                </div>
+                                                <div className="mt-1 text-slate-700">{row?.reason || '—'}</div>
+                                                {!!row?.comment && (
+                                                    <div className="mt-1 text-slate-500">Комментарий: {row.comment}</div>
+                                                )}
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            ) : (
+                                <div className="rounded-md border border-dashed border-rose-200 bg-rose-50/20 px-3 py-2 text-xs text-slate-500">
+                                    Для этого рабочего места инциденты в выбранном периоде не найдены.
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
+        </>
     );
 });
 
@@ -1748,7 +1805,7 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
 
                 {/* ── Analytics panels ── */}
                 {!loading && rows.length > 0 && (
-                    <div className="mb-10 grid grid-cols-1 xl:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)] gap-4 items-start">
+                    <div className="mb-10 grid grid-cols-1 xl:grid-cols-2 gap-4 items-start">
                         <WorkplaceAnalyticsPanel rows={rows} />
                         <AnalyticsPanel rows={rows} />
                     </div>
