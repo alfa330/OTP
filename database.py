@@ -918,6 +918,7 @@ class Database:
                     end_time TIME NOT NULL DEFAULT TIME '23:59:59',
                     reason VARCHAR(255) NOT NULL,
                     comment TEXT,
+                    workplace_number INTEGER,
                     direction_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
                     created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -930,6 +931,10 @@ class Database:
             cursor.execute("""
                 ALTER TABLE operator_technical_issues
                 ADD COLUMN IF NOT EXISTS end_time TIME NOT NULL DEFAULT TIME '23:59:59';
+            """)
+            cursor.execute("""
+                ALTER TABLE operator_technical_issues
+                ADD COLUMN IF NOT EXISTS workplace_number INTEGER;
             """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS operator_offline_activities (
@@ -1633,6 +1638,8 @@ class Database:
                 ON operator_technical_issues(operator_id, issue_date);
                 CREATE INDEX IF NOT EXISTS idx_operator_technical_issues_reason
                 ON operator_technical_issues(reason);
+                CREATE INDEX IF NOT EXISTS idx_operator_technical_issues_workplace_number
+                ON operator_technical_issues(workplace_number);
                 CREATE INDEX IF NOT EXISTS idx_operator_technical_issues_created_by
                 ON operator_technical_issues(created_by);
                 CREATE INDEX IF NOT EXISTS idx_operator_technical_issues_created_at
@@ -2379,6 +2386,7 @@ class Database:
                 ti.end_time,
                 ti.reason,
                 ti.comment,
+                ti.workplace_number,
                 cb.name,
                 ti.created_at
             FROM operator_technical_issues ti
@@ -2390,7 +2398,7 @@ class Database:
             """,
             (op_ids, start_date, end_date),
         )
-        for issue_id, op_id, issue_date, start_time, end_time, reason, comment, created_by_name, created_at in cursor.fetchall() or []:
+        for issue_id, op_id, issue_date, start_time, end_time, reason, comment, workplace_number, created_by_name, created_at in cursor.fetchall() or []:
             try:
                 op_id_int = int(op_id)
             except Exception:
@@ -2418,6 +2426,7 @@ class Database:
                 "time_range": f"{start_text} - {end_text}" if start_text and end_text else None,
                 "reason": reason,
                 "comment": comment,
+                "workplace_number": int(workplace_number) if workplace_number is not None else None,
                 "created_by_name": created_by_name,
                 "created_at": created_at.strftime('%Y-%m-%d %H:%M:%S') if created_at else None,
                 "duration_minutes": int(duration_minutes),
@@ -6311,6 +6320,29 @@ class Database:
                 continue
         raise ValueError(f"Invalid '{field_name}' format. Use HH:MM")
 
+    def _parse_technical_issue_workplace_number(self, value, field_name='workplace_number', required=False):
+        if value is None:
+            if required:
+                raise ValueError(f"Field '{field_name}' is required")
+            return None
+
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                if required:
+                    raise ValueError(f"Field '{field_name}' is required")
+                return None
+
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"Invalid '{field_name}'. Use integer in range 1..30")
+
+        if number < 1 or number > 30:
+            raise ValueError(f"Field '{field_name}' must be in range 1..30")
+
+        return number
+
     def _technical_issue_time_to_hhmm(self, time_value):
         if isinstance(time_value, dt_time):
             return time_value.strftime('%H:%M')
@@ -6539,7 +6571,8 @@ class Database:
         end_time=None,
         comment=None,
         operator_ids=None,
-        direction_ids=None
+        direction_ids=None,
+        workplace_number=None
     ):
         role_norm = self._normalize_technical_issue_role(requester_role)
         if not (role_has_min(role_norm, 'admin') or role_norm == 'sv'):
@@ -6555,6 +6588,11 @@ class Database:
         if start_time_obj == end_time_obj:
             raise ValueError("start_time and end_time cannot be equal")
         comment_text = str(comment or '').strip() or None
+        workplace_number_int = self._parse_technical_issue_workplace_number(
+            workplace_number,
+            field_name='workplace_number',
+            required=False
+        )
         requester_id_int = int(requester_id)
 
         with self._get_cursor() as cursor:
@@ -6595,6 +6633,7 @@ class Database:
                         chunk['end_time'],
                         reason_text,
                         comment_text,
+                        workplace_number_int,
                         Json(selected_direction_ids),
                         requester_id_int
                     ))
@@ -6613,6 +6652,7 @@ class Database:
                         end_time,
                         reason,
                         comment,
+                        workplace_number,
                         direction_ids,
                         created_by
                     )
@@ -6637,7 +6677,8 @@ class Database:
                 'date': issue_date_obj.strftime('%Y-%m-%d'),
                 'start_time': start_time_obj.strftime('%H:%M'),
                 'end_time': end_time_obj.strftime('%H:%M'),
-                'reason': reason_text
+                'reason': reason_text,
+                'workplace_number': workplace_number_int
             }
 
     def get_operator_technical_issues(
@@ -6649,6 +6690,7 @@ class Database:
         date_to=None,
         operator_id=None,
         reason=None,
+        workplace_number=None,
         limit=500,
         offset=0
     ):
@@ -6691,6 +6733,15 @@ class Database:
             where_parts.append("ti.reason = %s")
             params.append(reason_text)
 
+        workplace_number_int = self._parse_technical_issue_workplace_number(
+            workplace_number,
+            field_name='workplace_number',
+            required=False
+        )
+        if workplace_number_int is not None:
+            where_parts.append("ti.workplace_number = %s")
+            params.append(workplace_number_int)
+
         where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
         base_sql = """
             FROM operator_technical_issues ti
@@ -6720,6 +6771,7 @@ class Database:
                         ti.end_time,
                         ti.reason,
                         ti.comment,
+                        ti.workplace_number,
                         ti.created_by,
                         cb.name,
                         ti.created_at,
@@ -6736,7 +6788,7 @@ class Database:
             all_selected_direction_ids = set()
             prepared_rows = []
             for row in rows:
-                selected_direction_ids = self._normalize_direction_ids_json_payload(row[16])
+                selected_direction_ids = self._normalize_direction_ids_json_payload(row[17])
                 all_selected_direction_ids.update(selected_direction_ids)
                 prepared_rows.append((row, selected_direction_ids))
 
@@ -6760,9 +6812,10 @@ class Database:
                     'time_range': f"{start_time_text} - {end_time_text}" if start_time_text and end_time_text else None,
                     'reason': row[11],
                     'comment': row[12],
-                    'created_by_id': int(row[13]) if row[13] is not None else None,
-                    'created_by_name': row[14],
-                    'created_at': row[15].strftime('%Y-%m-%d %H:%M:%S') if row[15] else None,
+                    'workplace_number': int(row[13]) if row[13] is not None else None,
+                    'created_by_id': int(row[14]) if row[14] is not None else None,
+                    'created_by_name': row[15],
+                    'created_at': row[16].strftime('%Y-%m-%d %H:%M:%S') if row[16] else None,
                     'selected_direction_ids': selected_direction_ids,
                     'selected_direction_names': [direction_name_map.get(dir_id) for dir_id in selected_direction_ids if direction_name_map.get(dir_id)]
                 })
