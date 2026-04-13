@@ -808,39 +808,6 @@ const REASON_COLORS = [
     '#84cc16', '#f97316',
 ];
 
-const WORKPLACE_REFERENCE_LABELS = {
-    1: 'RM1',
-    2: 'RM11',
-    3: 'RM30',
-    4: 'RM4',
-    5: 'RM5',
-    6: 'RM6',
-    7: 'RM9',
-    8: 'RM8',
-    9: 'RM7',
-    10: 'SupervisorSzOv',
-    11: 'RM10',
-    12: 'RM36',
-    13: 'RM13',
-    14: 'RM14',
-    15: 'RM53',
-    16: 'RM15',
-    17: 'RM50',
-    18: 'RM25',
-    19: 'RM019',
-    20: 'RM2000',
-    21: 'RM_21',
-    22: 'RM32',
-    23: 'RM223',
-    24: 'RM23',
-    25: 'RM29',
-    26: 'RM3',
-    27: 'RM33',
-    28: 'RM96',
-    29: 'RM18',
-    30: 'RM97',
-};
-
 const WORKPLACE_LAYOUT_ROWS = [
     [null, null, null, null, 27, 26, 25, 24, 23, 22, null, null],
     [null, null, null, null, null, null, null, null, null, null, null, null],
@@ -867,6 +834,54 @@ const getWorkplaceTileStyle = (count, maxCount) => {
         color: ratio > 0.45 ? '#ffffff' : '#7f1d1d',
     };
 };
+
+const WorkplaceVisualizationBlock = memo(function WorkplaceVisualizationBlock({
+    itemsByNumber,
+    maxIncidents,
+    selectedWorkplace,
+    onSelectWorkplace,
+}) {
+    return (
+        <div className="rounded-xl border border-slate-300 bg-slate-50/80 p-2">
+            <div className="overflow-x-auto">
+                <div className="min-w-[740px] rounded-lg border border-slate-400 bg-white p-2 shadow-sm">
+                    <div className="space-y-1">
+                        {WORKPLACE_LAYOUT_ROWS.map((layoutRow, rowIdx) => (
+                            <div key={`workplace-layout-row-${rowIdx}`} className="grid grid-cols-12 gap-1">
+                                {layoutRow.map((seatNumber, colIdx) => {
+                                    if (!seatNumber) {
+                                        return <div key={`workplace-empty-${rowIdx}-${colIdx}`} className="h-[46px]" />;
+                                    }
+                                    const item = itemsByNumber.get(seatNumber);
+                                    const incidents = item?.incidents || 0;
+                                    const isSelected = seatNumber === selectedWorkplace;
+                                    const style = getWorkplaceTileStyle(incidents, maxIncidents);
+                                    return (
+                                        <button
+                                            key={`workplace-seat-${seatNumber}`}
+                                            type="button"
+                                            onClick={() => onSelectWorkplace(seatNumber)}
+                                            className={`h-[46px] rounded-sm border px-1.5 py-1 text-left transition-all hover:-translate-y-0.5 ${
+                                                isSelected ? 'ring-2 ring-rose-400 shadow-md' : 'shadow-sm'
+                                            }`}
+                                            style={style}
+                                            title={`РМ ${seatNumber}: ${incidents} инцидент(ов)`}
+                                        >
+                                            <div className="text-[11px] font-bold leading-none">{seatNumber}</div>
+                                            <div className="mt-0.5 text-[9px] font-bold leading-none">
+                                                {incidents} сл.
+                                            </div>
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+});
 
 const WorkplaceAnalyticsPanel = memo(function WorkplaceAnalyticsPanel({ rows }) {
     const [selectedWorkplace, setSelectedWorkplace] = useState(null);
@@ -915,8 +930,11 @@ const WorkplaceAnalyticsPanel = memo(function WorkplaceAnalyticsPanel({ rows }) 
             ))
             .slice(0, 5);
 
+        const itemsByNumber = new Map(items.map((item) => [item.workplaceNumber, item]));
+
         return {
             items,
+            itemsByNumber,
             activeItems,
             activeCount: activeItems.length,
             maxIncidents,
@@ -955,47 +973,14 @@ const WorkplaceAnalyticsPanel = memo(function WorkplaceAnalyticsPanel({ rows }) 
             </div>
 
             <div className="p-5 space-y-4">
-                <div className="rounded-xl border border-slate-300 bg-slate-50/80 p-3">
-                    <div className="overflow-x-auto">
-                        <div className="min-w-[900px] rounded-lg border border-slate-400 bg-white p-3 shadow-sm">
-                            <div className="space-y-1.5">
-                                {WORKPLACE_LAYOUT_ROWS.map((layoutRow, rowIdx) => (
-                                    <div key={`workplace-layout-row-${rowIdx}`} className="grid grid-cols-12 gap-1.5">
-                                        {layoutRow.map((seatNumber, colIdx) => {
-                                            if (!seatNumber) {
-                                                return <div key={`workplace-empty-${rowIdx}-${colIdx}`} className="h-[62px]" />;
-                                            }
-                                            const item = workplaceStats.items.find((entry) => entry.workplaceNumber === seatNumber);
-                                            const incidents = item?.incidents || 0;
-                                            const isSelected = seatNumber === selectedWorkplace;
-                                            const style = getWorkplaceTileStyle(incidents, workplaceStats.maxIncidents);
-                                            return (
-                                                <button
-                                                    key={`workplace-seat-${seatNumber}`}
-                                                    type="button"
-                                                    onClick={() => setSelectedWorkplace((prev) => (prev === seatNumber ? null : seatNumber))}
-                                                    className={`h-[62px] rounded-sm border px-2 py-1 text-left transition-all hover:-translate-y-0.5 ${
-                                                        isSelected ? 'ring-2 ring-rose-400 shadow-md' : 'shadow-sm'
-                                                    }`}
-                                                    style={style}
-                                                    title={`РМ ${seatNumber}: ${incidents} инцидент(ов)`}
-                                                >
-                                                    <div className="text-xs font-bold leading-none">{seatNumber}</div>
-                                                    <div className="mt-1 truncate text-[10px] font-semibold leading-tight">
-                                                        {WORKPLACE_REFERENCE_LABELS[seatNumber] || `РМ ${seatNumber}`}
-                                                    </div>
-                                                    <div className="mt-1 text-[10px] font-bold leading-none">
-                                                        {incidents} сл.
-                                                    </div>
-                                                </button>
-                                            );
-                                        })}
-                                    </div>
-                                ))}
-                            </div>
-                        </div>
-                    </div>
-                </div>
+                <WorkplaceVisualizationBlock
+                    itemsByNumber={workplaceStats.itemsByNumber}
+                    maxIncidents={workplaceStats.maxIncidents}
+                    selectedWorkplace={selectedWorkplace}
+                    onSelectWorkplace={(seatNumber) => {
+                        setSelectedWorkplace((prev) => (prev === seatNumber ? null : seatNumber));
+                    }}
+                />
 
                 {workplaceStats.topItems.length > 0 && (
                     <div className="flex flex-wrap gap-2">
