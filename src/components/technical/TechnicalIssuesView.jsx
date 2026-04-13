@@ -34,6 +34,9 @@ const MONTHS_RU = [
 ];
 const DAYS_SHORT = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
 const MASS_KEYWORDS = ['массовая', 'массовый', 'массовое'];
+const WORKPLACE_MIN = 1;
+const WORKPLACE_MAX = 30;
+const WORKPLACE_NUMBERS = Array.from({ length: WORKPLACE_MAX }, (_, idx) => WORKPLACE_MIN + idx);
 
 const INPUT_CLASS =
     'mt-1 w-full rounded-lg border border-blue-200 bg-white px-3 py-2 text-sm text-gray-800 shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-blue-400';
@@ -88,6 +91,7 @@ const normalizeFilterPayload = (filters) => ({
     dateTo: String(filters?.dateTo || '').trim(),
     operatorId: String(filters?.operatorId || '').trim(),
     reason: String(filters?.reason || '').trim(),
+    workplaceNumber: String(filters?.workplaceNumber || '').trim(),
 });
 
 const areFiltersEqual = (left, right) => {
@@ -97,7 +101,8 @@ const areFiltersEqual = (left, right) => {
         a.dateFrom === b.dateFrom &&
         a.dateTo === b.dateTo &&
         a.operatorId === b.operatorId &&
-        a.reason === b.reason
+        a.reason === b.reason &&
+        a.workplaceNumber === b.workplaceNumber
     );
 };
 
@@ -109,7 +114,18 @@ const buildFilterQuery = (filters) => {
     if (normalized.dateTo) query.set('date_to', normalized.dateTo);
     if (normalized.operatorId) query.set('operator_id', normalized.operatorId);
     if (normalized.reason) query.set('reason', normalized.reason);
+    if (normalized.workplaceNumber) query.set('workplace_number', normalized.workplaceNumber);
     return query;
+};
+
+const normalizeWorkplaceNumber = (value) => {
+    if (value === null || value === undefined) return null;
+    if (typeof value === 'string' && value.trim() === '') return null;
+    const n = Number(value);
+    if (!Number.isFinite(n)) return null;
+    const intN = Math.trunc(n);
+    if (intN < WORKPLACE_MIN || intN > WORKPLACE_MAX) return null;
+    return intN;
 };
 
 const formatDateDisplay = (iso) => {
@@ -580,6 +596,7 @@ const AddIssueModal = memo(function AddIssueModal({
     createDate, setCreateDate,
     createStartTime, setCreateStartTime,
     createEndTime, setCreateEndTime,
+    createWorkplaceNumber, setCreateWorkplaceNumber,
     createReason, setCreateReason,
     createComment, setCreateComment,
     createOperatorIds, setCreateOperatorIds,
@@ -632,7 +649,7 @@ const AddIssueModal = memo(function AddIssueModal({
                     <form id="add-issue-form" onSubmit={onSubmit} className="p-6 space-y-5">
 
                         {/* Date + time row */}
-                        <div className="grid grid-cols-3 gap-3">
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
                             <label className="block">
                                 <span className={LABEL_CLASS}>Дата проблемы</span>
                                 <input
@@ -662,6 +679,21 @@ const AddIssueModal = memo(function AddIssueModal({
                                     className={INPUT_CLASS}
                                     required
                                 />
+                            </label>
+                            <label className="block">
+                                <span className={LABEL_CLASS}>Рабочее место</span>
+                                <select
+                                    value={createWorkplaceNumber}
+                                    onChange={(e) => setCreateWorkplaceNumber(e.target.value)}
+                                    className={INPUT_CLASS}
+                                >
+                                    <option value="">Не указано</option>
+                                    {WORKPLACE_NUMBERS.map((num) => (
+                                        <option key={`create-workplace-${num}`} value={num}>
+                                            РМ {num}
+                                        </option>
+                                    ))}
+                                </select>
                             </label>
                         </div>
 
@@ -775,6 +807,208 @@ const REASON_COLORS = [
     '#f59e0b', '#10b981', '#06b6d4', '#ef4444',
     '#84cc16', '#f97316',
 ];
+
+const getWorkplaceTileStyle = (count, maxCount) => {
+    if (!count || count <= 0 || maxCount <= 0) {
+        return {
+            backgroundColor: '#f8fafc',
+            borderColor: '#e2e8f0',
+            color: '#64748b',
+        };
+    }
+    const ratio = Math.max(0, Math.min(1, count / maxCount));
+    const alpha = 0.2 + ratio * 0.78;
+    return {
+        backgroundColor: `rgba(220, 38, 38, ${alpha.toFixed(3)})`,
+        borderColor: ratio > 0.7 ? 'rgba(127, 29, 29, 0.85)' : 'rgba(220, 38, 38, 0.45)',
+        color: ratio > 0.5 ? '#ffffff' : '#7f1d1d',
+    };
+};
+
+const WorkplaceAnalyticsPanel = memo(function WorkplaceAnalyticsPanel({ rows }) {
+    const [selectedWorkplace, setSelectedWorkplace] = useState(null);
+
+    const workplaceStats = useMemo(() => {
+        const buckets = new Map();
+
+        for (const row of rows) {
+            const workplaceNumber = normalizeWorkplaceNumber(row?.workplace_number);
+            if (workplaceNumber === null) continue;
+
+            const durationMinutes = calcDurationMinutes(row?.start_time, row?.end_time);
+            if (!buckets.has(workplaceNumber)) {
+                buckets.set(workplaceNumber, {
+                    workplaceNumber,
+                    incidents: 0,
+                    totalMinutes: 0,
+                    rows: [],
+                });
+            }
+            const entry = buckets.get(workplaceNumber);
+            entry.incidents += 1;
+            if (durationMinutes !== null && durationMinutes >= 0) entry.totalMinutes += durationMinutes;
+            entry.rows.push(row);
+        }
+
+        const items = WORKPLACE_NUMBERS.map((num) => {
+            const entry = buckets.get(num);
+            return entry || {
+                workplaceNumber: num,
+                incidents: 0,
+                totalMinutes: 0,
+                rows: [],
+            };
+        });
+
+        const activeItems = items.filter((item) => item.incidents > 0);
+        const maxIncidents = Math.max(...items.map((item) => item.incidents), 0);
+        const totalIncidents = items.reduce((sum, item) => sum + item.incidents, 0);
+
+        const topItems = [...activeItems]
+            .sort((a, b) => (
+                b.incidents - a.incidents
+                || b.totalMinutes - a.totalMinutes
+                || a.workplaceNumber - b.workplaceNumber
+            ))
+            .slice(0, 5);
+
+        return {
+            items,
+            activeItems,
+            activeCount: activeItems.length,
+            maxIncidents,
+            totalIncidents,
+            topItems,
+        };
+    }, [rows]);
+
+    const selectedEntry = useMemo(() => {
+        if (selectedWorkplace === null) return null;
+        return workplaceStats.items.find((item) => item.workplaceNumber === selectedWorkplace) || null;
+    }, [selectedWorkplace, workplaceStats.items]);
+
+    useEffect(() => {
+        if (selectedWorkplace === null) return;
+        if (!selectedEntry || selectedEntry.incidents <= 0) {
+            setSelectedWorkplace(null);
+        }
+    }, [selectedEntry, selectedWorkplace]);
+
+    if (rows.length === 0) return null;
+
+    return (
+        <div className="mb-6 rounded-xl border-2 border-rose-200 bg-white shadow-lg overflow-hidden">
+            <div className="px-5 py-3 border-b border-rose-100 bg-gradient-to-r from-rose-50 to-red-50 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2 text-sm font-bold uppercase tracking-wide text-rose-900">
+                    <FaIcon className="fas fa-th" style={{ width: '1em', height: '1em' }} />
+                    Аналитика по рабочим местам
+                </div>
+                <div className="flex flex-wrap gap-2">
+                    <span className="inline-flex items-center gap-1 rounded-full bg-rose-100 border border-rose-200 px-3 py-0.5 text-xs font-semibold text-rose-800">
+                        <FaIcon className="fas fa-list" style={{ width: '0.8em', height: '0.8em' }} />
+                        Инцидентов: {workplaceStats.totalIncidents}
+                    </span>
+                    <span className="inline-flex items-center gap-1 rounded-full bg-red-100 border border-red-200 px-3 py-0.5 text-xs font-semibold text-red-800">
+                        <FaIcon className="fas fa-desktop" style={{ width: '0.8em', height: '0.8em' }} />
+                        Активных РМ: {workplaceStats.activeCount}
+                    </span>
+                    <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 border border-slate-200 px-3 py-0.5 text-xs font-semibold text-slate-700">
+                        Чем больше инцидентов, тем краснее ячейка.
+                    </span>
+                </div>
+            </div>
+
+            <div className="p-5 space-y-4">
+                <div className="grid grid-cols-3 gap-2 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-10">
+                    {workplaceStats.items.map((item) => {
+                        const isSelected = item.workplaceNumber === selectedWorkplace;
+                        const tileStyle = getWorkplaceTileStyle(item.incidents, workplaceStats.maxIncidents);
+                        return (
+                            <button
+                                key={`workplace-tile-${item.workplaceNumber}`}
+                                type="button"
+                                onClick={() => {
+                                    if (item.incidents <= 0) return;
+                                    setSelectedWorkplace((prev) => (prev === item.workplaceNumber ? null : item.workplaceNumber));
+                                }}
+                                title={item.incidents > 0
+                                    ? `РМ ${item.workplaceNumber}: ${item.incidents} инцидент(ов)`
+                                    : `РМ ${item.workplaceNumber}: инцидентов нет`}
+                                className={`rounded-lg border px-2 py-2 text-left transition-all ${
+                                    item.incidents > 0 ? 'hover:-translate-y-0.5' : 'cursor-default'
+                                } ${isSelected ? 'ring-2 ring-rose-400 shadow-md' : 'shadow-sm'}`}
+                                style={tileStyle}
+                            >
+                                <div className="text-[10px] font-semibold uppercase tracking-wide opacity-80">
+                                    РМ {item.workplaceNumber}
+                                </div>
+                                <div className="text-base font-extrabold leading-tight">
+                                    {item.incidents}
+                                </div>
+                            </button>
+                        );
+                    })}
+                </div>
+
+                {workplaceStats.topItems.length > 0 && (
+                    <div className="flex flex-wrap gap-2">
+                        {workplaceStats.topItems.map((item, idx) => (
+                            <button
+                                key={`top-workplace-${item.workplaceNumber}`}
+                                type="button"
+                                onClick={() => setSelectedWorkplace(item.workplaceNumber)}
+                                className={`inline-flex items-center gap-1 rounded-full border px-3 py-1 text-xs font-semibold transition-colors ${
+                                    item.workplaceNumber === selectedWorkplace
+                                        ? 'border-rose-400 bg-rose-100 text-rose-800'
+                                        : 'border-rose-200 bg-white text-rose-700 hover:bg-rose-50'
+                                }`}
+                            >
+                                #{idx + 1} РМ {item.workplaceNumber}: {item.incidents}
+                            </button>
+                        ))}
+                    </div>
+                )}
+
+                {selectedEntry && selectedEntry.incidents > 0 && (
+                    <div className="rounded-lg border border-rose-200 bg-rose-50/60 p-4">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="text-sm font-bold text-rose-900">
+                                РМ {selectedEntry.workplaceNumber}: {selectedEntry.incidents} инцидент(ов)
+                            </div>
+                            <div className="text-xs font-semibold text-rose-700">
+                                Суммарно: {formatDuration(selectedEntry.totalMinutes)}
+                            </div>
+                        </div>
+
+                        <div className="mt-3 space-y-2 max-h-60 overflow-y-auto pr-1">
+                            {selectedEntry.rows.map((row, idx) => {
+                                const key = row?.id ? `workplace-row-${row.id}` : `workplace-row-${selectedEntry.workplaceNumber}-${idx}`;
+                                const timeText = (row?.start_time && row?.end_time) ? `${row.start_time} - ${row.end_time}` : '—';
+                                return (
+                                    <div key={key} className="rounded-md border border-rose-100 bg-white p-2.5 text-xs">
+                                        <div className="font-semibold text-slate-800">
+                                            {row?.date || '—'} • {timeText} • {row?.operator_name || '—'}
+                                        </div>
+                                        <div className="mt-1 text-slate-700">{row?.reason || '—'}</div>
+                                        {!!row?.comment && (
+                                            <div className="mt-1 text-slate-500 line-clamp-2">Комментарий: {row.comment}</div>
+                                        )}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    </div>
+                )}
+
+                {workplaceStats.activeCount === 0 && (
+                    <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-500">
+                        В выбранном периоде нет инцидентов с указанным рабочим местом.
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+});
 
 const AnalyticsPanel = memo(function AnalyticsPanel({ rows }) {
     const stats = useMemo(() => {
@@ -897,6 +1131,15 @@ const TechnicalIssueRow = memo(function TechnicalIssueRow({ item, canDelete, isD
                     <div className="text-[11px] text-gray-400 leading-tight mt-0.5">{item.direction_name}</div>
                 )}
             </td>
+            <td className="px-3 py-2.5 text-xs text-gray-700 whitespace-nowrap">
+                {normalizeWorkplaceNumber(item?.workplace_number) !== null ? (
+                    <span className="inline-flex items-center rounded-full border border-rose-200 bg-rose-50 px-2 py-0.5 font-semibold text-rose-700">
+                        РМ {normalizeWorkplaceNumber(item?.workplace_number)}
+                    </span>
+                ) : (
+                    <span className="text-gray-300">—</span>
+                )}
+            </td>
             <td className="px-3 py-2.5 text-xs text-gray-700" style={{ maxWidth: 220 }}>
                 <div className="flex flex-wrap items-start gap-1">
                     {massive && (
@@ -997,6 +1240,7 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
         dateTo: toIsoDate(new Date()),
         operatorId: '',
         reason: '',
+        workplaceNumber: '',
     }), []);
 
     // ── state ──
@@ -1013,6 +1257,7 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
     const [createDate, setCreateDate]             = useState(() => toIsoDate(new Date()));
     const [createStartTime, setCreateStartTime]   = useState('00:00');
     const [createEndTime, setCreateEndTime]       = useState('23:59');
+    const [createWorkplaceNumber, setCreateWorkplaceNumber] = useState('');
     const [createReason, setCreateReason]         = useState('');
     const [createComment, setCreateComment]       = useState('');
     const [createOperatorIds, setCreateOperatorIds] = useState([]);
@@ -1082,7 +1327,7 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
     }, [appliedFilters, fetchRows, filterDraft]);
 
     const handleResetFilters = useCallback(async () => {
-        const reset = { dateFrom: currentMonthStartIso(), dateTo: toIsoDate(new Date()), operatorId: '', reason: '' };
+        const reset = { dateFrom: currentMonthStartIso(), dateTo: toIsoDate(new Date()), operatorId: '', reason: '', workplaceNumber: '' };
         setFilterDraft(reset);
         if (areFiltersEqual(reset, appliedFilters)) { await fetchRows(reset, { force: true }); return; }
         setAppliedFilters(reset);
@@ -1093,6 +1338,7 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
         setCreateDate(toIsoDate(new Date()));
         setCreateStartTime('00:00');
         setCreateEndTime('23:59');
+        setCreateWorkplaceNumber('');
         setCreateReason('');
         setCreateComment('');
         setCreateOperatorIds([]);
@@ -1111,6 +1357,11 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
         if (!createStartTime || !createEndTime) { notify('Укажите время начала и окончания', 'error'); return; }
         if (createStartTime === createEndTime) { notify('Время начала и окончания не должно совпадать', 'error'); return; }
         if (!createReason) { notify('Выберите техническую причину', 'error'); return; }
+        const workplaceNumber = normalizeWorkplaceNumber(createWorkplaceNumber);
+        if (String(createWorkplaceNumber || '').trim() && workplaceNumber === null) {
+            notify('Номер рабочего места должен быть от 1 до 30', 'error');
+            return;
+        }
         if (createOperatorIds.length === 0 && createDirectionIds.length === 0) {
             notify('Выберите операторов или направления', 'error'); return;
         }
@@ -1122,6 +1373,7 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
                 end_time: createEndTime,
                 reason: createReason,
                 comment: createComment || null,
+                workplace_number: workplaceNumber,
                 operator_ids: toIntList(createOperatorIds),
                 direction_ids: toIntList(createDirectionIds),
             };
@@ -1135,7 +1387,7 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
         } finally {
             setSubmitting(false);
         }
-    }, [apiBaseUrl, appliedFilters, buildHeaders, canCreate, createComment, createDate, createDirectionIds, createEndTime, createOperatorIds, createReason, createStartTime, fetchRows, notify]);
+    }, [apiBaseUrl, appliedFilters, buildHeaders, canCreate, createComment, createDate, createDirectionIds, createEndTime, createOperatorIds, createReason, createStartTime, createWorkplaceNumber, fetchRows, notify]);
 
     // ── export ──
     const handleExport = useCallback(async () => {
@@ -1214,6 +1466,7 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
                 createDate={createDate}          setCreateDate={setCreateDate}
                 createStartTime={createStartTime} setCreateStartTime={setCreateStartTime}
                 createEndTime={createEndTime}     setCreateEndTime={setCreateEndTime}
+                createWorkplaceNumber={createWorkplaceNumber} setCreateWorkplaceNumber={setCreateWorkplaceNumber}
                 createReason={createReason}       setCreateReason={setCreateReason}
                 createComment={createComment}     setCreateComment={setCreateComment}
                 createOperatorIds={createOperatorIds} setCreateOperatorIds={setCreateOperatorIds}
@@ -1257,7 +1510,7 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
 
                 {/* ── Filters card ── */}
                 <div className="sticky top-0 z-10 rounded-xl border border-blue-200 bg-blue-50/95 shadow px-4 py-3" style={{ backdropFilter: 'blur(6px)' }}>
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
                         {/* Date range */}
                         <div className="md:col-span-1">
                             <span className={LABEL_CLASS}>Период</span>
@@ -1296,6 +1549,22 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
                                 <option value="">Все причины</option>
                                 {reasons.map((r, i) => (
                                     <option key={`fr-${i}`} value={r}>{r}</option>
+                                ))}
+                            </select>
+                        </label>
+
+                        <label className="block">
+                            <span className={LABEL_CLASS}>Рабочее место</span>
+                            <select
+                                value={filterDraft.workplaceNumber}
+                                onChange={(e) => updateDraft('workplaceNumber', e.target.value)}
+                                className={INPUT_CLASS}
+                            >
+                                <option value="">Все РМ</option>
+                                {WORKPLACE_NUMBERS.map((num) => (
+                                    <option key={`filter-workplace-${num}`} value={num}>
+                                        РМ {num}
+                                    </option>
                                 ))}
                             </select>
                         </label>
@@ -1359,6 +1628,7 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
                                     <col style={{ width: 90 }} />
                                     <col style={{ width: 100 }} />
                                     <col style={{ width: 160 }} />
+                                    <col style={{ width: 100 }} />
                                     <col style={{ minWidth: 200 }} />
                                     <col style={{ minWidth: 140 }} />
                                     <col style={{ minWidth: 120 }} />
@@ -1369,7 +1639,7 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
                                 <thead style={{ position: 'sticky', top: 0, zIndex: 5 }}>
                                     <tr className="bg-blue-700 text-white">
                                         {[
-                                            'Дата', 'Время', 'Оператор', 'Причина',
+                                            'Дата', 'Время', 'Оператор', 'РМ', 'Причина',
                                             'Комментарий', 'Направления', 'Добавил', 'Зафиксировано',
                                         ].map((th) => (
                                             <th key={th} className="px-3 py-3 text-left text-[11px] font-bold uppercase tracking-wider whitespace-nowrap">
@@ -1405,8 +1675,13 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
                 </div>
             </div>
 
-                {/* ── Analytics panel ── */}
-                {!loading && rows.length > 0 && <AnalyticsPanel rows={rows} />}
+                {/* ── Analytics panels ── */}
+                {!loading && rows.length > 0 && (
+                    <>
+                        <WorkplaceAnalyticsPanel rows={rows} />
+                        <AnalyticsPanel rows={rows} />
+                    </>
+                )}
         </>
     );
 };

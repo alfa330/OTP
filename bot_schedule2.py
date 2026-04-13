@@ -9175,6 +9175,9 @@ def create_technical_issue():
         end_time = payload.get('end_time') or payload.get('end')
         reason = payload.get('reason')
         comment = payload.get('comment')
+        workplace_number = payload.get('workplace_number')
+        if workplace_number is None:
+            workplace_number = payload.get('workplace')
 
         operator_ids = _normalize_int_id_list(payload.get('operator_ids'))
         operator_ids.extend(_normalize_int_id_list(payload.get('operator_id')))
@@ -9193,7 +9196,8 @@ def create_technical_issue():
             reason=reason,
             comment=comment,
             operator_ids=operator_ids,
-            direction_ids=direction_ids
+            direction_ids=direction_ids,
+            workplace_number=workplace_number
         )
 
         return jsonify({
@@ -9230,6 +9234,7 @@ def list_technical_issues():
         date_to = (request.args.get('date_to') or '').strip() or None
         operator_id = (request.args.get('operator_id') or '').strip() or None
         reason = (request.args.get('reason') or '').strip() or None
+        workplace_number = (request.args.get('workplace_number') or request.args.get('workplace') or '').strip() or None
         limit = request.args.get('limit', 500)
         offset = request.args.get('offset', 0)
 
@@ -9241,6 +9246,7 @@ def list_technical_issues():
             date_to=date_to,
             operator_id=operator_id,
             reason=reason,
+            workplace_number=workplace_number,
             limit=limit,
             offset=offset
         )
@@ -9884,6 +9890,7 @@ def export_technical_issues_excel():
         date_to = (request.args.get('date_to') or '').strip() or None
         operator_id = (request.args.get('operator_id') or '').strip() or None
         reason = (request.args.get('reason') or '').strip() or None
+        workplace_number = (request.args.get('workplace_number') or request.args.get('workplace') or '').strip() or None
 
         result = db.get_operator_technical_issues(
             requester_id=requester_id,
@@ -9893,6 +9900,7 @@ def export_technical_issues_excel():
             date_to=date_to,
             operator_id=operator_id,
             reason=reason,
+            workplace_number=workplace_number,
             limit=5000,
             offset=0
         )
@@ -9907,6 +9915,7 @@ def export_technical_issues_excel():
             'Время начала',
             'Время окончания',
             'Оператор',
+            'Рабочее место',
             'Направление оператора',
             'Техническая причина',
             'Комментарий',
@@ -9924,12 +9933,13 @@ def export_technical_issues_excel():
             ws.cell(row=row_idx, column=2, value=item.get('start_time') or '')
             ws.cell(row=row_idx, column=3, value=item.get('end_time') or '')
             ws.cell(row=row_idx, column=4, value=item.get('operator_name') or '')
-            ws.cell(row=row_idx, column=5, value=item.get('direction_name') or '')
-            ws.cell(row=row_idx, column=6, value=item.get('reason') or '')
-            ws.cell(row=row_idx, column=7, value=item.get('comment') or '')
-            ws.cell(row=row_idx, column=8, value=selected_directions)
-            ws.cell(row=row_idx, column=9, value=item.get('created_by_name') or '')
-            ws.cell(row=row_idx, column=10, value=item.get('created_at') or '')
+            ws.cell(row=row_idx, column=5, value=item.get('workplace_number') or '')
+            ws.cell(row=row_idx, column=6, value=item.get('direction_name') or '')
+            ws.cell(row=row_idx, column=7, value=item.get('reason') or '')
+            ws.cell(row=row_idx, column=8, value=item.get('comment') or '')
+            ws.cell(row=row_idx, column=9, value=selected_directions)
+            ws.cell(row=row_idx, column=10, value=item.get('created_by_name') or '')
+            ws.cell(row=row_idx, column=11, value=item.get('created_at') or '')
 
         for column_cells in ws.columns:
             max_len = 0
