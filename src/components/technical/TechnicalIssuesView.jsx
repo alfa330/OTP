@@ -808,20 +808,63 @@ const REASON_COLORS = [
     '#84cc16', '#f97316',
 ];
 
+const WORKPLACE_REFERENCE_LABELS = {
+    1: 'RM1',
+    2: 'RM11',
+    3: 'RM30',
+    4: 'RM4',
+    5: 'RM5',
+    6: 'RM6',
+    7: 'RM9',
+    8: 'RM8',
+    9: 'RM7',
+    10: 'SupervisorSzOv',
+    11: 'RM10',
+    12: 'RM36',
+    13: 'RM13',
+    14: 'RM14',
+    15: 'RM53',
+    16: 'RM15',
+    17: 'RM50',
+    18: 'RM25',
+    19: 'RM019',
+    20: 'RM2000',
+    21: 'RM_21',
+    22: 'RM32',
+    23: 'RM223',
+    24: 'RM23',
+    25: 'RM29',
+    26: 'RM3',
+    27: 'RM33',
+    28: 'RM96',
+    29: 'RM18',
+    30: 'RM97',
+};
+
+const WORKPLACE_LAYOUT_ROWS = [
+    [null, null, null, null, 27, 26, 25, 24, 23, 22, null, null],
+    [null, null, null, null, null, null, null, null, null, null, null, null],
+    [30, 29, 28, null, null, null, null, null, null, null, null, null],
+    [null, null, null, 15, 16, 17, 18, 19, 20, 21, null, null],
+    [null, null, null, 14, 13, 12, 11, 10, 9, 8, null, null],
+    [null, null, null, null, null, null, null, null, null, null, null, null],
+    [null, null, null, 1, 2, 3, 4, 5, 6, 7, null, null],
+];
+
 const getWorkplaceTileStyle = (count, maxCount) => {
     if (!count || count <= 0 || maxCount <= 0) {
         return {
-            backgroundColor: '#f8fafc',
-            borderColor: '#e2e8f0',
-            color: '#64748b',
+            backgroundColor: '#f3f4f6',
+            borderColor: '#d1d5db',
+            color: '#4b5563',
         };
     }
     const ratio = Math.max(0, Math.min(1, count / maxCount));
-    const alpha = 0.2 + ratio * 0.78;
+    const alpha = 0.22 + ratio * 0.72;
     return {
         backgroundColor: `rgba(220, 38, 38, ${alpha.toFixed(3)})`,
-        borderColor: ratio > 0.7 ? 'rgba(127, 29, 29, 0.85)' : 'rgba(220, 38, 38, 0.45)',
-        color: ratio > 0.5 ? '#ffffff' : '#7f1d1d',
+        borderColor: ratio > 0.65 ? 'rgba(127, 29, 29, 0.9)' : 'rgba(220, 38, 38, 0.6)',
+        color: ratio > 0.45 ? '#ffffff' : '#7f1d1d',
     };
 };
 
@@ -887,13 +930,6 @@ const WorkplaceAnalyticsPanel = memo(function WorkplaceAnalyticsPanel({ rows }) 
         return workplaceStats.items.find((item) => item.workplaceNumber === selectedWorkplace) || null;
     }, [selectedWorkplace, workplaceStats.items]);
 
-    useEffect(() => {
-        if (selectedWorkplace === null) return;
-        if (!selectedEntry || selectedEntry.incidents <= 0) {
-            setSelectedWorkplace(null);
-        }
-    }, [selectedEntry, selectedWorkplace]);
-
     if (rows.length === 0) return null;
 
     return (
@@ -919,35 +955,46 @@ const WorkplaceAnalyticsPanel = memo(function WorkplaceAnalyticsPanel({ rows }) 
             </div>
 
             <div className="p-5 space-y-4">
-                <div className="grid grid-cols-3 gap-2 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-10">
-                    {workplaceStats.items.map((item) => {
-                        const isSelected = item.workplaceNumber === selectedWorkplace;
-                        const tileStyle = getWorkplaceTileStyle(item.incidents, workplaceStats.maxIncidents);
-                        return (
-                            <button
-                                key={`workplace-tile-${item.workplaceNumber}`}
-                                type="button"
-                                onClick={() => {
-                                    if (item.incidents <= 0) return;
-                                    setSelectedWorkplace((prev) => (prev === item.workplaceNumber ? null : item.workplaceNumber));
-                                }}
-                                title={item.incidents > 0
-                                    ? `РМ ${item.workplaceNumber}: ${item.incidents} инцидент(ов)`
-                                    : `РМ ${item.workplaceNumber}: инцидентов нет`}
-                                className={`rounded-lg border px-2 py-2 text-left transition-all ${
-                                    item.incidents > 0 ? 'hover:-translate-y-0.5' : 'cursor-default'
-                                } ${isSelected ? 'ring-2 ring-rose-400 shadow-md' : 'shadow-sm'}`}
-                                style={tileStyle}
-                            >
-                                <div className="text-[10px] font-semibold uppercase tracking-wide opacity-80">
-                                    РМ {item.workplaceNumber}
-                                </div>
-                                <div className="text-base font-extrabold leading-tight">
-                                    {item.incidents}
-                                </div>
-                            </button>
-                        );
-                    })}
+                <div className="rounded-xl border border-slate-300 bg-slate-50/80 p-3">
+                    <div className="overflow-x-auto">
+                        <div className="min-w-[900px] rounded-lg border border-slate-400 bg-white p-3 shadow-sm">
+                            <div className="space-y-1.5">
+                                {WORKPLACE_LAYOUT_ROWS.map((layoutRow, rowIdx) => (
+                                    <div key={`workplace-layout-row-${rowIdx}`} className="grid grid-cols-12 gap-1.5">
+                                        {layoutRow.map((seatNumber, colIdx) => {
+                                            if (!seatNumber) {
+                                                return <div key={`workplace-empty-${rowIdx}-${colIdx}`} className="h-[62px]" />;
+                                            }
+                                            const item = workplaceStats.items.find((entry) => entry.workplaceNumber === seatNumber);
+                                            const incidents = item?.incidents || 0;
+                                            const isSelected = seatNumber === selectedWorkplace;
+                                            const style = getWorkplaceTileStyle(incidents, workplaceStats.maxIncidents);
+                                            return (
+                                                <button
+                                                    key={`workplace-seat-${seatNumber}`}
+                                                    type="button"
+                                                    onClick={() => setSelectedWorkplace((prev) => (prev === seatNumber ? null : seatNumber))}
+                                                    className={`h-[62px] rounded-sm border px-2 py-1 text-left transition-all hover:-translate-y-0.5 ${
+                                                        isSelected ? 'ring-2 ring-rose-400 shadow-md' : 'shadow-sm'
+                                                    }`}
+                                                    style={style}
+                                                    title={`РМ ${seatNumber}: ${incidents} инцидент(ов)`}
+                                                >
+                                                    <div className="text-xs font-bold leading-none">{seatNumber}</div>
+                                                    <div className="mt-1 truncate text-[10px] font-semibold leading-tight">
+                                                        {WORKPLACE_REFERENCE_LABELS[seatNumber] || `РМ ${seatNumber}`}
+                                                    </div>
+                                                    <div className="mt-1 text-[10px] font-bold leading-none">
+                                                        {incidents} сл.
+                                                    </div>
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
                 </div>
 
                 {workplaceStats.topItems.length > 0 && (
@@ -969,7 +1016,7 @@ const WorkplaceAnalyticsPanel = memo(function WorkplaceAnalyticsPanel({ rows }) 
                     </div>
                 )}
 
-                {selectedEntry && selectedEntry.incidents > 0 && (
+                {selectedEntry && (
                     <div className="rounded-lg border border-rose-200 bg-rose-50/60 p-4">
                         <div className="flex flex-wrap items-center justify-between gap-2">
                             <div className="text-sm font-bold text-rose-900">
@@ -980,23 +1027,29 @@ const WorkplaceAnalyticsPanel = memo(function WorkplaceAnalyticsPanel({ rows }) 
                             </div>
                         </div>
 
-                        <div className="mt-3 space-y-2 max-h-60 overflow-y-auto pr-1">
-                            {selectedEntry.rows.map((row, idx) => {
-                                const key = row?.id ? `workplace-row-${row.id}` : `workplace-row-${selectedEntry.workplaceNumber}-${idx}`;
-                                const timeText = (row?.start_time && row?.end_time) ? `${row.start_time} - ${row.end_time}` : '—';
-                                return (
-                                    <div key={key} className="rounded-md border border-rose-100 bg-white p-2.5 text-xs">
-                                        <div className="font-semibold text-slate-800">
-                                            {row?.date || '—'} • {timeText} • {row?.operator_name || '—'}
+                        {selectedEntry.rows.length > 0 ? (
+                            <div className="mt-3 space-y-2 max-h-60 overflow-y-auto pr-1">
+                                {selectedEntry.rows.map((row, idx) => {
+                                    const key = row?.id ? `workplace-row-${row.id}` : `workplace-row-${selectedEntry.workplaceNumber}-${idx}`;
+                                    const timeText = (row?.start_time && row?.end_time) ? `${row.start_time} - ${row.end_time}` : '—';
+                                    return (
+                                        <div key={key} className="rounded-md border border-rose-100 bg-white p-2.5 text-xs">
+                                            <div className="font-semibold text-slate-800">
+                                                {row?.date || '—'} • {timeText} • {row?.operator_name || '—'}
+                                            </div>
+                                            <div className="mt-1 text-slate-700">{row?.reason || '—'}</div>
+                                            {!!row?.comment && (
+                                                <div className="mt-1 text-slate-500 line-clamp-2">Комментарий: {row.comment}</div>
+                                            )}
                                         </div>
-                                        <div className="mt-1 text-slate-700">{row?.reason || '—'}</div>
-                                        {!!row?.comment && (
-                                            <div className="mt-1 text-slate-500 line-clamp-2">Комментарий: {row.comment}</div>
-                                        )}
-                                    </div>
-                                );
-                            })}
-                        </div>
+                                    );
+                                })}
+                            </div>
+                        ) : (
+                            <div className="mt-3 rounded-md border border-dashed border-rose-200 bg-white px-3 py-2 text-xs text-slate-500">
+                                Для этого рабочего места инциденты в выбранном периоде не найдены.
+                            </div>
+                        )}
                     </div>
                 )}
 
