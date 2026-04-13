@@ -718,6 +718,18 @@ def _is_supervisor_role(role: str) -> bool:
     return _normalize_user_role(role) == 'sv'
 
 
+def _current_almaty_datetime():
+    try:
+        return datetime.now(ZoneInfo('Asia/Almaty'))
+    except Exception:
+        return datetime.now()
+
+
+def _is_supervisor_rate_change_day(now_dt=None) -> bool:
+    current_dt = now_dt or _current_almaty_datetime()
+    return int(current_dt.day) == 1
+
+
 def _normalize_management_role(role):
     return _normalize_user_role(role)
 
@@ -2893,6 +2905,17 @@ def admin_update_user():
             return jsonify({"error": "Only admins can update users"}), 403
         if target_role in ('admin', 'super_admin') and requester_role != 'super_admin':
             return jsonify({"error": "Only super admins can update admin users"}), 403
+        if field == 'rate' and requester_role == 'sv':
+            if not _is_supervisor_rate_change_day():
+                return jsonify({"error": "Супервайзер может менять ставку только 1-го числа каждого месяца"}), 403
+            if target_role != 'operator':
+                return jsonify({"error": "Супервайзер может менять ставку только операторам"}), 403
+            try:
+                target_supervisor_id = int(target_user[6])
+            except (TypeError, ValueError):
+                target_supervisor_id = None
+            if target_supervisor_id != requester_id:
+                return jsonify({"error": "Forbidden for this operator"}), 403
 
         success = db.update_user(user_id, field, value, changed_by=requester_id)  # Pass changed_by
         if not success:
@@ -2963,6 +2986,8 @@ def admin_bulk_update_users():
             if rate_value not in [1.0, 0.75, 0.5]:
                 return jsonify({"error": "Invalid rate value"}), 400
             updates['rate'] = rate_value
+            if requester_role == 'sv' and not _is_supervisor_rate_change_day():
+                return jsonify({"error": "Супервайзер может менять ставку только 1-го числа каждого месяца"}), 403
 
         if not updates:
             return jsonify({"error": "No valid changes provided"}), 400
@@ -2976,6 +3001,14 @@ def admin_bulk_update_users():
                     failed_user_ids.append(target_user_id)
                     continue
                 target_role = str(target_user[3] or '').strip().lower()
+                if requester_role == 'sv' and 'rate' in updates:
+                    try:
+                        target_supervisor_id = int(target_user[6])
+                    except (TypeError, ValueError):
+                        target_supervisor_id = None
+                    if target_role != 'operator' or target_supervisor_id != requester_id:
+                        failed_user_ids.append(target_user_id)
+                        continue
                 update_ok = True
                 for field, value in updates.items():
                     value_to_apply = None if (target_role == 'trainer' and field in ('direction_id', 'supervisor_id')) else value

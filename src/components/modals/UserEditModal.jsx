@@ -1,6 +1,6 @@
 ﻿import React, { useEffect, useState } from 'react';
 import FaIcon from '../common/FaIcon';
-import { isAdminLikeRole as isAdminLikeRoleFn } from '../../utils/roles';
+import { isAdminLikeRole as isAdminLikeRoleFn, normalizeRole } from '../../utils/roles';
 
 const PERIOD_STATUS_VALUES = new Set(['bs', 'sick_leave', 'annual_leave', 'dismissal']);
 const DISMISSAL_REASON_WITH_END_DATE = 'Б/С на летний период';
@@ -31,6 +31,18 @@ const AVATAR_MIN_ZOOM = 1;
 const AVATAR_MAX_ZOOM_CAP = 6;
 const KZ_PHONE_REGEX = /^\+7\d{10}$/;
 const KZ_PHONE_PLACEHOLDER = '+7XXXXXXXXXX';
+const getAlmatyDayOfMonth = (date = new Date()) => {
+    try {
+        const dayValue = new Intl.DateTimeFormat('en-US', {
+            timeZone: 'Asia/Almaty',
+            day: 'numeric'
+        }).format(date);
+        const parsed = Number(dayValue);
+        return Number.isFinite(parsed) ? parsed : date.getDate();
+    } catch (_) {
+        return date.getDate();
+    }
+};
 
 const isValidKzPhone = (value) => {
     const normalized = String(value || '').trim();
@@ -239,6 +251,12 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     const isTrainerDraft = (draft) => getRoleValue(draft) === 'trainer';
     const isOperatorDraft = (draft) => getRoleValue(draft) === 'operator';
     const isAdminLikeRequester = isAdminLikeRoleFn(user?.role);
+    const requesterRole = normalizeRole(user?.role);
+    const isSupervisorRequester = requesterRole === 'sv';
+    const isExistingUserEdit = Boolean(userToEdit?.id);
+    const isSupervisorRateEditDay = getAlmatyDayOfMonth() === 1;
+    const isSupervisorRateLocked = isSupervisorRequester && isOperatorDraft(editedUser) && isExistingUserEdit && !isSupervisorRateEditDay;
+    const canShowOperatorRateControls = isOperatorDraft(editedUser) && (isAdminLikeRequester || isSupervisorRequester);
     const normalizeModalStatusValue = (value) => {
         const status = String(value ?? '').trim();
         if (status === 'unpaid_leave') return 'bs';
@@ -1383,19 +1401,30 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     </div>
                     )}
 
+                    {(!isSupervisorRequester || isOperatorDraft(editedUser)) && (
                     <div>
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Ставка</label>
                         <select
                         value={editedUser?.rate ?? 1.0}
                         onChange={(e) => setEditedUser({ ...editedUser, rate: parseFloat(e.target.value) })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                        disabled={isLoading || !!createdCredentials}
+                        className={`w-full px-3 py-2 border rounded-lg shadow-sm focus:outline-none transition-all ${
+                            isSupervisorRateLocked
+                                ? 'border-slate-200 bg-slate-100 text-slate-400 cursor-not-allowed dark:border-slate-700 dark:bg-slate-800/70 dark:text-slate-400'
+                                : 'border-gray-300 focus:ring-2 focus:ring-blue-500 bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100'
+                        }`}
+                        disabled={isLoading || !!createdCredentials || isSupervisorRateLocked}
                         >
                         <option value={1.0}>1.00</option>
                         <option value={0.75}>0.75</option>
                         <option value={0.5}>0.50</option>
                         </select>
+                        {isSupervisorRateLocked && (
+                        <p className="mt-1 text-xs text-slate-500">
+                            Для супервайзеров изменение ставки доступно только 1-го числа месяца.
+                        </p>
+                        )}
                     </div>
+                    )}
 
                     {isOperatorDraft(editedUser) && (
                     <div>
@@ -1933,9 +1962,9 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
 
                         {userToEdit?.role !== "sv" && (
                             <>
-                            {isAdminLikeRequester && isOperatorDraft(editedUser) && (
+                            {canShowOperatorRateControls && (
                                 <div className="grid grid-cols-1 gap-4">
-                                {isOperatorDraft(editedUser) && (
+                                {isAdminLikeRequester && isOperatorDraft(editedUser) && (
                                 <div>
                                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Супервайзер</label>
                                     <select
@@ -1965,14 +1994,23 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     <select
                                     value={editedUser?.rate || 1.0}
                                     onChange={(e) => setEditedUser({ ...editedUser, rate: parseFloat(e.target.value) })}
-                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                                    disabled={isLoading}
+                                    className={`w-full px-3 py-2 border rounded-lg shadow-sm focus:outline-none transition-all ${
+                                        isSupervisorRateLocked
+                                            ? 'border-slate-200 bg-slate-100 text-slate-400 cursor-not-allowed dark:border-slate-700 dark:bg-slate-800/70 dark:text-slate-400'
+                                            : 'border-gray-300 focus:ring-2 focus:ring-blue-500 bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100'
+                                    }`}
+                                    disabled={isLoading || isSupervisorRateLocked}
                                     >
                                     <option value={1.0}>1.00</option>
                                     <option value={0.75}>0.75</option>
                                     <option value={0.5}>0.50</option>
                                     </select>
                                 </div>
+                                {isSupervisorRateLocked && (
+                                    <div className="text-xs text-slate-500">
+                                        Для супервайзеров изменение ставки доступно только 1-го числа месяца.
+                                    </div>
+                                )}
                                 </div>
                             )}
 

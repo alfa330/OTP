@@ -25606,16 +25606,25 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const supervisorFilterOptions = useMemo(() => {
                 const rows = Array.isArray(svData?.operators) ? svData.operators : [];
                 const map = new Map();
+                const activeSupervisors = (Array.isArray(svList) ? svList : []).filter(
+                    (sv) => sv?.status === 'working' || sv?.status === 'unpaid_leave' || !sv?.status
+                );
+                const activeSupervisorIds = new Set(
+                    activeSupervisors
+                        .map((sv) => (sv?.id == null ? '' : String(sv.id)))
+                        .filter(Boolean)
+                );
 
                 rows.forEach((op) => {
                     const id = getOperatorSupervisorFilterValue(op);
+                    if (id !== 'without-supervisor' && activeSupervisorIds.size > 0 && !activeSupervisorIds.has(id)) return;
                     const name = String(op?.supervisor_name || '').trim();
                     if (!map.has(id)) {
                         map.set(id, name || (id === 'without-supervisor' ? 'Без супервайзера' : `СВ #${id}`));
                     }
                 });
 
-                (Array.isArray(svList) ? svList : []).forEach((sv) => {
+                activeSupervisors.forEach((sv) => {
                     const id = sv?.id == null ? '' : String(sv.id);
                     if (!id || map.has(id)) return;
                     map.set(id, String(sv?.name || `СВ #${id}`).trim());
@@ -26846,6 +26855,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const normalized = String(value ?? '').trim().toLowerCase();
                     return ['1', 'true', 'yes', 'y', 'on'].includes(normalized);
                 };
+                const isSupervisorRateChangeDayInAlmaty = () => {
+                    try {
+                        const dayValue = new Intl.DateTimeFormat('en-US', {
+                            timeZone: 'Asia/Almaty',
+                            day: 'numeric'
+                        }).format(new Date());
+                        return Number(dayValue) === 1;
+                    } catch (_) {
+                        return new Date().getDate() === 1;
+                    }
+                };
                 const syncUserAvatar = async (targetUserId, avatarFile, avatarOriginalFile, avatarRemove) => {
                     if (!targetUserId || (!avatarFile && !avatarRemove)) {
                         return null;
@@ -27126,11 +27146,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         // Позволяем повторно сохранить периодный статус из "Сотрудники", даже если users.status уже совпадает
                         await saveUserStatusPeriodViaPlannerApi(editedUser.id, editedUser);
                     }
-                    if (editedUser.rate && editedUser.rate !== userToEdit.rate) {
+                    const nextRate = Number(editedUser?.rate);
+                    const prevRate = Number(userToEdit?.rate);
+                    if (Number.isFinite(nextRate) && Number.isFinite(prevRate) && nextRate !== prevRate) {
+                        if (isSupervisorRole(user?.role) && !isSupervisorRateChangeDayInAlmaty()) {
+                            throw new Error('Супервайзер может менять ставку только 1-го числа каждого месяца');
+                        }
                         await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
                             user_id: editedUser.id,
                             field: 'rate',
-                            value: editedUser.rate
+                            value: nextRate
                         }, {
                             headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
                         });
