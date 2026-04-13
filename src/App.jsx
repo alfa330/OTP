@@ -23131,6 +23131,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [showDisputeModal, setShowDisputeModal] = useState(false);
             const [selectedEvaluation, setSelectedEvaluation] = useState(null);
             const [expandedEvalId, setExpandedEvalId] = useState(null);
+            const [showEvaluationMonitoringScale, setShowEvaluationMonitoringScale] = useState(false);
             const [disputeText, setDisputeText] = useState('');
             const [disputeLoading, setDisputeLoading] = useState(false);
             const [salaryData, setSalaryData] = useState({
@@ -29433,6 +29434,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, [view, user?.id, user?.role]);
 
             useEffect(() => {
+                if (view !== 'evaluation') {
+                    setShowEvaluationMonitoringScale(false);
+                }
+            }, [view]);
+
+            useEffect(() => {
                 if (view !== 'qr_access') {
                     stopQrScanner();
                     setQrScannerError('');
@@ -33153,10 +33160,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     )}
                                     {view === 'evaluation' && (
                                     <div className="bg-white p-4 sm:p-6 lg:p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
-                                        <h2 className="text-xl sm:text-2xl lg:text-3xl font-bold mb-4 sm:mb-6 lg:mb-8 text-gray-900 flex items-center gap-2">
-                                        <FaIcon className="fas fa-chart-bar text-blue-600"></FaIcon>
-                                        <span className="text-blue-600">Ваши оценки</span>
-                                        </h2>
+                                        <div className="mb-4 sm:mb-6 lg:mb-8 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                                            <h2 className="text-xl sm:text-2xl lg:text-3xl font-bold text-gray-900 flex items-center gap-2">
+                                                <FaIcon className="fas fa-chart-bar text-blue-600"></FaIcon>
+                                                <span className="text-blue-600">Ваши оценки</span>
+                                            </h2>
+                                            <button
+                                                type="button"
+                                                onClick={() => setShowEvaluationMonitoringScale((prev) => !prev)}
+                                                className={`inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl border text-sm font-semibold transition-all duration-200 ${
+                                                    showEvaluationMonitoringScale
+                                                        ? 'bg-blue-600 text-white border-blue-600 shadow-md'
+                                                        : 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100'
+                                                }`}
+                                            >
+                                                <FaIcon className="fas fa-sliders-h"></FaIcon>
+                                                <span>{showEvaluationMonitoringScale ? 'Скрыть шкалу' : 'Мониторинговая шкала'}</span>
+                                            </button>
+                                        </div>
 
                                         {(() => {
                                         // prepare filtered lists: exclude evaluations whose call is imported
@@ -33180,6 +33201,34 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         const baseCallTarget = Number(evaluationTarget?.base_call_target ?? 20);
                                         const requiredCallsRaw = Number(evaluationTarget?.required_calls_raw ?? targetEvalCount);
                                         const hasCalculationDetails = evaluationTarget != null;
+                                        const directionCandidatesMap = allEvals.reduce((acc, ev, index) => {
+                                            const direction = ev?.direction;
+                                            const hasCriteria = Array.isArray(direction?.criteria) && direction.criteria.length > 0;
+                                            if (!direction || !hasCriteria) return acc;
+
+                                            const directionName = String(direction?.name || ev?.direction_name || 'Без названия');
+                                            const directionKey = String(direction?.id ?? `${directionName}-${index}`);
+                                            if (!acc[directionKey]) {
+                                                acc[directionKey] = { ...direction, name: directionName, _count: 0 };
+                                            }
+                                            acc[directionKey]._count += 1;
+                                            return acc;
+                                        }, {});
+
+                                        const preferredDirectionName = String(profileData?.direction || user?.direction || '').trim().toLowerCase();
+                                        const sortedScaleDirections = Object.values(directionCandidatesMap)
+                                            .sort((a, b) => (b?._count || 0) - (a?._count || 0));
+                                        const selectedScaleDirection =
+                                            (preferredDirectionName
+                                                ? sortedScaleDirections.find((dir) => String(dir?.name || '').trim().toLowerCase() === preferredDirectionName)
+                                                : null) ||
+                                            sortedScaleDirections[0] ||
+                                            null;
+                                        const selectedScaleCriteria = Array.isArray(selectedScaleDirection?.criteria) ? selectedScaleDirection.criteria : [];
+                                        const selectedScaleCriticalCount = selectedScaleCriteria.filter((crit) => !!crit?.isCritical).length;
+                                        const selectedScaleWeightSum = selectedScaleCriteria
+                                            .filter((crit) => !crit?.isCritical)
+                                            .reduce((sum, crit) => sum + Number(crit?.weight || 0), 0);
 
                                         return isLoading ? (
                                             <p className="text-center text-gray-600 flex items-center justify-center">
@@ -33188,6 +33237,89 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </p>
                                         ) : (
                                             <div>
+                                            {showEvaluationMonitoringScale && (
+                                                <div className="mb-6 sm:mb-8 rounded-2xl border border-blue-200 bg-gradient-to-br from-blue-50 via-white to-cyan-50 p-4 sm:p-6 shadow-sm">
+                                                    {!selectedScaleDirection ? (
+                                                        <div className="text-sm text-gray-600 flex items-center gap-2">
+                                                            <FaIcon className="fas fa-info-circle text-blue-500"></FaIcon>
+                                                            Для выбранного периода нет данных по шкале направления.
+                                                        </div>
+                                                    ) : (
+                                                        <>
+                                                            <div className="flex flex-col xl:flex-row xl:items-end xl:justify-between gap-4">
+                                                                <div>
+                                                                    <p className="text-xs uppercase tracking-wide text-blue-600 font-semibold">Мониторинговая шкала</p>
+                                                                    <h3 className="text-lg sm:text-xl font-bold text-gray-900 mt-1">{selectedScaleDirection.name || 'Без названия'}</h3>
+                                                                    <p className="text-sm text-gray-600 mt-1">Критерии и веса по вашему направлению.</p>
+                                                                </div>
+                                                                <div className="grid grid-cols-3 gap-2 sm:gap-3">
+                                                                    <div className="rounded-lg border border-blue-100 bg-white px-3 py-2">
+                                                                        <div className="text-[11px] uppercase tracking-wide text-gray-500">Критериев</div>
+                                                                        <div className="text-base sm:text-lg font-bold text-blue-700">{selectedScaleCriteria.length}</div>
+                                                                    </div>
+                                                                    <div className="rounded-lg border border-emerald-100 bg-white px-3 py-2">
+                                                                        <div className="text-[11px] uppercase tracking-wide text-gray-500">Вес</div>
+                                                                        <div className="text-base sm:text-lg font-bold text-emerald-700">{selectedScaleWeightSum}%</div>
+                                                                    </div>
+                                                                    <div className="rounded-lg border border-red-100 bg-white px-3 py-2">
+                                                                        <div className="text-[11px] uppercase tracking-wide text-gray-500">Критичные</div>
+                                                                        <div className="text-base sm:text-lg font-bold text-red-700">{selectedScaleCriticalCount}</div>
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+
+                                                            {selectedScaleCriteria.length > 0 ? (
+                                                                <div className="mt-4 space-y-3">
+                                                                    {selectedScaleCriteria.map((crit, cidx) => {
+                                                                        const isCritical = !!crit?.isCritical;
+                                                                        const critWeightRaw = Number(crit?.weight || 0);
+                                                                        const critWeight = Number.isFinite(critWeightRaw) ? Math.max(0, Math.min(100, critWeightRaw)) : 0;
+                                                                        const hasDeficiency = !!crit?.deficiency;
+                                                                        const deficiencyWeightRaw = Number(crit?.deficiency?.weight || 0);
+                                                                        const deficiencyWeight = Number.isFinite(deficiencyWeightRaw) ? Math.max(0, deficiencyWeightRaw) : 0;
+                                                                        const deficiencyDescription = String(crit?.deficiency?.description || '').trim();
+                                                                        const criterionDescription = String(crit?.value || '').trim();
+
+                                                                        return (
+                                                                            <div key={`${crit?.id || crit?.name || 'criterion'}-${cidx}`} className="rounded-xl border border-gray-200 bg-white/95 p-3 sm:p-4">
+                                                                                <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+                                                                                    <div className="min-w-0">
+                                                                                        <div className="flex items-center gap-2 flex-wrap">
+                                                                                            <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-blue-100 text-xs font-bold text-blue-700">{cidx + 1}</span>
+                                                                                            <h4 className="font-semibold text-gray-900">{crit?.name || `Критерий ${cidx + 1}`}</h4>
+                                                                                        </div>
+                                                                                        {criterionDescription && (
+                                                                                            <p className="mt-2 text-sm text-gray-600 whitespace-pre-wrap break-words">{criterionDescription}</p>
+                                                                                        )}
+                                                                                    </div>
+                                                                                    <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold shrink-0 ${isCritical ? 'border-red-200 bg-red-100 text-red-700' : 'border-emerald-200 bg-emerald-100 text-emerald-700'}`}>
+                                                                                        {isCritical ? 'Критичный' : `${critWeight}%`}
+                                                                                    </span>
+                                                                                </div>
+
+                                                                                {!isCritical && (
+                                                                                    <div className="mt-3 h-2 w-full rounded-full bg-gray-100 overflow-hidden">
+                                                                                        <div className="h-full rounded-full bg-gradient-to-r from-blue-500 to-emerald-500" style={{ width: `${critWeight}%` }}></div>
+                                                                                    </div>
+                                                                                )}
+
+                                                                                {hasDeficiency && (
+                                                                                    <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs sm:text-sm text-amber-900">
+                                                                                        Недочет: {deficiencyWeight}%{deficiencyDescription ? ` - ${deficiencyDescription}` : ''}
+                                                                                    </div>
+                                                                                )}
+                                                                            </div>
+                                                                        );
+                                                                    })}
+                                                                </div>
+                                                            ) : (
+                                                                <div className="mt-4 text-sm text-gray-600">В этом направлении пока нет критериев.</div>
+                                                            )}
+                                                        </>
+                                                    )}
+                                                </div>
+                                            )}
+
                                             {/* KPI cards */}
                                             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6 mb-6 sm:mb-8">
                                                 <div className="col-span-1 sm:col-span-2">
