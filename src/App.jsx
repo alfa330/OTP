@@ -23132,6 +23132,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [selectedEvaluation, setSelectedEvaluation] = useState(null);
             const [expandedEvalId, setExpandedEvalId] = useState(null);
             const [showEvaluationMonitoringScale, setShowEvaluationMonitoringScale] = useState(false);
+            const [selectedMonitoringScaleDirectionKey, setSelectedMonitoringScaleDirectionKey] = useState('');
             const [selectedMonitoringScaleCriterionIndex, setSelectedMonitoringScaleCriterionIndex] = useState(null);
             const [disputeText, setDisputeText] = useState('');
             const [disputeLoading, setDisputeLoading] = useState(false);
@@ -27987,6 +27988,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             const closeEvaluationMonitoringScale = useCallback(() => {
                 setShowEvaluationMonitoringScale(false);
+                setSelectedMonitoringScaleDirectionKey('');
                 setSelectedMonitoringScaleCriterionIndex(null);
             }, []);
 
@@ -33198,6 +33200,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         closeEvaluationMonitoringScale();
                                                         return;
                                                     }
+                                                    setSelectedMonitoringScaleDirectionKey('');
                                                     setSelectedMonitoringScaleCriterionIndex(null);
                                                     setShowEvaluationMonitoringScale(true);
                                                 }}
@@ -33240,23 +33243,120 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             if (!direction || !hasCriteria) return acc;
 
                                             const directionName = String(direction?.name || ev?.direction_name || 'Без названия');
-                                            const directionKey = String(direction?.id ?? `${directionName}-${index}`);
+                                            const normalizedDirectionName = String(directionName || '').trim().toLowerCase();
+                                            const directionId = Number(direction?.id);
+                                            const directionKey = Number.isFinite(directionId)
+                                                ? `id:${directionId}`
+                                                : `name:${normalizedDirectionName || `fallback-${index}`}`;
                                             if (!acc[directionKey]) {
-                                                acc[directionKey] = { ...direction, name: directionName, _count: 0 };
+                                                acc[directionKey] = {
+                                                    ...direction,
+                                                    name: directionName,
+                                                    _count: 0,
+                                                    _directionId: Number.isFinite(directionId) ? directionId : null,
+                                                    _normalizedName: normalizedDirectionName,
+                                                    _monitoringKey: `eval:${directionKey}`
+                                                };
                                             }
                                             acc[directionKey]._count += 1;
                                             return acc;
                                         }, {});
 
-                                        const preferredDirectionName = String(profileData?.direction || user?.direction || '').trim().toLowerCase();
-                                        const sortedScaleDirections = Object.values(directionCandidatesMap)
+                                        const normalizeDirectionName = (value) => String(value || '').trim().toLowerCase();
+                                        const directionsMatch = (left, right) => {
+                                            if (!left || !right) return false;
+                                            const leftId = Number(left?._directionId ?? left?.id);
+                                            const rightId = Number(right?._directionId ?? right?.id);
+                                            if (Number.isFinite(leftId) && Number.isFinite(rightId)) {
+                                                return leftId === rightId;
+                                            }
+                                            const leftName = normalizeDirectionName(left?.name || left?.direction_name || left?.direction || left?._normalizedName);
+                                            const rightName = normalizeDirectionName(right?.name || right?.direction_name || right?.direction || right?._normalizedName);
+                                            return Boolean(leftName && rightName && leftName === rightName);
+                                        };
+
+                                        const evaluationScaleDirections = Object.values(directionCandidatesMap)
                                             .sort((a, b) => (b?._count || 0) - (a?._count || 0));
-                                        const selectedScaleDirection =
+
+                                        const operatorUserRow = Array.isArray(users)
+                                            ? users.find((op) => Number(op?.id) === Number(user?.id))
+                                            : null;
+                                        const operatorDirectionNameCandidates = [
+                                            profileData?.direction,
+                                            user?.direction,
+                                            operatorUserRow?.direction_name,
+                                            operatorUserRow?.direction
+                                        ]
+                                            .map(normalizeDirectionName)
+                                            .filter(Boolean);
+                                        const operatorDirectionIdCandidates = [
+                                            profileData?.direction_id,
+                                            user?.direction_id,
+                                            operatorUserRow?.direction_id
+                                        ]
+                                            .map((value) => Number(value))
+                                            .filter((value) => Number.isFinite(value));
+
+                                        const fallbackScaleDirectionFromCatalogRaw = (directions || []).find((dir) => {
+                                            if (!dir) return false;
+                                            const dirId = Number(dir?.id);
+                                            const dirName = normalizeDirectionName(dir?.name || dir?.direction_name || dir?.direction);
+                                            if (Number.isFinite(dirId) && operatorDirectionIdCandidates.includes(dirId)) return true;
+                                            if (dirName && operatorDirectionNameCandidates.includes(dirName)) return true;
+                                            return false;
+                                        }) || null;
+                                        const fallbackScaleDirectionFromCatalog = fallbackScaleDirectionFromCatalogRaw
+                                            ? {
+                                                ...fallbackScaleDirectionFromCatalogRaw,
+                                                name: String(
+                                                    fallbackScaleDirectionFromCatalogRaw?.name ||
+                                                    fallbackScaleDirectionFromCatalogRaw?.direction_name ||
+                                                    fallbackScaleDirectionFromCatalogRaw?.direction ||
+                                                    'Без названия'
+                                                ),
+                                                _count: 0,
+                                                _directionId: Number.isFinite(Number(fallbackScaleDirectionFromCatalogRaw?.id))
+                                                    ? Number(fallbackScaleDirectionFromCatalogRaw.id)
+                                                    : null,
+                                                _normalizedName: normalizeDirectionName(
+                                                    fallbackScaleDirectionFromCatalogRaw?.name ||
+                                                    fallbackScaleDirectionFromCatalogRaw?.direction_name ||
+                                                    fallbackScaleDirectionFromCatalogRaw?.direction
+                                                ),
+                                                _monitoringKey: `catalog:${
+                                                    Number.isFinite(Number(fallbackScaleDirectionFromCatalogRaw?.id))
+                                                        ? `id:${Number(fallbackScaleDirectionFromCatalogRaw.id)}`
+                                                        : `name:${normalizeDirectionName(fallbackScaleDirectionFromCatalogRaw?.name || fallbackScaleDirectionFromCatalogRaw?.direction_name || fallbackScaleDirectionFromCatalogRaw?.direction)}`
+                                                }`
+                                            }
+                                            : null;
+
+                                        const availableScaleDirections = [...evaluationScaleDirections];
+                                        if (
+                                            fallbackScaleDirectionFromCatalog &&
+                                            !availableScaleDirections.some((dir) => directionsMatch(dir, fallbackScaleDirectionFromCatalog))
+                                        ) {
+                                            availableScaleDirections.push(fallbackScaleDirectionFromCatalog);
+                                        }
+
+                                        const preferredDirectionName = normalizeDirectionName(profileData?.direction || user?.direction || '');
+                                        const selectedScaleDirectionByOperatorId = availableScaleDirections.find((dir) => {
+                                            const dirId = Number(dir?._directionId ?? dir?.id);
+                                            return Number.isFinite(dirId) && operatorDirectionIdCandidates.includes(dirId);
+                                        }) || null;
+                                        const selectedScaleDirectionDefault =
+                                            selectedScaleDirectionByOperatorId ||
                                             (preferredDirectionName
-                                                ? sortedScaleDirections.find((dir) => String(dir?.name || '').trim().toLowerCase() === preferredDirectionName)
+                                                ? availableScaleDirections.find((dir) => normalizeDirectionName(dir?.name) === preferredDirectionName)
                                                 : null) ||
-                                            sortedScaleDirections[0] ||
+                                            availableScaleDirections[0] ||
                                             null;
+                                        const selectedScaleDirection =
+                                            (selectedMonitoringScaleDirectionKey
+                                                ? availableScaleDirections.find((dir) => String(dir?._monitoringKey || '') === selectedMonitoringScaleDirectionKey)
+                                                : null) ||
+                                            selectedScaleDirectionDefault;
+                                        const selectedScaleDirectionKey = String(selectedScaleDirection?._monitoringKey || '');
                                         const selectedScaleCriteria = Array.isArray(selectedScaleDirection?.criteria) ? selectedScaleDirection.criteria : [];
                                         const selectedScaleCriticalCount = selectedScaleCriteria.filter((crit) => !!crit?.isCritical).length;
                                         const selectedScaleWeightSum = selectedScaleCriteria
@@ -33315,6 +33415,34 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     <FaIcon className="fas fa-times"></FaIcon>
                                                                 </button>
                                                             </div>
+
+                                                            {availableScaleDirections.length > 1 && (
+                                                                <div className="mt-4">
+                                                                    <label className="block text-xs uppercase tracking-wide text-gray-500 mb-1">
+                                                                        Направление
+                                                                    </label>
+                                                                    <select
+                                                                        value={selectedScaleDirectionKey}
+                                                                        onChange={(event) => {
+                                                                            setSelectedMonitoringScaleDirectionKey(event.target.value);
+                                                                            setSelectedMonitoringScaleCriterionIndex(null);
+                                                                        }}
+                                                                        className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-400"
+                                                                    >
+                                                                        {availableScaleDirections.map((directionOption, optionIndex) => {
+                                                                            const optionKey = String(directionOption?._monitoringKey || `direction-option-${optionIndex}`);
+                                                                            const optionName = String(directionOption?.name || 'Без названия');
+                                                                            const optionCount = Number(directionOption?._count || 0);
+                                                                            const optionSuffix = optionCount > 0 ? ` (${optionCount})` : '';
+                                                                            return (
+                                                                                <option key={optionKey} value={optionKey}>
+                                                                                    {optionName}{optionSuffix}
+                                                                                </option>
+                                                                            );
+                                                                        })}
+                                                                    </select>
+                                                                </div>
+                                                            )}
 
                                                             <div className="mt-4 grid grid-cols-3 gap-2 sm:gap-3">
                                                                 <div className="rounded-lg border border-blue-100 bg-blue-50 px-3 py-2">
