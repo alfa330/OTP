@@ -119,6 +119,24 @@ def _minutes_to_time(minutes: int) -> str:
     mins = minutes % 60
     return f"{hours:02d}:{mins:02d}"
 
+WORK_SHIFT_TYPE_REGULAR = 'regular'
+WORK_SHIFT_TYPE_OFFICE_PRACTICE = 'office_practice'
+WORK_SHIFT_TYPE_ALLOWED = {
+    WORK_SHIFT_TYPE_REGULAR,
+    WORK_SHIFT_TYPE_OFFICE_PRACTICE
+}
+
+
+def _normalize_work_shift_type_value(value: Optional[str]) -> str:
+    raw = str(value or '').strip().lower()
+    if raw in ('', 'regular', 'обычная', 'обычная смена'):
+        return WORK_SHIFT_TYPE_REGULAR
+    if raw in ('office_practice', 'practice', 'практика', 'практика в офисе', 'практика в офисе таксопарка'):
+        return WORK_SHIFT_TYPE_OFFICE_PRACTICE
+    if raw not in WORK_SHIFT_TYPE_ALLOWED:
+        raise ValueError("Invalid shift_type")
+    return raw
+
 def _merge_shifts_for_date(shifts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Объединяет перекрывающиеся смены на одну дату.
@@ -142,7 +160,10 @@ def _merge_shifts_for_date(shifts: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             'start': start_min,
             'end': end_min,
             'original': shift,
-            'breaks': shift.get('breaks', [])
+            'breaks': shift.get('breaks', []),
+            'shift_type': _normalize_work_shift_type_value(
+                shift.get('shift_type') if isinstance(shift, dict) and ('shift_type' in shift) else shift.get('shiftType')
+            )
         })
     
     # Сортируем по времени начала
@@ -166,6 +187,9 @@ def _merge_shifts_for_date(shifts: List[Dict[str, Any]]) -> List[Dict[str, Any]]
                     last['original_ids'] = [last['original'].get('id')]
                 if interval['original'].get('id'):
                     last['original_ids'].append(interval['original'].get('id'))
+                # Для объединенного интервала приоритет у "Практики в офисе".
+                if interval.get('shift_type') == WORK_SHIFT_TYPE_OFFICE_PRACTICE:
+                    last['shift_type'] = WORK_SHIFT_TYPE_OFFICE_PRACTICE
             else:
                 merged.append(interval.copy())
     
@@ -210,7 +234,8 @@ def _merge_shifts_for_date(shifts: List[Dict[str, Any]]) -> List[Dict[str, Any]]
         result.append({
             'start': start_time,
             'end': end_time,
-            'breaks': normalized_breaks
+            'breaks': normalized_breaks,
+            'shift_type': _normalize_work_shift_type_value(m.get('shift_type'))
         })
     
     return result
@@ -1006,10 +1031,37 @@ class Database:
                     shift_date DATE NOT NULL,
                     start_time TIME NOT NULL,
                     end_time TIME NOT NULL,
+                    shift_type VARCHAR(32) NOT NULL DEFAULT 'regular',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(operator_id, shift_date, start_time, end_time)
                 );
+            """)
+            cursor.execute("""
+                ALTER TABLE work_shifts
+                ADD COLUMN IF NOT EXISTS shift_type VARCHAR(32);
+            """)
+            cursor.execute("""
+                UPDATE work_shifts
+                SET shift_type = 'regular'
+                WHERE shift_type IS NULL;
+            """)
+            cursor.execute("""
+                ALTER TABLE work_shifts
+                ALTER COLUMN shift_type SET DEFAULT 'regular';
+            """)
+            cursor.execute("""
+                ALTER TABLE work_shifts
+                ALTER COLUMN shift_type SET NOT NULL;
+            """)
+            cursor.execute("""
+                ALTER TABLE work_shifts
+                DROP CONSTRAINT IF EXISTS work_shifts_shift_type_check;
+            """)
+            cursor.execute("""
+                ALTER TABLE work_shifts
+                ADD CONSTRAINT work_shifts_shift_type_check
+                CHECK (shift_type IN ('regular', 'office_practice'));
             """)
 
             # Break periods within shifts
@@ -3727,6 +3779,20 @@ class Database:
                       AND t.count_in_hours = TRUE
                       AND t.training_date >= %s
                       AND t.training_date < %s
+                ), 0)
+                + COALESCE((
+                    SELECT SUM(
+                        CASE
+                            WHEN ws.end_time <= ws.start_time
+                                THEN EXTRACT(EPOCH FROM (ws.end_time + INTERVAL '24 hours' - ws.start_time))
+                            ELSE EXTRACT(EPOCH FROM (ws.end_time - ws.start_time))
+                        END
+                    ) / 3600.0
+                    FROM work_shifts ws
+                    WHERE ws.operator_id = u.id
+                      AND COALESCE(ws.shift_type, 'regular') = 'office_practice'
+                      AND ws.shift_date >= %s
+                      AND ws.shift_date < %s
                 ), 0) AS training_hours,
                 COALESCE((
                     SELECT SUM(
@@ -3761,6 +3827,8 @@ class Database:
             WHERE u.id = %s
             LIMIT 1
         """, (
+            month_start_date,
+            next_month_start,
             month_start_date,
             next_month_start,
             month_start_date,
@@ -3954,6 +4022,22 @@ class Database:
             """, (operator_id, current_month))
             tr_row = cursor.fetchone()
             training_hours = float(tr_row[0] or 0.0)
+
+            cursor.execute("""
+                SELECT COALESCE(SUM(
+                    CASE
+                    WHEN ws.end_time <= ws.start_time
+                        THEN EXTRACT(EPOCH FROM (ws.end_time + INTERVAL '24 hours' - ws.start_time))
+                    ELSE EXTRACT(EPOCH FROM (ws.end_time - ws.start_time))
+                    END
+                ) / 3600.0, 0) AS practice_shift_training_hours
+                FROM work_shifts ws
+                WHERE ws.operator_id = %s
+                AND COALESCE(ws.shift_type, 'regular') = 'office_practice'
+                AND TO_CHAR(ws.shift_date, 'YYYY-MM') = %s
+            """, (operator_id, current_month))
+            practice_row = cursor.fetchone()
+            training_hours += float(practice_row[0] or 0.0)
 
             # 3) Рассчитываем техсбои за месяц (учитываются в часах выполнения нормы)
             cursor.execute("""
@@ -4264,6 +4348,19 @@ class Database:
                     WHERE t.operator_id = u.id
                     AND t.count_in_hours = TRUE
                     AND (%s IS NULL OR TO_CHAR(t.training_date, 'YYYY-MM') = %s)
+                ), 0)
+                + COALESCE((
+                    SELECT SUM(
+                        CASE
+                            WHEN ws.end_time <= ws.start_time
+                                THEN EXTRACT(EPOCH FROM (ws.end_time + INTERVAL '24 hours' - ws.start_time))
+                            ELSE EXTRACT(EPOCH FROM (ws.end_time - ws.start_time))
+                        END
+                    ) / 3600.0
+                    FROM work_shifts ws
+                    WHERE ws.operator_id = u.id
+                    AND COALESCE(ws.shift_type, 'regular') = 'office_practice'
+                    AND (%s IS NULL OR TO_CHAR(ws.shift_date, 'YYYY-MM') = %s)
                 ), 0) AS training_hours,
 
                 -- technical issue hours считаем отдельно и учитываем в часах выполнения
@@ -4300,7 +4397,7 @@ class Database:
             WHERE u.role = 'operator'
         """
 
-        params = [month, month, month, month, month, month, month, month]
+        params = [month, month, month, month, month, month, month, month, month, month]
 
         if operator_id:
             query += " AND u.id = %s"
@@ -8434,6 +8531,12 @@ class Database:
             return datetime.strptime(value, '%H:%M').time()
         raise ValueError(f"Invalid {field_name} format, expected HH:MM")
 
+    def _normalize_work_shift_type(self, value):
+        return _normalize_work_shift_type_value(value)
+
+    def _is_office_practice_shift_type(self, value):
+        return self._normalize_work_shift_type(value) == WORK_SHIFT_TYPE_OFFICE_PRACTICE
+
     def _normalize_shift_breaks(self, breaks):
         if breaks is None:
             return []
@@ -9426,7 +9529,7 @@ class Database:
         shifts_source_end = calc_end_date_obj
 
         cursor.execute("""
-            SELECT id, operator_id, shift_date, start_time, end_time
+            SELECT id, operator_id, shift_date, start_time, end_time, shift_type
             FROM work_shifts
             WHERE operator_id = ANY(%s)
               AND shift_date >= %s
@@ -9437,14 +9540,18 @@ class Database:
 
         shifts_by_start_day = {}
         shifts_segments_by_day = {}
-        for shift_id, op_id, shift_date_value, start_time_value, end_time_value in shifts_rows:
+        practice_shift_segments_by_day = {}
+        for shift_id, op_id, shift_date_value, start_time_value, end_time_value, shift_type_value in shifts_rows:
             start_min, end_min = self._schedule_interval_minutes(start_time_value, end_time_value)
             start_sec = int(start_min) * 60
             end_sec = int(end_min) * 60
+            shift_type_norm = self._normalize_work_shift_type(shift_type_value)
+            is_practice_shift = (shift_type_norm == WORK_SHIFT_TYPE_OFFICE_PRACTICE)
             item = {
                 'id': int(shift_id),
                 'start': int(start_sec),
-                'end': int(end_sec)
+                'end': int(end_sec),
+                'shift_type': shift_type_norm
             }
             start_key = (int(op_id), shift_date_value)
             shifts_by_start_day.setdefault(start_key, []).append(item)
@@ -9473,6 +9580,11 @@ class Database:
                     'start': local_start,
                     'end': local_end
                 })
+                if is_practice_shift:
+                    practice_shift_segments_by_day.setdefault((int(op_id), day_value), []).append({
+                        'start': local_start,
+                        'end': local_end
+                    })
 
         status_start_for_query = calc_start_date_obj - timedelta(days=1)
         status_end_for_query = calc_end_date_obj + timedelta(days=1)
@@ -9594,6 +9706,9 @@ class Database:
                 day_statuses,
                 lambda seg: str(seg.get('status_key') or '') == SCHEDULE_AUTO_TRAINING_STATUS_KEY
             )
+            day_practice_shift_intervals = self._merge_break_intervals(
+                practice_shift_segments_by_day.get((op_id, day_value)) or []
+            )
             day_technical_reason_status = pick_status_intervals(
                 day_statuses,
                 lambda seg: self._schedule_auto_is_tech_reason_status_key(seg.get('status_key'))
@@ -9611,7 +9726,10 @@ class Database:
             # Перерывы считаем по фактическим статусам в пределах смены, независимо от
             # запланированных break-интервалов графика.
             break_seconds = self._schedule_auto_overlap_minutes(day_shift_intervals, day_break_status)
-            training_seconds_in_shift = self._schedule_auto_overlap_minutes(day_shift_intervals, day_training_status)
+            training_intervals_effective = self._merge_break_intervals(
+                (day_training_status or []) + (day_practice_shift_intervals or [])
+            )
+            training_seconds_in_shift = self._schedule_auto_overlap_minutes(day_shift_intervals, training_intervals_effective)
             technical_reason_seconds_in_shift = self._schedule_auto_overlap_minutes(day_shift_intervals, day_technical_reason_status)
 
             late_seconds_total = 0.0
@@ -10174,9 +10292,11 @@ class Database:
         start_time,
         end_time,
         breaks=None,
+        shift_type=None,
         previous_start_time=None,
         previous_end_time=None
     ):
+        shift_type_norm = self._normalize_work_shift_type(shift_type)
         new_start_min, new_end_min = self._schedule_interval_minutes(start_time, end_time)
         new_duration_min = max(0, new_end_min - new_start_min)
         direction_name = self._get_operator_direction_name_tx(cursor, operator_id)
@@ -10294,13 +10414,13 @@ class Database:
 
         cursor.execute(
             """
-            INSERT INTO work_shifts (operator_id, shift_date, start_time, end_time, updated_at)
-            VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+            INSERT INTO work_shifts (operator_id, shift_date, start_time, end_time, shift_type, updated_at)
+            VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
             ON CONFLICT (operator_id, shift_date, start_time, end_time)
-            DO UPDATE SET updated_at = CURRENT_TIMESTAMP
+            DO UPDATE SET shift_type = EXCLUDED.shift_type, updated_at = CURRENT_TIMESTAMP
             RETURNING id
             """,
-            (operator_id, shift_date, start_time, end_time)
+            (operator_id, shift_date, start_time, end_time, shift_type_norm)
         )
         shift_id = cursor.fetchone()[0]
         self._insert_shift_breaks(cursor, shift_id, breaks_norm)
@@ -11058,7 +11178,7 @@ class Database:
                 }
 
             shifts_query = """
-                SELECT ws.id, ws.operator_id, ws.shift_date, ws.start_time, ws.end_time
+                SELECT ws.id, ws.operator_id, ws.shift_date, ws.start_time, ws.end_time, ws.shift_type
                 FROM work_shifts ws
                 WHERE ws.operator_id = ANY(%s)
             """
@@ -11075,7 +11195,7 @@ class Database:
 
             shift_ids = []
             shift_ref = {}
-            for shift_id, operator_id, shift_date, start_time_value, end_time_value in shifts_rows:
+            for shift_id, operator_id, shift_date, start_time_value, end_time_value, shift_type_value in shifts_rows:
                 op_entry = result_map.get(operator_id)
                 if not op_entry:
                     continue
@@ -11084,6 +11204,7 @@ class Database:
                     'id': shift_id,
                     'start': start_time_value.strftime('%H:%M'),
                     'end': end_time_value.strftime('%H:%M'),
+                    'shift_type': self._normalize_work_shift_type(shift_type_value),
                     'breaks': []
                 }
                 op_entry['shifts'].setdefault(date_str, []).append(shift_item)
@@ -11224,7 +11345,7 @@ class Database:
             }
 
             shifts_query = """
-                SELECT ws.id, ws.shift_date, ws.start_time, ws.end_time
+                SELECT ws.id, ws.shift_date, ws.start_time, ws.end_time, ws.shift_type
                 FROM work_shifts ws
                 WHERE ws.operator_id = %s
             """
@@ -11241,12 +11362,13 @@ class Database:
 
             shift_ids = []
             shift_ref = {}
-            for shift_id, shift_date, start_time_value, end_time_value in shifts_rows:
+            for shift_id, shift_date, start_time_value, end_time_value, shift_type_value in shifts_rows:
                 date_str = shift_date.strftime('%Y-%m-%d')
                 shift_item = {
                     'id': shift_id,
                     'start': start_time_value.strftime('%H:%M'),
                     'end': end_time_value.strftime('%H:%M'),
+                    'shift_type': self._normalize_work_shift_type(shift_type_value),
                     'breaks': []
                 }
                 result['shifts'].setdefault(date_str, []).append(shift_item)
@@ -11345,7 +11467,7 @@ class Database:
 
         cursor.execute(
             """
-            SELECT ws.id, ws.shift_date, ws.start_time, ws.end_time
+            SELECT ws.id, ws.shift_date, ws.start_time, ws.end_time, ws.shift_type
             FROM work_shifts ws
             WHERE ws.operator_id = %s
               AND ws.shift_date >= %s
@@ -11359,11 +11481,12 @@ class Database:
         shifts_by_date = {}
         shift_ref = {}
         shift_ids = []
-        for shift_id, shift_date, start_time_value, end_time_value in rows:
+        for shift_id, shift_date, start_time_value, end_time_value, shift_type_value in rows:
             day_key = shift_date.strftime('%Y-%m-%d')
             item = {
                 'start': start_time_value.strftime('%H:%M'),
                 'end': end_time_value.strftime('%H:%M'),
+                'shift_type': self._normalize_work_shift_type(shift_type_value),
                 'breaks': []
             }
             shifts_by_date.setdefault(day_key, []).append(item)
@@ -11439,6 +11562,9 @@ class Database:
                 parsed_shifts.append({
                     'start': start_obj.strftime('%H:%M'),
                     'end': end_obj.strftime('%H:%M'),
+                    'shift_type': self._normalize_work_shift_type(
+                        seg.get('shift_type') if isinstance(seg, dict) and ('shift_type' in seg) else seg.get('shiftType')
+                    ),
                     'breaks': breaks_norm
                 })
 
@@ -13052,6 +13178,7 @@ class Database:
                         shift_date=day_obj,
                         start_time=seg_start_obj,
                         end_time=seg_end_obj,
+                        shift_type=seg.get('shift_type'),
                         # Перерывы пересчитываем по правилам после обмена, старые не переносим.
                         breaks=None
                     )
@@ -13067,6 +13194,7 @@ class Database:
                         shift_date=day_obj,
                         start_time=seg_start_obj,
                         end_time=seg_end_obj,
+                        shift_type=seg.get('shift_type'),
                         # Перерывы пересчитываем по правилам после обмена, старые не переносим.
                         breaks=None
                     )
@@ -13102,6 +13230,7 @@ class Database:
         start_time,
         end_time,
         breaks=None,
+        shift_type=None,
         previous_start_time=None,
         previous_end_time=None
     ):
@@ -13123,6 +13252,7 @@ class Database:
                 start_time=start_time_obj,
                 end_time=end_time_obj,
                 breaks=breaks,
+                shift_type=shift_type,
                 previous_start_time=previous_start_time,
                 previous_end_time=previous_end_time
             )
@@ -13409,7 +13539,8 @@ class Database:
                         shift_date=date_obj,
                         start_time=start_time_obj,
                         end_time=end_time_obj,
-                        breaks=resolved_breaks
+                        breaks=resolved_breaks,
+                        shift_type=item.get('shift_type')
                     )
                     summary['set_shift'] += 1
                     summary['deleted_shift_rows'] += deleted_count
@@ -13564,7 +13695,8 @@ class Database:
                             shift_date=date_obj,
                             start_time=start_time_obj,
                             end_time=end_time_obj,
-                            breaks=shift.get('breaks') if ('breaks' in shift) else None
+                            breaks=shift.get('breaks') if ('breaks' in shift) else None,
+                            shift_type=shift.get('shift_type')
                         )
                     except ValueError as e:
                         if _is_blacklist_shift_block_error(e):
@@ -14250,7 +14382,8 @@ class Database:
                     shift_date=shift_date_obj,
                     start_time=start_time_obj,
                     end_time=end_time_obj,
-                    breaks=shift.get('breaks')
+                    breaks=shift.get('breaks'),
+                    shift_type=shift.get('shift_type')
                 )
                 result_ids.append(shift_id)
 

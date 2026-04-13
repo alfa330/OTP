@@ -534,6 +534,82 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         return Number((diff / 60).toFixed(2));
         }
 
+        const PLANNER_SHIFT_TYPE_REGULAR = 'regular';
+        const PLANNER_SHIFT_TYPE_OFFICE_PRACTICE = 'office_practice';
+        const PLANNER_SHIFT_TYPE_OFFICE_PRACTICE_LABEL = 'Практика в офисе';
+
+        function normalizePlannerShiftType(value) {
+        const raw = String(value || '').trim().toLowerCase();
+        if (!raw || raw === 'regular' || raw === 'обычная' || raw === 'обычная смена') return PLANNER_SHIFT_TYPE_REGULAR;
+        if (
+            raw === 'office_practice'
+            || raw === 'practice'
+            || raw === 'практика'
+            || raw === 'практика в офисе'
+            || raw === 'практика в офисе таксопарка'
+        ) {
+            return PLANNER_SHIFT_TYPE_OFFICE_PRACTICE;
+        }
+        return PLANNER_SHIFT_TYPE_REGULAR;
+        }
+
+        function isPlannerOfficePracticeShift(shift) {
+        if (!shift || typeof shift !== 'object') return false;
+        return normalizePlannerShiftType(shift.shift_type ?? shift.shiftType) === PLANNER_SHIFT_TYPE_OFFICE_PRACTICE;
+        }
+
+        function plannerShiftTypeLabel(value) {
+        const type = normalizePlannerShiftType(value);
+        if (type === PLANNER_SHIFT_TYPE_OFFICE_PRACTICE) return PLANNER_SHIFT_TYPE_OFFICE_PRACTICE_LABEL;
+        return 'Обычная смена';
+        }
+
+        function plannerShiftDisplayLabel(shift) {
+        if (!shift) return '';
+        const startMinutes = parseTimeToMinutes(shift.start);
+        const endMinutes = parseTimeToMinutes(shift.end);
+        const isCrossing = Number.isFinite(startMinutes) && Number.isFinite(endMinutes) && endMinutes <= startMinutes && shift.end !== '00:00';
+        const base = `${shift.start} — ${shift.end}${isCrossing ? ' (+1)' : ''}`;
+        return isPlannerOfficePracticeShift(shift) ? `${PLANNER_SHIFT_TYPE_OFFICE_PRACTICE_LABEL}: ${base}` : base;
+        }
+
+        function plannerShiftVisualMeta(shift) {
+        const startMinutes = parseTimeToMinutes(shift?.start);
+        const endMinutes = parseTimeToMinutes(shift?.end);
+        const isNight = Number.isFinite(startMinutes) && Number.isFinite(endMinutes) && endMinutes <= startMinutes;
+        const isPractice = isPlannerOfficePracticeShift(shift);
+        if (isPractice) {
+            return {
+            isNight,
+            isPractice,
+            barGradient: isNight ? 'linear-gradient(90deg,#059669,#047857)' : 'linear-gradient(90deg,#34d399,#059669)',
+            chipClass: isNight
+                ? 'bg-emerald-100 text-emerald-900 border border-emerald-300'
+                : 'bg-emerald-50 text-emerald-800 border border-emerald-200',
+            dotClass: 'bg-emerald-500',
+            labelClass: 'text-emerald-800'
+            };
+        }
+        if (isNight) {
+            return {
+            isNight,
+            isPractice,
+            barGradient: 'linear-gradient(90deg,#f97316,#ea580c)',
+            chipClass: 'bg-orange-100 text-orange-800 border border-orange-200',
+            dotClass: 'bg-orange-500',
+            labelClass: 'text-amber-600'
+            };
+        }
+        return {
+            isNight,
+            isPractice,
+            barGradient: 'linear-gradient(90deg,#60a5fa,#2563eb)',
+            chipClass: 'bg-blue-100 text-blue-800 border border-blue-200',
+            dotClass: 'bg-blue-500',
+            labelClass: 'text-blue-800'
+        };
+        }
+
         const HoursAccountingView = ({ user, svList, onUploaded, showToast }) => {
         const [month, setMonth] = useState(() => {
             const d = new Date();
@@ -655,12 +731,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             offlineParams.append('date_to', `${month}-${String(daysInMonth).padStart(2, '0')}`);
             offlineParams.append('limit', '5000');
             const offlineActivitiesUrl = `${API_BASE_URL}/api/offline_activities?${offlineParams.toString()}`;
+            const scheduleParams = new URLSearchParams();
+            scheduleParams.append('start_date', `${month}-01`);
+            scheduleParams.append('end_date', `${month}-${String(daysInMonth).padStart(2, '0')}`);
+            scheduleParams.append('include_imported_statuses', '0');
+            scheduleParams.append('include_technical_issues', '0');
+            scheduleParams.append('include_offline_activities', '0');
+            const schedulesUrl = `${API_BASE_URL}/api/work_schedules/operators?${scheduleParams.toString()}`;
 
-            const [hoursResp, trainingsResp, technicalIssuesResp, offlineActivitiesResp] = await Promise.all([
+            const [hoursResp, trainingsResp, technicalIssuesResp, offlineActivitiesResp, schedulesResp] = await Promise.all([
                 axios.get(url, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } }),
                 axios.get(trainingsUrl, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } }),
                 axios.get(technicalIssuesUrl, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } }),
-                axios.get(offlineActivitiesUrl, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } })
+                axios.get(offlineActivitiesUrl, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } }),
+                axios.get(schedulesUrl, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } })
             ]);
 
             const loadedOperators = (hoursResp.data && hoursResp.data.status === 'success' && Array.isArray(hoursResp.data.operators))
@@ -673,9 +757,68 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 fallbackToast('Не удалось загрузить daily hours', 'error');
             }
 
+            const visibleOperatorIds = new Set(
+                (loadedOperators || [])
+                    .map(op => Number(op?.operator_id))
+                    .filter(id => Number.isFinite(id) && id > 0)
+            );
+
             const trainingsList = Array.isArray(trainingsResp.data) ? trainingsResp.data : (trainingsResp.data?.trainings || []);
+            const scheduleOperators = Array.isArray(schedulesResp?.data?.operators) ? schedulesResp.data.operators : [];
+            const trainingSignatureSet = new Set(
+                (trainingsList || []).map((t) => [
+                String(t?.operator_id || ''),
+                String(t?.date || ''),
+                String(t?.start_time || ''),
+                String(t?.end_time || ''),
+                String(t?.reason || '').trim().toLowerCase()
+                ].join('|'))
+            );
+            const syntheticPracticeTrainings = [];
+            for (const op of scheduleOperators) {
+                const opId = Number(op?.id);
+                if (!Number.isFinite(opId) || opId <= 0) continue;
+                if (visibleOperatorIds.size > 0 && !visibleOperatorIds.has(opId)) continue;
+                const shiftsByDay = (op && typeof op.shifts === 'object' && op.shifts) ? op.shifts : {};
+                for (const [dateKeyRaw, dayShiftsRaw] of Object.entries(shiftsByDay)) {
+                const dateKey = String(dateKeyRaw || '').trim();
+                if (!dateKey) continue;
+                const dayShifts = Array.isArray(dayShiftsRaw) ? dayShiftsRaw : [];
+                for (const shift of dayShifts) {
+                    if (normalizePlannerShiftType(shift?.shift_type ?? shift?.shiftType) !== PLANNER_SHIFT_TYPE_OFFICE_PRACTICE) continue;
+                    const startTime = String(shift?.start || '').trim();
+                    const endTime = String(shift?.end || '').trim();
+                    if (!startTime || !endTime) continue;
+                    const signature = [
+                    String(opId),
+                    dateKey,
+                    startTime,
+                    endTime,
+                    String('Практика в офисе таксопарка').toLowerCase()
+                    ].join('|');
+                    if (trainingSignatureSet.has(signature)) continue;
+                    trainingSignatureSet.add(signature);
+                    syntheticPracticeTrainings.push({
+                    id: `practice-shift-${shift?.id ?? `${opId}-${dateKey}-${startTime}-${endTime}`}`,
+                    operator_id: opId,
+                    date: dateKey,
+                    start_time: startTime,
+                    end_time: endTime,
+                    reason: 'Практика в офисе таксопарка',
+                    comment: 'Автоматически из графика смен',
+                    created_at: '',
+                    created_by_name: 'Планировщик',
+                    count_in_hours: true,
+                    is_practice_shift: true,
+                    read_only: true,
+                    shift_type: PLANNER_SHIFT_TYPE_OFFICE_PRACTICE
+                    });
+                }
+                }
+            }
+            const mergedTrainingsList = [...trainingsList, ...syntheticPracticeTrainings];
             const tmap = {};
-            for (const t of trainingsList) {
+            for (const t of mergedTrainingsList) {
                 const op = t.operator_id;
                 let dayNum;
                 try {
@@ -688,12 +831,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 tmap[op][dayNum].push(t);
             }
             setTrainingsMap(tmap);
-
-            const visibleOperatorIds = new Set(
-                (loadedOperators || [])
-                    .map(op => Number(op?.operator_id))
-                    .filter(id => Number.isFinite(id) && id > 0)
-            );
             const technicalItems = Array.isArray(technicalIssuesResp?.data?.items)
                 ? technicalIssuesResp.data.items
                 : [];
@@ -2733,6 +2870,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             <div className="space-y-2">
                             {getTrainingsFor(selectedCell.operator.operator_id, selectedCell.day).map(t => {
                                 const dur = computeTrainingDurationHours(t);
+                                const isReadOnlyTraining = !!(t?.read_only || t?.is_practice_shift);
                                 return (
                                 <div
                                     key={t.id}
@@ -2750,18 +2888,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         <button
                                         type="button"
                                         onClick={() => openTrainingModalForDay(selectedCell.operator.operator_id, selectedCell.day, t)}
-                                        disabled={isTrainingActionLoading}
+                                        disabled={isTrainingActionLoading || isReadOnlyTraining}
                                         className="px-2 py-1 text-xs rounded-md border bg-white hover:bg-gray-50"
                                         aria-label="Редактировать тренинг"
+                                        title={isReadOnlyTraining ? 'Запись формируется из графика смен' : 'Редактировать тренинг'}
                                         >
                                         <FaIcon className="fas fa-pen" aria-hidden="true" />
                                         </button>
                                         <button
                                         type="button"
                                         onClick={() => handleTrainingDeleteFromModal(t.id)}
-                                        disabled={isTrainingActionLoading}
+                                        disabled={isTrainingActionLoading || isReadOnlyTraining}
                                         className="px-2 py-1 text-xs rounded-md border border-red-200 text-red-600 bg-white hover:bg-red-50"
                                         aria-label="Удалить тренинг"
+                                        title={isReadOnlyTraining ? 'Запись формируется из графика смен' : 'Удалить тренинг'}
                                         >
                                         <FaIcon className="fas fa-trash" aria-hidden="true" />
                                         </button>
@@ -2775,6 +2915,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-white border">
                                         <FaIcon className="fas fa-info-circle" /> {t.count_in_hours === false ? 'Не засчитывается' : 'Засчитывается в часы'}
                                     </span>
+                                    {isReadOnlyTraining && (
+                                        <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-white border border-emerald-200 text-emerald-700">
+                                        <FaIcon className="fas fa-briefcase" /> Из графика смен
+                                        </span>
+                                    )}
                                     {t.verified && (
                                         <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-white border">
                                         <FaIcon className="fas fa-check" /> Проверено
@@ -6221,7 +6366,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const start = timeToMinutes(s.start);
                 let end = timeToMinutes(s.end);
                 if (end <= start) end += 1440;
-                return { start, end };
+                return {
+                    start,
+                    end,
+                    shiftType: normalizePlannerShiftType(s?.shift_type ?? s?.shiftType)
+                };
             });
             intervals.sort((a, b) => a.start - b.start);
             const merged = [];
@@ -6232,6 +6381,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const last = merged[merged.length - 1];
                 if (iv.start <= last.end) {
                     last.end = Math.max(last.end, iv.end);
+                    if (iv.shiftType === PLANNER_SHIFT_TYPE_OFFICE_PRACTICE) {
+                    last.shiftType = PLANNER_SHIFT_TYPE_OFFICE_PRACTICE;
+                    }
                 } else {
                     merged.push({ ...iv });
                 }
@@ -6249,7 +6401,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     directionValue,
                     breakRuleRanges
                 );
-                return { start: startStr, end: endStr, __startMin: m.start, __endMin: m.end, breaks };
+                return {
+                start: startStr,
+                end: endStr,
+                shift_type: normalizePlannerShiftType(m.shiftType),
+                __startMin: m.start,
+                __endMin: m.end,
+                breaks
+                };
             });
             }
 
@@ -6463,6 +6622,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 date: null,
                 start: '09:00',
                 end: '17:00',
+                shiftType: PLANNER_SHIFT_TYPE_REGULAR,
                 editIndex: null,
                 breaks: [],
                 isDayOff: false,
@@ -8299,9 +8459,37 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (editIndex !== null && arr[editIndex]) {
                 const seg = arr[editIndex];
                 // Держим breaks пустым, чтобы автоперегенерация могла сработать при изменении длительности.
-                setModalState({ open: true, opId, date, start: seg.start, end: seg.end, editIndex, breaks: [], isDayOff, multipleDates: null, multipleTargets: null, showAddPanel: true, ...buildModalStatusDraftForDate(opId, date) });
+                setModalState({
+                    open: true,
+                    opId,
+                    date,
+                    start: seg.start,
+                    end: seg.end,
+                    shiftType: normalizePlannerShiftType(seg?.shift_type ?? seg?.shiftType),
+                    editIndex,
+                    breaks: [],
+                    isDayOff,
+                    multipleDates: null,
+                    multipleTargets: null,
+                    showAddPanel: true,
+                    ...buildModalStatusDraftForDate(opId, date)
+                });
                 } else {
-                setModalState({ open: true, opId, date, start: '09:00', end: '17:00', editIndex: null, breaks: [], isDayOff, multipleDates: null, multipleTargets: null, showAddPanel: false, ...buildModalStatusDraftForDate(opId, date) });
+                setModalState({
+                    open: true,
+                    opId,
+                    date,
+                    start: '09:00',
+                    end: '17:00',
+                    shiftType: PLANNER_SHIFT_TYPE_REGULAR,
+                    editIndex: null,
+                    breaks: [],
+                    isDayOff,
+                    multipleDates: null,
+                    multipleTargets: null,
+                    showAddPanel: false,
+                    ...buildModalStatusDraftForDate(opId, date)
+                });
                 }
             };
 
@@ -8535,6 +8723,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     date: firstTarget.date, // используем первую ячейку как контекст
                     start: '09:00', 
                     end: '17:00', 
+                    shiftType: PLANNER_SHIFT_TYPE_REGULAR,
                     editIndex: null, 
                     breaks: [], 
                     isDayOff: false,
@@ -8626,12 +8815,28 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }));
             };
 
-            const buildAdjustedShiftPayloadForDate = ({ opId, date, start, end, editIndex = null, breaks = null, simulatedOperators = null, replaceExistingOnDate = false }) => {
+            const buildAdjustedShiftPayloadForDate = ({
+                opId,
+                date,
+                start,
+                end,
+                shiftType = PLANNER_SHIFT_TYPE_REGULAR,
+                editIndex = null,
+                breaks = null,
+                simulatedOperators = null,
+                replaceExistingOnDate = false
+            }) => {
                 const hasExplicitBreaks = Array.isArray(breaks);
                 const simulated = simulatedOperators || cloneOperatorsForBreakSimulation(operators);
                 const simOp = simulated.find(x => x.id === opId);
+                const normalizedShiftType = normalizePlannerShiftType(shiftType);
                 if (!simOp) {
-                  return { start, end, breaks: hasExplicitBreaks ? breaks.map(b => ({ start: b.start, end: b.end })) : [] };
+                  return {
+                    start,
+                    end,
+                    shiftType: normalizedShiftType,
+                    breaks: hasExplicitBreaks ? breaks.map(b => ({ start: b.start, end: b.end })) : []
+                  };
                 }
 
                 const existing = (replaceExistingOnDate ? [] : (simOp.shifts?.[date] ?? [])).map(s => ({
@@ -8659,11 +8864,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const shouldRegenerateBreaksByShortening = !hasExplicitBreaks && editIndex !== null && prevSegBeforeEdit && newInputDurationMin < prevDurationMin;
 
                 if (editIndex === null) {
-                  existing.push({ start, end });
+                  existing.push({ start, end, shift_type: normalizedShiftType });
                 } else if (existing[editIndex]) {
-                  existing[editIndex] = { ...existing[editIndex], start, end };
+                  existing[editIndex] = { ...existing[editIndex], start, end, shift_type: normalizedShiftType };
                 } else {
-                  existing[editIndex] = { start, end };
+                  existing[editIndex] = { start, end, shift_type: normalizedShiftType };
                 }
 
                 const merged = mergeSegments(existing, simOp?.direction, getPlannerBreakRuleRangesForDirection);
@@ -8677,7 +8882,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }) || merged.find(s => s.start === minutesToTime(inputStartMin) && s.end === minutesToTime(inputEndMin % 1440));
 
                 if (!targetSeg) {
-                  return { start, end, breaks: hasExplicitBreaks ? breaks.map(b => ({ start: b.start, end: b.end })) : [] };
+                  return {
+                    start,
+                    end,
+                    shiftType: normalizedShiftType,
+                    breaks: hasExplicitBreaks ? breaks.map(b => ({ start: b.start, end: b.end })) : []
+                  };
                 }
 
                 let seedBreaks = hasExplicitBreaks
@@ -8720,6 +8930,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return {
                   start: adjustedTarget.start ?? start,
                   end: adjustedTarget.end ?? end,
+                  shiftType: normalizePlannerShiftType(adjustedTarget?.shift_type ?? adjustedTarget?.shiftType ?? normalizedShiftType),
                   breaks: (adjustedTarget.breaks ?? []).map(b => ({ start: b.start, end: b.end }))
                 };
             };
@@ -9220,11 +9431,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             };
 
-            const saveSegmentToMultipleTargets = async ({ targets, start, end, breaks = null }) => {
+            const saveSegmentToMultipleTargets = async ({ targets, start, end, shiftType = PLANNER_SHIFT_TYPE_REGULAR, breaks = null }) => {
                 const normalizedTargets = normalizeBulkTargets(targets);
                 if (normalizedTargets.length === 0) return;
                 // В bulk-режиме пустой массив не должен отключать автогенерацию перерывов.
                 const breaksForBulk = (Array.isArray(breaks) && breaks.length === 0) ? null : breaks;
+                const normalizedShiftType = normalizePlannerShiftType(shiftType);
 
                 try {
                   // Одна общая симуляция нужна, чтобы перерывы считались с учетом уже подготовленных ячеек (в т.ч. других операторов)
@@ -9235,6 +9447,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                       date: target.date,
                       start,
                       end,
+                      shiftType: normalizedShiftType,
                       breaks: breaksForBulk,
                       simulatedOperators: simulated,
                       replaceExistingOnDate: true
@@ -9247,6 +9460,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                       ...target,
                       startPrepared: prepared.start || start,
                       endPrepared: prepared.end || end,
+                      shiftTypePrepared: normalizePlannerShiftType(prepared.shiftType ?? normalizedShiftType),
                       breaksPrepared: Array.isArray(prepared.breaks)
                         ? prepared.breaks.map(b => ({ start: b.start, end: b.end }))
                         : []
@@ -9260,6 +9474,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                       date: target.date,
                       start: target.startPrepared,
                       end: target.endPrepared,
+                      shift_type: target.shiftTypePrepared,
                       breaks: target.breaksPrepared
                     })),
                     'set_shift'
@@ -9285,6 +9500,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                       op.shifts[target.date] = [{
                         start: target.startPrepared,
                         end: target.endPrepared,
+                        shift_type: target.shiftTypePrepared,
                         breaks: (target.breaksPrepared || []).map(b => ({ start: b.start, end: b.end }))
                       }];
                       touchedPairs.add(makeSelectedCellKey(target.opId, target.date));
@@ -9302,7 +9518,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                   });
               
                   clearSelectedDays();
-                  setModalState(m => ({ ...m, open: false, multipleDates: null, multipleTargets: null, breaks: [], showAddPanel: false }));
+                  setModalState(m => ({
+                    ...m,
+                    open: false,
+                    multipleDates: null,
+                    multipleTargets: null,
+                    breaks: [],
+                    shiftType: PLANNER_SHIFT_TYPE_REGULAR,
+                    showAddPanel: false
+                  }));
                   await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
                 } catch (error) {
                   console.error('Error saving multiple shifts:', error);
@@ -9310,11 +9534,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             };
 
-            const saveSegmentToMultipleDays = async ({ opId, dates, start, end, breaks = null }) => {
+            const saveSegmentToMultipleDays = async ({ opId, dates, start, end, shiftType = PLANNER_SHIFT_TYPE_REGULAR, breaks = null }) => {
                 return saveSegmentToMultipleTargets({
                     targets: (dates || []).map(date => ({ opId, date })),
                     start,
                     end,
+                    shiftType,
                     breaks
                 });
             };
@@ -9353,7 +9578,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     });
 
                     clearSelectedDays();
-                    setModalState(m => ({ ...m, open: false, multipleDates: null, multipleTargets: null, breaks: [], showAddPanel: false }));
+                    setModalState(m => ({ ...m, open: false, multipleDates: null, multipleTargets: null, breaks: [], shiftType: PLANNER_SHIFT_TYPE_REGULAR, showAddPanel: false }));
                     await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
                 } catch (error) {
                     console.error('Error setting multiple day offs:', error);
@@ -9393,7 +9618,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     });
 
                     clearSelectedDays();
-                    setModalState(m => ({ ...m, open: false, multipleDates: null, multipleTargets: null, breaks: [], showAddPanel: false }));
+                    setModalState(m => ({ ...m, open: false, multipleDates: null, multipleTargets: null, breaks: [], shiftType: PLANNER_SHIFT_TYPE_REGULAR, showAddPanel: false }));
                     await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
                 } catch (error) {
                     console.error('Error deleting multiple shifts:', error);
@@ -10333,23 +10558,34 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             };
 
-            const saveSegment = async ({ opId, date, start, end, editIndex = null, breaks = null }) => {
+            const saveSegment = async ({ opId, date, start, end, shiftType = PLANNER_SHIFT_TYPE_REGULAR, editIndex = null, breaks = null }) => {
                 try {
                   // найдём оператора в текущем state
                   const op = operators.find(x => x.id === opId);
                   const previousSegment = (editIndex !== null) ? (op?.shifts?.[date]?.[editIndex] ?? null) : null;
+                  const normalizedShiftType = normalizePlannerShiftType(shiftType);
               
                   // Отправляем на сервер уже после локальной корректировки не-пересечения перерывов
-                  const prepared = buildAdjustedShiftPayloadForDate({ opId, date, start, end, editIndex, breaks });
+                  const prepared = buildAdjustedShiftPayloadForDate({
+                    opId,
+                    date,
+                    start,
+                    end,
+                    shiftType: normalizedShiftType,
+                    editIndex,
+                    breaks
+                  });
                   const breaksToSend = prepared.breaks || [];
                   const effectiveStart = prepared.start || start;
                   const effectiveEnd = prepared.end || end;
+                  const effectiveShiftType = normalizePlannerShiftType(prepared.shiftType ?? normalizedShiftType);
               
                   const payload = {
                     operator_id: opId,
                     shift_date: date,
                     start_time: effectiveStart,
                     end_time: effectiveEnd,
+                    shift_type: effectiveShiftType,
                     breaks: breaksToSend
                   };
                   if (previousSegment && editIndex !== null) {
@@ -10382,9 +10618,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     interruptLocalDismissalByWorkDate(op, date);
                     const arr = op.shifts[date] ? ([...op.shifts[date]]) : [];
                     if (editIndex === null) {
-                      arr.push({ start, end });
+                      arr.push({ start, end, shift_type: effectiveShiftType });
                     } else {
-                      arr[editIndex] = { start, end };
+                      arr[editIndex] = { start, end, shift_type: effectiveShiftType };
                     }
                     const merged = mergeSegments(arr, op?.direction, getPlannerBreakRuleRangesForDirection);
                     // подставим перерывы, если они были
@@ -10397,7 +10633,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return copy;
                   });
               
-                  setModalState(m => ({ ...m, editIndex: null, multipleDates: null, multipleTargets: null, showAddPanel: false, breaks: [] }));
+                  setModalState(m => ({
+                    ...m,
+                    editIndex: null,
+                    multipleDates: null,
+                    multipleTargets: null,
+                    showAddPanel: false,
+                    shiftType: PLANNER_SHIFT_TYPE_REGULAR,
+                    breaks: []
+                  }));
                   await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
                 } catch (error) {
                   console.error('Error saving shift:', error);
@@ -10457,7 +10701,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (e <= s) e += 1440;
                 const segStart = Math.max(0, s);
                 const segEnd = Math.min(1440, e);
-                if (segEnd > segStart) parts.push({ start: segStart, end: segEnd, sourceDate: dateStr, sourceIndex: idx });
+                if (segEnd > segStart) {
+                    parts.push({
+                    start: segStart,
+                    end: segEnd,
+                    sourceDate: dateStr,
+                    sourceIndex: idx,
+                    shift_type: normalizePlannerShiftType(sh?.shift_type ?? sh?.shiftType)
+                    });
+                }
                 });
                 const date = parseDateStr(dateStr);
                 const prev = addDays(date, -1);
@@ -10470,7 +10722,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     pe += 1440;
                     const partStart = 0;
                     const partEnd = Math.min(1440, pe - 1440);
-                    if (partEnd > partStart) parts.push({ start: partStart, end: partEnd, sourceDate: prevStr, sourceIndex: idx });
+                    if (partEnd > partStart) {
+                        parts.push({
+                            start: partStart,
+                            end: partEnd,
+                            sourceDate: prevStr,
+                            sourceIndex: idx,
+                            shift_type: normalizePlannerShiftType(sh?.shift_type ?? sh?.shiftType)
+                        });
+                    }
                 }
                 });
                 return parts;
@@ -13510,10 +13770,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         <div className="p-4">
                                                             <div className="mb-3 flex flex-wrap items-center gap-2 text-[11px]">
                                                                 <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-blue-200 bg-blue-50 text-blue-700">
-                                                                    <span className="w-2 h-2 rounded-full bg-blue-500"></span> Дневная смена
+                                                                    <span className="w-2 h-2 rounded-full bg-blue-500"></span> Обычная смена
                                                                 </span>
                                                                 <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-orange-200 bg-orange-50 text-orange-700">
                                                                     <span className="w-2 h-2 rounded-full bg-orange-500"></span> Ночная смена
+                                                                </span>
+                                                                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-emerald-200 bg-emerald-50 text-emerald-700">
+                                                                    <span className="w-2 h-2 rounded-full bg-emerald-500"></span> {PLANNER_SHIFT_TYPE_OFFICE_PRACTICE_LABEL}
                                                                 </span>
                                                                 <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-amber-200 bg-amber-50 text-amber-700">
                                                                     <span className="w-2 h-2 rounded-sm bg-amber-300 border border-amber-500/70"></span> Перерыв
@@ -13590,7 +13853,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         )}
                                                                         {myTimelineParts.map((p, idx) => {
                                                                             const srcSeg = myTimelineOperator?.shifts?.[p.sourceDate]?.[p.sourceIndex];
-                                                                            const isNight = srcSeg && (timeToMinutes(srcSeg.end) <= timeToMinutes(srcSeg.start));
+                                                                            const visual = plannerShiftVisualMeta(srcSeg);
+                                                                            const isNight = !!visual.isNight;
                                                                             const label = srcSeg
                                                                                 ? `${srcSeg.start} — ${srcSeg.end}${(isNight && srcSeg.end !== '00:00') ? ' (+1)' : ''}`
                                                                                 : `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`;
@@ -13601,7 +13865,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                     style={{
                                                                                         left: `${computeLeftPercent(p.start)}%`,
                                                                                         width: `${((p.end - p.start) / minutesInDay) * 100}%`,
-                                                                                        background: isNight ? "linear-gradient(90deg,#f97316,#ea580c)" : "linear-gradient(90deg,#60a5fa,#2563eb)",
+                                                                                        background: visual.barGradient,
                                                                                         color: "white"
                                                                                     }}
                                                                                 >
@@ -13694,19 +13958,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 const dayNetMin = Math.max(0, dayWorkMin - dayBreakMin);
                                                 const weekdayLabel = formatWeekdayRu(dateObj, 'long');
                                                 const isExpanded = Boolean(expandedMyDayCards?.[dayCard.date]);
-                                                const shiftPreviewLabels = (dayCard.shifts || []).map(seg => {
-                                                    const crossing = timeToMinutes(seg.end) <= timeToMinutes(seg.start) && seg.end !== '00:00';
-                                                    return `${seg.start} — ${seg.end}${crossing ? ' (+1)' : ''}`;
-                                                });
-                                                const hasShifts = shiftPreviewLabels.length > 0;
+                                                const shiftPreviewItems = (dayCard.shifts || []).map(seg => ({
+                                                    label: plannerShiftDisplayLabel(seg),
+                                                    isPractice: isPlannerOfficePracticeShift(seg)
+                                                }));
+                                                const hasShifts = shiftPreviewItems.length > 0;
+                                                const hasPracticeShift = shiftPreviewItems.some(item => item.isPractice);
                                                 const primaryShiftLabel = hasShifts
-                                                    ? shiftPreviewLabels[0]
+                                                    ? shiftPreviewItems[0].label
                                                     : (scheduleStatus ? (scheduleStatus.label || 'Статус') : (dayCard.isDayOff ? 'Выходной' : 'Смен нет'));
-                                                const extraShiftCount = hasShifts ? Math.max(0, shiftPreviewLabels.length - 1) : 0;
-                                                const tailShiftPreviewLabels = hasShifts ? shiftPreviewLabels.slice(1) : [];
+                                                const extraShiftCount = hasShifts ? Math.max(0, shiftPreviewItems.length - 1) : 0;
+                                                const tailShiftPreviewItems = hasShifts ? shiftPreviewItems.slice(1) : [];
                                                 return (
                                                     <div key={`my-shifts-${dayCard.date}`} className={`bg-white rounded-xl border overflow-hidden shadow-sm flex ${isToday ? 'border-blue-300 ring-2 ring-blue-100' : 'border-slate-200'}`}>
-                                                        <div className={`w-1 flex-shrink-0 ${hasShifts ? 'bg-blue-500' : dayCard.isDayOff ? 'bg-sky-400' : scheduleStatus ? 'bg-amber-400' : 'bg-slate-200'}`}></div>
+                                                        <div className={`w-1 flex-shrink-0 ${hasShifts ? (hasPracticeShift ? 'bg-emerald-500' : 'bg-blue-500') : dayCard.isDayOff ? 'bg-sky-400' : scheduleStatus ? 'bg-amber-400' : 'bg-slate-200'}`}></div>
                                                         <div className="flex-1 min-w-0">
                                                         <button
                                                             type="button"
@@ -13726,7 +13991,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                             viewMode === 'day' ? 'text-base' : 'text-sm'
                                                                         } ${
                                                                             hasShifts
-                                                                                ? 'bg-blue-50 border-blue-200 text-blue-900'
+                                                                                ? (hasPracticeShift ? 'bg-emerald-50 border-emerald-200 text-emerald-900' : 'bg-blue-50 border-blue-200 text-blue-900')
                                                                                 : scheduleStatus
                                                                                     ? (scheduleStatusTone?.pill || 'bg-amber-100 border-amber-200 text-amber-800')
                                                                                 : dayCard.isDayOff
@@ -13764,16 +14029,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 </div>
                                                             </div>
 
-                                                            {tailShiftPreviewLabels.length > 0 && viewMode !== 'day' && (
+                                                            {tailShiftPreviewItems.length > 0 && viewMode !== 'day' && (
                                                                 <div className="mt-2 flex flex-wrap gap-1.5">
-                                                                    {tailShiftPreviewLabels.slice(0, isExpanded ? tailShiftPreviewLabels.length : 2).map((label, i) => (
-                                                                        <span key={`${dayCard.date}-preview-${i}`} className="px-2 py-0.5 rounded-md bg-white border border-slate-200 text-xs text-slate-700 tabular-nums">
-                                                                            {label}
+                                                                    {tailShiftPreviewItems.slice(0, isExpanded ? tailShiftPreviewItems.length : 2).map((item, i) => (
+                                                                        <span
+                                                                            key={`${dayCard.date}-preview-${i}`}
+                                                                            className={`px-2 py-0.5 rounded-md border text-xs tabular-nums ${item.isPractice ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-white border-slate-200 text-slate-700'}`}
+                                                                        >
+                                                                            {item.label}
                                                                         </span>
                                                                     ))}
-                                                                    {!isExpanded && tailShiftPreviewLabels.length > 2 && (
+                                                                    {!isExpanded && tailShiftPreviewItems.length > 2 && (
                                                                         <span className="px-2 py-0.5 rounded-md bg-slate-100 text-xs text-slate-600">
-                                                                            +{tailShiftPreviewLabels.length - 2} еще
+                                                                            +{tailShiftPreviewItems.length - 2} еще
                                                                         </span>
                                                                     )}
                                                                 </div>
@@ -13797,19 +14065,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         </div>
                                                                     )}
                                                                     {dayCard.shifts.map((seg, idx) => {
-                                                                        const isCrossing = timeToMinutes(seg.end) <= timeToMinutes(seg.start) && seg.end !== '00:00';
+                                                                        const isPracticeShift = isPlannerOfficePracticeShift(seg);
+                                                                        const shiftLabel = plannerShiftDisplayLabel(seg);
+                                                                        const visual = plannerShiftVisualMeta(seg);
                                                                         const segBreakCount = Array.isArray(seg.breaks) ? seg.breaks.length : 0;
                                                                         const segBreakMin = (seg.breaks || []).reduce((acc, b) => acc + Math.max(0, (Number(b?.end) || 0) - (Number(b?.start) || 0)), 0);
                                                                         return (
                                                                             <div key={`${dayCard.date}-${idx}-${seg.start}-${seg.end}`} className="rounded-xl border border-slate-200 bg-white overflow-hidden">
                                                                                 <div className="px-3 py-2 border-b border-slate-100 flex flex-wrap items-center justify-between gap-2">
                                                                                     <div className="flex items-center gap-2 min-w-0">
-                                                                                        <span className={`inline-block w-2 h-2 rounded-full flex-shrink-0 ${isCrossing ? 'bg-orange-500' : 'bg-blue-500'}`}></span>
+                                                                                        <span className={`inline-block w-2 h-2 rounded-full flex-shrink-0 ${visual.dotClass}`}></span>
                                                                                         <span className="font-semibold text-slate-900 tabular-nums truncate">
-                                                                                            {seg.start} — {seg.end}{isCrossing ? ' (+1)' : ''}
+                                                                                            {shiftLabel}
                                                                                         </span>
                                                                                     </div>
                                                                                     <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                                                                                        {isPracticeShift && (
+                                                                                            <span className="px-2 py-0.5 rounded-md bg-emerald-50 border border-emerald-200 text-emerald-700">
+                                                                                                {PLANNER_SHIFT_TYPE_OFFICE_PRACTICE_LABEL}
+                                                                                            </span>
+                                                                                        )}
                                                                                         <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 tabular-nums">
                                                                                             {(seg.durationMin / 60).toFixed(2)} ч
                                                                                         </span>
@@ -15013,9 +15288,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         const sMin = timeToMinutes(sh.start);
                                                         const eMin = timeToMinutes(sh.end);
                                                         const overnight = eMin <= sMin && sh.end !== '00:00';
+                                                        const isPracticeShift = isPlannerOfficePracticeShift(sh);
+                                                        const chipClass = isPracticeShift
+                                                            ? (overnight
+                                                                ? 'bg-emerald-200 text-emerald-900 border border-emerald-300'
+                                                                : 'bg-emerald-100 text-emerald-800 border border-emerald-200')
+                                                            : (overnight
+                                                                ? 'bg-orange-100 text-orange-800 border border-orange-200'
+                                                                : 'bg-blue-100 text-blue-800 border border-blue-200');
                                                         return (
-                                                            <span key={si} className={`px-1 py-0.5 rounded text-[10px] font-medium tabular-nums leading-tight ${overnight ? 'bg-orange-100 text-orange-800 border border-orange-200' : 'bg-emerald-100 text-emerald-800 border border-emerald-200'}`}>
-                                                                {sh.start}–{sh.end}{overnight ? '↑' : ''}
+                                                            <span key={si} className={`px-1 py-0.5 rounded text-[10px] font-medium tabular-nums leading-tight ${chipClass}`}>
+                                                                {isPracticeShift ? 'ПР ' : ''}{sh.start}–{sh.end}{overnight ? '↑' : ''}
                                                             </span>
                                                         );
                                                     })}
@@ -15087,8 +15370,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     </div>
                                                 )}
                                                 <div className="flex items-center gap-3 px-4 py-2 border-t border-slate-100 bg-slate-50/50">
-                                                    <span className="inline-flex items-center gap-1 text-[10px] text-slate-500"><span className="w-2.5 h-2.5 rounded-sm bg-emerald-100 border border-emerald-200 inline-block"></span>Дневная</span>
+                                                    <span className="inline-flex items-center gap-1 text-[10px] text-slate-500"><span className="w-2.5 h-2.5 rounded-sm bg-blue-100 border border-blue-200 inline-block"></span>Обычная</span>
                                                     <span className="inline-flex items-center gap-1 text-[10px] text-slate-500"><span className="w-2.5 h-2.5 rounded-sm bg-orange-100 border border-orange-200 inline-block"></span>Ночная</span>
+                                                    <span className="inline-flex items-center gap-1 text-[10px] text-slate-500"><span className="w-2.5 h-2.5 rounded-sm bg-emerald-100 border border-emerald-200 inline-block"></span>Практика</span>
                                                     <span className="inline-flex items-center gap-1 text-[10px] text-slate-500"><span className="w-2.5 h-2.5 rounded-sm bg-sky-50 border border-sky-200 inline-block"></span>Выходной</span>
                                                 </div>
                                             </div>
@@ -16008,8 +16292,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             const eM = timeToMinutes(s.end);
                                             const crossing = eM <= sM;
                                             const crossesForDisplay = crossing && s.end !== '00:00';
-                                            const text = crossesForDisplay ? `${s.start} — ${s.end} (+1)` : `${s.start} — ${s.end}`;
-                                            return { text, crossing: crossesForDisplay, idx };
+                                            const text = plannerShiftDisplayLabel(s);
+                                            return {
+                                                text,
+                                                crossing: crossesForDisplay,
+                                                idx,
+                                                isPractice: isPlannerOfficePracticeShift(s)
+                                            };
                                             });
                                             const prevArr = op.shifts?.[todayDateStr(addDays(parseDateStr(d), -1))] ?? [];
                                             const prevCont = prevArr
@@ -16019,10 +16308,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     const crossing = eM <= sM;
                                                     const crossesForDisplay = crossing && s.end !== '00:00';
                                                     if (!crossesForDisplay) return null;
-                                                    return { text: `${s.start} — ${s.end} (+1)`, crossing: true, idx };
+                                                    return {
+                                                        text: plannerShiftDisplayLabel(s),
+                                                        crossing: true,
+                                                        idx,
+                                                        isPractice: isPlannerOfficePracticeShift(s)
+                                                    };
                                                 })
                                                 .filter(Boolean);
                                             const labelList = [...origArr, ...prevCont];
+                                            const hasPracticeShift = labelList.some(item => !!item?.isPractice);
                                             const displayParts = (viewMode === 'day') ? parts : parts.filter(p => p.sourceDate === d);
                                             const durationHours = (viewMode === 'day')
                                                 ? displayParts.reduce((acc, p) => acc + (p.end - p.start) / 60, 0)
@@ -16064,9 +16359,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             } else if (isDayOff) {
                                                 bgColor = ' bg-sky-50';
                                             } else if (hasShift) {
-                                                bgColor = ' bg-gradient-to-br from-blue-50 to-indigo-50';
-                                                borderClass = ' border-blue-300';
-                                                emphasisClass = ' ring-1 ring-blue-200 shadow-sm shadow-blue-100/70';
+                                                if (hasPracticeShift) {
+                                                    bgColor = ' bg-gradient-to-br from-emerald-50 to-green-100';
+                                                    borderClass = ' border-emerald-300';
+                                                    emphasisClass = ' ring-1 ring-emerald-200 shadow-sm shadow-emerald-100/70';
+                                                } else {
+                                                    bgColor = ' bg-gradient-to-br from-blue-50 to-indigo-50';
+                                                    borderClass = ' border-blue-300';
+                                                    emphasisClass = ' ring-1 ring-blue-200 shadow-sm shadow-blue-100/70';
+                                                }
                                             }
                                             return (
                                             <div
@@ -16206,18 +16507,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                 title={seg.title}
                                                                             />
                                                                         ))}
-                                                                        {specialTimelineShiftParts.map((p, idx) => (
+                                                                        {specialTimelineShiftParts.map((p, idx) => {
+                                                                            const srcSeg = op.shifts?.[p.sourceDate]?.[p.sourceIndex];
+                                                                            const visual = plannerShiftVisualMeta(srcSeg);
+                                                                            return (
                                                                             <React.Fragment key={`special-part-${idx}`}>
                                                                                 <div
                                                                                     className="absolute top-1/2 -translate-y-1/2 h-5 text-xs overflow-hidden flex items-center justify-between"
                                                                                     style={{
                                                                                         left: `${specialTimelineLeftPercent(p.start)}%`,
                                                                                         width: `${((p.end - p.start) / specialTimelineMinutes) * 100}%`,
-                                                                                        background: ((op.shifts?.[p.sourceDate]?.[p.sourceIndex] && timeToMinutes(op.shifts[p.sourceDate][p.sourceIndex].end) <= timeToMinutes(op.shifts[p.sourceDate][p.sourceIndex].start)) ? "linear-gradient(90deg,#f97316,#ea580c)" : "linear-gradient(90deg,#60a5fa,#2563eb)"),
+                                                                                        background: visual.barGradient,
                                                                                         color: "white",
                                                                                     }}
                                                                                     title={(() => {
-                                                                                        const srcSeg = op.shifts?.[p.sourceDate]?.[p.sourceIndex];
                                                                                         if (!srcSeg) return `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`;
                                                                                         const srcStart = timeToMinutes(srcSeg.start);
                                                                                         const srcEnd = timeToMinutes(srcSeg.end);
@@ -16247,7 +16550,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                     />
                                                                                 ))}
                                                                             </React.Fragment>
-                                                                        ))}
+                                                                            );
+                                                                        })}
                                                                         {specialStatusLateBars.map((late, lateIdx) => (
                                                                             <div
                                                                                 key={`special-late-${lateIdx}`}
@@ -16398,18 +16702,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 title={seg.title}
                                                             />
                                                         ))}
-                                                        {parts.map((p, idx) => (
+                                                        {parts.map((p, idx) => {
+                                                            const srcSeg = op.shifts?.[p.sourceDate]?.[p.sourceIndex];
+                                                            const visual = plannerShiftVisualMeta(srcSeg);
+                                                            return (
                                                         <div key={idx}
                                                             className="absolute top-1/4 h-1/2 rounded text-xs overflow-hidden flex items-center justify-between"
                                                             style={{
                                                             left: `${computeLeftPercent(p.start)}%`,
                                                             width: `${((p.end - p.start) / minutesInDay) * 100}%`,
-                                                            background: ((op.shifts?.[p.sourceDate]?.[p.sourceIndex] && timeToMinutes(op.shifts[p.sourceDate][p.sourceIndex].end) <= timeToMinutes(op.shifts[p.sourceDate][p.sourceIndex].start)) ? "linear-gradient(90deg,#f97316,#ea580c)" : "linear-gradient(90deg,#60a5fa,#2563eb)"),
+                                                            background: visual.barGradient,
                                                             color: "white",
                                                             }}
                                                         >
                                                             <div className="px-1 truncate text-[11px] border border-white/30 bg-white/10 rounded-sm z-40" style={{ paddingLeft: 6, paddingRight: 6 }}>{(() => {
-                                                                const srcSeg = op.shifts?.[p.sourceDate]?.[p.sourceIndex];
                                                                 if (!srcSeg) return `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`;
                                                                 const srcStart = timeToMinutes(srcSeg.start);
                                                                 const srcEnd = timeToMinutes(srcSeg.end);
@@ -16437,7 +16743,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             />
                                                             ))}
                                                         </div>
-                                                        ))}
+                                                            );
+                                                        })}
                                                         {parts.length === 0 && <div className="text-[11px] text-slate-400">Нет смены</div>}
                                                         </>
                                                     )}
@@ -16458,11 +16765,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         </div>
                                                     ) : labelList.length > 0 ? (
                                                     <div className="relative h-full pb-4">
-                                                        {labelList.slice(0,2).map((l, i) => <div key={i} className={"font-semibold text-xs truncate " + (l.crossing ? 'text-amber-600' : 'text-blue-800')}>{l.text}</div>)}
+                                                        {labelList.slice(0,2).map((l, i) => (
+                                                            <div
+                                                                key={i}
+                                                                className={`font-semibold text-xs truncate ${l.isPractice ? 'text-emerald-800' : (l.crossing ? 'text-amber-600' : 'text-blue-800')}`}
+                                                            >
+                                                                {l.text}
+                                                            </div>
+                                                        ))}
                                                         {labelList.length > 2 && (
                                                         <div className="absolute right-1 bottom-[1px] text-xs text-slate-400">+{labelList.length - 2}</div>
                                                         )}
-                                                        <div className="absolute left-1 bottom-[1px] text-xs text-blue-700">{durationHours.toFixed(2)} ч</div>
+                                                        <div className={`absolute left-1 bottom-[1px] text-xs ${hasPracticeShift ? 'text-emerald-700' : 'text-blue-700'}`}>{durationHours.toFixed(2)} ч</div>
                                                     </div>
                                                     ) : (
                                                     <div className="text-xs text-slate-400">—</div>
@@ -17205,6 +17519,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 />
                             </div>
                         </div>
+                        <div className="mt-4">
+                            <label className="block text-xs font-medium text-slate-600 mb-2">Тип смены</label>
+                            <select
+                                value={normalizePlannerShiftType(modalState.shiftType)}
+                                onChange={(e) => setModalState((m) => ({ ...m, shiftType: normalizePlannerShiftType(e.target.value) }))}
+                                className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all text-sm font-medium bg-white"
+                            >
+                                <option value={PLANNER_SHIFT_TYPE_REGULAR}>Обычная смена</option>
+                                <option value={PLANNER_SHIFT_TYPE_OFFICE_PRACTICE}>{PLANNER_SHIFT_TYPE_OFFICE_PRACTICE_LABEL}</option>
+                            </select>
+                        </div>
                         <div className="mt-4 p-3 bg-blue-50 border border-blue-100 rounded-lg">
                             <div className="flex items-center justify-between">
                                 <span className="text-sm text-blue-900 font-medium">Длительность смены:</span>
@@ -17236,6 +17561,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             return arr.map((seg, idx) => {
                                 const crossing = timeToMinutes(seg.end) <= timeToMinutes(seg.start);
                                 const duration = ((timeToMinutes(seg.end) <= timeToMinutes(seg.start) ? timeToMinutes(seg.end) + 1440 : timeToMinutes(seg.end)) - timeToMinutes(seg.start)) / 60;
+                                const isPracticeShift = isPlannerOfficePracticeShift(seg);
                                 const isEditing = modalState.editIndex === idx;
                                 return (
                                 <div key={idx} className={`flex items-center gap-3 p-4 rounded-lg border-2 transition-all ${isEditing ? 'border-blue-400 bg-blue-50 shadow-md' : 'border-slate-200 bg-white hover:border-slate-300 hover:shadow-sm'}`}>
@@ -17243,6 +17569,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         <div className="flex items-center gap-2 mb-1">
                                             <span className="text-base font-bold text-slate-900">{seg.start} — {seg.end}</span>
                                             {crossing && <span className="px-2 py-0.5 bg-orange-100 text-orange-700 text-xs font-semibold rounded-full">+1 день</span>}
+                                            {isPracticeShift && <span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 text-xs font-semibold rounded-full">{PLANNER_SHIFT_TYPE_OFFICE_PRACTICE_LABEL}</span>}
                                             {isEditing && <span className="px-2 py-0.5 bg-blue-500 text-white text-xs font-semibold rounded-full">Редактируется</span>}
                                         </div>
                                         <div className="text-sm text-slate-600 flex items-center gap-2">
@@ -17255,7 +17582,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             className="px-3 py-2 text-sm font-medium bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg transition-colors flex items-center gap-1"
                                             onClick={() => {
                                                 // Держим breaks пустым, чтобы при сокращении смены перерывы считались заново автоматически.
-                                                setModalState(m => ({ ...m, start: seg.start, end: seg.end, editIndex: idx, breaks: [], showAddPanel: true }));
+                                                setModalState(m => ({
+                                                    ...m,
+                                                    start: seg.start,
+                                                    end: seg.end,
+                                                    shiftType: normalizePlannerShiftType(seg?.shift_type ?? seg?.shiftType),
+                                                    editIndex: idx,
+                                                    breaks: [],
+                                                    showAddPanel: true
+                                                }));
                                             }}
                                         >
                                             <FaIcon className="fas fa-pen text-xs"></FaIcon>
@@ -17320,6 +17655,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all text-lg font-medium"
                                 />
                             </div>
+                        </div>
+                        <div className="mt-4">
+                            <label className="block text-xs font-medium text-slate-600 mb-2">Тип смены</label>
+                            <select
+                                value={normalizePlannerShiftType(modalState.shiftType)}
+                                onChange={(e) => setModalState((m) => ({ ...m, shiftType: normalizePlannerShiftType(e.target.value) }))}
+                                className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all text-sm font-medium bg-white"
+                            >
+                                <option value={PLANNER_SHIFT_TYPE_REGULAR}>Обычная смена</option>
+                                <option value={PLANNER_SHIFT_TYPE_OFFICE_PRACTICE}>{PLANNER_SHIFT_TYPE_OFFICE_PRACTICE_LABEL}</option>
+                            </select>
                         </div>
                     </div>
 
@@ -17510,7 +17856,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             {!modalState.isDayOff && isBulkSelectionModal && (
                                 <button 
                                     className="px-5 py-3 rounded-lg bg-gradient-to-r from-green-600 to-green-500 hover:from-green-700 hover:to-green-600 text-white font-semibold shadow-lg hover:shadow-xl transition-all flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
-                                    onClick={() => saveSegmentToMultipleTargets({ targets: modalState.multipleTargets || (modalState.multipleDates || []).map(date => ({ opId: modalState.opId, date })), start: modalState.start, end: modalState.end, breaks: (modalState.breaks && modalState.breaks.length) ? modalState.breaks : null })}
+                                    onClick={() => saveSegmentToMultipleTargets({
+                                        targets: modalState.multipleTargets || (modalState.multipleDates || []).map(date => ({ opId: modalState.opId, date })),
+                                        start: modalState.start,
+                                        end: modalState.end,
+                                        shiftType: modalState.shiftType,
+                                        breaks: (modalState.breaks && modalState.breaks.length) ? modalState.breaks : null
+                                    })}
                                     disabled={bulkActionState.loading}
                                 >
                                     <FaIcon className={`fas ${bulkActionState.loading && bulkActionState.action === 'set_shift' ? 'fa-spinner fa-spin' : 'fa-check-double'}`}></FaIcon>
@@ -17522,7 +17874,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             {!modalState.isDayOff && !modalState.multipleDates && (modalState.editIndex !== null || modalState.showAddPanel) && (
                                 <button 
                                     className="px-5 py-3 rounded-lg bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-700 hover:to-blue-600 text-white font-semibold shadow-lg hover:shadow-xl transition-all flex items-center gap-2"
-                                    onClick={() => saveSegment({ opId: modalState.opId, date: modalState.date, start: modalState.start, end: modalState.end, editIndex: modalState.editIndex, breaks: modalState.breaks && modalState.breaks.length ? modalState.breaks : null })}
+                                    onClick={() => saveSegment({
+                                        opId: modalState.opId,
+                                        date: modalState.date,
+                                        start: modalState.start,
+                                        end: modalState.end,
+                                        shiftType: modalState.shiftType,
+                                        editIndex: modalState.editIndex,
+                                        breaks: modalState.breaks && modalState.breaks.length ? modalState.breaks : null
+                                    })}
                                 >
                                     <FaIcon className="fas fa-save"></FaIcon>
                                     {modalState.editIndex !== null ? 'Обновить смену' : 'Сохранить смену'}
@@ -18432,7 +18792,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     </div>
                                                     {previewParts.map((p, pIdx) => {
                                                         const srcSeg = modalPreviewOp?.shifts?.[p.sourceDate]?.[p.sourceIndex];
-                                                        const isNight = !!(srcSeg && timeToMinutes(srcSeg.end) <= timeToMinutes(srcSeg.start));
+                                                        const visual = plannerShiftVisualMeta(srcSeg);
+                                                        const isNight = !!visual.isNight;
+                                                        const isPractice = !!visual.isPractice;
                                                         return (
                                                             <div
                                                                 key={`modal-sheet-shift-bar-${pIdx}`}
@@ -18440,9 +18802,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 style={{
                                                                     left: `${computeLeftPercent(p.start)}%`,
                                                                     width: `${((p.end - p.start) / minutesInDay) * 100}%`,
-                                                                    background: isNight ? 'linear-gradient(90deg,#fb923c,#ea580c)' : 'linear-gradient(90deg,#60a5fa,#2563eb)'
+                                                                    background: visual.barGradient
                                                                 }}
-                                                                title={`${isNight ? 'Ночная смена' : 'Смена'} • ${minutesToTime(p.start)} — ${minutesToTime(p.end)}`}
+                                                                title={`${isPractice ? PLANNER_SHIFT_TYPE_OFFICE_PRACTICE_LABEL : (isNight ? 'Ночная смена' : 'Смена')} • ${minutesToTime(p.start)} — ${minutesToTime(p.end)}`}
                                                             />
                                                         );
                                                     })}
@@ -19991,7 +20353,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                                 </div>
                                                                                                 {plannedShiftParts.map((p, pIdx) => {
                                                                                                     const srcSeg = matchedPlannerOperator?.shifts?.[p.sourceDate]?.[p.sourceIndex];
-                                                                                                    const isNight = !!(srcSeg && timeToMinutes(srcSeg.end) <= timeToMinutes(srcSeg.start));
+                                                                                                    const visual = plannerShiftVisualMeta(srcSeg);
+                                                                                                    const isNight = !!visual.isNight;
+                                                                                                    const isPractice = !!visual.isPractice;
                                                                                                     return (
                                                                                                         <div
                                                                                                             key={`anomaly-shift-bar-${pIdx}`}
@@ -19999,9 +20363,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                                             style={{
                                                                                                                 left: `${computeLeftPercent(p.start)}%`,
                                                                                                                 width: `${((p.end - p.start) / minutesInDay) * 100}%`,
-                                                                                                                background: isNight ? 'linear-gradient(90deg,#fb923c,#ea580c)' : 'linear-gradient(90deg,#60a5fa,#2563eb)'
+                                                                                                                background: visual.barGradient
                                                                                                             }}
-                                                                                                            title={`${isNight ? 'Ночная смена' : 'Смена'} • ${minutesToTime(p.start)} — ${minutesToTime(p.end)}`}
+                                                                                                            title={`${isPractice ? PLANNER_SHIFT_TYPE_OFFICE_PRACTICE_LABEL : (isNight ? 'Ночная смена' : 'Смена')} • ${minutesToTime(p.start)} — ${minutesToTime(p.end)}`}
                                                                                                         />
                                                                                                     );
                                                                                                 })}

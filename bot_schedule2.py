@@ -11274,6 +11274,7 @@ def save_work_shift():
         "shift_date": "YYYY-MM-DD",
         "start_time": "HH:MM",
         "end_time": "HH:MM",
+        "shift_type": "regular" | "office_practice",  // optional
         "breaks": [{"start": minutes, "end": minutes}, ...],  // optional
         "previous_start_time": "HH:MM",  // optional, for edit without duplicates
         "previous_end_time": "HH:MM"     // optional, for edit without duplicates
@@ -11299,6 +11300,7 @@ def save_work_shift():
         shift_date = data.get('shift_date')
         start_time = data.get('start_time')
         end_time = data.get('end_time')
+        shift_type = data.get('shift_type')
         breaks = data.get('breaks')
         previous_start_time = data.get('previous_start_time')
         previous_end_time = data.get('previous_end_time')
@@ -11312,6 +11314,7 @@ def save_work_shift():
             start_time,
             end_time,
             breaks,
+            shift_type=shift_type,
             previous_start_time=previous_start_time,
             previous_end_time=previous_end_time
         )
