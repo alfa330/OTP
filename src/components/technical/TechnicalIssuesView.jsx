@@ -808,15 +808,11 @@ const REASON_COLORS = [
     '#84cc16', '#f97316',
 ];
 
-const WORKPLACE_LAYOUT_ROWS = [
-    [null, null, null, null, 27, 26, 25, 24, 23, 22, null, null],
-    [null, null, null, null, null, null, null, null, null, null, null, null],
-    [30, 29, 28, null, null, null, null, null, null, null, null, null],
-    [null, null, null, 15, 16, 17, 18, 19, 20, 21, null, null],
-    [null, null, null, 14, 13, 12, 11, 10, 9, 8, null, null],
-    [null, null, null, null, null, null, null, null, null, null, null, null],
-    [null, null, null, 1, 2, 3, 4, 5, 6, 7, null, null],
-];
+const CELL_W = 72;
+const CELL_H = 56;
+const CELL_GAP = 3;
+const MAIN_LEFT = 290;
+const MIDDLE_TOP = 148;
 
 const getWorkplaceTileStyle = (count, maxCount) => {
     if (!count || count <= 0 || maxCount <= 0) {
@@ -835,49 +831,86 @@ const getWorkplaceTileStyle = (count, maxCount) => {
     };
 };
 
+const WorkplaceSeat = memo(function WorkplaceSeat({
+    seatNumber,
+    itemsByNumber,
+    maxIncidents,
+    selectedWorkplace,
+    onSelectWorkplace,
+}) {
+    const item = itemsByNumber?.get(seatNumber);
+    const incidents = item?.incidents || 0;
+    const isSelected = seatNumber === selectedWorkplace;
+    const style = getWorkplaceTileStyle(incidents, maxIncidents);
+
+    return (
+        <button
+            type="button"
+            onClick={() => onSelectWorkplace(seatNumber)}
+            className={`flex flex-col items-center justify-center border rounded-sm transition-all hover:-translate-y-0.5 ${
+                isSelected ? 'ring-2 ring-rose-400 shadow-md' : 'shadow-sm'
+            }`}
+            style={{ width: CELL_W, height: CELL_H, flexShrink: 0, ...style }}
+            title={`Место ${seatNumber}: ${incidents} инцидент(ов)`}
+        >
+            <span className="text-[15px] font-medium leading-none">{seatNumber}</span>
+            {incidents > 0 && (
+                <span className="text-[11px] font-medium mt-1 leading-none opacity-90">{incidents}</span>
+            )}
+        </button>
+    );
+});
+
+const SeatBlock = memo(function SeatBlock({ rows, style, ...cellProps }) {
+    return (
+        <div
+            style={{
+                position: 'absolute',
+                display: 'inline-flex',
+                flexDirection: 'column',
+                gap: CELL_GAP,
+                border: '1.5px solid #64748b',
+                borderRadius: 4,
+                padding: 3,
+                ...(style || {}),
+            }}
+        >
+            {rows.map((seats, i) => (
+                <div key={i} style={{ display: 'flex', gap: CELL_GAP }}>
+                    {seats.map((n) => (
+                        <WorkplaceSeat key={n} seatNumber={n} {...cellProps} />
+                    ))}
+                </div>
+            ))}
+        </div>
+    );
+});
+
 const WorkplaceVisualizationBlock = memo(function WorkplaceVisualizationBlock({
     itemsByNumber,
     maxIncidents,
     selectedWorkplace,
     onSelectWorkplace,
 }) {
+    const props = { itemsByNumber, maxIncidents, selectedWorkplace, onSelectWorkplace };
+    const W = MAIN_LEFT + 7 * (CELL_W + CELL_GAP) + 20;
+    const H = MIDDLE_TOP + 2 * (CELL_H + CELL_GAP) + 96 + CELL_H + 20;
+
     return (
-        <div className="rounded-xl border border-slate-300 bg-slate-50/80 p-2">
-            <div className="overflow-x-auto">
-                <div className="min-w-[740px] rounded-lg border border-slate-400 bg-white p-2 shadow-sm">
-                    <div className="space-y-1">
-                        {WORKPLACE_LAYOUT_ROWS.map((layoutRow, rowIdx) => (
-                            <div key={`workplace-layout-row-${rowIdx}`} className="grid grid-cols-12 gap-1">
-                                {layoutRow.map((seatNumber, colIdx) => {
-                                    if (!seatNumber) {
-                                        return <div key={`workplace-empty-${rowIdx}-${colIdx}`} className="h-[46px]" />;
-                                    }
-                                    const item = itemsByNumber.get(seatNumber);
-                                    const incidents = item?.incidents || 0;
-                                    const isSelected = seatNumber === selectedWorkplace;
-                                    const style = getWorkplaceTileStyle(incidents, maxIncidents);
-                                    return (
-                                        <button
-                                            key={`workplace-seat-${seatNumber}`}
-                                            type="button"
-                                            onClick={() => onSelectWorkplace(seatNumber)}
-                                            className={`h-[46px] rounded-sm border px-1.5 py-1 text-left transition-all hover:-translate-y-0.5 ${
-                                                isSelected ? 'ring-2 ring-rose-400 shadow-md' : 'shadow-sm'
-                                            }`}
-                                            style={style}
-                                            title={`РМ ${seatNumber}: ${incidents} инцидент(ов)`}
-                                        >
-                                            <div className="text-[11px] font-bold leading-none">{seatNumber}</div>
-                                            <div className="mt-0.5 text-[9px] font-bold leading-none">
-                                                {incidents} сл.
-                                            </div>
-                                        </button>
-                                    );
-                                })}
-                            </div>
-                        ))}
-                    </div>
-                </div>
+        <div className="rounded-xl border border-slate-300 bg-slate-50/80 p-3 overflow-x-auto">
+            <div style={{ position: 'relative', width: W, height: H, minWidth: W }}>
+                <SeatBlock rows={[[27, 26, 25, 24, 23, 22]]} style={{ left: MAIN_LEFT, top: 10 }} {...props} />
+                <SeatBlock rows={[[30, 29, 28]]} style={{ left: 10, top: MIDDLE_TOP }} {...props} />
+                <SeatBlock
+                    rows={[[15, 16, 17, 18, 19, 20, 21], [14, 13, 12, 11, 10, 9, 8]]}
+                    style={{ left: MAIN_LEFT, top: MIDDLE_TOP }}
+                    {...props}
+                />
+                <SeatBlock
+                    rows={[[1, 2, 3, 4, 5, 6, 7]]}
+                    style={{ left: MAIN_LEFT, top: MIDDLE_TOP + 2 * (CELL_H + CELL_GAP) + 90 }}
+                    {...props}
+                />
             </div>
         </div>
     );
@@ -951,7 +984,7 @@ const WorkplaceAnalyticsPanel = memo(function WorkplaceAnalyticsPanel({ rows }) 
     if (rows.length === 0) return null;
 
     return (
-        <div className="mb-6 rounded-xl border-2 border-rose-200 bg-white shadow-lg overflow-hidden">
+        <div className="rounded-xl border-2 border-rose-200 bg-white shadow-lg overflow-hidden h-full">
             <div className="px-5 py-3 border-b border-rose-100 bg-gradient-to-r from-rose-50 to-red-50 flex flex-wrap items-center justify-between gap-3">
                 <div className="flex items-center gap-2 text-sm font-bold uppercase tracking-wide text-rose-900">
                     <FaIcon className="fas fa-th" style={{ width: '1em', height: '1em' }} />
@@ -1075,7 +1108,7 @@ const AnalyticsPanel = memo(function AnalyticsPanel({ rows }) {
     if (rows.length === 0) return null;
 
     return (
-        <div className="mb-10 rounded-xl border-2 border-blue-200 bg-white shadow-lg overflow-hidden">
+        <div className="rounded-xl border-2 border-blue-200 bg-white shadow-lg overflow-hidden h-full">
             <div className="px-5 py-3 border-b border-blue-100 bg-gradient-to-r from-blue-50 to-indigo-50 flex flex-wrap items-center justify-between gap-3">
                 <div className="flex items-center gap-2 text-sm font-bold uppercase tracking-wide text-blue-900">
                     <FaIcon className="fas fa-chart-bar" style={{ width: '1em', height: '1em' }} />
@@ -1715,10 +1748,10 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
 
                 {/* ── Analytics panels ── */}
                 {!loading && rows.length > 0 && (
-                    <>
+                    <div className="mb-10 grid grid-cols-1 xl:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)] gap-4 items-start">
                         <WorkplaceAnalyticsPanel rows={rows} />
                         <AnalyticsPanel rows={rows} />
-                    </>
+                    </div>
                 )}
         </>
     );
