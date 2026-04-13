@@ -33266,11 +33266,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             Number.isInteger(selectedMonitoringScaleCriterionIndex) &&
                                             selectedMonitoringScaleCriterionIndex >= 0 &&
                                             selectedMonitoringScaleCriterionIndex < selectedScaleCriteria.length;
-                                        const selectedScaleCriterion = hasSelectedScaleCriterion
-                                            ? selectedScaleCriteria[selectedMonitoringScaleCriterionIndex]
-                                            : null;
-                                        const selectedScaleCriterionDescription = String(selectedScaleCriterion?.value || '').trim();
-                                        const selectedScaleDeficiencyDescription = String(selectedScaleCriterion?.deficiency?.description || '').trim();
 
                                         return isLoading ? (
                                             <p className="text-center text-gray-600 flex items-center justify-center">
@@ -33344,75 +33339,69 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                             const critWeightRaw = Number(crit?.weight || 0);
                                                                             const critWeight = Number.isFinite(critWeightRaw) ? Math.max(0, Math.min(100, critWeightRaw)) : 0;
                                                                             const isSelected = selectedMonitoringScaleCriterionIndex === cidx;
+                                                                            const criterionDescription = String(crit?.value || '').trim();
+                                                                            const deficiencyDescription = String(crit?.deficiency?.description || '').trim();
 
                                                                             return (
-                                                                                <button
+                                                                                <div
                                                                                     key={`${crit?.id || crit?.name || 'criterion'}-${cidx}`}
-                                                                                    type="button"
-                                                                                    onClick={() => {
-                                                                                        setSelectedMonitoringScaleCriterionIndex((prev) => (prev === cidx ? null : cidx));
-                                                                                    }}
                                                                                     className={`w-full rounded-xl border px-3 py-3 text-left transition ${
                                                                                         isSelected
                                                                                             ? 'border-blue-300 bg-blue-50 shadow-sm'
-                                                                                            : 'border-gray-200 bg-white hover:bg-gray-50'
+                                                                                            : 'border-gray-200 bg-white'
                                                                                     }`}
                                                                                 >
-                                                                                    <div className="flex items-start justify-between gap-3">
-                                                                                        <div className="min-w-0">
-                                                                                            <div className="flex items-center gap-2">
-                                                                                                <span className={`inline-flex h-6 min-w-6 items-center justify-center rounded-full text-xs font-bold ${isSelected ? 'bg-blue-200 text-blue-800' : 'bg-blue-100 text-blue-700'}`}>{cidx + 1}</span>
-                                                                                                <span className="font-semibold text-gray-900 break-words">{crit?.name || `Критерий ${cidx + 1}`}</span>
+                                                                                    <button
+                                                                                        type="button"
+                                                                                        onClick={() => {
+                                                                                            setSelectedMonitoringScaleCriterionIndex((prev) => (prev === cidx ? null : cidx));
+                                                                                        }}
+                                                                                        className="w-full text-left"
+                                                                                    >
+                                                                                        <div className="flex items-start justify-between gap-3">
+                                                                                            <div className="min-w-0">
+                                                                                                <div className="flex items-center gap-2">
+                                                                                                    <span className={`inline-flex h-6 min-w-6 items-center justify-center rounded-full text-xs font-bold ${isSelected ? 'bg-blue-200 text-blue-800' : 'bg-blue-100 text-blue-700'}`}>{cidx + 1}</span>
+                                                                                                    <span className="font-semibold text-gray-900 break-words">{crit?.name || `Критерий ${cidx + 1}`}</span>
+                                                                                                </div>
                                                                                             </div>
+                                                                                            <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold shrink-0 ${isCritical ? 'border-red-200 bg-red-100 text-red-700' : 'border-emerald-200 bg-emerald-100 text-emerald-700'}`}>
+                                                                                                {isCritical ? 'Критичный' : `${critWeight}%`}
+                                                                                            </span>
                                                                                         </div>
-                                                                                        <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold shrink-0 ${isCritical ? 'border-red-200 bg-red-100 text-red-700' : 'border-emerald-200 bg-emerald-100 text-emerald-700'}`}>
-                                                                                            {isCritical ? 'Критичный' : `${critWeight}%`}
-                                                                                        </span>
-                                                                                    </div>
-                                                                                </button>
+                                                                                    </button>
+
+                                                                                    {isSelected && (
+                                                                                        <div className="mt-3 pt-3 border-t border-blue-200/70">
+                                                                                            <div className="text-sm text-gray-700 whitespace-pre-wrap break-words">
+                                                                                                {criterionDescription || 'Описание не заполнено.'}
+                                                                                            </div>
+                                                                                            {!isCritical && (
+                                                                                                <div className="mt-3 h-2 w-full rounded-full bg-gray-200 overflow-hidden">
+                                                                                                    <div
+                                                                                                        className="h-full rounded-full bg-gradient-to-r from-blue-500 to-emerald-500"
+                                                                                                        style={{ width: `${critWeight}%` }}
+                                                                                                    ></div>
+                                                                                                </div>
+                                                                                            )}
+                                                                                            {crit?.deficiency && (
+                                                                                                <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs sm:text-sm text-amber-900">
+                                                                                                    Недочет: {Math.max(0, Number(crit?.deficiency?.weight || 0))}%
+                                                                                                    {deficiencyDescription ? ` - ${deficiencyDescription}` : ''}
+                                                                                                </div>
+                                                                                            )}
+                                                                                        </div>
+                                                                                    )}
+                                                                                </div>
                                                                             );
                                                                         })}
                                                                     </div>
-
-                                                                    <div className="mt-5 rounded-xl border border-gray-200 bg-gray-50 p-4">
-                                                                        {!selectedScaleCriterion ? (
-                                                                            <div className="text-sm text-gray-600 flex items-center gap-2">
-                                                                                <FaIcon className="fas fa-hand-pointer text-blue-500"></FaIcon>
-                                                                                Нажмите на критерий выше, чтобы увидеть описание.
-                                                                            </div>
-                                                                        ) : (
-                                                                            <>
-                                                                                <div className="flex items-center justify-between gap-3">
-                                                                                    <h4 className="font-semibold text-gray-900">
-                                                                                        {selectedScaleCriterion?.name || `Критерий ${(selectedMonitoringScaleCriterionIndex ?? 0) + 1}`}
-                                                                                    </h4>
-                                                                                    <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold shrink-0 ${selectedScaleCriterion?.isCritical ? 'border-red-200 bg-red-100 text-red-700' : 'border-emerald-200 bg-emerald-100 text-emerald-700'}`}>
-                                                                                        {selectedScaleCriterion?.isCritical ? 'Критичный' : `${Math.max(0, Math.min(100, Number(selectedScaleCriterion?.weight || 0)))}%`}
-                                                                                    </span>
-                                                                                </div>
-
-                                                                                <div className="mt-3 text-sm text-gray-700 whitespace-pre-wrap break-words">
-                                                                                    {selectedScaleCriterionDescription || 'Описание не заполнено.'}
-                                                                                </div>
-
-                                                                                {!selectedScaleCriterion?.isCritical && (
-                                                                                    <div className="mt-3 h-2 w-full rounded-full bg-gray-200 overflow-hidden">
-                                                                                        <div
-                                                                                            className="h-full rounded-full bg-gradient-to-r from-blue-500 to-emerald-500"
-                                                                                            style={{ width: `${Math.max(0, Math.min(100, Number(selectedScaleCriterion?.weight || 0)))}%` }}
-                                                                                        ></div>
-                                                                                    </div>
-                                                                                )}
-
-                                                                                {selectedScaleCriterion?.deficiency && (
-                                                                                    <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs sm:text-sm text-amber-900">
-                                                                                        Недочет: {Math.max(0, Number(selectedScaleCriterion?.deficiency?.weight || 0))}%
-                                                                                        {selectedScaleDeficiencyDescription ? ` - ${selectedScaleDeficiencyDescription}` : ''}
-                                                                                    </div>
-                                                                                )}
-                                                                            </>
-                                                                        )}
-                                                                    </div>
+                                                                    {!hasSelectedScaleCriterion && (
+                                                                        <div className="mt-4 text-sm text-gray-600 flex items-center gap-2">
+                                                                            <FaIcon className="fas fa-hand-pointer text-blue-500"></FaIcon>
+                                                                            Нажмите на критерий, чтобы раскрыть описание под ним.
+                                                                        </div>
+                                                                    )}
                                                                 </>
                                                             ) : (
                                                                 <div className="mt-4 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-gray-700">
