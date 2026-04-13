@@ -33376,14 +33376,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                             <div className="text-sm text-gray-700 whitespace-pre-wrap break-words">
                                                                                                 {criterionDescription || 'Описание не заполнено.'}
                                                                                             </div>
-                                                                                            {!isCritical && (
-                                                                                                <div className="mt-3 h-2 w-full rounded-full bg-gray-200 overflow-hidden">
-                                                                                                    <div
-                                                                                                        className="h-full rounded-full bg-gradient-to-r from-blue-500 to-emerald-500"
-                                                                                                        style={{ width: `${critWeight}%` }}
-                                                                                                    ></div>
-                                                                                                </div>
-                                                                                            )}
                                                                                             {crit?.deficiency && (
                                                                                                 <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs sm:text-sm text-amber-900">
                                                                                                     Недочет: {Math.max(0, Number(crit?.deficiency?.weight || 0))}%
