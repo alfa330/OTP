@@ -23132,6 +23132,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [selectedEvaluation, setSelectedEvaluation] = useState(null);
             const [expandedEvalId, setExpandedEvalId] = useState(null);
             const [showEvaluationMonitoringScale, setShowEvaluationMonitoringScale] = useState(false);
+            const [selectedMonitoringScaleCriterionIndex, setSelectedMonitoringScaleCriterionIndex] = useState(null);
             const [disputeText, setDisputeText] = useState('');
             const [disputeLoading, setDisputeLoading] = useState(false);
             const [salaryData, setSalaryData] = useState({
@@ -27984,6 +27985,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setLoadingAudioId(null);
             };
 
+            const closeEvaluationMonitoringScale = useCallback(() => {
+                setShowEvaluationMonitoringScale(false);
+                setSelectedMonitoringScaleCriterionIndex(null);
+            }, []);
+
 
             const getScoreColor = (score) => {
                 if (!score) return 'text-gray-500';
@@ -29435,9 +29441,29 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             useEffect(() => {
                 if (view !== 'evaluation') {
-                    setShowEvaluationMonitoringScale(false);
+                    closeEvaluationMonitoringScale();
                 }
-            }, [view]);
+            }, [view, closeEvaluationMonitoringScale]);
+
+            useEffect(() => {
+                if (!showEvaluationMonitoringScale) return;
+                const handleEscClose = (event) => {
+                    if (event.key === 'Escape') {
+                        closeEvaluationMonitoringScale();
+                    }
+                };
+                window.addEventListener('keydown', handleEscClose);
+                return () => window.removeEventListener('keydown', handleEscClose);
+            }, [showEvaluationMonitoringScale, closeEvaluationMonitoringScale]);
+
+            useEffect(() => {
+                if (!showEvaluationMonitoringScale || typeof document === 'undefined') return;
+                const previousOverflow = document.body.style.overflow;
+                document.body.style.overflow = 'hidden';
+                return () => {
+                    document.body.style.overflow = previousOverflow;
+                };
+            }, [showEvaluationMonitoringScale]);
 
             useEffect(() => {
                 if (view !== 'qr_access') {
@@ -33167,7 +33193,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </h2>
                                             <button
                                                 type="button"
-                                                onClick={() => setShowEvaluationMonitoringScale((prev) => !prev)}
+                                                onClick={() => {
+                                                    if (showEvaluationMonitoringScale) {
+                                                        closeEvaluationMonitoringScale();
+                                                        return;
+                                                    }
+                                                    setSelectedMonitoringScaleCriterionIndex(null);
+                                                    setShowEvaluationMonitoringScale(true);
+                                                }}
                                                 className={`inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl border text-sm font-semibold transition-all duration-200 ${
                                                     showEvaluationMonitoringScale
                                                         ? 'bg-blue-600 text-white border-blue-600 shadow-md'
@@ -33229,6 +33262,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         const selectedScaleWeightSum = selectedScaleCriteria
                                             .filter((crit) => !crit?.isCritical)
                                             .reduce((sum, crit) => sum + Number(crit?.weight || 0), 0);
+                                        const hasSelectedScaleCriterion =
+                                            Number.isInteger(selectedMonitoringScaleCriterionIndex) &&
+                                            selectedMonitoringScaleCriterionIndex >= 0 &&
+                                            selectedMonitoringScaleCriterionIndex < selectedScaleCriteria.length;
+                                        const selectedScaleCriterion = hasSelectedScaleCriterion
+                                            ? selectedScaleCriteria[selectedMonitoringScaleCriterionIndex]
+                                            : null;
+                                        const selectedScaleCriterionDescription = String(selectedScaleCriterion?.value || '').trim();
+                                        const selectedScaleDeficiencyDescription = String(selectedScaleCriterion?.deficiency?.description || '').trim();
 
                                         return isLoading ? (
                                             <p className="text-center text-gray-600 flex items-center justify-center">
@@ -33237,88 +33279,150 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </p>
                                         ) : (
                                             <div>
-                                            {showEvaluationMonitoringScale && (
-                                                <div className="mb-6 sm:mb-8 rounded-2xl border border-blue-200 bg-gradient-to-br from-blue-50 via-white to-cyan-50 p-4 sm:p-6 shadow-sm">
+                                            <div
+                                                className={`fixed inset-0 z-[70] transition-opacity duration-300 ${
+                                                    showEvaluationMonitoringScale ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
+                                                }`}
+                                                aria-hidden={!showEvaluationMonitoringScale}
+                                            >
+                                                <button
+                                                    type="button"
+                                                    onClick={closeEvaluationMonitoringScale}
+                                                    className="absolute inset-0 bg-slate-900/40"
+                                                    aria-label="Закрыть мониторинговую шкалу"
+                                                ></button>
+                                                <aside
+                                                    className={`absolute right-0 top-0 h-full w-full max-w-xl bg-white border-l border-slate-200 shadow-2xl overflow-y-auto transition-transform duration-300 ${
+                                                        showEvaluationMonitoringScale ? 'translate-x-0' : 'translate-x-full'
+                                                    }`}
+                                                >
                                                     {!selectedScaleDirection ? (
-                                                        <div className="text-sm text-gray-600 flex items-center gap-2">
-                                                            <FaIcon className="fas fa-info-circle text-blue-500"></FaIcon>
-                                                            Для выбранного периода нет данных по шкале направления.
+                                                        <div className="h-full flex items-center justify-center p-6">
+                                                            <div className="rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-gray-700 flex items-center gap-2">
+                                                                <FaIcon className="fas fa-info-circle text-blue-500"></FaIcon>
+                                                                Для выбранного периода нет данных по шкале направления.
+                                                            </div>
                                                         </div>
                                                     ) : (
-                                                        <>
-                                                            <div className="flex flex-col xl:flex-row xl:items-end xl:justify-between gap-4">
+                                                        <div className="p-4 sm:p-6">
+                                                            <div className="flex items-start justify-between gap-3">
                                                                 <div>
                                                                     <p className="text-xs uppercase tracking-wide text-blue-600 font-semibold">Мониторинговая шкала</p>
                                                                     <h3 className="text-lg sm:text-xl font-bold text-gray-900 mt-1">{selectedScaleDirection.name || 'Без названия'}</h3>
-                                                                    <p className="text-sm text-gray-600 mt-1">Критерии и веса по вашему направлению.</p>
+                                                                    <p className="text-sm text-gray-600 mt-1">Кликните по критерию, чтобы открыть описание.</p>
                                                                 </div>
-                                                                <div className="grid grid-cols-3 gap-2 sm:gap-3">
-                                                                    <div className="rounded-lg border border-blue-100 bg-white px-3 py-2">
-                                                                        <div className="text-[11px] uppercase tracking-wide text-gray-500">Критериев</div>
-                                                                        <div className="text-base sm:text-lg font-bold text-blue-700">{selectedScaleCriteria.length}</div>
-                                                                    </div>
-                                                                    <div className="rounded-lg border border-emerald-100 bg-white px-3 py-2">
-                                                                        <div className="text-[11px] uppercase tracking-wide text-gray-500">Вес</div>
-                                                                        <div className="text-base sm:text-lg font-bold text-emerald-700">{selectedScaleWeightSum}%</div>
-                                                                    </div>
-                                                                    <div className="rounded-lg border border-red-100 bg-white px-3 py-2">
-                                                                        <div className="text-[11px] uppercase tracking-wide text-gray-500">Критичные</div>
-                                                                        <div className="text-base sm:text-lg font-bold text-red-700">{selectedScaleCriticalCount}</div>
-                                                                    </div>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={closeEvaluationMonitoringScale}
+                                                                    className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-gray-200 text-gray-500 hover:text-gray-700 hover:bg-gray-100 transition"
+                                                                    aria-label="Закрыть панель"
+                                                                >
+                                                                    <FaIcon className="fas fa-times"></FaIcon>
+                                                                </button>
+                                                            </div>
+
+                                                            <div className="mt-4 grid grid-cols-3 gap-2 sm:gap-3">
+                                                                <div className="rounded-lg border border-blue-100 bg-blue-50 px-3 py-2">
+                                                                    <div className="text-[11px] uppercase tracking-wide text-gray-500">Критериев</div>
+                                                                    <div className="text-base sm:text-lg font-bold text-blue-700">{selectedScaleCriteria.length}</div>
+                                                                </div>
+                                                                <div className="rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-2">
+                                                                    <div className="text-[11px] uppercase tracking-wide text-gray-500">Вес</div>
+                                                                    <div className="text-base sm:text-lg font-bold text-emerald-700">{selectedScaleWeightSum}%</div>
+                                                                </div>
+                                                                <div className="rounded-lg border border-red-100 bg-red-50 px-3 py-2">
+                                                                    <div className="text-[11px] uppercase tracking-wide text-gray-500">Критичные</div>
+                                                                    <div className="text-base sm:text-lg font-bold text-red-700">{selectedScaleCriticalCount}</div>
                                                                 </div>
                                                             </div>
 
                                                             {selectedScaleCriteria.length > 0 ? (
-                                                                <div className="mt-4 space-y-3">
-                                                                    {selectedScaleCriteria.map((crit, cidx) => {
-                                                                        const isCritical = !!crit?.isCritical;
-                                                                        const critWeightRaw = Number(crit?.weight || 0);
-                                                                        const critWeight = Number.isFinite(critWeightRaw) ? Math.max(0, Math.min(100, critWeightRaw)) : 0;
-                                                                        const hasDeficiency = !!crit?.deficiency;
-                                                                        const deficiencyWeightRaw = Number(crit?.deficiency?.weight || 0);
-                                                                        const deficiencyWeight = Number.isFinite(deficiencyWeightRaw) ? Math.max(0, deficiencyWeightRaw) : 0;
-                                                                        const deficiencyDescription = String(crit?.deficiency?.description || '').trim();
-                                                                        const criterionDescription = String(crit?.value || '').trim();
+                                                                <>
+                                                                    <div className="mt-5 space-y-2">
+                                                                        {selectedScaleCriteria.map((crit, cidx) => {
+                                                                            const isCritical = !!crit?.isCritical;
+                                                                            const critWeightRaw = Number(crit?.weight || 0);
+                                                                            const critWeight = Number.isFinite(critWeightRaw) ? Math.max(0, Math.min(100, critWeightRaw)) : 0;
+                                                                            const isSelected = selectedMonitoringScaleCriterionIndex === cidx;
 
-                                                                        return (
-                                                                            <div key={`${crit?.id || crit?.name || 'criterion'}-${cidx}`} className="rounded-xl border border-gray-200 bg-white/95 p-3 sm:p-4">
-                                                                                <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
-                                                                                    <div className="min-w-0">
-                                                                                        <div className="flex items-center gap-2 flex-wrap">
-                                                                                            <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-blue-100 text-xs font-bold text-blue-700">{cidx + 1}</span>
-                                                                                            <h4 className="font-semibold text-gray-900">{crit?.name || `Критерий ${cidx + 1}`}</h4>
+                                                                            return (
+                                                                                <button
+                                                                                    key={`${crit?.id || crit?.name || 'criterion'}-${cidx}`}
+                                                                                    type="button"
+                                                                                    onClick={() => {
+                                                                                        setSelectedMonitoringScaleCriterionIndex((prev) => (prev === cidx ? null : cidx));
+                                                                                    }}
+                                                                                    className={`w-full rounded-xl border px-3 py-3 text-left transition ${
+                                                                                        isSelected
+                                                                                            ? 'border-blue-300 bg-blue-50 shadow-sm'
+                                                                                            : 'border-gray-200 bg-white hover:bg-gray-50'
+                                                                                    }`}
+                                                                                >
+                                                                                    <div className="flex items-start justify-between gap-3">
+                                                                                        <div className="min-w-0">
+                                                                                            <div className="flex items-center gap-2">
+                                                                                                <span className={`inline-flex h-6 min-w-6 items-center justify-center rounded-full text-xs font-bold ${isSelected ? 'bg-blue-200 text-blue-800' : 'bg-blue-100 text-blue-700'}`}>{cidx + 1}</span>
+                                                                                                <span className="font-semibold text-gray-900 break-words">{crit?.name || `Критерий ${cidx + 1}`}</span>
+                                                                                            </div>
                                                                                         </div>
-                                                                                        {criterionDescription && (
-                                                                                            <p className="mt-2 text-sm text-gray-600 whitespace-pre-wrap break-words">{criterionDescription}</p>
-                                                                                        )}
+                                                                                        <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold shrink-0 ${isCritical ? 'border-red-200 bg-red-100 text-red-700' : 'border-emerald-200 bg-emerald-100 text-emerald-700'}`}>
+                                                                                            {isCritical ? 'Критичный' : `${critWeight}%`}
+                                                                                        </span>
                                                                                     </div>
-                                                                                    <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold shrink-0 ${isCritical ? 'border-red-200 bg-red-100 text-red-700' : 'border-emerald-200 bg-emerald-100 text-emerald-700'}`}>
-                                                                                        {isCritical ? 'Критичный' : `${critWeight}%`}
+                                                                                </button>
+                                                                            );
+                                                                        })}
+                                                                    </div>
+
+                                                                    <div className="mt-5 rounded-xl border border-gray-200 bg-gray-50 p-4">
+                                                                        {!selectedScaleCriterion ? (
+                                                                            <div className="text-sm text-gray-600 flex items-center gap-2">
+                                                                                <FaIcon className="fas fa-hand-pointer text-blue-500"></FaIcon>
+                                                                                Нажмите на критерий выше, чтобы увидеть описание.
+                                                                            </div>
+                                                                        ) : (
+                                                                            <>
+                                                                                <div className="flex items-center justify-between gap-3">
+                                                                                    <h4 className="font-semibold text-gray-900">
+                                                                                        {selectedScaleCriterion?.name || `Критерий ${(selectedMonitoringScaleCriterionIndex ?? 0) + 1}`}
+                                                                                    </h4>
+                                                                                    <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold shrink-0 ${selectedScaleCriterion?.isCritical ? 'border-red-200 bg-red-100 text-red-700' : 'border-emerald-200 bg-emerald-100 text-emerald-700'}`}>
+                                                                                        {selectedScaleCriterion?.isCritical ? 'Критичный' : `${Math.max(0, Math.min(100, Number(selectedScaleCriterion?.weight || 0)))}%`}
                                                                                     </span>
                                                                                 </div>
 
-                                                                                {!isCritical && (
-                                                                                    <div className="mt-3 h-2 w-full rounded-full bg-gray-100 overflow-hidden">
-                                                                                        <div className="h-full rounded-full bg-gradient-to-r from-blue-500 to-emerald-500" style={{ width: `${critWeight}%` }}></div>
+                                                                                <div className="mt-3 text-sm text-gray-700 whitespace-pre-wrap break-words">
+                                                                                    {selectedScaleCriterionDescription || 'Описание не заполнено.'}
+                                                                                </div>
+
+                                                                                {!selectedScaleCriterion?.isCritical && (
+                                                                                    <div className="mt-3 h-2 w-full rounded-full bg-gray-200 overflow-hidden">
+                                                                                        <div
+                                                                                            className="h-full rounded-full bg-gradient-to-r from-blue-500 to-emerald-500"
+                                                                                            style={{ width: `${Math.max(0, Math.min(100, Number(selectedScaleCriterion?.weight || 0)))}%` }}
+                                                                                        ></div>
                                                                                     </div>
                                                                                 )}
 
-                                                                                {hasDeficiency && (
+                                                                                {selectedScaleCriterion?.deficiency && (
                                                                                     <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs sm:text-sm text-amber-900">
-                                                                                        Недочет: {deficiencyWeight}%{deficiencyDescription ? ` - ${deficiencyDescription}` : ''}
+                                                                                        Недочет: {Math.max(0, Number(selectedScaleCriterion?.deficiency?.weight || 0))}%
+                                                                                        {selectedScaleDeficiencyDescription ? ` - ${selectedScaleDeficiencyDescription}` : ''}
                                                                                     </div>
                                                                                 )}
-                                                                            </div>
-                                                                        );
-                                                                    })}
-                                                                </div>
+                                                                            </>
+                                                                        )}
+                                                                    </div>
+                                                                </>
                                                             ) : (
-                                                                <div className="mt-4 text-sm text-gray-600">В этом направлении пока нет критериев.</div>
+                                                                <div className="mt-4 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-gray-700">
+                                                                    В этом направлении пока нет критериев.
+                                                                </div>
                                                             )}
-                                                        </>
+                                                        </div>
                                                     )}
-                                                </div>
-                                            )}
+                                                </aside>
+                                            </div>
 
                                             {/* KPI cards */}
                                             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6 mb-6 sm:mb-8">
