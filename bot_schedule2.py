@@ -14986,6 +14986,10 @@ def _lms_material_row_to_payload(row):
         "url": signed_url or row[7],
         "content_url": row[7],
         "signed_url": signed_url,
+        "bucket": bucket,
+        "blob_path": blob_path,
+        "gcs_bucket": bucket,
+        "gcs_blob_path": blob_path,
         "mime_type": row[8],
         "metadata": _lms_parse_json(row[9], {}),
         "position": int(row[10] or 1)
@@ -15685,7 +15689,7 @@ def _lms_finalize_attempt_tx(cursor, attempt_id, user_id):
     }
 
 
-def _lms_course_structure_tx(cursor, course_id, course_version_id):
+def _lms_course_structure_tx(cursor, course_id, course_version_id, include_test_questions=False, include_correct_answers=False):
     cursor.execute("""
         SELECT
             c.id, c.title, c.description, c.category, c.status,
@@ -15780,13 +15784,18 @@ def _lms_course_structure_tx(cursor, course_id, course_version_id):
     tests = []
     for row in tests_rows:
         test_id = int(row[0])
-        cursor.execute("SELECT COUNT(*) FROM lms_questions WHERE test_id = %s", (test_id,))
-        question_bank_count = int(cursor.fetchone()[0] or 0)
+        questions = []
+        if include_test_questions:
+            questions = _lms_fetch_test_questions_tx(cursor, test_id, include_correct=include_correct_answers)
+            question_bank_count = len(questions)
+        else:
+            cursor.execute("SELECT COUNT(*) FROM lms_questions WHERE test_id = %s", (test_id,))
+            question_bank_count = int(cursor.fetchone()[0] or 0)
         configured_question_count = _lms_to_int(row[7], 0)
         effective_question_count = question_bank_count
         if configured_question_count > 0:
             effective_question_count = min(question_bank_count, configured_question_count)
-        tests.append({
+        test_payload = {
             "id": test_id,
             "module_id": int(row[1]) if row[1] is not None else None,
             "title": row[2],
@@ -15799,7 +15808,10 @@ def _lms_course_structure_tx(cursor, course_id, course_version_id):
             "random_order": _lms_parse_bool(row[8], True),
             "is_final": bool(row[9]),
             "status": row[10]
-        })
+        }
+        if include_test_questions:
+            test_payload["questions"] = questions
+        tests.append(test_payload)
 
     version_settings = _lms_parse_json(header[12], {})
     cover_payload = _lms_resolve_cover_payload(version_settings)
@@ -15824,6 +15836,325 @@ def _lms_course_structure_tx(cursor, course_id, course_version_id):
         },
         "modules": modules,
         "tests": tests
+    }
+
+
+def _lms_course_versions_history_tx(cursor, course_id, current_version_id=None):
+    cursor.execute("""
+        SELECT
+            cv.id,
+            cv.version_number,
+            cv.status,
+            cv.created_by,
+            cv.created_at,
+            cv.published_by,
+            cv.published_at,
+            cv.pass_threshold,
+            cv.attempt_limit,
+            COALESCE(mods.module_count, 0) AS modules_count,
+            COALESCE(lessons.lesson_count, 0) AS lessons_count,
+            COALESCE(tests.test_count, 0) AS tests_count,
+            COALESCE(questions.question_count, 0) AS questions_count
+        FROM lms_course_versions cv
+        LEFT JOIN (
+            SELECT m.course_version_id, COUNT(*) AS module_count
+            FROM lms_modules m
+            GROUP BY m.course_version_id
+        ) mods ON mods.course_version_id = cv.id
+        LEFT JOIN (
+            SELECT m.course_version_id, COUNT(*) AS lesson_count
+            FROM lms_lessons l
+            JOIN lms_modules m ON m.id = l.module_id
+            GROUP BY m.course_version_id
+        ) lessons ON lessons.course_version_id = cv.id
+        LEFT JOIN (
+            SELECT t.course_version_id, COUNT(*) FILTER (WHERE t.status <> 'archived') AS test_count
+            FROM lms_tests t
+            GROUP BY t.course_version_id
+        ) tests ON tests.course_version_id = cv.id
+        LEFT JOIN (
+            SELECT t.course_version_id, COUNT(*) AS question_count
+            FROM lms_questions q
+            JOIN lms_tests t ON t.id = q.test_id
+            WHERE t.status <> 'archived'
+            GROUP BY t.course_version_id
+        ) questions ON questions.course_version_id = cv.id
+        WHERE cv.course_id = %s
+        ORDER BY cv.version_number DESC, cv.id DESC
+    """, (course_id,))
+    rows = cursor.fetchall()
+    normalized_current_version_id = int(current_version_id) if current_version_id is not None else None
+    items = []
+    for row in rows:
+        version_id = int(row[0])
+        items.append({
+            "id": version_id,
+            "version_number": int(row[1] or 1),
+            "status": row[2],
+            "is_current": normalized_current_version_id is not None and version_id == normalized_current_version_id,
+            "created_by": int(row[3]) if row[3] is not None else None,
+            "created_at": row[4].isoformat() if row[4] else None,
+            "published_by": int(row[5]) if row[5] is not None else None,
+            "published_at": row[6].isoformat() if row[6] else None,
+            "pass_threshold": float(row[7] if row[7] is not None else LMS_DEFAULT_PASS_THRESHOLD),
+            "attempt_limit": int(row[8] if row[8] is not None else LMS_DEFAULT_ATTEMPT_LIMIT),
+            "modules_count": int(row[9] or 0),
+            "lessons_count": int(row[10] or 0),
+            "tests_count": int(row[11] or 0),
+            "questions_count": int(row[12] or 0)
+        })
+    return items
+
+
+def _lms_insert_course_structure_tx(cursor, requester_id, version_id, modules, tests, pass_threshold, attempt_limit, now):
+    created_module_ids = []
+    module_by_source_id = {}
+    module_by_position = {}
+
+    for module_index, module in enumerate(modules, start=1):
+        if not isinstance(module, dict):
+            continue
+        module_title = str(module.get('title') or '').strip()
+        if not module_title:
+            continue
+        module_desc = str(module.get('description') or '').strip() or None
+        module_pos = max(1, _lms_to_int(module.get('position'), module_index))
+        cursor.execute("""
+            INSERT INTO lms_modules (course_version_id, title, description, position, created_at)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING id
+        """, (version_id, module_title, module_desc, module_pos, now))
+        module_id = int(cursor.fetchone()[0])
+        created_module_ids.append(module_id)
+        module_by_position[module_pos] = module_id
+
+        source_module_id = _lms_to_int(module.get('id'), 0)
+        if source_module_id > 0:
+            module_by_source_id[source_module_id] = module_id
+
+        lessons = module.get('lessons') if isinstance(module.get('lessons'), list) else []
+        for lesson_index, lesson in enumerate(lessons, start=1):
+            if not isinstance(lesson, dict):
+                continue
+            lesson_title = str(lesson.get('title') or '').strip()
+            if not lesson_title:
+                continue
+            lesson_desc = str(lesson.get('description') or '').strip() or None
+            lesson_type = str(lesson.get('lesson_type') or lesson.get('type') or '').strip().lower()
+            lesson_materials = lesson.get('materials') if isinstance(lesson.get('materials'), list) else []
+            cursor.execute("""
+                INSERT INTO lms_lessons (
+                    module_id, title, description, position, duration_seconds,
+                    allow_fast_forward, completion_threshold, created_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (
+                module_id,
+                lesson_title,
+                lesson_desc,
+                max(1, _lms_to_int(lesson.get('position'), lesson_index)),
+                max(0, _lms_to_int(lesson.get('duration_seconds'), 0)),
+                _lms_parse_bool(lesson.get('allow_fast_forward'), False),
+                min(100.0, max(0.0, _lms_to_float(lesson.get('completion_threshold'), LMS_COMPLETION_THRESHOLD))),
+                now
+            ))
+            lesson_id = int(cursor.fetchone()[0])
+
+            material_position = 1
+            has_text_material = False
+            for material in lesson_materials:
+                if not isinstance(material, dict):
+                    continue
+                material_type = str(material.get('material_type') or material.get('type') or 'file').strip().lower()
+                if material_type not in ('video', 'pdf', 'link', 'text', 'file'):
+                    material_type = 'file'
+                content_url = str(material.get('content_url') or material.get('url') or '').strip() or None
+                content_text = str(material.get('content_text') or '').strip() or None
+                if material_type == 'text' and content_text:
+                    has_text_material = True
+                if not content_url and not content_text:
+                    continue
+                title_raw = str(material.get('title') or '').strip()
+                material_title = title_raw or ("Текстовый материал" if material_type == 'text' else f"Материал {material_position}")
+                mime_type = str(material.get('mime_type') or material.get('content_type') or '').strip() or None
+                gcs_bucket = str(material.get('bucket') or material.get('gcs_bucket') or '').strip() or None
+                gcs_blob_path = str(material.get('blob_path') or material.get('gcs_blob_path') or '').strip() or None
+                metadata = material.get('metadata') if isinstance(material.get('metadata'), dict) else {}
+                uploaded_name = str(material.get('file_name') or material.get('uploaded_file_name') or '').strip()
+                if uploaded_name:
+                    metadata["uploaded_file_name"] = uploaded_name
+                position = max(1, _lms_to_int(material.get('position'), material_position))
+                cursor.execute("""
+                    INSERT INTO lms_lesson_materials (
+                        lesson_id, title, material_type, content_text, content_url,
+                        gcs_bucket, gcs_blob_path, mime_type, metadata, position, created_by, created_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s)
+                """, (
+                    lesson_id,
+                    material_title,
+                    material_type,
+                    content_text,
+                    content_url,
+                    gcs_bucket,
+                    gcs_blob_path,
+                    mime_type,
+                    json.dumps(metadata, ensure_ascii=False),
+                    position,
+                    requester_id,
+                    now
+                ))
+                material_position += 1
+
+            if lesson_type == 'text' and not has_text_material:
+                fallback_text = str(lesson.get('content_text') or lesson_desc or '').strip()
+                if fallback_text:
+                    cursor.execute("""
+                        INSERT INTO lms_lesson_materials (
+                            lesson_id, title, material_type, content_text, content_url,
+                            gcs_bucket, gcs_blob_path, mime_type, metadata, position, created_by, created_at
+                        )
+                        VALUES (%s, %s, 'text', %s, NULL, NULL, NULL, 'text/plain', %s::jsonb, %s, %s, %s)
+                    """, (
+                        lesson_id,
+                        "Текстовый материал",
+                        fallback_text,
+                        json.dumps({}, ensure_ascii=False),
+                        material_position,
+                        requester_id,
+                        now
+                    ))
+
+    for test_index, test in enumerate(tests, start=1):
+        if not isinstance(test, dict):
+            continue
+        test_title = str(test.get('title') or '').strip() or f"Тест {test_index}"
+        requested_module_id = _lms_to_int(test.get('module_id'), 0)
+        test_module_id = module_by_source_id.get(requested_module_id) if requested_module_id > 0 else None
+        if not test_module_id:
+            module_position = _lms_to_int(test.get('module_position'), 0)
+            if module_position > 0:
+                test_module_id = module_by_position.get(module_position)
+        if not test_module_id:
+            test_module_id = None
+
+        test_metadata = test.get('metadata') if isinstance(test.get('metadata'), dict) else {}
+        raw_time_limit_minutes = test.get('time_limit_minutes')
+        if raw_time_limit_minutes in (None, ''):
+            raw_time_limit_minutes = test.get('time_limit')
+        parsed_time_limit_minutes = _lms_to_int(raw_time_limit_minutes, 0)
+        test_time_limit_minutes = parsed_time_limit_minutes if parsed_time_limit_minutes > 0 else None
+        raw_question_count = test.get('question_count')
+        if raw_question_count in (None, ''):
+            raw_question_count = test_metadata.get('questions_per_test')
+        parsed_question_count = _lms_to_int(raw_question_count, 0)
+        test_question_count = parsed_question_count if parsed_question_count > 0 else None
+        raw_random_order = test.get('random_order')
+        if raw_random_order in (None, ''):
+            raw_random_order = test_metadata.get('random_order')
+        test_random_order = _lms_parse_bool(raw_random_order, True)
+        cursor.execute("""
+            INSERT INTO lms_tests (
+                course_version_id, module_id, title, description, pass_threshold,
+                attempt_limit, time_limit_minutes, question_count, random_order,
+                is_final, status, created_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'draft', %s)
+            RETURNING id
+        """, (
+            version_id,
+            test_module_id,
+            test_title,
+            str(test.get('description') or '').strip() or None,
+            min(100.0, max(0.0, _lms_to_float(test.get('pass_threshold'), pass_threshold))),
+            max(1, _lms_to_int(test.get('attempt_limit'), attempt_limit)),
+            test_time_limit_minutes,
+            test_question_count,
+            test_random_order,
+            _lms_parse_bool(test.get('is_final'), True),
+            now
+        ))
+        test_id = int(cursor.fetchone()[0])
+
+        questions = test.get('questions') if isinstance(test.get('questions'), list) else []
+        for q_index, question in enumerate(questions, start=1):
+            if not isinstance(question, dict):
+                continue
+            prompt = str(question.get('prompt') or question.get('text') or '').strip()
+            if not prompt:
+                continue
+            q_type = str(question.get('type') or 'single').strip().lower()
+            if q_type in ('single_choice',):
+                q_type = 'single'
+            if q_type in ('multiple_choice', 'multi'):
+                q_type = 'multiple'
+            if q_type in ('boolean', 'truefalse'):
+                q_type = 'true_false'
+            if q_type not in ('single', 'multiple', 'true_false', 'matching', 'text'):
+                q_type = 'single'
+
+            cursor.execute("""
+                INSERT INTO lms_questions (
+                    test_id, question_type, prompt, points, position, required, metadata, correct_text_answers, created_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s)
+                RETURNING id
+            """, (
+                test_id,
+                q_type,
+                prompt,
+                max(0.1, _lms_to_float(question.get('points'), 1.0)),
+                max(1, _lms_to_int(question.get('position'), q_index)),
+                _lms_parse_bool(question.get('required'), True),
+                json.dumps(question.get('metadata') if isinstance(question.get('metadata'), dict) else {}, ensure_ascii=False),
+                json.dumps(question.get('correct_text_answers') if isinstance(question.get('correct_text_answers'), list) else [], ensure_ascii=False),
+                now
+            ))
+            question_id = int(cursor.fetchone()[0])
+
+            options = question.get('options') if isinstance(question.get('options'), list) else []
+            if q_type == 'true_false' and not options:
+                correct_bool = _lms_parse_bool(question.get('correct'), True)
+                options = [
+                    {"text": "True", "is_correct": correct_bool, "key": "true"},
+                    {"text": "False", "is_correct": (not correct_bool), "key": "false"}
+                ]
+
+            for o_index, option in enumerate(options, start=1):
+                if isinstance(option, dict):
+                    opt_text = str(option.get('text') or option.get('label') or '').strip()
+                    opt_key = str(option.get('key') or '').strip() or None
+                    is_correct = _lms_parse_bool(option.get('is_correct'), False)
+                    match_key = str(option.get('match_key') or option.get('right') or '').strip() or None
+                    opt_meta = option.get('metadata') if isinstance(option.get('metadata'), dict) else {}
+                    opt_position = max(1, _lms_to_int(option.get('position'), o_index))
+                else:
+                    opt_text = str(option or '').strip()
+                    opt_key = None
+                    is_correct = False
+                    match_key = None
+                    opt_meta = {}
+                    opt_position = o_index
+                if not opt_text:
+                    continue
+                cursor.execute("""
+                    INSERT INTO lms_question_options (
+                        question_id, option_key, option_text, position, is_correct, match_key, metadata
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)
+                """, (
+                    question_id,
+                    opt_key,
+                    opt_text,
+                    opt_position,
+                    is_correct,
+                    match_key,
+                    json.dumps(opt_meta, ensure_ascii=False)
+                ))
+
+    return {
+        "module_ids": created_module_ids
     }
 
 
@@ -17299,7 +17630,13 @@ def lms_admin_courses():
                     version_id = int(base[0]) if base[0] is not None else None
                     if not version_id:
                         return jsonify({"error": "Course has no active version"}), 404
-                    detail = _lms_course_structure_tx(cursor, course_id, version_id)
+                    detail = _lms_course_structure_tx(
+                        cursor,
+                        course_id,
+                        version_id,
+                        include_test_questions=True,
+                        include_correct_answers=True
+                    )
                     return jsonify({"status": "success", "course": detail}), 200
 
                 cursor.execute("""
@@ -17359,12 +17696,112 @@ def lms_admin_courses():
             tests = data.get('tests') if isinstance(data.get('tests'), list) else []
             if not tests and isinstance(data.get('test'), dict):
                 tests = [data.get('test')]
-
-            base_slug = re.sub(r'[^a-z0-9]+', '-', title.lower()).strip('-') or 'course'
-            slug = f"{base_slug[:80]}-{secrets.token_hex(3)}"
+            editing_course_id = _lms_to_int(data.get('course_id'), default=0)
 
             with db._get_cursor() as cursor:
                 now = _lms_now()
+
+                if editing_course_id > 0:
+                    cursor.execute("""
+                        SELECT id
+                        FROM lms_courses
+                        WHERE id = %s
+                        LIMIT 1
+                    """, (editing_course_id,))
+                    if not cursor.fetchone():
+                        return jsonify({"error": "Course not found"}), 404
+
+                    cursor.execute("""
+                        SELECT COALESCE(MAX(version_number), 0) + 1
+                        FROM lms_course_versions
+                        WHERE course_id = %s
+                    """, (editing_course_id,))
+                    next_version_number = max(1, int(cursor.fetchone()[0] or 1))
+
+                    cursor.execute("""
+                        UPDATE lms_courses
+                        SET
+                            title = %s,
+                            description = %s,
+                            category = %s,
+                            default_pass_threshold = %s,
+                            default_attempt_limit = %s,
+                            updated_by = %s,
+                            updated_at = %s
+                        WHERE id = %s
+                    """, (
+                        title,
+                        description,
+                        category,
+                        pass_threshold,
+                        attempt_limit,
+                        requester_id,
+                        now,
+                        editing_course_id
+                    ))
+
+                    cursor.execute("""
+                        INSERT INTO lms_course_versions (
+                            course_id, version_number, title, description, status,
+                            pass_threshold, attempt_limit, anti_cheat_settings, created_by, created_at
+                        )
+                        VALUES (%s, %s, %s, %s, 'draft', %s, %s, %s::jsonb, %s, %s)
+                        RETURNING id
+                    """, (
+                        editing_course_id,
+                        next_version_number,
+                        title,
+                        description,
+                        pass_threshold,
+                        attempt_limit,
+                        json.dumps({
+                            "heartbeat_seconds": LMS_HEARTBEAT_SECONDS,
+                            "stale_gap_seconds": LMS_STALE_GAP_SECONDS,
+                            "completion_threshold_percent": LMS_COMPLETION_THRESHOLD,
+                            "cover_url": cover_url,
+                            "cover_bucket": cover_bucket,
+                            "cover_blob_path": cover_blob_path,
+                            "skills": skills
+                        }, ensure_ascii=False),
+                        requester_id,
+                        now
+                    ))
+                    version_id = int(cursor.fetchone()[0])
+                    course_id = editing_course_id
+
+                    _lms_insert_course_structure_tx(
+                        cursor,
+                        requester_id=requester_id,
+                        version_id=version_id,
+                        modules=modules,
+                        tests=tests,
+                        pass_threshold=pass_threshold,
+                        attempt_limit=attempt_limit,
+                        now=now
+                    )
+
+                    _lms_audit(
+                        cursor,
+                        actor_id=requester_id,
+                        actor_role=requester_role,
+                        action='create_course_version',
+                        entity_type='lms_course',
+                        entity_id=course_id,
+                        details={
+                            "course_version_id": version_id,
+                            "version_number": next_version_number
+                        }
+                    )
+
+                    return jsonify({
+                        "status": "success",
+                        "course_id": course_id,
+                        "course_version_id": version_id,
+                        "version_number": next_version_number
+                    }), 201
+
+                base_slug = re.sub(r'[^a-z0-9]+', '-', title.lower()).strip('-') or 'course'
+                slug = f"{base_slug[:80]}-{secrets.token_hex(3)}"
                 cursor.execute("""
                     INSERT INTO lms_courses (
                         slug, title, description, category, status,
@@ -17405,237 +17842,16 @@ def lms_admin_courses():
 
                 cursor.execute("UPDATE lms_courses SET current_version_id = %s WHERE id = %s", (version_id, course_id))
 
-                created_module_ids = []
-                for module_index, module in enumerate(modules, start=1):
-                    if not isinstance(module, dict):
-                        continue
-                    module_title = str(module.get('title') or '').strip()
-                    if not module_title:
-                        continue
-                    module_desc = str(module.get('description') or '').strip() or None
-                    module_pos = max(1, _lms_to_int(module.get('position'), module_index))
-                    cursor.execute("""
-                        INSERT INTO lms_modules (course_version_id, title, description, position, created_at)
-                        VALUES (%s, %s, %s, %s, %s)
-                        RETURNING id
-                    """, (version_id, module_title, module_desc, module_pos, now))
-                    module_id = int(cursor.fetchone()[0])
-                    created_module_ids.append(module_id)
-
-                    lessons = module.get('lessons') if isinstance(module.get('lessons'), list) else []
-                    for lesson_index, lesson in enumerate(lessons, start=1):
-                        if not isinstance(lesson, dict):
-                            continue
-                        lesson_title = str(lesson.get('title') or '').strip()
-                        if not lesson_title:
-                            continue
-                        lesson_desc = str(lesson.get('description') or '').strip() or None
-                        lesson_type = str(lesson.get('lesson_type') or lesson.get('type') or '').strip().lower()
-                        lesson_materials = lesson.get('materials') if isinstance(lesson.get('materials'), list) else []
-                        cursor.execute("""
-                            INSERT INTO lms_lessons (
-                                module_id, title, description, position, duration_seconds,
-                                allow_fast_forward, completion_threshold, created_at
-                            )
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                            RETURNING id
-                        """, (
-                            module_id,
-                            lesson_title,
-                            lesson_desc,
-                            max(1, _lms_to_int(lesson.get('position'), lesson_index)),
-                            max(0, _lms_to_int(lesson.get('duration_seconds'), 0)),
-                            _lms_parse_bool(lesson.get('allow_fast_forward'), False),
-                            min(100.0, max(0.0, _lms_to_float(lesson.get('completion_threshold'), LMS_COMPLETION_THRESHOLD))),
-                            now
-                        ))
-                        lesson_id = int(cursor.fetchone()[0])
-
-                        material_position = 1
-                        has_text_material = False
-                        for material in lesson_materials:
-                            if not isinstance(material, dict):
-                                continue
-                            material_type = str(material.get('material_type') or material.get('type') or 'file').strip().lower()
-                            if material_type not in ('video', 'pdf', 'link', 'text', 'file'):
-                                material_type = 'file'
-                            content_url = str(material.get('content_url') or material.get('url') or '').strip() or None
-                            content_text = str(material.get('content_text') or '').strip() or None
-                            if material_type == 'text' and content_text:
-                                has_text_material = True
-                            if not content_url and not content_text:
-                                continue
-                            title_raw = str(material.get('title') or '').strip()
-                            material_title = title_raw or ("Текстовый материал" if material_type == 'text' else f"Материал {material_position}")
-                            mime_type = str(material.get('mime_type') or material.get('content_type') or '').strip() or None
-                            gcs_bucket = str(material.get('bucket') or material.get('gcs_bucket') or '').strip() or None
-                            gcs_blob_path = str(material.get('blob_path') or material.get('gcs_blob_path') or '').strip() or None
-                            metadata = material.get('metadata') if isinstance(material.get('metadata'), dict) else {}
-                            uploaded_name = str(material.get('file_name') or material.get('uploaded_file_name') or '').strip()
-                            if uploaded_name:
-                                metadata["uploaded_file_name"] = uploaded_name
-                            position = max(1, _lms_to_int(material.get('position'), material_position))
-                            cursor.execute("""
-                                INSERT INTO lms_lesson_materials (
-                                    lesson_id, title, material_type, content_text, content_url,
-                                    gcs_bucket, gcs_blob_path, mime_type, metadata, position, created_by, created_at
-                                )
-                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s)
-                            """, (
-                                lesson_id,
-                                material_title,
-                                material_type,
-                                content_text,
-                                content_url,
-                                gcs_bucket,
-                                gcs_blob_path,
-                                mime_type,
-                                json.dumps(metadata, ensure_ascii=False),
-                                position,
-                                requester_id,
-                                now
-                            ))
-                            material_position += 1
-
-                        if lesson_type == 'text' and not has_text_material:
-                            fallback_text = str(lesson.get('content_text') or lesson_desc or '').strip()
-                            if fallback_text:
-                                cursor.execute("""
-                                    INSERT INTO lms_lesson_materials (
-                                        lesson_id, title, material_type, content_text, content_url,
-                                        gcs_bucket, gcs_blob_path, mime_type, metadata, position, created_by, created_at
-                                    )
-                                    VALUES (%s, %s, 'text', %s, NULL, NULL, NULL, 'text/plain', %s::jsonb, %s, %s, %s)
-                                """, (
-                                    lesson_id,
-                                    "Текстовый материал",
-                                    fallback_text,
-                                    json.dumps({}, ensure_ascii=False),
-                                    material_position,
-                                    requester_id,
-                                    now
-                                ))
-
-                for test_index, test in enumerate(tests, start=1):
-                    if not isinstance(test, dict):
-                        continue
-                    test_title = str(test.get('title') or '').strip() or f"Тест {test_index}"
-                    test_module_id = test.get('module_id')
-                    if test_module_id not in created_module_ids:
-                        test_module_id = None
-                    test_metadata = test.get('metadata') if isinstance(test.get('metadata'), dict) else {}
-                    raw_time_limit_minutes = test.get('time_limit_minutes')
-                    if raw_time_limit_minutes in (None, ''):
-                        raw_time_limit_minutes = test.get('time_limit')
-                    parsed_time_limit_minutes = _lms_to_int(raw_time_limit_minutes, 0)
-                    test_time_limit_minutes = parsed_time_limit_minutes if parsed_time_limit_minutes > 0 else None
-                    raw_question_count = test.get('question_count')
-                    if raw_question_count in (None, ''):
-                        raw_question_count = test_metadata.get('questions_per_test')
-                    parsed_question_count = _lms_to_int(raw_question_count, 0)
-                    test_question_count = parsed_question_count if parsed_question_count > 0 else None
-                    raw_random_order = test.get('random_order')
-                    if raw_random_order in (None, ''):
-                        raw_random_order = test_metadata.get('random_order')
-                    test_random_order = _lms_parse_bool(raw_random_order, True)
-                    cursor.execute("""
-                        INSERT INTO lms_tests (
-                            course_version_id, module_id, title, description, pass_threshold,
-                            attempt_limit, time_limit_minutes, question_count, random_order,
-                            is_final, status, created_at
-                        )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'draft', %s)
-                        RETURNING id
-                    """, (
-                        version_id,
-                        test_module_id,
-                        test_title,
-                        str(test.get('description') or '').strip() or None,
-                        min(100.0, max(0.0, _lms_to_float(test.get('pass_threshold'), pass_threshold))),
-                        max(1, _lms_to_int(test.get('attempt_limit'), attempt_limit)),
-                        test_time_limit_minutes,
-                        test_question_count,
-                        test_random_order,
-                        _lms_parse_bool(test.get('is_final'), True),
-                        now
-                    ))
-                    test_id = int(cursor.fetchone()[0])
-
-                    questions = test.get('questions') if isinstance(test.get('questions'), list) else []
-                    for q_index, question in enumerate(questions, start=1):
-                        if not isinstance(question, dict):
-                            continue
-                        prompt = str(question.get('prompt') or question.get('text') or '').strip()
-                        if not prompt:
-                            continue
-                        q_type = str(question.get('type') or 'single').strip().lower()
-                        if q_type in ('single_choice',):
-                            q_type = 'single'
-                        if q_type in ('multiple_choice', 'multi'):
-                            q_type = 'multiple'
-                        if q_type in ('boolean', 'truefalse'):
-                            q_type = 'true_false'
-                        if q_type not in ('single', 'multiple', 'true_false', 'matching', 'text'):
-                            q_type = 'single'
-
-                        cursor.execute("""
-                            INSERT INTO lms_questions (
-                                test_id, question_type, prompt, points, position, required, metadata, correct_text_answers, created_at
-                            )
-                            VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s)
-                            RETURNING id
-                        """, (
-                            test_id,
-                            q_type,
-                            prompt,
-                            max(0.1, _lms_to_float(question.get('points'), 1.0)),
-                            max(1, _lms_to_int(question.get('position'), q_index)),
-                            _lms_parse_bool(question.get('required'), True),
-                            json.dumps(question.get('metadata') if isinstance(question.get('metadata'), dict) else {}, ensure_ascii=False),
-                            json.dumps(question.get('correct_text_answers') if isinstance(question.get('correct_text_answers'), list) else [], ensure_ascii=False),
-                            now
-                        ))
-                        question_id = int(cursor.fetchone()[0])
-
-                        options = question.get('options') if isinstance(question.get('options'), list) else []
-                        if q_type == 'true_false' and not options:
-                            correct_bool = _lms_parse_bool(question.get('correct'), True)
-                            options = [
-                                {"text": "True", "is_correct": correct_bool, "key": "true"},
-                                {"text": "False", "is_correct": (not correct_bool), "key": "false"}
-                            ]
-
-                        for o_index, option in enumerate(options, start=1):
-                            if isinstance(option, dict):
-                                opt_text = str(option.get('text') or option.get('label') or '').strip()
-                                opt_key = str(option.get('key') or '').strip() or None
-                                is_correct = _lms_parse_bool(option.get('is_correct'), False)
-                                match_key = str(option.get('match_key') or option.get('right') or '').strip() or None
-                                opt_meta = option.get('metadata') if isinstance(option.get('metadata'), dict) else {}
-                                opt_position = max(1, _lms_to_int(option.get('position'), o_index))
-                            else:
-                                opt_text = str(option or '').strip()
-                                opt_key = None
-                                is_correct = False
-                                match_key = None
-                                opt_meta = {}
-                                opt_position = o_index
-                            if not opt_text:
-                                continue
-                            cursor.execute("""
-                                INSERT INTO lms_question_options (
-                                    question_id, option_key, option_text, position, is_correct, match_key, metadata
-                                )
-                                VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)
-                            """, (
-                                question_id,
-                                opt_key,
-                                opt_text,
-                                opt_position,
-                                is_correct,
-                                match_key,
-                                json.dumps(opt_meta, ensure_ascii=False)
-                            ))
+                _lms_insert_course_structure_tx(
+                    cursor,
+                    requester_id=requester_id,
+                    version_id=version_id,
+                    modules=modules,
+                    tests=tests,
+                    pass_threshold=pass_threshold,
+                    attempt_limit=attempt_limit,
+                    now=now
+                )
 
                 _lms_audit(
                     cursor,
@@ -17647,7 +17863,7 @@ def lms_admin_courses():
                     details={"course_version_id": version_id}
                 )
 
-            return jsonify({"status": "success", "course_id": course_id, "course_version_id": version_id}), 201
+            return jsonify({"status": "success", "course_id": course_id, "course_version_id": version_id, "version_number": 1}), 201
 
         if request.method == 'PATCH':
             course_id = _lms_to_int(data.get('course_id'), default=0)
@@ -17760,6 +17976,64 @@ def lms_admin_courses():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/lms/admin/courses/<int:course_id>/history', methods=['GET'])
+@require_api_key
+def lms_admin_course_history(course_id):
+    _, _, _, error_response, status_code = _lms_resolve_request('manager')
+    if error_response:
+        return error_response, status_code
+
+    version_id = _lms_to_int(request.args.get('course_version_id'), default=0)
+
+    try:
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id, title, current_version_id
+                FROM lms_courses
+                WHERE id = %s
+                LIMIT 1
+            """, (course_id,))
+            course_row = cursor.fetchone()
+            if not course_row:
+                return jsonify({"error": "Course not found"}), 404
+
+            current_version_id = int(course_row[2]) if course_row[2] is not None else None
+            history_versions = _lms_course_versions_history_tx(
+                cursor,
+                course_id=course_id,
+                current_version_id=current_version_id
+            )
+
+            response_payload = {
+                "status": "success",
+                "course_id": course_id,
+                "course_title": course_row[1],
+                "current_version_id": current_version_id,
+                "versions": history_versions
+            }
+
+            if version_id > 0:
+                if not any(int(item.get('id') or 0) == version_id for item in history_versions):
+                    return jsonify({"error": "Version not found for course"}), 404
+                detail = _lms_course_structure_tx(
+                    cursor,
+                    course_id,
+                    version_id,
+                    include_test_questions=True,
+                    include_correct_answers=True
+                )
+                if not detail:
+                    return jsonify({"error": "Version not found for course"}), 404
+                response_payload["selected_version_id"] = version_id
+                response_payload["course"] = detail
+                response_payload["access_mode"] = "history"
+
+        return jsonify(response_payload), 200
+    except Exception as e:
+        logging.exception("Error in /api/lms/admin/courses/<course_id>/history")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/api/lms/admin/courses/<int:course_id>', methods=['DELETE'])
 @require_api_key
 def lms_admin_delete_course(course_id):
@@ -17824,12 +18098,17 @@ def lms_admin_publish_course(course_id):
 
     data = request.get_json(silent=True) or {}
     version_id_raw = data.get('course_version_id')
+    certificate_action = str(data.get('previous_certificates_action') or 'keep').strip().lower()
+    if certificate_action not in ('keep', 'delete'):
+        return jsonify({"error": "previous_certificates_action must be 'keep' or 'delete'"}), 400
     try:
         version_id = int(version_id_raw) if version_id_raw not in (None, '') else None
     except Exception:
         return jsonify({"error": "Invalid course_version_id"}), 400
 
     try:
+        deleted_certificate_count = 0
+        deleted_certificate_blobs = 0
         with db._get_cursor() as cursor:
             cursor.execute("SELECT id FROM lms_courses WHERE id = %s", (course_id,))
             if not cursor.fetchone():
@@ -17887,6 +18166,35 @@ def lms_admin_publish_course(course_id):
                 WHERE id = %s
             """, (version_id, requester_id, now, course_id))
 
+            if certificate_action == 'delete':
+                cursor.execute("""
+                    SELECT id, pdf_storage_type, gcs_bucket, gcs_blob_path
+                    FROM lms_certificates
+                    WHERE course_id = %s
+                """, (course_id,))
+                cert_rows = cursor.fetchall()
+                deleted_certificate_count = len(cert_rows)
+                blob_refs = []
+                for cert_row in cert_rows:
+                    storage_type = str(cert_row[1] or '').strip().lower()
+                    bucket = str(cert_row[2] or '').strip()
+                    blob_path = str(cert_row[3] or '').strip()
+                    if storage_type == 'gcs' and bucket and blob_path:
+                        blob_refs.append({
+                            "bucket": bucket,
+                            "blob_path": blob_path
+                        })
+                if blob_refs:
+                    cleanup_result = _lms_delete_blob_refs(blob_refs)
+                    deleted_certificate_blobs = int(cleanup_result.get("deleted") or 0)
+                    if cleanup_result.get("failed"):
+                        first_error = cleanup_result["failed"][0]
+                        raise RuntimeError(
+                            "Failed to delete one or more certificate files from GCS "
+                            f"(example: {first_error.get('bucket')}/{first_error.get('blob_path')})"
+                        )
+                cursor.execute("DELETE FROM lms_certificates WHERE course_id = %s", (course_id,))
+
             _lms_audit(
                 cursor,
                 actor_id=requester_id,
@@ -17894,10 +18202,22 @@ def lms_admin_publish_course(course_id):
                 action='publish_course',
                 entity_type='lms_course',
                 entity_id=course_id,
-                details={"course_version_id": version_id}
+                details={
+                    "course_version_id": version_id,
+                    "previous_certificates_action": certificate_action,
+                    "deleted_certificates": deleted_certificate_count,
+                    "deleted_certificate_gcs_blobs": deleted_certificate_blobs
+                }
             )
 
-        return jsonify({"status": "success", "course_id": course_id, "course_version_id": version_id}), 200
+        return jsonify({
+            "status": "success",
+            "course_id": course_id,
+            "course_version_id": version_id,
+            "previous_certificates_action": certificate_action,
+            "deleted_certificates": deleted_certificate_count,
+            "deleted_certificate_gcs_blobs": deleted_certificate_blobs
+        }), 200
     except Exception as e:
         logging.exception("Error in /api/lms/admin/courses/<course_id>/publish")
         return jsonify({"error": str(e)}), 500
@@ -17948,9 +18268,10 @@ def lms_admin_assign_course(course_id):
             course_row = cursor.fetchone()
             if not course_row:
                 return jsonify({"error": "Course not found"}), 404
+            current_version_id = int(course_row[1]) if course_row[1] is not None else None
 
             if version_id is None:
-                version_id = int(course_row[1]) if course_row[1] is not None else None
+                version_id = current_version_id
             if not version_id:
                 cursor.execute("""
                     SELECT id
@@ -17965,14 +18286,20 @@ def lms_admin_assign_course(course_id):
                 version_id = int(row[0])
 
             cursor.execute("""
-                SELECT id
+                SELECT id, status
                 FROM lms_course_versions
                 WHERE id = %s
                   AND course_id = %s
                 LIMIT 1
             """, (version_id, course_id))
-            if not cursor.fetchone():
+            version_row = cursor.fetchone()
+            if not version_row:
                 return jsonify({"error": "course_version_id does not belong to course"}), 400
+            version_status = str(version_row[1] or '').strip().lower()
+            if version_status == 'archived':
+                return jsonify({"error": "Archived course version cannot be assigned"}), 400
+            if current_version_id is not None and int(version_id) != int(current_version_id):
+                return jsonify({"error": "Only current course version can be assigned. Use history to review old versions."}), 400
 
             assigned = []
             skipped = []
