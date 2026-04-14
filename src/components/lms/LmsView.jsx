@@ -2709,11 +2709,16 @@ function CatalogView({
 
 // ─── COURSE CARD ──────────────────────────────────────────────────────────────
 
-function CourseCard({ course, onClick, busy = false, actions = null }) {
+function CourseCard({ course, onClick, busy = false, actions = null, managerMode = false }) {
   const st = statusConfig[course.status] || statusConfig.not_started;
   const dl = course.deadline ? formatDeadline(course.deadline) : null;
   const isMandatory = resolveCourseMandatoryFlag(course);
   const attemptsLeft = Math.max(0, Number(course.maxAttempts || 0) - Number(course.attemptsUsed || 0));
+  const showProgressBar = managerMode || (course.status !== "completed" && course.status !== "not_started");
+  const progressLabel = managerMode ? "Прошли" : "Прогресс";
+  const actionLabel = managerMode
+    ? "Открыть"
+    : ((course.status === "completed" || course.status === "completed_late") ? "Просмотр" : course.status === "not_started" ? "Начать" : "Продолжить");
 
   return (
     <div onClick={() => !busy && onClick?.()} className={`bg-white rounded-2xl border border-slate-200 overflow-hidden transition-all group ${busy ? "opacity-70 cursor-wait" : "cursor-pointer hover:shadow-md hover:border-slate-300"}`}>
@@ -2727,17 +2732,17 @@ function CourseCard({ course, onClick, busy = false, actions = null }) {
         {isMandatory && (
           <div className="absolute top-3 left-3 bg-white/20 backdrop-blur-sm text-white text-[10px] font-semibold px-2 py-1 rounded-full border border-white/30 z-10">Обязательный</div>
         )}
-        {course.status === "completed" && (
+        {!managerMode && course.status === "completed" && (
           <div className="absolute top-3 right-3 w-8 h-8 bg-white rounded-full flex items-center justify-center shadow-md z-10"><CheckCircle size={16} className="text-emerald-600" /></div>
         )}
-        {course.status === "overdue" && (
+        {!managerMode && course.status === "overdue" && (
           <div className="absolute top-3 right-3 w-8 h-8 bg-red-500 rounded-full flex items-center justify-center shadow-md z-10"><AlertCircle size={16} className="text-white" /></div>
         )}
       </div>
       <div className="p-5">
         <div className="flex items-start justify-between gap-2 mb-2">
           <span className="text-[10px] font-semibold text-indigo-600 uppercase tracking-wider">{course.category}</span>
-          <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${st.bg} ${st.text}`}>{st.label}</span>
+          {!managerMode && <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${st.bg} ${st.text}`}>{st.label}</span>}
         </div>
         <h3 className="text-sm font-semibold text-slate-900 leading-snug mb-3 group-hover:text-indigo-700 transition-colors line-clamp-2">{course.title}</h3>
         <div className="flex items-center gap-3 text-xs text-slate-500 mb-4">
@@ -2745,23 +2750,23 @@ function CourseCard({ course, onClick, busy = false, actions = null }) {
           <span className="flex items-center gap-1"><BookOpen size={11} /> {course.lessons} уроков</span>
           <span className="flex items-center gap-1"><Star size={11} className="text-amber-400 fill-amber-400" /> {course.rating}</span>
         </div>
-        {course.status !== "completed" && course.status !== "not_started" && (
+        {showProgressBar && (
           <div className="mb-3">
-            <div className="flex justify-between text-xs text-slate-500 mb-1.5"><span>Прогресс</span><span className="font-semibold text-slate-700">{course.progress}%</span></div>
+            <div className="flex justify-between text-xs text-slate-500 mb-1.5"><span>{progressLabel}</span><span className="font-semibold text-slate-700">{course.progress}%</span></div>
             <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
-              <div className={`h-full rounded-full transition-all ${course.status === "overdue" ? "bg-red-500" : "bg-indigo-500"}`} style={{ width: `${course.progress}%` }} />
+              <div className={`h-full rounded-full transition-all ${!managerMode && course.status === "overdue" ? "bg-red-500" : "bg-indigo-500"}`} style={{ width: `${course.progress}%` }} />
             </div>
           </div>
         )}
         {/* Попытки */}
-        {course.hasCourseAttemptLimit && Number(course.maxAttempts || 0) > 0 && course.status !== "completed" && course.status !== "completed_late" && (
+        {!managerMode && course.hasCourseAttemptLimit && Number(course.maxAttempts || 0) > 0 && course.status !== "completed" && course.status !== "completed_late" && (
           <div className={`flex items-center gap-1 text-[10px] mb-3 ${attemptsLeft <= 1 ? "text-red-600" : "text-slate-500"}`}>
             <RefreshCw size={10} />
             <span>Попыток осталось: <strong>{attemptsLeft <= 0 ? "нет" : attemptsLeft}</strong> из {course.maxAttempts}</span>
           </div>
         )}
         <div className="flex items-center justify-between">
-          {dl && (
+          {!managerMode && dl && (
             <div className={`flex items-center gap-1 text-xs ${dl.overdue ? "text-red-600" : dl.urgent ? "text-amber-600" : "text-slate-500"}`}>
               <Calendar size={11} />
               {dl.overdue ? `Просрочен ${Math.abs(Math.ceil((new Date(course.deadline) - new Date()) / 86400000))} дн` : `До ${dl.label}`}
@@ -2771,9 +2776,9 @@ function CourseCard({ course, onClick, busy = false, actions = null }) {
             {actions}
             <button
               onClick={() => !busy && onClick?.()}
-              className={`text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors ${course.status === "completed" || course.status === "completed_late" ? "bg-emerald-50 text-emerald-700 hover:bg-emerald-100" : "bg-indigo-600 text-white hover:bg-indigo-700"}`}
+              className={`text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors ${managerMode ? "bg-indigo-600 text-white hover:bg-indigo-700" : (course.status === "completed" || course.status === "completed_late" ? "bg-emerald-50 text-emerald-700 hover:bg-emerald-100" : "bg-indigo-600 text-white hover:bg-indigo-700")}`}
             >
-              {busy ? "Загрузка..." : (course.status === "completed" || course.status === "completed_late") ? "Просмотр" : course.status === "not_started" ? "Начать" : "Продолжить"}
+              {busy ? "Загрузка..." : actionLabel}
             </button>
           </div>
         </div>
@@ -2782,10 +2787,11 @@ function CourseCard({ course, onClick, busy = false, actions = null }) {
   );
 }
 
-function CourseListItem({ course, onClick, busy = false, actions = null }) {
+function CourseListItem({ course, onClick, busy = false, actions = null, managerMode = false }) {
   const st = statusConfig[course.status] || statusConfig.not_started;
   const dl = course.deadline ? formatDeadline(course.deadline) : null;
   const isMandatory = resolveCourseMandatoryFlag(course);
+  const showProgressBar = managerMode || (course.status !== "completed" && course.status !== "not_started");
   return (
     <div onClick={() => !busy && onClick?.()} className={`bg-white rounded-2xl border border-slate-200 p-5 flex items-center gap-5 transition-all group ${busy ? "opacity-70 cursor-wait" : "cursor-pointer hover:shadow-sm hover:border-slate-300"}`}>
       <div className={`w-14 h-14 rounded-xl bg-gradient-to-br ${course.color} flex items-center justify-center text-2xl flex-shrink-0 overflow-hidden`}>
@@ -2808,22 +2814,22 @@ function CourseListItem({ course, onClick, busy = false, actions = null }) {
             <span className="flex items-center gap-1"><RefreshCw size={11} /> {Math.max(0, Number(course.maxAttempts || 0) - Number(course.attemptsUsed || 0))} поп.</span>
           )}
         </div>
-        {dl && (
+        {!managerMode && dl && (
           <div className={`mt-1.5 flex items-center gap-1 text-[11px] ${dl.overdue ? "text-red-600" : dl.urgent ? "text-amber-600" : "text-slate-500"}`}>
             <Calendar size={11} />
             {dl.overdue ? `Просрочен ${Math.abs(Math.ceil((new Date(course.deadline) - new Date()) / 86400000))} дн` : `До ${dl.label}`}
           </div>
         )}
       </div>
-      {course.status !== "completed" && course.status !== "not_started" && (
+      {showProgressBar && (
         <div className="w-32">
-          <div className="flex justify-between text-xs text-slate-500 mb-1"><span>Прогресс</span><span>{course.progress}%</span></div>
+          <div className="flex justify-between text-xs text-slate-500 mb-1"><span>{managerMode ? "Прошли" : "Прогресс"}</span><span>{course.progress}%</span></div>
           <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
             <div className="h-full bg-indigo-500 rounded-full" style={{ width: `${course.progress}%` }} />
           </div>
         </div>
       )}
-      <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${st.bg} ${st.text}`}>{st.label}</span>
+      {!managerMode && <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${st.bg} ${st.text}`}>{st.label}</span>}
       <div className="flex items-center gap-1.5" onClick={(event) => event.stopPropagation()}>
         {actions}
         <ChevronRight size={16} className="text-slate-400 flex-shrink-0" />
@@ -2851,6 +2857,12 @@ function CourseDetail({
   const firstLesson = modulesData[0]?.lessons?.[0] || null;
   const attemptsLeft = Math.max(0, Number(course.maxAttempts || 0) - Number(course.attemptsUsed || 0));
   const hasCourseAnalytics = isManagerMode && courseAnalytics && typeof courseAnalytics === "object";
+  const handleOpenProgram = useCallback(() => {
+    if (typeof document === "undefined") return;
+    const node = document.getElementById("lms-course-curriculum");
+    if (!node) return;
+    node.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, []);
 
   useEffect(() => {
     setOpenModules(modulesData[0]?.id ? [modulesData[0].id] : []);
@@ -2904,12 +2916,18 @@ function CourseDetail({
             </div>
           )}
           <button
-            onClick={() => firstLesson && onStartLesson(firstLesson)}
-            disabled={!firstLesson}
+            onClick={() => {
+              if (isManagerMode) {
+                handleOpenProgram();
+                return;
+              }
+              if (firstLesson) onStartLesson(firstLesson);
+            }}
+            disabled={isManagerMode ? modulesData.length === 0 : !firstLesson}
             className="bg-white text-slate-900 font-semibold px-6 py-3 rounded-xl hover:bg-white/90 transition-colors text-sm shadow-lg disabled:opacity-60 disabled:cursor-not-allowed"
           >
             {isManagerMode
-              ? (firstLesson ? "Открыть программу курса" : "Программа курса пуста")
+              ? (modulesData.length > 0 ? "Показать программу курса" : "Программа курса пуста")
               : (course.status === "not_started" ? "Начать курс" : course.status === "completed" ? "Повторить" : "Продолжить обучение")}
           </button>
         </div>
@@ -2926,7 +2944,7 @@ function CourseDetail({
           </div>
 
           {modulesData.length > 0 && (
-            <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+            <div id="lms-course-curriculum" className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
               <div className="px-6 py-5 border-b border-slate-100">
                 <h2 className="text-base font-semibold text-slate-900">Программа курса</h2>
                 <p className="text-xs text-slate-500 mt-1">{course.modules} модуля · {course.lessons} уроков</p>
@@ -2945,16 +2963,19 @@ function CourseDetail({
                     <div className="px-6 pb-4 space-y-1">
                       {mod.lessons.map((l, lessonIndex) => {
                         const Icon = lessonIcons[l.type];
+                        const lessonLocked = isManagerMode ? false : Boolean(l.locked);
                         return (
-                          <div key={l.id} onClick={() => !l.locked && onStartLesson(l)} className={`flex items-center gap-3 p-3 rounded-xl transition-all ${l.locked ? "opacity-50 cursor-not-allowed" : "cursor-pointer hover:bg-indigo-50 group"}`}>
-                            <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${l.status === "completed" ? "bg-emerald-50" : l.locked ? "bg-slate-100" : "bg-indigo-50"}`}>
-                              {l.status === "completed" ? <CheckCircle size={14} className="text-emerald-600" /> : l.locked ? <Lock size={14} className="text-slate-400" /> : <Icon size={14} className="text-indigo-600" />}
+                          <div key={l.id} onClick={() => !lessonLocked && onStartLesson(l)} className={`flex items-center gap-3 p-3 rounded-xl transition-all ${lessonLocked ? "opacity-50 cursor-not-allowed" : "cursor-pointer hover:bg-indigo-50 group"}`}>
+                            <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${isManagerMode ? "bg-indigo-50" : (l.status === "completed" ? "bg-emerald-50" : lessonLocked ? "bg-slate-100" : "bg-indigo-50")}`}>
+                              {isManagerMode
+                                ? <Icon size={14} className="text-indigo-600" />
+                                : (l.status === "completed" ? <CheckCircle size={14} className="text-emerald-600" /> : lessonLocked ? <Lock size={14} className="text-slate-400" /> : <Icon size={14} className="text-indigo-600" />)}
                             </div>
                             <div className="flex-1">
-                              <p className={`text-xs font-medium ${l.locked ? "text-slate-400" : "text-slate-800 group-hover:text-indigo-700"}`}>{lessonIndex + 1}. {l.title}</p>
-                              <p className="text-[10px] text-slate-400 mt-0.5">{l.type === "video" ? "Видеоурок" : l.type === "text" ? "Текстовый материал" : "Тест"} · {l.duration}</p>
+                              <p className={`text-xs font-medium ${lessonLocked ? "text-slate-400" : "text-slate-800 group-hover:text-indigo-700"}`}>{lessonIndex + 1}. {l.title}</p>
+                              {!isManagerMode && <p className="text-[10px] text-slate-400 mt-0.5">{l.type === "video" ? "Видеоурок" : l.type === "text" ? "Текстовый материал" : "Тест"} · {l.duration}</p>}
                             </div>
-                            {l.requiresTest && !l.locked && <span className="text-[10px] bg-violet-50 text-violet-600 px-1.5 py-0.5 rounded-full font-medium">Тест</span>}
+                            {!isManagerMode && l.requiresTest && !lessonLocked && <span className="text-[10px] bg-violet-50 text-violet-600 px-1.5 py-0.5 rounded-full font-medium">Тест</span>}
                           </div>
                         );
                       })}
@@ -7256,6 +7277,15 @@ function AdminView({
   const safeAttempts = Array.isArray(attempts) ? attempts : [];
   const safeAdminCourses = Array.isArray(adminCourses) ? adminCourses : [];
   const isAdminLoading = loading && safeAdminCourses.length === 0 && safeProgressRows.length === 0 && safeAttempts.length === 0;
+  const extractCourseSkills = (courseLike) => {
+    const directSkills = Array.isArray(courseLike?.skills)
+      ? courseLike.skills.map((item) => String(item || "").trim()).filter(Boolean)
+      : [];
+    const versionSkills = Array.isArray(courseLike?.course_version?.skills)
+      ? courseLike.course_version.skills.map((item) => String(item || "").trim()).filter(Boolean)
+      : [];
+    return Array.from(new Set([...directSkills, ...versionSkills]));
+  };
 
   const attemptAggByUser = new Map();
   safeAttempts.forEach((item) => {
@@ -7369,6 +7399,7 @@ function AdminView({
       id: Number(item?.id || index + 1),
       title: item?.title || `Курс #${item?.id || index + 1}`,
       category: item?.category || "Без категории",
+      skills: extractCourseSkills(item),
       cover: visual.cover,
       color: visual.color,
       mandatory: false,
@@ -7475,6 +7506,7 @@ function AdminView({
         id: Number(item?.id || index + 1),
         title: item?.title || `Курс #${item?.id || index + 1}`,
         category: item?.category || "Без категории",
+        skills: extractCourseSkills(item),
         cover: visual.cover,
         color: visual.color,
         mandatory: false,
@@ -7511,9 +7543,12 @@ function AdminView({
     if (!courseItem) return false;
     const title = String(courseItem?.title || "").toLowerCase();
     const category = String(courseItem?.category || "").toLowerCase();
+    const skills = Array.isArray(courseItem?.skills)
+      ? courseItem.skills.map((item) => String(item || "").toLowerCase()).join(" ")
+      : "";
     const status = String(courseItem?.status || "").toLowerCase();
     const isCompleted = isCompletedLmsStatus(status);
-    if (normalizedCourseSearch && !(`${title} ${category}`).includes(normalizedCourseSearch)) {
+    if (normalizedCourseSearch && !(`${title} ${category} ${skills}`).includes(normalizedCourseSearch)) {
       return false;
     }
     if (courseFilter === "completed") return isCompleted;
@@ -7522,6 +7557,20 @@ function AdminView({
     if (courseFilter === "not_started") return status === "not_started";
     return true;
   });
+  const groupedCourseRows = Array.from(
+    filteredCourseRows.reduce((acc, courseItem) => {
+      const categoryLabel = String(courseItem?.category || "Без категории").trim() || "Без категории";
+      const bucket = acc.get(categoryLabel) || [];
+      bucket.push(courseItem);
+      acc.set(categoryLabel, bucket);
+      return acc;
+    }, new Map())
+  )
+    .sort((left, right) => String(left[0] || "").localeCompare(String(right[0] || ""), "ru"))
+    .map(([category, items]) => ({
+      category,
+      items: [...items].sort((left, right) => String(left?.title || "").localeCompare(String(right?.title || ""), "ru")),
+    }));
 
   const normalizedEmployeeSearch = employeeSearch.trim().toLowerCase();
   const departmentOptions = Array.from(
@@ -8346,7 +8395,7 @@ function AdminView({
               <input
                 value={courseSearch}
                 onChange={(event) => setCourseSearch(event.target.value)}
-                placeholder="Поиск курсов..."
+                placeholder="Поиск по названию, категории, навыкам..."
                 className="w-full pl-9 pr-4 py-2.5 bg-white border border-slate-200 rounded-xl text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition-all"
               />
             </div>
@@ -8406,68 +8455,84 @@ function AdminView({
               <BookOpen size={36} className="mx-auto mb-3 opacity-30" />
               <p className="text-sm">По заданным фильтрам курсы не найдены</p>
             </div>
-          ) : courseGridView ? (
-            <div className="grid [grid-template-columns:repeat(auto-fill,minmax(290px,1fr))] gap-5">
-              {filteredCourseRows.map((courseItem) => (
-                <CourseCard
-                  key={courseItem.id}
-                  course={courseItem}
-                  busy={busyCourseId === courseItem.id}
-                  onClick={() => onOpenCourse?.(courseItem)}
-                  actions={(
-                    <>
-                      <button
-                        onClick={() => onOpenBuilder?.(courseItem.id)}
-                        className="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-white/80 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 border border-slate-200 transition-colors"
-                        title="Редактировать и выпустить новую версию"
-                      >
-                        <Edit size={14} />
-                      </button>
-                      {canDeleteCourses && (
-                        <button
-                          onClick={() => { void handleDeleteCourse(courseItem); }}
-                          disabled={deletingCourseId === courseItem.id}
-                          title={deletingCourseId === courseItem.id ? "Удаляем..." : "Удалить курс"}
-                          className="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-white/80 text-slate-500 hover:text-red-600 hover:bg-red-50 border border-slate-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                          {deletingCourseId === courseItem.id ? <Clock size={14} /> : <Trash2 size={14} />}
-                        </button>
-                      )}
-                    </>
-                  )}
-                />
-              ))}
-            </div>
           ) : (
-            <div className="flex flex-col gap-3">
-              {filteredCourseRows.map((courseItem) => (
-                <CourseListItem
-                  key={courseItem.id}
-                  course={courseItem}
-                  busy={busyCourseId === courseItem.id}
-                  onClick={() => onOpenCourse?.(courseItem)}
-                  actions={(
-                    <>
-                      <button
-                        onClick={() => onOpenBuilder?.(courseItem.id)}
-                        className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-colors"
-                        title="Редактировать и выпустить новую версию"
-                      >
-                        <Edit size={15} />
-                      </button>
-                      {canDeleteCourses && (
-                        <button
-                          onClick={() => { void handleDeleteCourse(courseItem); }}
-                          disabled={deletingCourseId === courseItem.id}
-                          title={deletingCourseId === courseItem.id ? "Удаляем..." : "Удалить курс"}
-                          className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                          {deletingCourseId === courseItem.id ? <Clock size={15} /> : <Trash2 size={15} />}
-                        </button>
-                      )}
-                    </>
+            <div className="space-y-6">
+              {groupedCourseRows.map((groupItem) => (
+                <section key={groupItem.category} className="space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <h3 className="text-sm font-semibold text-slate-800">{groupItem.category}</h3>
+                    <span className="text-[11px] font-medium text-slate-500 bg-white border border-slate-200 px-2.5 py-1 rounded-full">
+                      {groupItem.items.length}
+                    </span>
+                  </div>
+                  {courseGridView ? (
+                    <div className="grid [grid-template-columns:repeat(auto-fill,minmax(290px,1fr))] gap-5">
+                      {groupItem.items.map((courseItem) => (
+                        <CourseCard
+                          key={courseItem.id}
+                          course={courseItem}
+                          managerMode
+                          busy={busyCourseId === courseItem.id}
+                          onClick={() => onOpenCourse?.(courseItem)}
+                          actions={(
+                            <>
+                              <button
+                                onClick={() => onOpenBuilder?.(courseItem.id)}
+                                className="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-white/80 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 border border-slate-200 transition-colors"
+                                title="Редактировать и выпустить новую версию"
+                              >
+                                <Edit size={14} />
+                              </button>
+                              {canDeleteCourses && (
+                                <button
+                                  onClick={() => { void handleDeleteCourse(courseItem); }}
+                                  disabled={deletingCourseId === courseItem.id}
+                                  title={deletingCourseId === courseItem.id ? "Удаляем..." : "Удалить курс"}
+                                  className="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-white/80 text-slate-500 hover:text-red-600 hover:bg-red-50 border border-slate-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                  {deletingCourseId === courseItem.id ? <Clock size={14} /> : <Trash2 size={14} />}
+                                </button>
+                              )}
+                            </>
+                          )}
+                        />
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="flex flex-col gap-3">
+                      {groupItem.items.map((courseItem) => (
+                        <CourseListItem
+                          key={courseItem.id}
+                          course={courseItem}
+                          managerMode
+                          busy={busyCourseId === courseItem.id}
+                          onClick={() => onOpenCourse?.(courseItem)}
+                          actions={(
+                            <>
+                              <button
+                                onClick={() => onOpenBuilder?.(courseItem.id)}
+                                className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-colors"
+                                title="Редактировать и выпустить новую версию"
+                              >
+                                <Edit size={15} />
+                              </button>
+                              {canDeleteCourses && (
+                                <button
+                                  onClick={() => { void handleDeleteCourse(courseItem); }}
+                                  disabled={deletingCourseId === courseItem.id}
+                                  title={deletingCourseId === courseItem.id ? "Удаляем..." : "Удалить курс"}
+                                  className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                  {deletingCourseId === courseItem.id ? <Clock size={15} /> : <Trash2 size={15} />}
+                                </button>
+                              )}
+                            </>
+                          )}
+                        />
+                      ))}
+                    </div>
                   )}
-                />
+                </section>
               ))}
             </div>
           )}
