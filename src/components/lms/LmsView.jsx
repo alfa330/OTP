@@ -1286,6 +1286,7 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
   });
 
   const assignmentId = Number(assignment?.id || fallbackCourse?.assignmentId || 0);
+  const hasAssignmentContext = assignmentId > 0;
   const courseDeadline = assignment?.due_at || fallbackCourse?.deadline || null;
   const assignmentDeadlineStatus = resolveDeadlineStatusByDates({
     dueAt: courseDeadline,
@@ -1436,12 +1437,17 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
   }
 
   const isAssignmentCompleted = String(assignment?.status || "").toLowerCase() === "completed";
-  const progressPercent = isAssignmentCompleted
+  const computedProgressPercent = isAssignmentCompleted
     ? 100
     : (progressItemsTotal > 0 ? Math.round((progressItemsCompleted / progressItemsTotal) * 100) : 0);
+  const progressPercent = hasAssignmentContext
+    ? computedProgressPercent
+    : clampLmsProgress(fallbackCourse?.progress);
 
-  let status = mapAssignmentStatusToUi(assignment?.status, assignmentDeadlineStatus);
-  if (status !== "completed" && courseAttemptTests.length > 0 && regularLessonsTotal > 0 && regularLessonsCompleted >= regularLessonsTotal) {
+  let status = hasAssignmentContext
+    ? mapAssignmentStatusToUi(assignment?.status, assignmentDeadlineStatus)
+    : String(fallbackCourse?.status || "not_started");
+  if (hasAssignmentContext && status !== "completed" && courseAttemptTests.length > 0 && regularLessonsTotal > 0 && regularLessonsCompleted >= regularLessonsTotal) {
     const hasFailedRequiredTest = courseAttemptTests.some((test) => {
       const testState = testProgress?.[test.id] || testProgress?.[String(test.id)] || {};
       const passedAny = Boolean(testState?.passed_any);
@@ -1452,16 +1458,23 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
     status = hasFailedRequiredTest ? "test_failed" : "waiting_test";
   }
 
-  const hasCourseAttemptLimit = courseAttemptTests.length > 0;
-  const attemptsUsedTotal = hasCourseAttemptLimit
+  const hasCourseAttemptLimit = hasAssignmentContext
+    ? courseAttemptTests.length > 0
+    : Boolean(fallbackCourse?.hasCourseAttemptLimit);
+  const attemptsUsedTotal = hasAssignmentContext
     ? courseAttemptTests.reduce((sum, test) => {
       const testState = testProgress?.[test.id] || testProgress?.[String(test.id)] || {};
       return sum + Math.max(0, Number(testState?.attempts_used || 0));
     }, 0)
-    : 0;
-  const maxAttempts = hasCourseAttemptLimit
+    : Math.max(0, Number(fallbackCourse?.attemptsUsed || 0));
+  const maxAttempts = hasAssignmentContext && courseAttemptTests.length > 0
     ? Math.max(...courseAttemptTests.map((test) => Math.max(1, Number(test?.attempt_limit || coursePayload?.course_version?.attempt_limit || coursePayload?.default_attempt_limit || 3))))
-    : 0;
+    : Math.max(0, Number(
+      fallbackCourse?.maxAttempts
+      || coursePayload?.course_version?.attempt_limit
+      || coursePayload?.default_attempt_limit
+      || 0
+    ));
 
   const lessonsCountWithTests = modulesData.reduce((sum, mod) => sum + (Array.isArray(mod?.lessons) ? mod.lessons.length : 0), 0);
 
@@ -1934,6 +1947,11 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
           nextCourse = mapCourseDetailToView(detail.course, course);
           setCourses((prev) => prev.map((item) => (item.id === nextCourse.id ? { ...item, ...nextCourse } : item)));
         }
+      } else if (apiRoot && canUseManagerApi) {
+        const detail = await lmsRequest(`/api/lms/admin/courses?course_id=${course.id}`);
+        if (detail?.course) {
+          nextCourse = mapCourseDetailToView(detail.course, course);
+        }
       }
       setSelectedCourse(nextCourse);
       setView("course");
@@ -1942,7 +1960,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
     } finally {
       setBusyCourseId(null);
     }
-  }, [apiRoot, canUseLearnerApi, lmsRequest, emitToast]);
+  }, [apiRoot, canUseLearnerApi, canUseManagerApi, lmsRequest, emitToast]);
 
   const refreshSelectedCourse = useCallback(async () => {
     if (!apiRoot || !canUseLearnerApi || !selectedCourse?.id) return null;
@@ -2043,6 +2061,87 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
     () => (Array.isArray(notifications) ? notifications.filter((item) => !item?.read).length : 0),
     [notifications]
   );
+  const selectedCourseAnalytics = useMemo(() => {
+    if (!canUseManagerApi || !selectedCourse?.id) return null;
+    const selectedCourseId = Number(selectedCourse.id || 0);
+    if (!selectedCourseId) return null;
+
+    const rows = (Array.isArray(adminProgressRows) ? adminProgressRows : [])
+      .filter((row) => Number(row?.course_id || 0) === selectedCourseId);
+    const attemptsForCourse = (Array.isArray(adminAttempts) ? adminAttempts : [])
+      .filter((attemptItem) => Number(attemptItem?.course_id || 0) === selectedCourseId);
+
+    const assignedCount = rows.length;
+    let completedCount = 0;
+    let inProgressCount = 0;
+    let overdueCount = 0;
+    let notStartedCount = 0;
+    let progressSum = 0;
+    const learners = new Set();
+
+    rows.forEach((row) => {
+      const uiStatus = mapAdminProgressRowToUiStatus(row);
+      if (uiStatus === "overdue") overdueCount += 1;
+      else if (uiStatus === "in_progress") inProgressCount += 1;
+      else if (isCompletedLmsStatus(uiStatus)) completedCount += 1;
+      else notStartedCount += 1;
+      progressSum += clampLmsProgress(row?.progress_percent);
+      const learnerId = Number(row?.user_id || 0);
+      if (learnerId > 0) learners.add(learnerId);
+    });
+
+    const scoredAttempts = attemptsForCourse.filter((item) => item?.score_percent != null);
+    const passedAttempts = scoredAttempts.filter((item) => Boolean(item?.passed));
+    const finalScoredAttempts = attemptsForCourse.filter((item) => Boolean(item?.is_final) && item?.score_percent != null);
+
+    const avgScore = scoredAttempts.length
+      ? Math.round(scoredAttempts.reduce((sum, item) => sum + Number(item?.score_percent || 0), 0) / scoredAttempts.length)
+      : null;
+    const avgFinalScore = finalScoredAttempts.length
+      ? Math.round(finalScoredAttempts.reduce((sum, item) => sum + Number(item?.score_percent || 0), 0) / finalScoredAttempts.length)
+      : null;
+    const passRate = scoredAttempts.length
+      ? Math.round((passedAttempts.length / scoredAttempts.length) * 100)
+      : null;
+
+    const recentAttempts = [...attemptsForCourse]
+      .sort((left, right) => {
+        const leftTs = Date.parse(left?.started_at || left?.finished_at || "") || 0;
+        const rightTs = Date.parse(right?.started_at || right?.finished_at || "") || 0;
+        return rightTs - leftTs;
+      })
+      .slice(0, 5)
+      .map((item, index) => ({
+        key: `${item?.attempt_id || index}-${item?.test_id || 0}`,
+        testTitle: String(item?.test_title || "Тест"),
+        employeeName: String(item?.user_name || `#${item?.user_id || "—"}`),
+        score: item?.score_percent != null ? Math.round(Number(item.score_percent)) : null,
+        passed: Boolean(item?.passed),
+        isFinal: Boolean(item?.is_final),
+        startedAt: item?.started_at || null,
+      }));
+
+    return {
+      assignedCount,
+      learnerCount: learners.size,
+      completedCount,
+      inProgressCount,
+      overdueCount,
+      notStartedCount,
+      avgProgress: assignedCount > 0 ? Math.round(progressSum / assignedCount) : 0,
+      attemptsCount: attemptsForCourse.length,
+      avgScore,
+      avgFinalScore,
+      passRate,
+      recentAttempts,
+    };
+  }, [canUseManagerApi, selectedCourse?.id, adminProgressRows, adminAttempts]);
+  const handleOpenSelectedCourseAnalytics = useCallback(() => {
+    if (typeof document === "undefined") return;
+    const node = document.getElementById("lms-course-analytics");
+    if (!node) return;
+    node.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, []);
   const isLessonLayout = view === "lesson" && Boolean(selectedLesson) && Boolean(selectedCourse);
 
   return (
@@ -2087,7 +2186,14 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
           />
         )}
         {view === "course" && selectedCourse && (
-          <CourseDetail course={selectedCourse} onStartLesson={openLesson} />
+          <CourseDetail
+            course={selectedCourse}
+            onStartLesson={openLesson}
+            isManagerMode={canUseManagerApi}
+            onEditCourse={(courseLike) => openBuilder(Number(courseLike?.id || selectedCourse?.id || 0) || null)}
+            onOpenCourseAnalytics={handleOpenSelectedCourseAnalytics}
+            courseAnalytics={selectedCourseAnalytics}
+          />
         )}
         {view === "lesson" && selectedLesson && selectedCourse && (
           <LessonView
@@ -2132,9 +2238,11 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
             analytics={adminAnalytics}
             loading={loadingAdmin}
             onOpenBuilder={openBuilder}
+            onOpenCourse={openCourse}
             onDeleteCourse={handleDeleteAdminCourse}
             onAssignCourseToEmployee={handleAssignAdminCourseToEmployee}
             canDeleteCourses={canDeleteCourses}
+            busyCourseId={busyCourseId}
           />
         )}
       </main>
@@ -2601,7 +2709,7 @@ function CatalogView({
 
 // ─── COURSE CARD ──────────────────────────────────────────────────────────────
 
-function CourseCard({ course, onClick, busy = false }) {
+function CourseCard({ course, onClick, busy = false, actions = null }) {
   const st = statusConfig[course.status] || statusConfig.not_started;
   const dl = course.deadline ? formatDeadline(course.deadline) : null;
   const isMandatory = resolveCourseMandatoryFlag(course);
@@ -2659,16 +2767,22 @@ function CourseCard({ course, onClick, busy = false }) {
               {dl.overdue ? `Просрочен ${Math.abs(Math.ceil((new Date(course.deadline) - new Date()) / 86400000))} дн` : `До ${dl.label}`}
             </div>
           )}
-          <button className={`ml-auto text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors ${course.status === "completed" || course.status === "completed_late" ? "bg-emerald-50 text-emerald-700 hover:bg-emerald-100" : "bg-indigo-600 text-white hover:bg-indigo-700"}`}>
-            {busy ? "Загрузка..." : (course.status === "completed" || course.status === "completed_late") ? "Просмотр" : course.status === "not_started" ? "Начать" : "Продолжить"}
-          </button>
+          <div className="ml-auto flex items-center gap-2" onClick={(event) => event.stopPropagation()}>
+            {actions}
+            <button
+              onClick={() => !busy && onClick?.()}
+              className={`text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors ${course.status === "completed" || course.status === "completed_late" ? "bg-emerald-50 text-emerald-700 hover:bg-emerald-100" : "bg-indigo-600 text-white hover:bg-indigo-700"}`}
+            >
+              {busy ? "Загрузка..." : (course.status === "completed" || course.status === "completed_late") ? "Просмотр" : course.status === "not_started" ? "Начать" : "Продолжить"}
+            </button>
+          </div>
         </div>
       </div>
     </div>
   );
 }
 
-function CourseListItem({ course, onClick, busy = false }) {
+function CourseListItem({ course, onClick, busy = false, actions = null }) {
   const st = statusConfig[course.status] || statusConfig.not_started;
   const dl = course.deadline ? formatDeadline(course.deadline) : null;
   const isMandatory = resolveCourseMandatoryFlag(course);
@@ -2710,23 +2824,36 @@ function CourseListItem({ course, onClick, busy = false }) {
         </div>
       )}
       <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${st.bg} ${st.text}`}>{st.label}</span>
-      <ChevronRight size={16} className="text-slate-400 flex-shrink-0" />
+      <div className="flex items-center gap-1.5" onClick={(event) => event.stopPropagation()}>
+        {actions}
+        <ChevronRight size={16} className="text-slate-400 flex-shrink-0" />
+      </div>
     </div>
   );
 }
 
 // ─── COURSE DETAIL ────────────────────────────────────────────────────────────
 
-function CourseDetail({ course, onStartLesson }) {
-  const [openModules, setOpenModules] = useState([course?.modules_data?.[0]?.id || 1]);
+function CourseDetail({
+  course,
+  onStartLesson,
+  isManagerMode = false,
+  onEditCourse,
+  onOpenCourseAnalytics,
+  courseAnalytics = null,
+}) {
+  const modulesData = Array.isArray(course?.modules_data) ? course.modules_data : [];
+  const skills = Array.isArray(course?.skills) ? course.skills : [];
+  const [openModules, setOpenModules] = useState([modulesData[0]?.id || 1]);
   const toggleModule = (id) => setOpenModules(p => p.includes(id) ? p.filter(x => x !== id) : [...p, id]);
   const dl = course.deadline ? formatDeadline(course.deadline) : null;
   const isMandatory = resolveCourseMandatoryFlag(course);
-  const firstLesson = course.modules_data[0]?.lessons[0];
+  const firstLesson = modulesData[0]?.lessons?.[0] || null;
   const attemptsLeft = Math.max(0, Number(course.maxAttempts || 0) - Number(course.attemptsUsed || 0));
+  const hasCourseAnalytics = isManagerMode && courseAnalytics && typeof courseAnalytics === "object";
 
   useEffect(() => {
-    setOpenModules(course?.modules_data?.[0]?.id ? [course.modules_data[0].id] : []);
+    setOpenModules(modulesData[0]?.id ? [modulesData[0].id] : []);
   }, [course?.id]);
 
   return (
@@ -2760,8 +2887,30 @@ function CourseDetail({ course, onStartLesson }) {
               <div className="h-2 bg-white/20 rounded-full overflow-hidden"><div className="h-full bg-white rounded-full" style={{ width: `${course.progress}%` }} /></div>
             </div>
           )}
-          <button onClick={() => firstLesson && onStartLesson(firstLesson)} className="bg-white text-slate-900 font-semibold px-6 py-3 rounded-xl hover:bg-white/90 transition-colors text-sm shadow-lg">
-            {course.status === "not_started" ? "Начать курс" : course.status === "completed" ? "Повторить" : "Продолжить обучение"}
+          {isManagerMode && (
+            <div className="flex flex-wrap items-center gap-2 mb-4">
+              <button
+                onClick={() => onEditCourse?.(course)}
+                className="inline-flex items-center gap-1.5 bg-white/20 hover:bg-white/30 border border-white/30 text-white text-sm font-semibold px-3.5 py-2 rounded-xl transition-colors"
+              >
+                <Edit size={14} /> Редактировать
+              </button>
+              <button
+                onClick={() => onOpenCourseAnalytics?.(course)}
+                className="inline-flex items-center gap-1.5 bg-white/20 hover:bg-white/30 border border-white/30 text-white text-sm font-semibold px-3.5 py-2 rounded-xl transition-colors"
+              >
+                <BarChart2 size={14} /> Аналитика курса
+              </button>
+            </div>
+          )}
+          <button
+            onClick={() => firstLesson && onStartLesson(firstLesson)}
+            disabled={!firstLesson}
+            className="bg-white text-slate-900 font-semibold px-6 py-3 rounded-xl hover:bg-white/90 transition-colors text-sm shadow-lg disabled:opacity-60 disabled:cursor-not-allowed"
+          >
+            {isManagerMode
+              ? (firstLesson ? "Открыть программу курса" : "Программа курса пуста")
+              : (course.status === "not_started" ? "Начать курс" : course.status === "completed" ? "Повторить" : "Продолжить обучение")}
           </button>
         </div>
       </div>
@@ -2771,18 +2920,18 @@ function CourseDetail({ course, onStartLesson }) {
           <div className="bg-white rounded-2xl border border-slate-200 p-6">
             <h2 className="text-base font-semibold text-slate-900 mb-4">Приобретаемые навыки</h2>
             <div className="flex flex-wrap gap-2">
-              {course.skills.map(s => <span key={s} className="text-xs font-medium bg-indigo-50 text-indigo-700 border border-indigo-100 px-3 py-1.5 rounded-full">{s}</span>)}
-              {course.skills.length === 0 && <span className="text-xs text-slate-400">Навыки не добавлены</span>}
+              {skills.map(s => <span key={s} className="text-xs font-medium bg-indigo-50 text-indigo-700 border border-indigo-100 px-3 py-1.5 rounded-full">{s}</span>)}
+              {skills.length === 0 && <span className="text-xs text-slate-400">Навыки не добавлены</span>}
             </div>
           </div>
 
-          {course.modules_data.length > 0 && (
+          {modulesData.length > 0 && (
             <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
               <div className="px-6 py-5 border-b border-slate-100">
                 <h2 className="text-base font-semibold text-slate-900">Программа курса</h2>
                 <p className="text-xs text-slate-500 mt-1">{course.modules} модуля · {course.lessons} уроков</p>
               </div>
-              {course.modules_data.map((mod, moduleIndex) => (
+              {modulesData.map((mod, moduleIndex) => (
                 <div key={mod.id} className="border-b border-slate-100 last:border-0">
                   <button onClick={() => toggleModule(mod.id)} className="w-full flex items-center justify-between px-6 py-4 hover:bg-slate-50 transition-colors">
                     <div className="flex items-center gap-3">
@@ -2834,6 +2983,49 @@ function CourseDetail({ course, onStartLesson }) {
               ))}
             </div>
           </div>
+          {hasCourseAnalytics && (
+            <div id="lms-course-analytics" className="bg-white rounded-2xl border border-slate-200 p-5 space-y-4">
+              <div>
+                <h3 className="text-sm font-semibold text-slate-900">Аналитика курса</h3>
+                <p className="text-[11px] text-slate-500 mt-1">Статистика по назначениям и попыткам прохождения</p>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                {[
+                  { label: "Назначено", value: courseAnalytics.assignedCount },
+                  { label: "Завершили", value: courseAnalytics.completedCount },
+                  { label: "В процессе", value: courseAnalytics.inProgressCount },
+                  { label: "Просрочено", value: courseAnalytics.overdueCount },
+                  { label: "Ср. прогресс", value: `${courseAnalytics.avgProgress}%` },
+                  { label: "Попытки", value: courseAnalytics.attemptsCount },
+                  { label: "Ср. балл", value: courseAnalytics.avgScore == null ? "—" : `${courseAnalytics.avgScore}%` },
+                  { label: "Итог. тест", value: courseAnalytics.avgFinalScore == null ? "—" : `${courseAnalytics.avgFinalScore}%` },
+                ].map((item) => (
+                  <div key={item.label} className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
+                    <p className="text-[10px] uppercase tracking-wide text-slate-400">{item.label}</p>
+                    <p className="text-sm font-semibold text-slate-800 mt-0.5">{item.value}</p>
+                  </div>
+                ))}
+              </div>
+              {Array.isArray(courseAnalytics?.recentAttempts) && courseAnalytics.recentAttempts.length > 0 && (
+                <div>
+                  <h4 className="text-xs font-semibold text-slate-700 mb-2">Последние попытки</h4>
+                  <div className="space-y-2">
+                    {courseAnalytics.recentAttempts.map((attemptItem) => (
+                      <div key={attemptItem.key} className="rounded-lg border border-slate-100 px-3 py-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-xs font-medium text-slate-800 truncate">{attemptItem.testTitle}</p>
+                          <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${attemptItem.passed ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+                            {attemptItem.passed ? "Сдан" : "Не сдан"}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-slate-500 mt-1">{attemptItem.employeeName}{attemptItem.score != null ? ` • ${attemptItem.score}%` : ""}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
           <div className="bg-white rounded-2xl border border-slate-200 p-5">
             <h3 className="text-sm font-semibold text-slate-900 mb-3">Отзывы</h3>
             <div className="text-center mb-4">
@@ -7036,14 +7228,19 @@ function AdminView({
   analytics = null,
   loading = false,
   onOpenBuilder,
+  onOpenCourse,
   onDeleteCourse,
   onAssignCourseToEmployee,
   canDeleteCourses = true,
+  busyCourseId = null,
 }) {
   const [deletingCourseId, setDeletingCourseId] = useState(null);
   const [employeeSearch, setEmployeeSearch] = useState("");
   const [employeeAssignedCourseSearch, setEmployeeAssignedCourseSearch] = useState("");
   const [employeeDeptFilter, setEmployeeDeptFilter] = useState("all");
+  const [courseSearch, setCourseSearch] = useState("");
+  const [courseFilter, setCourseFilter] = useState("all");
+  const [courseGridView, setCourseGridView] = useState(true);
   const [selectedEmployeeId, setSelectedEmployeeId] = useState(null);
   const [selectedEmployeeCourseKey, setSelectedEmployeeCourseKey] = useState(null);
   const [employeeCourseDeadlines, setEmployeeCourseDeadlines] = useState({});
@@ -7308,6 +7505,23 @@ function AdminView({
       pct: Math.max(0, Math.min(100, Number(item?.pct || 0))),
     }));
   }
+
+  const normalizedCourseSearch = courseSearch.trim().toLowerCase();
+  const filteredCourseRows = courseRows.filter((courseItem) => {
+    if (!courseItem) return false;
+    const title = String(courseItem?.title || "").toLowerCase();
+    const category = String(courseItem?.category || "").toLowerCase();
+    const status = String(courseItem?.status || "").toLowerCase();
+    const isCompleted = isCompletedLmsStatus(status);
+    if (normalizedCourseSearch && !(`${title} ${category}`).includes(normalizedCourseSearch)) {
+      return false;
+    }
+    if (courseFilter === "completed") return isCompleted;
+    if (courseFilter === "active") return !isCompleted && status !== "not_started";
+    if (courseFilter === "overdue") return status === "overdue";
+    if (courseFilter === "not_started") return status === "not_started";
+    return true;
+  });
 
   const normalizedEmployeeSearch = employeeSearch.trim().toLowerCase();
   const departmentOptions = Array.from(
@@ -8125,69 +8339,139 @@ function AdminView({
       )}
 
       {tab === "courses" && (
-        isAdminLoading ? (
-          <div className="space-y-3">
-            {Array.from({ length: 6 }).map((_, idx) => (
-              <div key={`admin-course-skeleton-${idx}`} className="bg-white rounded-2xl border border-slate-200 p-5 flex items-center gap-5">
-                <SkeletonBlock className="w-12 h-12 rounded-xl flex-shrink-0" />
-                <div className="flex-1 space-y-2">
-                  <SkeletonBlock className="w-6/12 h-4" />
-                  <SkeletonBlock className="w-8/12 h-3.5" />
-                </div>
-                <div className="flex items-center gap-3">
-                  <SkeletonBlock className="w-12 h-6" />
-                  <SkeletonBlock className="w-24 h-6 rounded-full" />
-                  <SkeletonBlock className="w-16 h-8" />
-                </div>
-              </div>
-            ))}
+        <div className="space-y-5">
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="relative flex-1 min-w-[240px] max-w-xl">
+              <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input
+                value={courseSearch}
+                onChange={(event) => setCourseSearch(event.target.value)}
+                placeholder="Поиск курсов..."
+                className="w-full pl-9 pr-4 py-2.5 bg-white border border-slate-200 rounded-xl text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition-all"
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              {[
+                { id: "all", label: "Все" },
+                { id: "active", label: "В процессе" },
+                { id: "completed", label: "Завершены" },
+                { id: "overdue", label: "Просрочены" },
+                { id: "not_started", label: "Не начаты" },
+              ].map((filterItem) => (
+                <button
+                  key={filterItem.id}
+                  onClick={() => setCourseFilter(filterItem.id)}
+                  className={`px-3 py-2 text-xs rounded-xl border font-medium transition-all ${courseFilter === filterItem.id ? "bg-indigo-600 text-white border-indigo-600" : "bg-white text-slate-600 border-slate-200 hover:border-slate-300"}`}
+                >
+                  {filterItem.label}
+                </button>
+              ))}
+            </div>
+            <div className="flex items-center gap-1 bg-white border border-slate-200 rounded-xl p-1 ml-auto">
+              <button onClick={() => setCourseGridView(true)} className={`p-1.5 rounded-lg transition-colors ${courseGridView ? "bg-slate-100 text-slate-800" : "text-slate-400 hover:text-slate-600"}`}><LayoutGrid size={14} /></button>
+              <button onClick={() => setCourseGridView(false)} className={`p-1.5 rounded-lg transition-colors ${!courseGridView ? "bg-slate-100 text-slate-800" : "text-slate-400 hover:text-slate-600"}`}><List size={14} /></button>
+            </div>
           </div>
-        ) : (
-        <div className="space-y-3">
-          {courseRows.map(c => {
-            const st = statusConfig[c.status] || statusConfig.not_started;
-            return (
-              <div key={c.id} className="bg-white rounded-2xl border border-slate-200 p-5 flex items-center gap-5">
-                <div className={`w-12 h-12 rounded-xl bg-gradient-to-br ${c.color} flex items-center justify-center text-xl flex-shrink-0`}>{c.cover}</div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 mb-1">
-                    <h3 className="text-sm font-semibold text-slate-900 truncate">{c.title}</h3>
-                    {c.mandatory && <span className="text-[10px] font-semibold text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full flex-shrink-0">Обязательный</span>}
+
+          {isAdminLoading ? (
+            courseGridView ? (
+              <div className="grid [grid-template-columns:repeat(auto-fill,minmax(290px,1fr))] gap-5">
+                {Array.from({ length: 6 }).map((_, idx) => (
+                  <div key={`admin-course-card-skeleton-${idx}`} className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+                    <SkeletonBlock className="h-32 w-full rounded-none" />
+                    <div className="p-5 space-y-3">
+                      <SkeletonBlock className="w-20 h-3" />
+                      <SkeletonBlock className="w-10/12 h-4" />
+                      <SkeletonBlock className="w-7/12 h-3" />
+                      <SkeletonBlock className="w-full h-1.5 rounded-full" />
+                    </div>
                   </div>
-                  <div className="flex items-center gap-3 text-xs text-slate-500">
-                    <span>{c.duration}</span><span>·</span><span>{c.lessons} уроков</span><span>·</span>
-                    <span className="flex items-center gap-1"><RefreshCw size={10} /> до {c.maxAttempts} попыток</span><span>·</span>
-                    <span className="flex items-center gap-1"><Star size={10} className="text-amber-400 fill-amber-400" />{c.rating}</span>
-                  </div>
-                </div>
-                <div className="flex items-center gap-4">
-                  <div className="text-right"><p className="text-xs text-slate-400 mb-0.5">Прогресс</p><p className="text-sm font-bold text-slate-800">{c.progress}%</p></div>
-                  <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${st.bg} ${st.text}`}>{st.label}</span>
-                  <div className="flex items-center gap-1">
-                    <button
-                      onClick={() => onOpenBuilder?.(c.id)}
-                      className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-colors"
-                      title="Редактировать и выпустить новую версию"
-                    >
-                      <Edit size={15} />
-                    </button>
-                    {canDeleteCourses && (
-                      <button
-                        onClick={() => { void handleDeleteCourse(c); }}
-                        disabled={deletingCourseId === c.id}
-                        title={deletingCourseId === c.id ? "Удаляем..." : "Удалить курс"}
-                        className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        {deletingCourseId === c.id ? <Clock size={15} /> : <Trash2 size={15} />}
-                      </button>
-                    )}
-                  </div>
-                </div>
+                ))}
               </div>
-            );
-          })}
+            ) : (
+              <div className="space-y-3">
+                {Array.from({ length: 6 }).map((_, idx) => (
+                  <div key={`admin-course-row-skeleton-${idx}`} className="bg-white rounded-2xl border border-slate-200 p-5 flex items-center gap-5">
+                    <SkeletonBlock className="w-12 h-12 rounded-xl flex-shrink-0" />
+                    <div className="flex-1 space-y-2">
+                      <SkeletonBlock className="w-6/12 h-4" />
+                      <SkeletonBlock className="w-8/12 h-3.5" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )
+          ) : filteredCourseRows.length === 0 ? (
+            <div className="text-center py-16 text-slate-400">
+              <BookOpen size={36} className="mx-auto mb-3 opacity-30" />
+              <p className="text-sm">По заданным фильтрам курсы не найдены</p>
+            </div>
+          ) : courseGridView ? (
+            <div className="grid [grid-template-columns:repeat(auto-fill,minmax(290px,1fr))] gap-5">
+              {filteredCourseRows.map((courseItem) => (
+                <CourseCard
+                  key={courseItem.id}
+                  course={courseItem}
+                  busy={busyCourseId === courseItem.id}
+                  onClick={() => onOpenCourse?.(courseItem)}
+                  actions={(
+                    <>
+                      <button
+                        onClick={() => onOpenBuilder?.(courseItem.id)}
+                        className="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-white/80 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 border border-slate-200 transition-colors"
+                        title="Редактировать и выпустить новую версию"
+                      >
+                        <Edit size={14} />
+                      </button>
+                      {canDeleteCourses && (
+                        <button
+                          onClick={() => { void handleDeleteCourse(courseItem); }}
+                          disabled={deletingCourseId === courseItem.id}
+                          title={deletingCourseId === courseItem.id ? "Удаляем..." : "Удалить курс"}
+                          className="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-white/80 text-slate-500 hover:text-red-600 hover:bg-red-50 border border-slate-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {deletingCourseId === courseItem.id ? <Clock size={14} /> : <Trash2 size={14} />}
+                        </button>
+                      )}
+                    </>
+                  )}
+                />
+              ))}
+            </div>
+          ) : (
+            <div className="flex flex-col gap-3">
+              {filteredCourseRows.map((courseItem) => (
+                <CourseListItem
+                  key={courseItem.id}
+                  course={courseItem}
+                  busy={busyCourseId === courseItem.id}
+                  onClick={() => onOpenCourse?.(courseItem)}
+                  actions={(
+                    <>
+                      <button
+                        onClick={() => onOpenBuilder?.(courseItem.id)}
+                        className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-colors"
+                        title="Редактировать и выпустить новую версию"
+                      >
+                        <Edit size={15} />
+                      </button>
+                      {canDeleteCourses && (
+                        <button
+                          onClick={() => { void handleDeleteCourse(courseItem); }}
+                          disabled={deletingCourseId === courseItem.id}
+                          title={deletingCourseId === courseItem.id ? "Удаляем..." : "Удалить курс"}
+                          className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {deletingCourseId === courseItem.id ? <Clock size={15} /> : <Trash2 size={15} />}
+                        </button>
+                      )}
+                    </>
+                  )}
+                />
+              ))}
+            </div>
+          )}
         </div>
-        )
       )}
     </div>
   );
