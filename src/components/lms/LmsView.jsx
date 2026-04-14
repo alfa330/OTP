@@ -9,7 +9,7 @@ import {
   PlayCircle, AlignLeft, Layers, ChevronLeft, Eye,
   BookMarked, Zap, ToggleLeft, ToggleRight, LayoutGrid, List, Percent,
   UserCheck, RefreshCw, ClipboardList, PlusCircle, LogOut, ChevronUp,
-  Save, Image, Link2, FileCheck, Volume2, Maximize, AlertTriangle,
+  Save, Image, Link2, FileCheck, Volume2, Maximize, AlertTriangle, Rocket,
   XCircle, CheckSquare, Square, Type, ToggleRight as RadioIcon
 } from "lucide-react";
 import "react-quill/dist/quill.snow.css";
@@ -1545,6 +1545,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
   const [searchQuery, setSearchQuery] = useState("");
   const isAdmin = canUseManagerApi;
   const [adminTab, setAdminTab] = useState("analytics");
+  const [builderInitialCourseId, setBuilderInitialCourseId] = useState(null);
   const [quizView, setQuizView] = useState("intro");
   const [quizAnswers, setQuizAnswers] = useState({});
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -2018,6 +2019,12 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
     }
   }, [refreshSelectedCourse, loadLearnerDashboard]);
 
+  const openBuilder = useCallback((courseId = null) => {
+    const normalizedCourseId = Number(courseId || 0) || null;
+    setBuilderInitialCourseId(normalizedCourseId);
+    setView("builder");
+  }, []);
+
   const goBack = () => {
     if (view === "lesson") {
       setView("course");
@@ -2068,7 +2075,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
             setSearchQuery={setSearchQuery}
             onOpenCourse={openCourse}
             isAdmin={isAdmin}
-            onOpenBuilder={() => setView("builder")}
+            onOpenBuilder={() => openBuilder(null)}
             courses={courses}
             certificates={certificates}
             notifications={notifications}
@@ -2112,6 +2119,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
             loading={loadingAdmin}
             emitToast={emitToast}
             onAfterSave={loadAdminData}
+            initialCourseId={builderInitialCourseId}
           />
         )}
         {view === "admin" && (
@@ -2123,7 +2131,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
             attempts={adminAttempts}
             analytics={adminAnalytics}
             loading={loadingAdmin}
-            onOpenBuilder={() => setView("builder")}
+            onOpenBuilder={openBuilder}
             onDeleteCourse={handleDeleteAdminCourse}
             onAssignCourseToEmployee={handleAssignAdminCourseToEmployee}
             canDeleteCourses={canDeleteCourses}
@@ -4329,7 +4337,7 @@ function NotificationsView({ notifications = [], onRead, loading = false }) {
 
 // ─── COURSE BUILDER ───────────────────────────────────────────────────────────
 
-function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], adminCourses = [], loading = false, emitToast, onAfterSave }) {
+function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], adminCourses = [], loading = false, emitToast, onAfterSave, initialCourseId = null }) {
   const buildLesson = useCallback((overrides = {}) => ({
     id: Date.now() + Math.floor(Math.random() * 1000),
     title: "Новый урок",
@@ -4391,6 +4399,16 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
   const [operatorEditField, setOperatorEditField] = useState(null);
   const [saved, setSaved] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [publishing, setPublishing] = useState(false);
+  const [loadingCourseDraft, setLoadingCourseDraft] = useState(false);
+  const [editingCourseId, setEditingCourseId] = useState(null);
+  const [savedVersionId, setSavedVersionId] = useState(null);
+  const [savedVersionNumber, setSavedVersionNumber] = useState(null);
+  const [courseHistoryVersions, setCourseHistoryVersions] = useState([]);
+  const [historyViewVersionId, setHistoryViewVersionId] = useState(null);
+  const [activeCourseVersionNumber, setActiveCourseVersionNumber] = useState(null);
+  const [activeCourseVersionStatus, setActiveCourseVersionStatus] = useState("");
+  const [publishCertificatesAction, setPublishCertificatesAction] = useState("keep");
   const [createdCourseId, setCreatedCourseId] = useState(null);
   const [selectedLearnerIds, setSelectedLearnerIds] = useState([]);
   const [assigning, setAssigning] = useState(false);
@@ -4497,6 +4515,308 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
       )),
     }));
   }, [updateLessonById]);
+
+  const buildDefaultModules = useCallback(() => ([
+    {
+      id: 1,
+      title: "Модуль 1: Введение",
+      expanded: true,
+      lessons: [
+        buildLesson({ id: 1, title: "Вводный урок", type: "video" }),
+        buildLesson({ id: 2, title: "Основные концепции", type: "text", durationSeconds: 8 * 60 }),
+      ],
+    },
+  ]), [buildLesson]);
+
+  const buildDefaultQuestions = useCallback(() => ([
+    { id: 1, text: "Вопрос 1", type: "single", options: ["Ответ A", "Ответ B", "Ответ C", "Ответ D"], correct: 0, explanation: "" },
+  ]), []);
+
+  const buildDefaultSettings = useCallback(() => ({
+    title: "",
+    description: "",
+    category: "",
+    mandatory: false,
+    passingScore: 80,
+    maxAttempts: 3,
+    questionsPerTest: 5,
+    finalTestTimeLimitMinutes: 20,
+    randomOrder: true,
+    showExplanations: true,
+    coverUrl: "",
+    coverBucket: "",
+    coverBlobPath: "",
+    skills: [],
+  }), []);
+
+  const resetBuilderDraft = useCallback(() => {
+    setModules(buildDefaultModules());
+    setQuestions(buildDefaultQuestions());
+    setSettings(buildDefaultSettings());
+    setCustomCategories([]);
+    setCategoryDropdownOpen(false);
+    setNewCategoryInput("");
+    setNewSkill("");
+    setLessonMaterialLink("");
+    setSelectedLessonId(null);
+    setBuilderLessonPanelMode("edit");
+    setOperatorEditField(null);
+    setSaved(false);
+    setSaving(false);
+    setPublishing(false);
+    setEditingCourseId(null);
+    setSavedVersionId(null);
+    setSavedVersionNumber(null);
+    setCourseHistoryVersions([]);
+    setHistoryViewVersionId(null);
+    setActiveCourseVersionNumber(null);
+    setActiveCourseVersionStatus("");
+    setCreatedCourseId(null);
+    setAssignmentCourseId(null);
+    setSelectedLearnerIds([]);
+    setAssignmentDueAt("");
+    setPublishCertificatesAction("keep");
+  }, [buildDefaultModules, buildDefaultQuestions, buildDefaultSettings]);
+
+  const mapApiQuestionToBuilder = useCallback((question, fallbackId = 0) => {
+    const qType = mapApiQuestionTypeToView(question?.type);
+    const apiOptions = Array.isArray(question?.options) ? question.options : [];
+    const optionTexts = apiOptions.map((option) => String(option?.text || "")).filter((text) => text !== "");
+    let correct = qType === "multiple" ? [] : 0;
+    if (qType === "multiple") {
+      correct = apiOptions
+        .map((option, optionIndex) => (option?.is_correct ? optionIndex : null))
+        .filter((index) => index != null);
+    } else if (qType === "single" || qType === "bool") {
+      const correctIndex = apiOptions.findIndex((option) => Boolean(option?.is_correct));
+      correct = correctIndex >= 0 ? correctIndex : 0;
+    }
+    return {
+      id: Number(question?.id || fallbackId || Date.now() + Math.floor(Math.random() * 1000)),
+      text: String(question?.prompt || question?.text || "").trim(),
+      type: qType,
+      options: qType === "text"
+        ? []
+        : (optionTexts.length > 0 ? optionTexts : (qType === "bool" ? ["Верно", "Неверно"] : ["", "", "", ""])),
+      correct,
+      explanation: String(question?.metadata?.explanation || "").trim(),
+      correct_text_answers: qType === "text"
+        ? (Array.isArray(question?.correct_text_answers) ? question.correct_text_answers.map((item) => String(item || "").trim()).filter(Boolean) : [])
+        : [],
+    };
+  }, []);
+
+  const hydrateBuilderFromCourse = useCallback((coursePayload, options = {}) => {
+    const mode = String(options?.mode || "edit").toLowerCase();
+    const isHistoryView = mode === "history";
+    const resolvedVersionId = Number(options?.versionId || coursePayload?.course_version?.id || 0) || null;
+    const courseId = Number(coursePayload?.id || 0) || null;
+    const modulesPayload = (Array.isArray(coursePayload?.modules) ? coursePayload.modules : [])
+      .slice()
+      .sort((a, b) => Number(a?.position || 0) - Number(b?.position || 0));
+    const testsPayload = Array.isArray(coursePayload?.tests) ? coursePayload.tests : [];
+
+    const mappedModules = modulesPayload.map((moduleItem, moduleIndex) => {
+      const lessonsPayload = (Array.isArray(moduleItem?.lessons) ? moduleItem.lessons : [])
+        .slice()
+        .sort((a, b) => Number(a?.position || 0) - Number(b?.position || 0));
+      const mappedLessons = lessonsPayload.map((lessonItem, lessonIndex) => {
+        const lessonMaterials = Array.isArray(lessonItem?.materials) ? lessonItem.materials : [];
+        const videoMaterial = lessonMaterials.find((material) => String(material?.material_type || material?.type || "").toLowerCase() === "video");
+        const textMaterial = lessonMaterials.find((material) => String(material?.material_type || material?.type || "").toLowerCase() === "text");
+        const lessonType = inferLessonType({ ...lessonItem, materials: lessonMaterials });
+        return buildLesson({
+          id: Number(lessonItem?.id || `${moduleIndex + 1}${lessonIndex + 1}${Date.now()}`),
+          title: String(lessonItem?.title || "").trim() || `Урок ${lessonIndex + 1}`,
+          type: lessonType,
+          description: normalizeRichTextValue(lessonItem?.description || ""),
+          durationSeconds: Number(lessonItem?.duration_seconds || videoMaterial?.metadata?.duration_seconds || 0) || "",
+          completionThreshold: Number(lessonItem?.completion_threshold || 95) || 95,
+          contentText: normalizeRichTextValue(textMaterial?.content_text || ""),
+          materials: lessonMaterials.map((material) => ({
+            ...material,
+            title: String(material?.title || "").trim() || "Материал",
+            material_type: String(material?.material_type || material?.type || "file").toLowerCase(),
+            content_url: String(material?.content_url || material?.url || "").trim(),
+            signed_url: String(material?.signed_url || material?.url || material?.content_url || "").trim(),
+            mime_type: String(material?.mime_type || "").trim(),
+            bucket: String(material?.bucket || material?.gcs_bucket || "").trim(),
+            blob_path: String(material?.blob_path || material?.gcs_blob_path || "").trim(),
+            metadata: material?.metadata && typeof material.metadata === "object" ? material.metadata : {},
+            position: Number(material?.position || 0) || 0,
+          })),
+        });
+      });
+      return {
+        id: Number(moduleItem?.id || moduleIndex + 1),
+        title: String(moduleItem?.title || "").trim() || `Модуль ${moduleIndex + 1}`,
+        expanded: true,
+        lessons: mappedLessons,
+      };
+    });
+
+    if (mappedModules.length === 0) {
+      mappedModules.push({
+        id: Date.now(),
+        title: "Модуль 1",
+        expanded: true,
+        lessons: [],
+      });
+    }
+
+    const moduleById = new Map(mappedModules.map((moduleItem) => [Number(moduleItem.id), moduleItem]));
+    const finalTests = testsPayload.filter((test) => Boolean(test?.is_final));
+    const moduleTests = testsPayload.filter((test) => !Boolean(test?.is_final));
+
+    moduleTests.forEach((test, testIndex) => {
+      const questionsForTest = Array.isArray(test?.questions) ? test.questions : [];
+      const mappedQuizQuestions = questionsForTest.map((question, questionIndex) => (
+        mapApiQuestionToBuilder(question, Number(`${test?.id || testIndex + 1}${questionIndex + 1}`))
+      ));
+      const targetModule = moduleById.get(Number(test?.module_id || 0)) || mappedModules[mappedModules.length - 1];
+      if (!targetModule) return;
+      const timeLimitMinutes = Number(test?.time_limit_minutes || 0);
+      targetModule.lessons.push(buildLesson({
+        id: Date.now() + Math.floor(Math.random() * 1000) + testIndex,
+        title: String(test?.title || "").trim() || `Тест ${testIndex + 1}`,
+        type: "quiz",
+        description: normalizeRichTextValue(test?.description || ""),
+        durationSeconds: timeLimitMinutes > 0 ? timeLimitMinutes * 60 : "",
+        completionThreshold: 100,
+        quizQuestionsPerTest: Math.max(1, Number(test?.question_count || mappedQuizQuestions.length || 1)),
+        quizTimeLimitMinutes: timeLimitMinutes > 0 ? timeLimitMinutes : "",
+        quizPassingScore: Math.max(1, Math.min(100, Number(test?.pass_threshold || coursePayload?.course_version?.pass_threshold || 80))),
+        quizAttemptLimit: Math.max(1, Number(test?.attempt_limit || coursePayload?.course_version?.attempt_limit || 3)),
+        quizRandomOrder: test?.random_order !== false,
+        quizShowExplanations: true,
+        quizQuestions: mappedQuizQuestions.length > 0 ? mappedQuizQuestions : [createQuestionTemplate("single")],
+        materials: [],
+      }));
+    });
+
+    const primaryFinalTest = finalTests[0] || null;
+    const finalQuestionsPayload = Array.isArray(primaryFinalTest?.questions) ? primaryFinalTest.questions : [];
+    const mappedFinalQuestions = finalQuestionsPayload.map((question, questionIndex) => (
+      mapApiQuestionToBuilder(question, Number(`9${questionIndex + 1}${Date.now()}`))
+    ));
+
+    setModules(mappedModules);
+    setQuestions(mappedFinalQuestions.length > 0 ? mappedFinalQuestions : buildDefaultQuestions());
+    setSettings((prev) => ({
+      ...prev,
+      title: String(coursePayload?.title || "").trim(),
+      description: normalizeRichTextValue(coursePayload?.description || ""),
+      category: String(coursePayload?.category || "").trim(),
+      mandatory: false,
+      passingScore: Math.max(1, Math.min(100, Number(
+        coursePayload?.course_version?.pass_threshold
+          || coursePayload?.default_pass_threshold
+          || 80
+      ))),
+      maxAttempts: Math.max(1, Number(
+        coursePayload?.course_version?.attempt_limit
+          || coursePayload?.default_attempt_limit
+          || 3
+      )),
+      questionsPerTest: Math.max(1, Number(primaryFinalTest?.question_count || mappedFinalQuestions.length || 5)),
+      finalTestTimeLimitMinutes: primaryFinalTest?.time_limit_minutes != null
+        ? Number(primaryFinalTest.time_limit_minutes || 0)
+        : "",
+      randomOrder: primaryFinalTest ? primaryFinalTest.random_order !== false : true,
+      showExplanations: true,
+      coverUrl: String(coursePayload?.course_version?.cover_url || "").trim(),
+      coverBucket: String(coursePayload?.course_version?.cover_bucket || "").trim(),
+      coverBlobPath: String(coursePayload?.course_version?.cover_blob_path || "").trim(),
+      skills: Array.isArray(coursePayload?.course_version?.skills)
+        ? coursePayload.course_version.skills.map((item) => String(item || "").trim()).filter(Boolean)
+        : [],
+    }));
+    setSelectedLessonId(mappedModules[0]?.lessons?.[0]?.id || null);
+    setEditingCourseId(courseId);
+    setCreatedCourseId(courseId);
+    setAssignmentCourseId(courseId);
+    setSavedVersionId(null);
+    setSavedVersionNumber(null);
+    setHistoryViewVersionId(isHistoryView ? resolvedVersionId : null);
+    setActiveCourseVersionNumber(Number(coursePayload?.course_version?.version_number || 0) || null);
+    setActiveCourseVersionStatus(String(coursePayload?.course_version?.status || "").trim().toLowerCase());
+    setPublishCertificatesAction("keep");
+    setSaved(false);
+  }, [buildLesson, buildDefaultQuestions, createQuestionTemplate, mapApiQuestionToBuilder]);
+
+  const loadCourseDraft = useCallback(async (courseId) => {
+    const normalizedCourseId = Number(courseId || 0) || null;
+    if (!normalizedCourseId) {
+      resetBuilderDraft();
+      return;
+    }
+    if (typeof lmsRequest !== "function") {
+      emitToast?.("LMS API не подключен", "error");
+      return;
+    }
+    setLoadingCourseDraft(true);
+    try {
+      const [payload, historyPayload] = await Promise.all([
+        lmsRequest(`/api/lms/admin/courses?course_id=${normalizedCourseId}`),
+        lmsRequest(`/api/lms/admin/courses/${normalizedCourseId}/history`).catch(() => null),
+      ]);
+      if (!payload?.course) {
+        throw new Error("Курс не найден");
+      }
+      hydrateBuilderFromCourse(payload.course, { mode: "edit" });
+      setCourseHistoryVersions(Array.isArray(historyPayload?.versions) ? historyPayload.versions : []);
+    } catch (error) {
+      emitToast?.(`Не удалось загрузить курс для редактирования: ${String(error?.message || "ошибка")}`, "error");
+    } finally {
+      setLoadingCourseDraft(false);
+    }
+  }, [emitToast, hydrateBuilderFromCourse, lmsRequest, resetBuilderDraft]);
+
+  const loadHistoryVersion = useCallback(async (courseId, versionId) => {
+    const normalizedCourseId = Number(courseId || 0) || null;
+    const normalizedVersionId = Number(versionId || 0) || null;
+    if (!normalizedCourseId || !normalizedVersionId) return;
+    if (typeof lmsRequest !== "function") {
+      emitToast?.("LMS API не подключен", "error");
+      return;
+    }
+
+    setLoadingCourseDraft(true);
+    try {
+      const payload = await lmsRequest(
+        `/api/lms/admin/courses/${normalizedCourseId}/history?course_version_id=${normalizedVersionId}`
+      );
+      if (!payload?.course) {
+        throw new Error("Версия курса не найдена");
+      }
+      setCourseHistoryVersions(Array.isArray(payload?.versions) ? payload.versions : []);
+      hydrateBuilderFromCourse(payload.course, { mode: "history", versionId: normalizedVersionId });
+    } catch (error) {
+      emitToast?.(`Не удалось открыть историческую версию: ${String(error?.message || "ошибка")}`, "error");
+    } finally {
+      setLoadingCourseDraft(false);
+    }
+  }, [emitToast, hydrateBuilderFromCourse, lmsRequest]);
+
+  useEffect(() => {
+    const normalizedInitialCourseId = Number(initialCourseId || 0) || null;
+    if (!normalizedInitialCourseId) {
+      resetBuilderDraft();
+      return;
+    }
+    void loadCourseDraft(normalizedInitialCourseId);
+  }, [initialCourseId, loadCourseDraft, resetBuilderDraft]);
+
+  const handleHistoryVersionChange = (rawVersionId) => {
+    const targetCourseId = Number(editingCourseId || 0) || null;
+    if (!targetCourseId) return;
+    const targetVersionId = Number(rawVersionId || 0) || null;
+    if (!targetVersionId) {
+      void loadCourseDraft(targetCourseId);
+      return;
+    }
+    void loadHistoryVersion(targetCourseId, targetVersionId);
+  };
 
   const removeSkill = (skillToRemove) => {
     setSettings((prev) => ({ ...prev, skills: (prev.skills || []).filter((skill) => skill !== skillToRemove) }));
@@ -4862,6 +5182,10 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
       emitToast?.("LMS API не подключен", "error");
       return;
     }
+    if (Number(historyViewVersionId || 0) > 0) {
+      emitToast?.("Историческая версия открыта только для просмотра. Переключитесь на текущую версию.", "error");
+      return;
+    }
 
     const title = String(settings.title || "").trim();
     if (!title) {
@@ -5031,6 +5355,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
       const payload = await lmsRequest("/api/lms/admin/courses", {
         method: "POST",
         body: {
+          ...(editingCourseId ? { course_id: Number(editingCourseId) } : {}),
           title,
           description: normalizeRichTextValue(settings.description || ""),
           category: String(settings.category || "").trim(),
@@ -5046,10 +5371,30 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
         },
       });
       const nextCourseId = Number(payload?.course_id || 0) || null;
+      const nextVersionId = Number(payload?.course_version_id || 0) || null;
+      const nextVersionNumber = Number(payload?.version_number || 0) || null;
       setCreatedCourseId(nextCourseId);
       setAssignmentCourseId(nextCourseId);
+      setEditingCourseId(nextCourseId);
+      setSavedVersionId(nextVersionId);
+      setSavedVersionNumber(nextVersionNumber);
+      setHistoryViewVersionId(null);
+      setActiveCourseVersionNumber(nextVersionNumber);
+      setActiveCourseVersionStatus("draft");
       setSaved(true);
-      emitToast?.("Курс сохранен в LMS", "success");
+      if (nextCourseId) {
+        try {
+          const historyPayload = await lmsRequest(`/api/lms/admin/courses/${nextCourseId}/history`);
+          setCourseHistoryVersions(Array.isArray(historyPayload?.versions) ? historyPayload.versions : []);
+        } catch (_) {
+          // ignore history refresh errors after save
+        }
+      }
+      if (editingCourseId) {
+        emitToast?.(`Версия сохранена${nextVersionNumber ? ` (v${nextVersionNumber})` : ""}. Опубликуйте, когда будете готовы.`, "success");
+      } else {
+        emitToast?.("Курс сохранен в LMS", "success");
+      }
       if (typeof onAfterSave === "function") {
         await onAfterSave();
       }
@@ -5058,6 +5403,58 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
       emitToast?.(`Не удалось сохранить курс: ${String(error?.message || "ошибка")}`, "error");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handlePublishSavedVersion = async () => {
+    if (!canUseManagerApi) {
+      emitToast?.("Недостаточно прав для публикации версии", "error");
+      return;
+    }
+    if (typeof lmsRequest !== "function") {
+      emitToast?.("LMS API не подключен", "error");
+      return;
+    }
+    if (Number(historyViewVersionId || 0) > 0) {
+      emitToast?.("Историческая версия открыта только для просмотра. Переключитесь на текущую версию.", "error");
+      return;
+    }
+
+    const targetCourseId = Number(editingCourseId || createdCourseId || 0) || null;
+    const targetVersionId = Number(savedVersionId || 0) || null;
+    if (!targetCourseId) {
+      emitToast?.("Сначала выберите или сохраните курс", "error");
+      return;
+    }
+    if (!targetVersionId) {
+      emitToast?.("Сначала сохраните изменения, чтобы создать новую версию", "error");
+      return;
+    }
+
+    setPublishing(true);
+    try {
+      const payload = await lmsRequest(`/api/lms/admin/courses/${targetCourseId}/publish`, {
+        method: "POST",
+        body: {
+          course_version_id: targetVersionId,
+          previous_certificates_action: publishCertificatesAction,
+        },
+      });
+      const deletedCount = Number(payload?.deleted_certificates || 0) || 0;
+      const suffix = publishCertificatesAction === "delete" ? `, удалено сертификатов: ${deletedCount}` : "";
+      emitToast?.(`Версия опубликована${suffix}`, "success");
+      setHistoryViewVersionId(null);
+      setActiveCourseVersionStatus("published");
+      setSavedVersionId(null);
+      setSavedVersionNumber(null);
+      if (typeof onAfterSave === "function") {
+        await onAfterSave();
+      }
+      await loadCourseDraft(targetCourseId);
+    } catch (error) {
+      emitToast?.(`Не удалось опубликовать версию: ${String(error?.message || "ошибка")}`, "error");
+    } finally {
+      setPublishing(false);
     }
   };
 
@@ -5077,7 +5474,27 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
 
   const safeLearners = Array.isArray(learners) ? learners : [];
   const safeAdminCourses = Array.isArray(adminCourses) ? adminCourses : [];
+  const isEditingExistingCourse = Number(editingCourseId || 0) > 0;
+  const isViewingHistoricalVersion = Number(historyViewVersionId || 0) > 0;
+  const pendingVersionId = Number(savedVersionId || 0) || null;
+  const historyVersionSelectValue = isViewingHistoricalVersion ? String(historyViewVersionId) : "current";
+  const historyStatusLabelById = {
+    published: "Опубликована",
+    archived: "Архив",
+    draft: "Черновик",
+  };
+  const activeVersionStatusLabel = historyStatusLabelById[String(activeCourseVersionStatus || "").toLowerCase()] || "";
+  const historyVersionsWithoutCurrent = (Array.isArray(courseHistoryVersions) ? courseHistoryVersions : [])
+    .filter((item) => Number(item?.id || 0) > 0 && !Boolean(item?.is_current));
   const isBuilderLoading = loading && safeLearners.length === 0 && safeAdminCourses.length === 0;
+  const handleBuilderCourseChange = (rawCourseId) => {
+    const nextCourseId = Number(rawCourseId || 0) || null;
+    if (!nextCourseId) {
+      resetBuilderDraft();
+      return;
+    }
+    void loadCourseDraft(nextCourseId);
+  };
   const filteredLearners = safeLearners.filter((item) => {
     const query = assignmentSearch.trim().toLowerCase();
     if (!query) return true;
@@ -5615,7 +6032,7 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
     );
   };
 
-  if (isBuilderLoading) {
+  if (isBuilderLoading || loadingCourseDraft) {
     return (
       <div className="lms-shell py-8">
         <div className="flex items-center justify-between mb-8">
@@ -5649,14 +6066,120 @@ function CourseBuilder({ onBack, lmsRequest, canUseManagerApi, learners = [], ad
 
   return (
     <div className="lms-shell py-8">
-      <div className="flex items-center justify-between mb-8">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Конструктор курса</h1>
-          <p className="text-sm text-slate-500 mt-0.5">Создание и редактирование учебных материалов</p>
+      <div className="flex flex-col gap-4 mb-8">
+        <div className="flex flex-col xl:flex-row xl:items-start xl:justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Конструктор курса</h1>
+            <p className="text-sm text-slate-500 mt-0.5">Создание, редактирование и выпуск версий LMS-курсов</p>
+            {isViewingHistoricalVersion ? (
+              <p className="text-xs text-amber-700 mt-1">
+                Просмотр исторической версии {activeCourseVersionNumber ? `v${activeCourseVersionNumber}` : ""}
+                {activeVersionStatusLabel ? ` (${activeVersionStatusLabel.toLowerCase()})` : ""}. Общий доступ к ней отключен.
+              </p>
+            ) : isEditingExistingCourse ? (
+              <p className="text-xs text-indigo-600 mt-1">
+                Редактирование курса ID {editingCourseId}
+                {activeCourseVersionNumber ? ` (текущая версия v${activeCourseVersionNumber})` : ""}
+              </p>
+            ) : (
+              <p className="text-xs text-slate-400 mt-1">Режим создания нового курса</p>
+            )}
+          </div>
+
+          <div className="flex flex-col sm:flex-row gap-2 sm:items-center">
+            <button
+              onClick={handleSave}
+              disabled={saving || loadingCourseDraft || isViewingHistoricalVersion}
+              className={`flex items-center gap-2 px-5 py-2.5 rounded-xl font-semibold text-sm transition-all disabled:opacity-60 disabled:cursor-not-allowed ${saved ? "bg-emerald-600 text-white" : "bg-indigo-600 hover:bg-indigo-700 text-white shadow-sm shadow-indigo-200"}`}
+            >
+              {saving
+                ? <><RefreshCw size={15} className="animate-spin" /> Сохранение...</>
+                : saved
+                  ? <><CheckCircle size={15} /> Сохранено</>
+                  : <><Save size={15} /> Сохранить версию</>}
+            </button>
+            <button
+              onClick={handlePublishSavedVersion}
+              disabled={publishing || !pendingVersionId || loadingCourseDraft || isViewingHistoricalVersion}
+              className="flex items-center gap-2 px-5 py-2.5 rounded-xl font-semibold text-sm transition-all bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-60 disabled:cursor-not-allowed"
+            >
+              {publishing ? <><RefreshCw size={15} className="animate-spin" /> Публикация...</> : <><Rocket size={15} /> Опубликовать версию</>}
+            </button>
+          </div>
         </div>
-        <button onClick={handleSave} disabled={saving} className={`flex items-center gap-2 px-5 py-2.5 rounded-xl font-semibold text-sm transition-all disabled:opacity-60 disabled:cursor-not-allowed ${saved ? "bg-emerald-600 text-white" : "bg-indigo-600 hover:bg-indigo-700 text-white shadow-sm shadow-indigo-200"}`}>
-          {saving ? <><RefreshCw size={15} className="animate-spin" /> Сохранение...</> : saved ? <><CheckCircle size={15} /> Сохранено</> : <><Save size={15} /> Сохранить</>}
-        </button>
+
+        <div className="bg-white rounded-2xl border border-slate-200 p-4">
+          <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+            <div>
+              <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Курс для конструктора</label>
+              <select
+                value={editingCourseId || ""}
+                onChange={(event) => handleBuilderCourseChange(event.target.value)}
+                disabled={loadingCourseDraft}
+                className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 focus:outline-none focus:border-indigo-400 transition-all disabled:opacity-60"
+              >
+                <option value="">Новый курс</option>
+                {safeAdminCourses.map((courseItem) => (
+                  <option key={courseItem.id} value={courseItem.id}>{courseItem.title}</option>
+                ))}
+              </select>
+              <p className="text-[11px] text-slate-400 mt-1">
+                {loadingCourseDraft
+                  ? "Загружаем структуру курса..."
+                  : (isEditingExistingCourse ? "Изменения сохраняются как новая черновая версия." : "После сохранения курс получит первую версию (v1).")}
+              </p>
+            </div>
+
+            <div>
+              <label className="text-xs font-semibold text-slate-600 mb-1.5 block">История версий курса</label>
+              <select
+                value={historyVersionSelectValue}
+                onChange={(event) => handleHistoryVersionChange(event.target.value)}
+                disabled={!isEditingExistingCourse || loadingCourseDraft}
+                className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 focus:outline-none focus:border-indigo-400 transition-all disabled:opacity-60"
+              >
+                <option value="current">Текущая версия (редактирование)</option>
+                {historyVersionsWithoutCurrent.map((versionItem) => {
+                  const statusKey = String(versionItem?.status || "").toLowerCase();
+                  const statusLabel = historyStatusLabelById[statusKey] || statusKey || "версия";
+                  const versionNumber = Number(versionItem?.version_number || 0) || 0;
+                  return (
+                    <option key={versionItem.id} value={versionItem.id}>
+                      {`v${versionNumber || "?"} • ${statusLabel}`}
+                    </option>
+                  );
+                })}
+              </select>
+              <p className="text-[11px] text-slate-400 mt-1">
+                {!isEditingExistingCourse
+                  ? "Выберите курс, чтобы запросить историю версий."
+                  : (historyVersionsWithoutCurrent.length > 0
+                    ? "Старые версии доступны только через историю и не попадают в общий доступ."
+                    : "Для курса пока нет опубликованных исторических версий.")}
+              </p>
+            </div>
+
+            <div>
+              <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Ранее выданные сертификаты при публикации</label>
+              <select
+                value={publishCertificatesAction}
+                onChange={(event) => setPublishCertificatesAction(event.target.value === "delete" ? "delete" : "keep")}
+                disabled={isViewingHistoricalVersion}
+                className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 focus:outline-none focus:border-indigo-400 transition-all disabled:opacity-60"
+              >
+                <option value="keep">Сохранить сертификаты</option>
+                <option value="delete">Удалить сертификаты</option>
+              </select>
+              <p className="text-[11px] text-slate-400 mt-1">
+                {isViewingHistoricalVersion
+                  ? "Историческая версия открыта только для просмотра."
+                  : pendingVersionId
+                  ? `Готова к публикации версия ${savedVersionNumber ? `v${savedVersionNumber}` : `#${pendingVersionId}`}.`
+                  : "Сначала сохраните изменения, затем публикуйте."}
+              </p>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div className="flex items-center gap-1 mb-8 bg-slate-100 p-1 rounded-xl w-fit">
@@ -7641,7 +8164,13 @@ function AdminView({
                   <div className="text-right"><p className="text-xs text-slate-400 mb-0.5">Прогресс</p><p className="text-sm font-bold text-slate-800">{c.progress}%</p></div>
                   <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${st.bg} ${st.text}`}>{st.label}</span>
                   <div className="flex items-center gap-1">
-                    <button className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-colors"><Edit size={15} /></button>
+                    <button
+                      onClick={() => onOpenBuilder?.(c.id)}
+                      className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-colors"
+                      title="Редактировать и выпустить новую версию"
+                    >
+                      <Edit size={15} />
+                    </button>
                     {canDeleteCourses && (
                       <button
                         onClick={() => { void handleDeleteCourse(c); }}
@@ -7663,4 +8192,3 @@ function AdminView({
     </div>
   );
 }
-
