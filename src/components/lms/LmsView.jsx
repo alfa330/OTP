@@ -1261,6 +1261,37 @@ const mapHomeCourseToView = (course) => {
   };
 };
 
+const mapApiQuestionToPreview = (question, fallbackId = 0) => {
+  const qType = mapApiQuestionTypeToView(question?.type);
+  const apiOptions = Array.isArray(question?.options) ? question.options : [];
+  const optionRows = apiOptions.map((option, optionIndex) => ({
+    id: Number(option?.id || optionIndex + 1),
+    text: String(option?.text || `Вариант ${optionIndex + 1}`).trim(),
+    isCorrect: Boolean(option?.is_correct),
+  }));
+  let correct = qType === "multiple" ? [] : null;
+  if (qType === "multiple") {
+    correct = optionRows
+      .map((optionRow, optionIndex) => (optionRow.isCorrect ? optionIndex : null))
+      .filter((index) => index != null);
+  } else if (qType === "single" || qType === "bool") {
+    const idx = optionRows.findIndex((optionRow) => optionRow.isCorrect);
+    correct = idx >= 0 ? idx : 0;
+  }
+  return {
+    id: Number(question?.id || fallbackId || Date.now() + Math.floor(Math.random() * 1000)),
+    text: String(question?.prompt || question?.text || "Вопрос").trim(),
+    type: qType,
+    options: optionRows,
+    correct,
+    correctTextAnswers: Array.isArray(question?.correct_text_answers)
+      ? question.correct_text_answers.map((item) => String(item || "").trim()).filter(Boolean)
+      : [],
+    explanation: String(question?.metadata?.explanation || question?.explanation || "").trim(),
+    points: Math.max(0, Number(question?.points || 0)),
+  };
+};
+
 const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
   const courseId = Number(coursePayload?.id || fallbackCourse?.id || 0);
   const visual = {
@@ -1313,6 +1344,9 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
     const attemptsUsed = Math.max(0, Number(testState?.attempts_used || 0));
     const attemptLimit = Math.max(1, Number(test?.attempt_limit || coursePayload?.course_version?.attempt_limit || coursePayload?.default_attempt_limit || 3));
     const passedAny = Boolean(testState?.passed_any);
+    const previewQuestions = Array.isArray(test?.questions)
+      ? test.questions.map((questionItem, questionIndex) => mapApiQuestionToPreview(questionItem, questionIndex + 1))
+      : [];
     const configuredMinutes = Math.max(0, Number(test?.time_limit_minutes || test?.time_limit || 0));
     const configuredSeconds = Math.max(0, Number(test?.time_limit_seconds || 0));
     const timeLimitSeconds = configuredSeconds > 0 ? configuredSeconds : (configuredMinutes > 0 ? configuredMinutes * 60 : 0);
@@ -1341,6 +1375,7 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
       questionCount: Math.max(0, Number(test?.question_count || 0)),
       moduleId: test?.module_id == null ? null : Number(test.module_id),
       _position: Number(test?.position || test?.id || 0),
+      quizQuestions: previewQuestions,
     };
   };
 
@@ -2093,6 +2128,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
     const scoredAttempts = attemptsForCourse.filter((item) => item?.score_percent != null);
     const passedAttempts = scoredAttempts.filter((item) => Boolean(item?.passed));
     const finalScoredAttempts = attemptsForCourse.filter((item) => Boolean(item?.is_final) && item?.score_percent != null);
+    const testStatsMap = new Map();
 
     const avgScore = scoredAttempts.length
       ? Math.round(scoredAttempts.reduce((sum, item) => sum + Number(item?.score_percent || 0), 0) / scoredAttempts.length)
@@ -2104,13 +2140,65 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
       ? Math.round((passedAttempts.length / scoredAttempts.length) * 100)
       : null;
 
+    attemptsForCourse.forEach((item) => {
+      const explicitTestId = Number(item?.test_id || 0);
+      const testTitle = String(item?.test_title || "Тест").trim() || "Тест";
+      const statKey = explicitTestId > 0 ? `id:${explicitTestId}` : `title:${testTitle.toLowerCase()}`;
+      const prev = testStatsMap.get(statKey) || {
+        key: statKey,
+        testId: explicitTestId || null,
+        title: testTitle,
+        attempts: 0,
+        scoredCount: 0,
+        scoreSum: 0,
+        passedCount: 0,
+        lastScore: null,
+        lastPassed: null,
+        lastAtMs: 0,
+      };
+      prev.attempts += 1;
+      const scoreRaw = item?.score_percent;
+      const hasScore = scoreRaw != null && scoreRaw !== "";
+      if (hasScore) {
+        const normalizedScore = Math.max(0, Math.min(100, Math.round(Number(scoreRaw) || 0)));
+        prev.scoredCount += 1;
+        prev.scoreSum += normalizedScore;
+      }
+      if (Boolean(item?.passed)) prev.passedCount += 1;
+      const ts = Date.parse(item?.started_at || item?.finished_at || "") || 0;
+      if (ts >= prev.lastAtMs) {
+        prev.lastAtMs = ts;
+        prev.lastScore = hasScore ? Math.max(0, Math.min(100, Math.round(Number(scoreRaw) || 0))) : null;
+        prev.lastPassed = item?.passed == null ? null : Boolean(item?.passed);
+      }
+      testStatsMap.set(statKey, prev);
+    });
+
+    const testStats = Array.from(testStatsMap.values())
+      .map((item) => ({
+        key: item.key,
+        testId: item.testId,
+        title: item.title,
+        attempts: item.attempts,
+        avgScore: item.scoredCount > 0 ? Math.round(item.scoreSum / item.scoredCount) : null,
+        passRate: item.scoredCount > 0 ? Math.round((item.passedCount / item.scoredCount) * 100) : null,
+        lastScore: item.lastScore,
+        lastPassed: item.lastPassed,
+        lastAt: item.lastAtMs > 0 ? new Date(item.lastAtMs).toISOString() : null,
+      }))
+      .sort((left, right) => {
+        const l = Date.parse(left?.lastAt || "") || 0;
+        const r = Date.parse(right?.lastAt || "") || 0;
+        return r - l;
+      });
+
     const recentAttempts = [...attemptsForCourse]
       .sort((left, right) => {
         const leftTs = Date.parse(left?.started_at || left?.finished_at || "") || 0;
         const rightTs = Date.parse(right?.started_at || right?.finished_at || "") || 0;
         return rightTs - leftTs;
       })
-      .slice(0, 5)
+      .slice(0, 12)
       .map((item, index) => ({
         key: `${item?.attempt_id || index}-${item?.test_id || 0}`,
         testTitle: String(item?.test_title || "Тест"),
@@ -2133,6 +2221,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
       avgScore,
       avgFinalScore,
       passRate,
+      testStats,
       recentAttempts,
     };
   }, [canUseManagerApi, selectedCourse?.id, adminProgressRows, adminAttempts]);
@@ -2213,6 +2302,8 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
             onCompleteLesson={handleCompleteLesson}
             onQuizFinished={handleQuizFinished}
             emitToast={emitToast}
+            isManagerMode={canUseManagerApi}
+            courseAnalytics={selectedCourseAnalytics}
           />
         )}
         {view === "builder" && (
@@ -2857,6 +2948,7 @@ function CourseDetail({
   const firstLesson = modulesData[0]?.lessons?.[0] || null;
   const attemptsLeft = Math.max(0, Number(course.maxAttempts || 0) - Number(course.attemptsUsed || 0));
   const hasCourseAnalytics = isManagerMode && courseAnalytics && typeof courseAnalytics === "object";
+  const [analyticsSection, setAnalyticsSection] = useState("summary");
   const handleOpenProgram = useCallback(() => {
     if (typeof document === "undefined") return;
     const node = document.getElementById("lms-course-curriculum");
@@ -2866,6 +2958,10 @@ function CourseDetail({
 
   useEffect(() => {
     setOpenModules(modulesData[0]?.id ? [modulesData[0].id] : []);
+  }, [course?.id]);
+
+  useEffect(() => {
+    setAnalyticsSection("summary");
   }, [course?.id]);
 
   return (
@@ -3008,30 +3104,75 @@ function CourseDetail({
             <div id="lms-course-analytics" className="bg-white rounded-2xl border border-slate-200 p-5 space-y-4">
               <div>
                 <h3 className="text-sm font-semibold text-slate-900">Аналитика курса</h3>
-                <p className="text-[11px] text-slate-500 mt-1">Статистика по назначениям и попыткам прохождения</p>
+                <p className="text-[11px] text-slate-500 mt-1">Нажмите блок ниже, чтобы показать только нужный срез</p>
               </div>
               <div className="grid grid-cols-2 gap-2">
                 {[
-                  { label: "Назначено", value: courseAnalytics.assignedCount },
-                  { label: "Завершили", value: courseAnalytics.completedCount },
-                  { label: "В процессе", value: courseAnalytics.inProgressCount },
-                  { label: "Просрочено", value: courseAnalytics.overdueCount },
-                  { label: "Ср. прогресс", value: `${courseAnalytics.avgProgress}%` },
-                  { label: "Попытки", value: courseAnalytics.attemptsCount },
-                  { label: "Ср. балл", value: courseAnalytics.avgScore == null ? "—" : `${courseAnalytics.avgScore}%` },
-                  { label: "Итог. тест", value: courseAnalytics.avgFinalScore == null ? "—" : `${courseAnalytics.avgFinalScore}%` },
-                ].map((item) => (
-                  <div key={item.label} className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
-                    <p className="text-[10px] uppercase tracking-wide text-slate-400">{item.label}</p>
-                    <p className="text-sm font-semibold text-slate-800 mt-0.5">{item.value}</p>
-                  </div>
+                  { id: "summary", label: "Сводка" },
+                  { id: "progress", label: "Прогресс" },
+                  { id: "tests", label: "Тесты" },
+                  { id: "recent", label: "Попытки" },
+                ].map((sectionItem) => (
+                  <button
+                    key={sectionItem.id}
+                    onClick={() => setAnalyticsSection(sectionItem.id)}
+                    className={`text-left rounded-xl border px-3 py-2 transition-colors ${analyticsSection === sectionItem.id ? "border-indigo-300 bg-indigo-50" : "border-slate-200 bg-slate-50 hover:bg-slate-100"}`}
+                  >
+                    <p className="text-[10px] uppercase tracking-wide text-slate-400">Раздел</p>
+                    <p className="text-sm font-semibold text-slate-800 mt-0.5">{sectionItem.label}</p>
+                  </button>
                 ))}
               </div>
-              {Array.isArray(courseAnalytics?.recentAttempts) && courseAnalytics.recentAttempts.length > 0 && (
+              {analyticsSection === "summary" && (
+                <div className="grid grid-cols-2 gap-2">
+                  {[
+                    { label: "Назначено", value: courseAnalytics.assignedCount },
+                    { label: "Завершили", value: courseAnalytics.completedCount },
+                    { label: "В процессе", value: courseAnalytics.inProgressCount },
+                    { label: "Просрочено", value: courseAnalytics.overdueCount },
+                  ].map((item) => (
+                    <div key={item.label} className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
+                      <p className="text-[10px] uppercase tracking-wide text-slate-400">{item.label}</p>
+                      <p className="text-sm font-semibold text-slate-800 mt-0.5">{item.value}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {analyticsSection === "progress" && (
+                <div className="grid grid-cols-2 gap-2">
+                  {[
+                    { label: "Сотрудников", value: courseAnalytics.learnerCount },
+                    { label: "Ср. прогресс", value: `${courseAnalytics.avgProgress}%` },
+                    { label: "Не начали", value: courseAnalytics.notStartedCount },
+                    { label: "Завершили", value: courseAnalytics.completedCount },
+                  ].map((item) => (
+                    <div key={item.label} className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
+                      <p className="text-[10px] uppercase tracking-wide text-slate-400">{item.label}</p>
+                      <p className="text-sm font-semibold text-slate-800 mt-0.5">{item.value}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {analyticsSection === "tests" && (
+                <div className="grid grid-cols-2 gap-2">
+                  {[
+                    { label: "Попытки", value: courseAnalytics.attemptsCount },
+                    { label: "Ср. балл", value: courseAnalytics.avgScore == null ? "—" : `${courseAnalytics.avgScore}%` },
+                    { label: "Итог. тест", value: courseAnalytics.avgFinalScore == null ? "—" : `${courseAnalytics.avgFinalScore}%` },
+                    { label: "Успешность", value: courseAnalytics.passRate == null ? "—" : `${courseAnalytics.passRate}%` },
+                  ].map((item) => (
+                    <div key={item.label} className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
+                      <p className="text-[10px] uppercase tracking-wide text-slate-400">{item.label}</p>
+                      <p className="text-sm font-semibold text-slate-800 mt-0.5">{item.value}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {analyticsSection === "recent" && Array.isArray(courseAnalytics?.recentAttempts) && courseAnalytics.recentAttempts.length > 0 && (
                 <div>
-                  <h4 className="text-xs font-semibold text-slate-700 mb-2">Последние попытки</h4>
+                  <h4 className="text-xs font-semibold text-slate-700 mb-2">Последние 3 попытки</h4>
                   <div className="space-y-2">
-                    {courseAnalytics.recentAttempts.map((attemptItem) => (
+                    {courseAnalytics.recentAttempts.slice(0, 3).map((attemptItem) => (
                       <div key={attemptItem.key} className="rounded-lg border border-slate-100 px-3 py-2">
                         <div className="flex items-center justify-between gap-2">
                           <p className="text-xs font-medium text-slate-800 truncate">{attemptItem.testTitle}</p>
@@ -3043,6 +3184,11 @@ function CourseDetail({
                       </div>
                     ))}
                   </div>
+                </div>
+              )}
+              {analyticsSection === "recent" && (!Array.isArray(courseAnalytics?.recentAttempts) || courseAnalytics.recentAttempts.length === 0) && (
+                <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-3 py-6 text-center text-xs text-slate-500">
+                  Попытки пока отсутствуют
                 </div>
               )}
             </div>
@@ -3082,6 +3228,8 @@ function LessonView({
   onCompleteLesson,
   onQuizFinished,
   emitToast,
+  isManagerMode = false,
+  courseAnalytics = null,
 }) {
   const isQuiz = lesson.type === "quiz";
   const isTextLesson = lesson.type === "text";
@@ -3123,20 +3271,29 @@ function LessonView({
                 const Icon = lessonIcons[l.type];
                 const isActive = l.id === lesson.id;
                 const dl = course.deadline ? formatDeadline(course.deadline) : null;
+                const lessonLocked = isManagerMode ? false : Boolean(l.locked);
                 return (
-                  <button key={l.id} onClick={() => !l.locked && onSelectLesson(l)} className={`w-full flex items-start gap-3 px-4 py-3 border-b border-slate-50 transition-colors text-left ${isActive ? "bg-indigo-50 border-l-2 border-l-indigo-500" : l.locked ? "opacity-50 cursor-not-allowed" : "hover:bg-slate-50"}`}>
-                    <div className={`w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5 ${isActive ? "bg-indigo-600" : l.status === "completed" ? "bg-emerald-50" : l.locked ? "bg-slate-100" : "bg-slate-100"}`}>
-                      {isActive ? <Play size={11} className="text-white ml-0.5" /> : l.status === "completed" ? <CheckCircle size={13} className="text-emerald-600" /> : l.locked ? <Lock size={11} className="text-slate-400" /> : <Icon size={12} className="text-slate-500" />}
+                  <button key={l.id} onClick={() => !lessonLocked && onSelectLesson(l)} className={`w-full flex items-start gap-3 px-4 py-3 border-b border-slate-50 transition-colors text-left ${isActive ? "bg-indigo-50 border-l-2 border-l-indigo-500" : lessonLocked ? "opacity-50 cursor-not-allowed" : "hover:bg-slate-50"}`}>
+                    <div className={`w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5 ${isActive ? "bg-indigo-600" : isManagerMode ? "bg-indigo-50" : l.status === "completed" ? "bg-emerald-50" : lessonLocked ? "bg-slate-100" : "bg-slate-100"}`}>
+                      {isActive
+                        ? <Play size={11} className="text-white ml-0.5" />
+                        : isManagerMode
+                          ? <Icon size={12} className="text-indigo-600" />
+                          : l.status === "completed"
+                            ? <CheckCircle size={13} className="text-emerald-600" />
+                            : lessonLocked
+                              ? <Lock size={11} className="text-slate-400" />
+                              : <Icon size={12} className="text-slate-500" />}
                     </div>
                     <div className="flex-1 min-w-0">
                       <p className={`text-xs font-medium leading-snug ${isActive ? "text-indigo-700" : "text-slate-700"}`}>{lessonIndex + 1}. {l.title}</p>
                       <div className="flex items-center gap-1.5 mt-1 flex-wrap">
                         <span className="text-[10px] text-slate-400">{l.duration}</span>
                         {l.type === "quiz" && <span className="text-[10px] bg-violet-50 text-violet-600 px-1.5 py-0.5 rounded-full font-medium">Тест</span>}
-                        {l.status === "in_progress" && <span className="text-[10px] bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded-full font-medium">В процессе</span>}
-                        {l.requiresTest && l.status !== "completed" && !l.locked && <span className="text-[10px] bg-violet-50 text-violet-600 px-1.5 py-0.5 rounded-full font-medium flex items-center gap-0.5"><HelpCircle size={8} /> Тест</span>}
-                        {dl?.overdue && l.status !== "completed" && <span className="text-[10px] bg-red-50 text-red-600 px-1.5 py-0.5 rounded-full font-medium">Просрочен</span>}
-                        {l.status === "completed" && <span className="text-[10px] bg-emerald-50 text-emerald-600 px-1.5 py-0.5 rounded-full font-medium">✓ Завершён</span>}
+                        {!isManagerMode && l.status === "in_progress" && <span className="text-[10px] bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded-full font-medium">В процессе</span>}
+                        {!isManagerMode && l.requiresTest && l.status !== "completed" && !lessonLocked && <span className="text-[10px] bg-violet-50 text-violet-600 px-1.5 py-0.5 rounded-full font-medium flex items-center gap-0.5"><HelpCircle size={8} /> Тест</span>}
+                        {!isManagerMode && dl?.overdue && l.status !== "completed" && <span className="text-[10px] bg-red-50 text-red-600 px-1.5 py-0.5 rounded-full font-medium">Просрочен</span>}
+                        {!isManagerMode && l.status === "completed" && <span className="text-[10px] bg-emerald-50 text-emerald-600 px-1.5 py-0.5 rounded-full font-medium">✓ Завершён</span>}
                       </div>
                     </div>
                   </button>
@@ -3156,7 +3313,7 @@ function LessonView({
             <p className="text-sm font-semibold text-slate-900">{lesson.title}</p>
           </div>
           <div className="flex items-center gap-3">
-            {lesson.type === "quiz" && lessonAttemptLimit > 0 && (
+            {!isManagerMode && lesson.type === "quiz" && lessonAttemptLimit > 0 && (
               <div className="flex items-center gap-1.5 text-xs text-slate-500 bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-lg">
                 <RefreshCw size={12} />
                 <span>Попыток: <strong className={lessonAttemptsLeft <= 1 ? "text-red-600" : "text-slate-700"}>{lessonAttemptsLeft}</strong> / {lessonAttemptLimit}</span>
@@ -3168,7 +3325,9 @@ function LessonView({
 
         <div className="max-w-6xl 2xl:max-w-7xl mx-auto px-8 2xl:px-10 py-8">
           {isQuiz ? (
-            apiMode && Number(lesson?.apiTestId) > 0 ? (
+            isManagerMode ? (
+              <ManagerQuizPreviewSection lesson={lesson} course={course} courseAnalytics={courseAnalytics} />
+            ) : apiMode && Number(lesson?.apiTestId) > 0 ? (
               <ApiQuizSection
                 quizView={quizView}
                 setQuizView={setQuizView}
@@ -4069,6 +4228,140 @@ function ApiQuizSection({ quizView, setQuizView, answers, setAnswers, course, le
           </button>
         )}
       </div>
+    </div>
+  );
+}
+
+function ManagerQuizPreviewSection({ lesson, course, courseAnalytics = null }) {
+  const previewQuestions = Array.isArray(lesson?.quizQuestions) ? lesson.quizQuestions : [];
+  const testStats = Array.isArray(courseAnalytics?.testStats) ? courseAnalytics.testStats : [];
+  const resolvedTestStat = useMemo(() => {
+    const testId = Number(lesson?.apiTestId || 0);
+    if (testId > 0) {
+      const byId = testStats.find((item) => Number(item?.testId || 0) === testId);
+      if (byId) return byId;
+    }
+    const lessonTitle = String(lesson?.title || "").trim().toLowerCase();
+    if (!lessonTitle) return null;
+    return testStats.find((item) => String(item?.title || "").trim().toLowerCase() === lessonTitle) || null;
+  }, [lesson?.apiTestId, lesson?.title, testStats]);
+
+  const questionTypeLabel = (qType) => {
+    if (qType === "multiple") return "Несколько ответов";
+    if (qType === "bool") return "Верно / Неверно";
+    if (qType === "text") return "Текстовый ответ";
+    return "Один ответ";
+  };
+
+  const formatLastAttempt = (value) => {
+    if (!value) return "—";
+    try {
+      return new Date(value).toLocaleString("ru-RU");
+    } catch (_) {
+      return "—";
+    }
+  };
+
+  return (
+    <div className="space-y-5 max-w-4xl 2xl:max-w-5xl mx-auto">
+      <div className="bg-white rounded-2xl border border-slate-200 p-6">
+        <div className="flex items-center justify-between gap-4 mb-4">
+          <div>
+            <p className="text-xs uppercase tracking-wide text-slate-400">Режим просмотра теста</p>
+            <h3 className="text-lg font-semibold text-slate-900 mt-1">{lesson?.title || "Тест"}</h3>
+          </div>
+          <span className="text-[11px] bg-indigo-50 text-indigo-700 border border-indigo-200 px-2.5 py-1 rounded-full font-semibold">
+            Только просмотр
+          </span>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+          {[
+            { label: "Вопросов", value: Math.max(0, Number(lesson?.questionCount || previewQuestions.length || 0)) },
+            { label: "Порог", value: `${Math.max(0, Number(lesson?.passingScore || course?.passingScore || 0))}%` },
+            { label: "Попыток", value: resolvedTestStat?.attempts ?? 0 },
+            { label: "Ср. балл", value: resolvedTestStat?.avgScore == null ? "—" : `${resolvedTestStat.avgScore}%` },
+          ].map((item) => (
+            <div key={item.label} className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
+              <p className="text-[10px] uppercase tracking-wide text-slate-400">{item.label}</p>
+              <p className="text-sm font-semibold text-slate-800 mt-0.5">{item.value}</p>
+            </div>
+          ))}
+        </div>
+        {resolvedTestStat && (
+          <p className="text-xs text-slate-500 mt-3">
+            Последняя попытка: {formatLastAttempt(resolvedTestStat.lastAt)} · Успешность: {resolvedTestStat.passRate == null ? "—" : `${resolvedTestStat.passRate}%`}
+          </p>
+        )}
+      </div>
+
+      {previewQuestions.length === 0 ? (
+        <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center text-sm text-slate-500">
+          Вопросы теста недоступны в текущем API-ответе курса.
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {previewQuestions.map((questionItem, index) => {
+            const options = Array.isArray(questionItem?.options) ? questionItem.options : [];
+            const qType = String(questionItem?.type || "single");
+            const correctIndexes = qType === "multiple"
+              ? (Array.isArray(questionItem?.correct) ? questionItem.correct.map((item) => Number(item)) : [])
+              : (qType === "single" || qType === "bool")
+                ? [Number(questionItem?.correct ?? 0)]
+                : [];
+            return (
+              <div key={`${questionItem?.id || index}-${index}`} className="bg-white rounded-2xl border border-slate-200 p-5">
+                <div className="flex items-start justify-between gap-3 mb-3">
+                  <p className="text-sm font-semibold text-slate-900">{index + 1}. {questionItem?.text || "Вопрос"}</p>
+                  <span className="text-[10px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full font-medium whitespace-nowrap">
+                    {questionTypeLabel(qType)}
+                  </span>
+                </div>
+
+                {(qType === "single" || qType === "bool" || qType === "multiple") && (
+                  <div className="space-y-2">
+                    {options.map((optionItem, optionIndex) => {
+                      const isCorrect = qType === "multiple"
+                        ? correctIndexes.includes(optionIndex)
+                        : correctIndexes[0] === optionIndex;
+                      return (
+                        <div
+                          key={`${optionItem?.id || optionIndex}-${optionIndex}`}
+                          className={`flex items-center justify-between gap-2 rounded-lg border px-3 py-2 text-xs ${isCorrect ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-slate-100 bg-white text-slate-600"}`}
+                        >
+                          <span>{optionItem?.text || `Вариант ${optionIndex + 1}`}</span>
+                          {isCorrect && <span className="text-[10px] font-semibold text-emerald-700">Правильный</span>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {qType === "text" && (
+                  <div className="space-y-2">
+                    <p className="text-xs text-slate-500">Правильные ключевые слова:</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {(Array.isArray(questionItem?.correctTextAnswers) ? questionItem.correctTextAnswers : []).map((answerItem, answerIndex) => (
+                        <span key={`${answerItem}-${answerIndex}`} className="text-[11px] bg-emerald-50 text-emerald-700 border border-emerald-200 px-2 py-0.5 rounded-full">
+                          {answerItem}
+                        </span>
+                      ))}
+                      {(!Array.isArray(questionItem?.correctTextAnswers) || questionItem.correctTextAnswers.length === 0) && (
+                        <span className="text-xs text-slate-400">Ключевые слова не указаны</span>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {questionItem?.explanation && (
+                  <p className="text-xs text-slate-500 mt-3">
+                    Пояснение: {questionItem.explanation}
+                  </p>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
