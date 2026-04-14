@@ -1,4 +1,4 @@
-﻿import React, { Suspense, lazy, useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import React, { Suspense, lazy, useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import axios from 'axios';
 import _ from 'lodash';
 import Papa from 'papaparse';
@@ -22749,6 +22749,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         initialSearch,
         revokingSessionId,       // одиночное прерывание — внешнее состояние
         handleRevokeAdminSession,
+        handleBulkRevokeAdminSessions,
         formatDate,
         }) => {
         const [search, setSearch]     = React.useState(initialSearch || '');
@@ -22924,17 +22925,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         // ── Bulk revoke ───────────────────────────────────────────────────────────
         const handleBulkRevoke = async () => {
             const ids = [...selected];
-            const sessions = allRows.filter((r) => ids.includes(r.session_id));
             setConfirmOpen(false);
             setBulkRevoking(true);
-            setBulkProgress({ done: 0, total: sessions.length });
-            for (let i = 0; i < sessions.length; i++) {
-            try { await handleRevokeAdminSession(sessions[i]); } catch (_) {}
-            setBulkProgress({ done: i + 1, total: sessions.length });
+            try {
+                if (typeof handleBulkRevokeAdminSessions === 'function') {
+                    await handleBulkRevokeAdminSessions(ids);
+                } else {
+                    for (let i = 0; i < ids.length; i++) {
+                        try { await handleRevokeAdminSession({ session_id: ids[i] }); } catch (_) {}
+                    }
+                    fetchAdminSessions();
+                }
+            } finally {
+                setBulkRevoking(false);
+                setSelected(new Set());
             }
-            setBulkRevoking(false);
-            setSelected(new Set());
-            fetchAdminSessions();
         };
 
         // ── Sort ──────────────────────────────────────────────────────────────────
@@ -26585,9 +26590,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     {(Number(selectedDay.trainingHours || 0) > 0 || Number(selectedDay.technicalHours || 0) > 0 || Number(selectedDay.offlineHours || 0) > 0) && (
                                     <p className="text-xs text-gray-600">
                                         База: {Number(selectedDay.baseHours || 0).toFixed(2)} ч
-                                        {' + '}Тренинг: {Number(selectedDay.trainingHours || 0).toFixed(2)} ч
-                                        {' + '}Тех. сбой: {Number(selectedDay.technicalHours || 0).toFixed(2)} ч
-                                        {' + '}Оффлайн: {Number(selectedDay.offlineHours || 0).toFixed(2)} ч
+                                        {` + `}Тренинг: {Number(selectedDay.trainingHours || 0).toFixed(2)} ч
+                                        {` + `}Тех. сбой: {Number(selectedDay.technicalHours || 0).toFixed(2)} ч
+                                        {` + `}Оффлайн: {Number(selectedDay.offlineHours || 0).toFixed(2)} ч
                                     </p>
                                     )}
                                 </div>
@@ -27175,6 +27180,31 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (isAdminSessionsLoading || isAdminSessionsLoadingMore || !adminSessionsHasMore) return;
                 fetchAdminSessions({ reset: false });
             }, [fetchAdminSessions, isAdminSessionsLoading, isAdminSessionsLoadingMore, adminSessionsHasMore]);
+
+            const handleBulkRevokeAdminSessions = async (sessionIds) => {
+                if (!sessionIds || sessionIds.length === 0) return;
+                try {
+                    const response = await axios.post(
+                        `${API_BASE_URL}/api/admin/sessions/revoke_bulk`,
+                        { session_ids: sessionIds },
+                        { headers: { 'X-User-Id': user.id } }
+                    );
+                    const data = response.data || {};
+                    if (data.status === 'success') {
+                        showToast(`Успешно прервано сессий: ${data.revoked_count ?? sessionIds.length}`, 'success');
+                        if (data.current_session_revoked) {
+                            await confirmLogout();
+                            return;
+                        }
+                        await refreshAdminSessions();
+                    } else {
+                        showToast(data.error || 'Failed to revoke sessions', 'error');
+                    }
+                } catch (err) {
+                    console.error('Bulk revoke admin sessions error:', err);
+                    showToast(err.response?.data?.error || 'Failed to revoke sessions', 'error');
+                }
+            };
 
             const handleRevokeAdminSession = async (session) => {
                 if (!session?.session_id) return;
@@ -31050,6 +31080,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     initialSearch={adminSessionsQuery}
                                     revokingSessionId={revokingSessionId}
                                     handleRevokeAdminSession={handleRevokeAdminSession}
+                                    handleBulkRevokeAdminSessions={handleBulkRevokeAdminSessions}
                                     formatDate={formatDate}
                                 />
                                 )}

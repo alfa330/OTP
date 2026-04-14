@@ -4620,6 +4620,19 @@ class Database:
                 """, (session_id, user_id))
             return cursor.fetchone() is not None
 
+    def revoke_user_sessions_bulk(self, session_ids):
+        if not session_ids:
+            return 0
+        with self._get_cursor() as cursor:
+            # Type casting to uuid array to prevent type errors
+            cursor.execute("""
+                UPDATE user_sessions
+                SET revoked_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                WHERE session_id::text = ANY(%s)
+                  AND revoked_at IS NULL
+            """, (session_ids,))
+            return cursor.rowcount
+
     def revoke_all_user_sessions(self, user_id, except_session_id=None):
         with self._get_cursor() as cursor:
             if except_session_id:

@@ -2401,6 +2401,42 @@ def revoke_admin_session(session_id):
         return jsonify({"error": "Internal server error"}), 500
 
 
+@app.route('/api/admin/sessions/revoke_bulk', methods=['POST', 'OPTIONS'])
+@require_api_key
+def revoke_admin_sessions_bulk():
+    try:
+        requester_id = getattr(g, 'user_id', None)
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        requester = db.get_user(id=requester_id)
+        if not requester or not _is_admin_role(requester[3]):
+            return jsonify({"error": "Forbidden: only admins can access"}), 403
+
+        data = request.get_json() or {}
+        session_ids = data.get('session_ids')
+        
+        if not isinstance(session_ids, list) or not session_ids:
+            return jsonify({"error": "session_ids list is required and cannot be empty"}), 400
+
+        revoked_count = db.revoke_user_sessions_bulk(session_ids=session_ids)
+
+        current_session_id = _current_session_id_from_access_token()
+        current_session_revoked = current_session_id in session_ids
+
+        response = jsonify({
+            "status": "success",
+            "revoked_count": revoked_count,
+            "current_session_revoked": current_session_revoked
+        })
+        if current_session_revoked:
+            _clear_auth_cookies(response)
+        return response, 200
+    except Exception as e:
+        logging.error(f"revoke_admin_sessions_bulk error: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/sensitive-access/qr/request', methods=['POST', 'OPTIONS'])
 @require_api_key
 def request_sensitive_access_qr():
