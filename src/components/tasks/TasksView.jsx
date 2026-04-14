@@ -975,9 +975,8 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
   const buildHeaders = useCallback(() => {
     const h = {};
     if (user?.id)     h['X-User-Id'] = String(user.id);
-    if (user?.apiKey) h['X-API-Key'] = user.apiKey;
     return typeof withAccessTokenHeader === 'function' ? withAccessTokenHeader(h) : h;
-  }, [user?.id, user?.apiKey, withAccessTokenHeader]);
+  }, [user?.id, withAccessTokenHeader]);
 
   const fetchRecipients = useCallback(async () => {
     setIsRecipientsLoading(true);

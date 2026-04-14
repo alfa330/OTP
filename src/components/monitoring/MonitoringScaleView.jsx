@@ -160,7 +160,7 @@ export default function MonitoringScaleView({
   const [isSaving, setIsSaving] = useState(false);
 
   const apiRoot = String(apiBaseUrl || '').trim().replace(/\/+$/, '');
-  const canUseApi = Boolean(apiRoot && user?.id && user?.apiKey);
+  const canUseApi = Boolean(apiRoot && user?.id);
 
   const notify = (message, type = 'success') => {
     if (typeof showToast === 'function') {
@@ -181,7 +181,6 @@ export default function MonitoringScaleView({
   const buildHeaders = (json = false) => {
     const headers = {};
     if (json) headers['Content-Type'] = 'application/json';
-    if (user?.apiKey) headers['X-API-Key'] = user.apiKey;
     if (user?.id) headers['X-User-Id'] = String(user.id);
     return headers;
   };
@@ -294,7 +293,7 @@ export default function MonitoringScaleView({
     return () => {
       cancelled = true;
     };
-  }, [apiRoot, canUseApi, user?.apiKey, user?.id]);
+  }, [apiRoot, canUseApi, user?.id]);
 
   const submitDirection = () => {
     if (!canEdit) return;

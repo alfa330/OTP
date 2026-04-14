@@ -823,9 +823,6 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
       ...extraHeaders,
     };
 
-    if (user?.apiKey) {
-      headers["X-API-Key"] = user.apiKey;
-    }
     if (user?.id) {
       headers["X-User-Id"] = String(user.id);
     }
@@ -833,7 +830,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
       headers = withAccessTokenHeader(headers) || headers;
     }
     return headers;
-  }, [user?.apiKey, user?.id, withAccessTokenHeader]);
+  }, [user?.id, withAccessTokenHeader]);
 
   const buildParserKeywordGroupsPayload = useCallback(() => {
     const normalized = {};
@@ -1086,7 +1083,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
 
   useEffect(() => {
     let isCancelled = false;
-    const bootstrapKey = `${apiBaseUrl || ""}|${user?.id || ""}|${user?.apiKey || ""}`;
+    const bootstrapKey = `${apiBaseUrl || ""}|${user?.id || ""}`;
 
     if (!apiBaseUrl || !user?.id || bootstrapKeyRef.current === bootstrapKey) {
       return undefined;
@@ -1121,7 +1118,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
     return () => {
       isCancelled = true;
     };
-  }, [apiBaseUrl, user?.id, user?.apiKey, loadResumesFromApi]);
+  }, [apiBaseUrl, user?.id, loadResumesFromApi]);
 
   useEffect(() => {
     let isCancelled = false;

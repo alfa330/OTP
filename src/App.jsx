@@ -74,6 +74,11 @@ const ADMIN_SESSIONS_PAGE_SIZE = 100;
 const ORAZA_AIT_SPLASH_BASE_DATE = Object.freeze({ year: 2026, month: 2, day: 20 });
 const ORAZA_AIT_SPLASH_SHIFT_DAYS = 11;
 const ORAZA_AIT_SPLASH_LAST_SHOWN_KEY = 'otp_oraza_ait_splash_last_shown';
+const sanitizeClientUser = (value) => {
+    if (!value || typeof value !== 'object') return value;
+    const { apiKey, api_key, access_token, refresh_token, ...rest } = value;
+    return rest;
+};
 const emitAppToast = (message, type = 'info') => {
     const text = String(message ?? '');
     try {
@@ -89,46 +94,28 @@ const emitAppToast = (message, type = 'info') => {
     return false;
 };
 
-const readAuthToken = (key) => {
-    if (typeof window === 'undefined') return '';
-    return window.localStorage.getItem(key) || '';
-};
-
-const writeAuthToken = (key, value) => {
-    if (typeof window === 'undefined') return;
-    if (value) {
-        window.localStorage.setItem(key, value);
-    } else {
-        window.localStorage.removeItem(key);
-    }
-};
-
-const persistAuthTokens = (accessToken, refreshToken) => {
-    if (typeof accessToken !== 'undefined') {
-        writeAuthToken(ACCESS_TOKEN_STORAGE_KEY, accessToken);
-    }
-    if (typeof refreshToken !== 'undefined') {
-        writeAuthToken(REFRESH_TOKEN_STORAGE_KEY, refreshToken);
-    }
-};
-
 const clearAuthTokens = () => {
     if (typeof window === 'undefined') return;
     window.localStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY);
     window.localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
 };
 
-const withAccessTokenHeader = (headers = {}) => {
+const stripLegacyAuthHeaders = (headers = {}) => {
     const nextHeaders = { ...(headers || {}) };
-    const accessToken = readAuthToken(ACCESS_TOKEN_STORAGE_KEY);
-    const refreshToken = readAuthToken(REFRESH_TOKEN_STORAGE_KEY);
-    if (accessToken && !nextHeaders.Authorization) {
-        nextHeaders.Authorization = `Bearer ${accessToken}`;
-    }
-    if (refreshToken && !nextHeaders['X-Refresh-Token']) {
-        nextHeaders['X-Refresh-Token'] = refreshToken;
+    delete nextHeaders['X-API-Key'];
+    delete nextHeaders['x-api-key'];
+    delete nextHeaders['Authorization'];
+    delete nextHeaders['authorization'];
+    delete nextHeaders['X-Refresh-Token'];
+    delete nextHeaders['x-refresh-token'];
+    if (nextHeaders['X-User-Id'] === '' || typeof nextHeaders['X-User-Id'] === 'undefined' || nextHeaders['X-User-Id'] === null) {
+        delete nextHeaders['X-User-Id'];
     }
     return nextHeaders;
+};
+
+const withAccessTokenHeader = (headers = {}) => {
+    return stripLegacyAuthHeaders(headers);
 };
 
 const buildDateKey = (date) => {
@@ -239,18 +226,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 window.__otpAxiosAuthRequestInterceptorInstalled = true;
                 axios.interceptors.request.use((config) => {
                     const nextConfig = config || {};
-                    const headers = nextConfig.headers || {};
-                    const accessToken = readAuthToken(ACCESS_TOKEN_STORAGE_KEY);
-                    const refreshToken = readAuthToken(REFRESH_TOKEN_STORAGE_KEY);
-
-                    if (accessToken && !headers.Authorization) {
-                        headers.Authorization = `Bearer ${accessToken}`;
-                    }
-                    if (refreshToken && !headers['X-Refresh-Token']) {
-                        headers['X-Refresh-Token'] = refreshToken;
-                    }
-
-                    nextConfig.headers = headers;
+                    nextConfig.headers = stripLegacyAuthHeaders(nextConfig.headers || {});
                     return nextConfig;
                 });
             }
@@ -260,13 +236,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 window.__otpRefreshPromise = null;
 
                 axios.interceptors.response.use(
-                    (response) => {
-                        const data = response?.data || {};
-                        if (data.access_token || data.refresh_token) {
-                            persistAuthTokens(data.access_token, data.refresh_token);
-                        }
-                        return response;
-                    },
+                    (response) => response,
                     async (error) => {
                         const status = error?.response?.status;
                         const code = error?.response?.data?.code;
@@ -275,7 +245,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         const url = originalRequest?.url || '';
                         const isRefreshCall = url.includes('/api/auth/refresh');
                         const isLoginCall = url.includes('/api/login');
-                        const hasRefreshToken = !!readAuthToken(REFRESH_TOKEN_STORAGE_KEY);
                         const isRecoverableAuthError = (
                             code === 'TOKEN_EXPIRED' ||
                             code === 'INVALID_TOKEN' ||
@@ -289,7 +258,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                         if (
                             status === 401 &&
-                            hasRefreshToken &&
                             isRecoverableAuthError &&
                             originalRequest &&
                             !originalRequest.__isRetryRequest &&
@@ -740,11 +708,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const schedulesUrl = `${API_BASE_URL}/api/work_schedules/operators?${scheduleParams.toString()}`;
 
             const [hoursResp, trainingsResp, technicalIssuesResp, offlineActivitiesResp, schedulesResp] = await Promise.all([
-                axios.get(url, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } }),
-                axios.get(trainingsUrl, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } }),
-                axios.get(technicalIssuesUrl, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } }),
-                axios.get(offlineActivitiesUrl, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } }),
-                axios.get(schedulesUrl, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } })
+                axios.get(url, { headers: { 'X-User-Id': user.id } }),
+                axios.get(trainingsUrl, { headers: { 'X-User-Id': user.id } }),
+                axios.get(technicalIssuesUrl, { headers: { 'X-User-Id': user.id } }),
+                axios.get(offlineActivitiesUrl, { headers: { 'X-User-Id': user.id } }),
+                axios.get(schedulesUrl, { headers: { 'X-User-Id': user.id } })
             ]);
 
             const loadedOperators = (hoursResp.data && hoursResp.data.status === 'success' && Array.isArray(hoursResp.data.operators))
@@ -983,7 +951,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 form.append('sv_id', String(selectedSvId));
             }
             const resp = await axios.post(`${API_BASE_URL}/api/sv/preview_calls_table`, form, {
-                headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id, 'Content-Type': 'multipart/form-data' },
+                headers: { 'X-User-Id': user.id, 'Content-Type': 'multipart/form-data' },
                 onUploadProgress: (p) => {
                 if (p.total) setUploadProgress(Math.round((p.loaded / p.total) * 100));
                 }
@@ -1034,7 +1002,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }))
             };
             const resp = await axios.post(`${API_BASE_URL}/api/hours/upload_group_day`, payload, {
-                headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id, 'Content-Type': 'application/json' }
+                headers: { 'X-User-Id': user.id, 'Content-Type': 'application/json' }
             });
             if (resp.data && resp.data.status === 'success') {
                 fallbackToast('Данные сохранены', 'success');
@@ -1219,7 +1187,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }]
             };
             const resp = await axios.post(`${API_BASE_URL}/api/hours/upload_group_day`, payload, {
-                headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id, 'Content-Type': 'application/json' },
+                headers: { 'X-User-Id': user.id, 'Content-Type': 'application/json' },
                 timeout: 60000
             });
             if (resp.data && resp.data.status === 'success') {
@@ -1306,7 +1274,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     sv_id: selectedSvId || null,
                     operators: rows
                 }, {
-                    headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id, 'Content-Type': 'application/json' },
+                    headers: { 'X-User-Id': user.id, 'Content-Type': 'application/json' },
                     timeout: 60000
                 });
                 if (resp.data && resp.data.status === 'success') {
@@ -1351,7 +1319,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 operator_id: operatorId,
                 month,
                 norm_hours: norm
-            }, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } });
+            }, { headers: { 'X-User-Id': user.id } });
             setOperators(prev => prev.map(op => op.operator_id === operatorId ? { ...op, norm_hours: norm } : op));
             fallbackToast('Норма часов обновлена', 'success');
             } catch (err) {
@@ -2066,7 +2034,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             if (trainingModalState.training?.id) {
                 await axios.put(`${API_BASE_URL}/api/trainings/${trainingModalState.training.id}`, data, {
                 headers: {
-                    'X-API-Key': user.apiKey,
                     'X-User-Id': user.id
                 }
                 });
@@ -2074,7 +2041,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             } else {
                 await axios.post(`${API_BASE_URL}/api/trainings`, { ...data, operator_id: trainingModalState.operatorId }, {
                 headers: {
-                    'X-API-Key': user.apiKey,
                     'X-User-Id': user.id
                 }
                 });
@@ -2098,7 +2064,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             try {
             await axios.delete(`${API_BASE_URL}/api/trainings/${trainingId}`, {
                 headers: {
-                'X-API-Key': user.apiKey,
                 'X-User-Id': user.id
                 }
             });
@@ -2120,7 +2085,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             try {
             await axios.delete(`${API_BASE_URL}/api/technical_issues/${issueId}`, {
                 headers: {
-                'X-API-Key': user.apiKey,
                 'X-User-Id': user.id
                 }
             });
@@ -2142,7 +2106,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             try {
             await axios.delete(`${API_BASE_URL}/api/offline_activities/${activityId}`, {
                 headers: {
-                'X-API-Key': user.apiKey,
                 'X-User-Id': user.id
                 }
             });
@@ -2188,7 +2151,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 method: 'GET',
                 credentials: 'include',
                 headers: withAccessTokenHeader({
-                'X-API-Key': user.apiKey || '',
                 'X-User-Id': String(user.id)
                 })
             });
@@ -3777,7 +3739,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 try {
                 if (typeof axios === 'undefined') return;
                 const headers = {};
-                if (typeof user !== 'undefined' && user?.apiKey) headers['X-API-Key'] = user.apiKey;
                 if (typeof user !== 'undefined' && user?.id) headers['X-User-Id'] = user.id;
                 const resp = await axios.get(`${API_BASE_URL}/api/admin/directions`, { headers });
                 const data = resp.data;
@@ -3799,7 +3760,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (typeof axios === 'undefined') return;
                 setLoadingOperators(true);
                 const headers = {};
-                if (typeof user !== 'undefined' && user?.apiKey) headers['X-API-Key'] = user.apiKey;
                 if (typeof user !== 'undefined' && user?.id) headers['X-User-Id'] = user.id;
 
                 const resp = await axios.get(`${API_BASE_URL}/api/admin/operators_summary?month=${encodeURIComponent(month)}`, { headers });
@@ -4484,7 +4444,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return;
                 }
                 const headers = { 'Content-Type': 'application/json' };
-                if (typeof user !== 'undefined' && user?.apiKey) headers['X-API-Key'] = user.apiKey;
                 if (typeof user !== 'undefined' && user?.id) headers['X-User-Id'] = user.id;
 
                 const payload = {
@@ -7466,7 +7425,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             fetch(`${API_BASE_URL}/api/admin/directions`, {
                                 credentials: 'include',
                                 headers: withAccessTokenHeader({
-                                    'X-API-Key': user?.apiKey || '',
                                     'X-User-Id': user?.id || ''
                                 })
                             })
@@ -21307,7 +21265,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 {
                 headers: {
                     'Content-Type': 'application/json',
-                    'X-API-Key': user.apiKey,
                     'X-User-Id': user.id,
                 },
                 timeout: 180000,
@@ -22072,7 +22029,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         }
                     }
                     const params = { start, end, operator_ids: opIds.join(',') };
-                    const resp = await axios.get(`${API_BASE_URL}/api/average_scores`, { params, headers: { 'X-API-Key': currentUser?.apiKey, 'X-User-Id': currentUser?.id } });
+                    const resp = await axios.get(`${API_BASE_URL}/api/average_scores`, { params, headers: { 'X-User-Id': currentUser?.id } });
                     const raw = resp?.data?.data;
                     let opMap = {};
                     if (!raw) return;
@@ -22185,7 +22142,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     form.append('file', file);
                     form.append('day', periodDay);
 
-                    const headers = { 'X-API-Key': currentUser?.apiKey, 'X-User-Id': currentUser?.id };
+                    const headers = { 'X-User-Id': currentUser?.id };
                     await axios.post(`${API_BASE_URL}/api/baiga/upload_day_csv`, form, { headers });
 
                     const resp = await axios.get(`${API_BASE_URL}/api/baiga/day_scores`, { params: { day: periodDay }, headers });
@@ -22237,7 +22194,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setBaigaLoading(true);
                 
                 try {
-                    const headers = { 'X-API-Key': currentUser?.apiKey, 'X-User-Id': currentUser?.id };
+                    const headers = { 'X-User-Id': currentUser?.id };
                     const params = { start: period.start, end: period.end };
                     const resp = await axios.get(`${API_BASE_URL}/api/baiga/period_scores`, { params, headers });
                     const days = (resp && resp.data && resp.data.days) ? resp.data.days : [];
@@ -25717,11 +25674,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 let cancelled = false;
 
                 const restoreSession = async () => {
+                    clearAuthTokens();
                     let parsedStoredUser = null;
                     const storedUser = localStorage.getItem('user');
                     if (storedUser) {
                         try {
-                            parsedStoredUser = JSON.parse(storedUser);
+                            parsedStoredUser = sanitizeClientUser(JSON.parse(storedUser));
                         } catch (err) {
                             console.error('Error parsing stored user:', err);
                             localStorage.removeItem('user');
@@ -25734,13 +25692,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         });
                         const data = response.data;
                         if (data?.status === 'success' && !cancelled) {
-                            const sessionUser = data.user || {
+                            const sessionUser = sanitizeClientUser(data.user || {
                                 role: data.role,
                                 id: data.id,
                                 name: data.name,
                                 telegram_id: data.telegram_id,
                                 gender: data.gender
-                            };
+                            });
                             setUser(sessionUser);
                         }
                     } catch (err) {
@@ -25767,7 +25725,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // Save user to localStorage when it changes
             useEffect(() => {
                 if (user) {
-                    localStorage.setItem('user', JSON.stringify(user));
+                    localStorage.setItem('user', JSON.stringify(sanitizeClientUser(user)));
                 }
             }, [user]);
 
@@ -26432,8 +26390,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         {
                         headers: {
                             'Content-Type': 'application/json',
-                            'X-User-Id': user.id,
-                            'X-API-Key': user.apiKey
+                            'X-User-Id': user.id
                         }
                         }
                     );
@@ -27053,7 +27010,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         try {
                             const response = await axios.get(`${API_BASE_URL}/api/admin/directions`, {
                                 headers: {
-                                    'X-API-Key': user.apiKey,
                                     'X-User-Id': user.id
                                 }
                             });
@@ -27081,7 +27037,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         {
                             headers: {
                                 'Content-Type': 'application/json',
-                                'X-API-Key': user.apiKey,
                                 'X-User-Id': user.id
                             }
                         }
@@ -27111,7 +27066,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                     try {
                         const response = await axios.get(`${API_BASE_URL}/api/admin/users`, {
-                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            headers: { 'X-User-Id': user.id }
                         });
                         const data = response.data;
                         if (data.status === 'success' && isMounted.current) {
@@ -27157,7 +27112,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     if (normalizedQuery) params.set('q', normalizedQuery);
 
                     const response = await axios.get(`${API_BASE_URL}/api/admin/sessions?${params.toString()}`, {
-                        headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        headers: { 'X-User-Id': user.id }
                     });
                     const data = response.data || {};
                     if (data.status === 'success' && isMounted.current && requestId === adminSessionsRequestIdRef.current) {
@@ -27233,7 +27188,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         `${API_BASE_URL}/api/admin/sessions/${encodeURIComponent(session.session_id)}/revoke`,
                         {},
                         {
-                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            headers: { 'X-User-Id': user.id }
                         }
                     );
                     const data = response.data || {};
@@ -27259,7 +27214,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     try {
                         setIsLoading(true);
                         const response = await axios.get(`${API_BASE_URL}/api/admin/users_report`, {
-                            headers:  {'X-API-Key': user.apiKey, 'X-User-Id': user.id},
+                            headers:  {'X-User-Id': user.id},
                             responseType: 'blob'
                         });
                         
@@ -27329,7 +27284,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         return null;
                     }
                     const commonHeaders = withAccessTokenHeader({
-                        'X-API-Key': user.apiKey,
                         'X-User-Id': user.id
                     });
                     if (avatarFile) {
@@ -27389,7 +27343,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         withCredentials: true,
                         headers: {
                             'Content-Type': 'application/json',
-                            'X-API-Key': user.apiKey,
                             'X-User-Id': user.id
                         }
                     });
@@ -27465,7 +27418,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             {
                             headers: {
                                 'Content-Type': 'application/json',
-                                'X-API-Key': user.apiKey,
                                 'X-User-Id': user.id
                             }
                             }
@@ -27495,7 +27447,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     field: 'status',
                                     value: editedUser.status
                                 }, {
-                                    headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                                    headers: { 'X-User-Id': user.id }
                                 });
                             }
                             showToast(`${createdRoleLabel} создан успешно`, 'success');
@@ -27526,7 +27478,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             field: 'name',
                             value: newName
                         }, {
-                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            headers: { 'X-User-Id': user.id }
                         });
                     }
                     const editedRole = String(editedUser?.role || userToEdit?.role || '').trim().toLowerCase();
@@ -27540,7 +27492,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 field: 'direction_id',
                                 value: null
                             }, {
-                                headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                                headers: { 'X-User-Id': user.id }
                             });
                         }
                         if (hasSupervisor) {
@@ -27549,7 +27501,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 field: 'supervisor_id',
                                 value: null
                             }, {
-                                headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                                headers: { 'X-User-Id': user.id }
                             });
                         }
                     } else {
@@ -27559,7 +27511,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 field: 'direction_id',
                                 value: editedUser.direction_id
                             }, {
-                                headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                                headers: { 'X-User-Id': user.id }
                             });
                         }
                         if (editedUser.supervisor_id && editedUser.supervisor_id !== userToEdit.supervisor_id) {
@@ -27568,7 +27520,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 field: 'supervisor_id',
                                 value: editedUser.supervisor_id
                             }, {
-                                headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                                headers: { 'X-User-Id': user.id }
                             });
                         }
                     }
@@ -27577,7 +27529,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             user_id: editedUser.id,
                             new_login: editedUser.new_login
                         }, {
-                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            headers: { 'X-User-Id': user.id }
                         });
                     }
                     if (editedUser.new_password && editedUser.new_password.trim() !== '') {
@@ -27585,7 +27537,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             user_id: editedUser.id,
                             new_password: editedUser.new_password
                         }, {
-                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            headers: { 'X-User-Id': user.id }
                         });
                     }
                     if (editedUser.status && editedUser.status !== userToEdit.status) {
@@ -27597,7 +27549,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 field: 'status',
                                 value: editedUser.status
                             }, {
-                                headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                                headers: { 'X-User-Id': user.id }
                             });
                         }
                     } else if (!editedUser.id ? false : (editedUser?.use_schedule_status_period && isPeriodStatusValue(editedUser?.status))) {
@@ -27615,7 +27567,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             field: 'rate',
                             value: nextRate
                         }, {
-                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            headers: { 'X-User-Id': user.id }
                         });
                     }
                     if (editedUser.hire_date && editedUser.hire_date !== userToEdit.hire_date) {
@@ -27627,7 +27579,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 field: 'hire_date',
                                 value: nextHireDate
                             }, {
-                                headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                                headers: { 'X-User-Id': user.id }
                             });
                         }
                     }
@@ -27637,7 +27589,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             field: 'gender',
                             value: editedUser.gender || null
                         }, {
-                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            headers: { 'X-User-Id': user.id }
                         });
                     }
                     const nextBirthDate = normalizeDateForApi(editedUser.birth_date);
@@ -27648,7 +27600,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             field: 'birth_date',
                             value: nextBirthDate
                         }, {
-                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            headers: { 'X-User-Id': user.id }
                         });
                     }
                     const nextPhone = normalizeTextForApi(editedUser?.phone);
@@ -27659,7 +27611,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             field: 'phone',
                             value: nextPhone
                         }, {
-                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            headers: { 'X-User-Id': user.id }
                         });
                     }
                     const nextEmail = normalizeTextForApi(editedUser?.email);
@@ -27670,7 +27622,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             field: 'email',
                             value: nextEmail
                         }, {
-                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            headers: { 'X-User-Id': user.id }
                         });
                     }
                     const nextInstagram = normalizeTextForApi(editedUser?.instagram);
@@ -27681,7 +27633,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             field: 'instagram',
                             value: nextInstagram
                         }, {
-                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            headers: { 'X-User-Id': user.id }
                         });
                     }
                     const nextTelegramNick = normalizeTextForApi(editedUser?.telegram_nick);
@@ -27692,7 +27644,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             field: 'telegram_nick',
                             value: nextTelegramNick
                         }, {
-                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            headers: { 'X-User-Id': user.id }
                         });
                     }
                     const nextStudyPlace = normalizeTextForApi(editedUser?.study_place);
@@ -27703,7 +27655,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             field: 'study_place',
                             value: nextStudyPlace
                         }, {
-                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            headers: { 'X-User-Id': user.id }
                         });
                     }
                     const nextStudyCourse = normalizeTextForApi(editedUser?.study_course);
@@ -27714,7 +27666,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             field: 'study_course',
                             value: nextStudyCourse
                         }, {
-                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            headers: { 'X-User-Id': user.id }
                         });
                     }
                     const nextCardNumber = normalizeTextForApi(editedUser?.card_number);
@@ -27725,7 +27677,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             field: 'card_number',
                             value: nextCardNumber
                         }, {
-                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            headers: { 'X-User-Id': user.id }
                         });
                     }
                     const nextCloseContact1Relation = normalizeTextForApi(editedUser?.close_contact_1_relation);
@@ -27736,7 +27688,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             field: 'close_contact_1_relation',
                             value: nextCloseContact1Relation
                         }, {
-                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            headers: { 'X-User-Id': user.id }
                         });
                     }
                     const nextCloseContact1FullName = normalizeTextForApi(editedUser?.close_contact_1_full_name);
@@ -27747,7 +27699,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             field: 'close_contact_1_full_name',
                             value: nextCloseContact1FullName
                         }, {
-                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            headers: { 'X-User-Id': user.id }
                         });
                     }
                     const nextCloseContact1Phone = normalizeTextForApi(editedUser?.close_contact_1_phone);
@@ -27758,7 +27710,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             field: 'close_contact_1_phone',
                             value: nextCloseContact1Phone
                         }, {
-                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            headers: { 'X-User-Id': user.id }
                         });
                     }
                     const nextCloseContact2Relation = normalizeTextForApi(editedUser?.close_contact_2_relation);
@@ -27769,7 +27721,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             field: 'close_contact_2_relation',
                             value: nextCloseContact2Relation
                         }, {
-                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            headers: { 'X-User-Id': user.id }
                         });
                     }
                     const nextCloseContact2FullName = normalizeTextForApi(editedUser?.close_contact_2_full_name);
@@ -27780,7 +27732,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             field: 'close_contact_2_full_name',
                             value: nextCloseContact2FullName
                         }, {
-                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            headers: { 'X-User-Id': user.id }
                         });
                     }
                     const nextCloseContact2Phone = normalizeTextForApi(editedUser?.close_contact_2_phone);
@@ -27791,7 +27743,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             field: 'close_contact_2_phone',
                             value: nextCloseContact2Phone
                         }, {
-                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            headers: { 'X-User-Id': user.id }
                         });
                     }
                     const nextCompanyName = normalizeTextForApi(editedUser?.company_name);
@@ -27802,7 +27754,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             field: 'company_name',
                             value: nextCompanyName
                         }, {
-                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            headers: { 'X-User-Id': user.id }
                         });
                     }
                     const nextEmploymentType = normalizeEmploymentTypeForApi(editedUser?.employment_type);
@@ -27813,7 +27765,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             field: 'employment_type',
                             value: nextEmploymentType
                         }, {
-                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            headers: { 'X-User-Id': user.id }
                         });
                     }
                     const nextInternshipInCompany = normalizeBoolForApi(editedUser?.internship_in_company);
@@ -27824,7 +27776,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             field: 'internship_in_company',
                             value: nextInternshipInCompany
                         }, {
-                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            headers: { 'X-User-Id': user.id }
                         });
                     }
                     const nextFrontOfficeTraining = normalizeBoolForApi(editedUser?.front_office_training);
@@ -27835,7 +27787,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             field: 'front_office_training',
                             value: nextFrontOfficeTraining
                         }, {
-                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            headers: { 'X-User-Id': user.id }
                         });
                     }
                     const nextFrontOfficeTrainingDate = nextFrontOfficeTraining
@@ -27850,7 +27802,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             field: 'front_office_training_date',
                             value: nextFrontOfficeTrainingDate
                         }, {
-                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            headers: { 'X-User-Id': user.id }
                         });
                     }
                     const nextTaxiproId = normalizeTextForApi(editedUser?.taxipro_id);
@@ -27861,7 +27813,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             field: 'taxipro_id',
                             value: nextTaxiproId
                         }, {
-                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            headers: { 'X-User-Id': user.id }
                         });
                     }
                     const nextHasProxy = normalizeBoolForApi(editedUser?.has_proxy);
@@ -27872,7 +27824,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             field: 'has_proxy',
                             value: nextHasProxy
                         }, {
-                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            headers: { 'X-User-Id': user.id }
                         });
                     }
                     const nextHasDriverLicense = normalizeBoolForApi(editedUser?.has_driver_license);
@@ -27883,7 +27835,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             field: 'has_driver_license',
                             value: nextHasDriverLicense
                         }, {
-                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            headers: { 'X-User-Id': user.id }
                         });
                     }
                     const nextProxyCardNumber = editedRole === 'operator' && nextHasProxy
@@ -27896,7 +27848,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             field: 'proxy_card_number',
                             value: nextProxyCardNumber
                         }, {
-                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            headers: { 'X-User-Id': user.id }
                         });
                     }
                     const nextSipNumber = editedRole === 'operator'
@@ -27909,7 +27861,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             field: 'sip_number',
                             value: nextSipNumber
                         }, {
-                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            headers: { 'X-User-Id': user.id }
                         });
                     }
                     if (editedUser?.avatar_file || editedUser?.avatar_remove) {
@@ -27973,7 +27925,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     try {
                         const response = await axios.get(`${API_BASE_URL}/api/surveys`, {
                             headers: withAccessTokenHeader({
-                                'X-API-Key': user.apiKey,
                                 'X-User-Id': user.id
                             })
                         });
@@ -28192,7 +28143,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         {
                             headers: {
                                 'Content-Type': 'application/json',
-                                'X-API-Key': user.apiKey,
                                 'X-User-Id': user.id
                             }
                         }
@@ -28366,7 +28316,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setSalaryResult(null);
             };
             const audioUrlCache = {};
-            const getAudioUrlWithAuth = async (evaluationId, apiKey, userId) => {
+            const getAudioUrlWithAuth = async (evaluationId, userId) => {
                 if (audioUrlCache[evaluationId]) {
                     return audioUrlCache[evaluationId];
                 }
@@ -28376,7 +28326,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         method: 'GET',
                         credentials: 'include',
                         headers: withAccessTokenHeader({
-                            'X-API-Key': apiKey,
                             'X-User-Id': userId
                         })
                     });
@@ -28412,7 +28361,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return;
                 }
                 setLoadingAudioId(evaluation.id);
-                const url = await getAudioUrlWithAuth(evaluation.id, user.apiKey, user.id);
+                const url = await getAudioUrlWithAuth(evaluation.id, user.id);
                 setAudioUrl(url);
                 setLoadingAudioId(null);
             };
@@ -28485,7 +28434,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         {
                             headers: {
                                 'Content-Type': 'application/json',
-                                'X-API-Key': user.apiKey,
                                 'X-User-Id': user.id
                             }
                         }
@@ -28576,7 +28524,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         {
                             headers: {
                                 'Content-Type': 'application/json',
-                                'X-API-Key': user.apiKey,
                                 'X-User-Id': user.id
                             }
                         }
@@ -28617,7 +28564,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
 
                 const commonHeaders = withAccessTokenHeader({
-                    'X-API-Key': user.apiKey,
                     'X-User-Id': user.id
                 });
 
@@ -28702,7 +28648,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setLoadingHistoryId(userId);
                     const response = await axios.get(`${API_BASE_URL}/api/user/history?user_id=${userId}`, {
                         headers: {
-                            'X-API-Key': user.apiKey,
                             'X-User-Id': user.id
                         }
                     });
@@ -28742,7 +28687,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         { user_id: targetUserId },
                         {
                             headers: withAccessTokenHeader({
-                                'X-API-Key': user.apiKey,
                                 'X-User-Id': user.id
                             })
                         }
@@ -28757,7 +28701,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     await fetchUsers();
                     try {
                         const svResponse = await axios.get(`${API_BASE_URL}/api/admin/sv_list`, {
-                            headers: withAccessTokenHeader({ 'X-API-Key': user.apiKey })
+                            headers: withAccessTokenHeader({ })
                         });
                         const svDataPayload = svResponse?.data || {};
                         if (svDataPayload.status === 'success' && isMounted.current) {
@@ -28800,7 +28744,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         { user_id: targetUserId, field: 'status', value: 'fired' },
                         {
                             headers: withAccessTokenHeader({
-                                'X-API-Key': user.apiKey,
                                 'X-User-Id': user.id
                             })
                         }
@@ -28837,14 +28780,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
-                        persistAuthTokens(data.access_token, data.refresh_token);
-                        const sessionUser = data.user || {
+                        const sessionUser = sanitizeClientUser(data.user || {
                             role: data.role,
                             id: data.id,
                             name: data.name,
                             telegram_id: data.telegram_id,
                             gender: data.gender
-                        };
+                        });
                         setUser(sessionUser);
                         setLogin('');
                         setPassword('');
@@ -28941,7 +28883,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                     try {
                         const response = await axios.get(`${API_BASE_URL}/api/admin/sv_list`, {
-                            headers: { 'X-API-Key': user.apiKey }
+                            headers: { }
                         });
                         const data = response.data;
                         if (data.status === 'success' && isMounted.current) {
@@ -28976,7 +28918,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         if (!user || !user.id) return;
                         const url = svDataUrl(user.id, month);
                         const response = await axios.get(url, {
-                        headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        headers: { 'X-User-Id': user.id }
                         });
                         const data = response.data;
                         if (data.status === 'success' && isMounted.current) {
@@ -29002,7 +28944,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         const response = await axios.get(
                             `${API_BASE_URL}/api/call_evaluations?operator_id=${user.id}&month=${selectedMonth}`,
                             {
-                                headers: { 'X-API-Key': user.apiKey },
+                                headers: { },
                             }
                         );
                         const data = response.data;
@@ -29097,7 +29039,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         },
                         {
                             headers: withAccessTokenHeader({
-                                'X-API-Key': user.apiKey,
                                 'X-User-Id': user.id
                             })
                         }
@@ -29155,7 +29096,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 
                 try {
                     const response = await axios.get(`${API_BASE_URL}/api/user/profile?user_id=${user.id}`, {
-                        headers: { 'X-API-Key': user.apiKey }
+                        headers: { }
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
@@ -29176,8 +29117,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return runSingleFlight(requestKey, async () => {
                     try{
                         const response = await axios.get(`${API_BASE_URL}/api/trainings?month=${selectedMonth}`,{
-                            headers: {'X-API-Key': user.apiKey, 
-                                      'X-User-Id': user.id}
+                            headers: {'X-User-Id': user.id}
                         });  
                         const data = response.data;
                         if (data.status === 'success' ){
@@ -29201,7 +29141,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     `${API_BASE_URL}/api/sv/daily_hours?month=${selectedMonth}`,
                     {
                         headers: {
-                        'X-API-Key': user.apiKey,
                         'X-User-Id': String(user.id), // обязательно для /api/sv/daily_hours
                         },
                     }
@@ -29295,7 +29234,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 try {
                     const url = svDataUrl(svId, month);
                     const response = await axios.get(url, {
-                    headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                    headers: { 'X-User-Id': user.id }
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
@@ -29327,7 +29266,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             {
                                 headers: {
                                     'Content-Type': 'application/json',
-                                    'X-API-Key': user.apiKey,
                                     'X-User-Id': user.id
                                 }
                             }
@@ -29357,7 +29295,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const response = await axios.post(`${API_BASE_URL}/api/admin/remove_sv`, {
                         id: svId
                     }, {
-                        headers: { 'X-API-Key': user.apiKey }
+                        headers: { }
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
@@ -29386,7 +29324,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         telegram_id: svId,
                         table_url: url
                     }, {
-                        headers: { 'X-API-Key': user.apiKey }
+                        headers: { }
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
@@ -29417,7 +29355,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const response = await axios.post(`${API_BASE_URL}/api/sv/update_table`, {
                         table_url: newTableUrl
                     }, {
-                        headers: { 'X-API-Key': user.apiKey }
+                        headers: { }
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
@@ -29442,7 +29380,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const response = await axios.get(
                         `${API_BASE_URL}/api/admin/monthly_report?month=${selectedReportMonth}`,
                         {
-                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id},
+                            headers: { 'X-User-Id': user.id},
                             responseType: 'blob' // <-- Важно для бинарных файлов (xlsx)
                         }
                     );
@@ -29504,7 +29442,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     }, {
                         headers: {
                             'Content-Type': 'application/json',
-                            'X-API-Key': user.apiKey,
                             'X-User-Id': user.id
                         },
                         timeout: 180000
@@ -29538,7 +29475,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         sv_id: svId,
                         operator_name: operatorName
                     }, {
-                        headers: { 'X-API-Key': user.apiKey }
+                        headers: { }
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
@@ -29603,7 +29540,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setSensitiveAccess(prev => ({ ...prev, loading: true }));
                 try {
                     const response = await axios.get(`${API_BASE_URL}/api/sensitive-access/status`, {
-                        headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        headers: { 'X-User-Id': user.id }
                     });
                     const data = response.data || {};
                     if (data.status === 'success') {
@@ -29649,7 +29586,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const response = await axios.post(
                         `${API_BASE_URL}/api/sensitive-access/qr/request`,
                         {},
-                        { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } }
+                        { headers: { 'X-User-Id': user.id } }
                     );
                     const data = response.data || {};
                     if (data.status !== 'success' || !(data.qr_payload || data.token)) {
@@ -29675,7 +29612,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     await axios.post(
                         `${API_BASE_URL}/api/sensitive-access/revoke`,
                         {},
-                        { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } }
+                        { headers: { 'X-User-Id': user.id } }
                     );
                     setSensitiveAccess(prev => ({ ...prev, granted: false }));
                     setAudioUrl(null);
@@ -29784,7 +29721,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const response = await axios.post(
                         `${API_BASE_URL}/api/sensitive-access/approve`,
                         { token },
-                        { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } }
+                        { headers: { 'X-User-Id': user.id } }
                     );
                     const data = response.data || {};
                     if (data.status === 'success') {

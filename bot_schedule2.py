@@ -58,15 +58,12 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # === Переменные окружения =========================================================================================
 API_TOKEN = os.getenv('BOT_TOKEN')
-FLASK_API_KEY = os.getenv('FLASK_API_KEY')
 super_admin_id = int(os.getenv('SUPER_ADMIN_ID', '0'))
 super_admin_login = os.getenv('SUPER_ADMIN_LOGIN', 'admin4')
 super_admin_password = os.getenv('SUPER_ADMIN_PASSWORD', 'admin1234')
 
 if not API_TOKEN:
     raise Exception("Переменная окружения BOT_TOKEN обязательна.")
-if not FLASK_API_KEY:
-    raise Exception("Переменная окружения FLASK_API_KEY обязательна.")
 
 # === Инициализация бота и диспетчера =============================================================================
 bot = Bot(token=API_TOKEN)
@@ -77,6 +74,7 @@ dp = Dispatcher(bot=bot, storage=storage)
 report_lock = threading.Lock()
 recruiting_parse_lock = threading.Lock()
 executor_pool = ThreadPoolExecutor(max_workers=4)
+login_rate_limit_lock = threading.Lock()
 
 # Runtime status for manual recruiting parser runs (for live logs in UI).
 recruiting_runtime_lock = threading.Lock()
@@ -87,7 +85,7 @@ RECRUITING_RUNTIME_MAX_JOBS = 20
 
 # === Flask-сервер ================================================================================================
 app = Flask(__name__)
-JWT_SECRET = os.getenv('JWT_SECRET') or FLASK_API_KEY
+JWT_SECRET = (os.getenv('JWT_SECRET') or '').strip()
 JWT_ALGORITHM = "HS256"
 JWT_ACCESS_TOKEN_MINUTES = int(os.getenv('JWT_ACCESS_TOKEN_MINUTES', '30'))
 JWT_REFRESH_TOKEN_DAYS = int(os.getenv('JWT_REFRESH_TOKEN_DAYS', '30'))
@@ -101,6 +99,10 @@ JWT_COOKIE_PARTITIONED = os.getenv('JWT_COOKIE_PARTITIONED', 'true').lower() == 
 JWT_TOKEN_PEPPER = os.getenv('JWT_TOKEN_PEPPER', JWT_SECRET)
 SENSITIVE_QR_SECRET = os.getenv('SENSITIVE_QR_SECRET', JWT_SECRET)
 SENSITIVE_QR_TTL_SECONDS = int(os.getenv('SENSITIVE_QR_TTL_SECONDS', '300'))
+LOGIN_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv('LOGIN_RATE_LIMIT_WINDOW_SECONDS', '900'))
+LOGIN_RATE_LIMIT_MAX_FAILURES_PER_IP = int(os.getenv('LOGIN_RATE_LIMIT_MAX_FAILURES_PER_IP', '20'))
+LOGIN_RATE_LIMIT_MAX_FAILURES_PER_LOGIN = int(os.getenv('LOGIN_RATE_LIMIT_MAX_FAILURES_PER_LOGIN', '8'))
+LOGIN_RATE_LIMIT_BLOCK_SECONDS = int(os.getenv('LOGIN_RATE_LIMIT_BLOCK_SECONDS', '900'))
 LMS_HEARTBEAT_SECONDS = int(os.getenv('LMS_HEARTBEAT_SECONDS', '15'))
 LMS_STALE_GAP_SECONDS = int(os.getenv('LMS_STALE_GAP_SECONDS', '45'))
 LMS_COMPLETION_THRESHOLD = float(os.getenv('LMS_COMPLETION_THRESHOLD', '95'))
@@ -112,6 +114,9 @@ try:
 except Exception:
     RECRUITING_PAGES_PER_QUERY = 5
 RECRUITING_PAGES_PER_QUERY = max(1, min(RECRUITING_PAGES_PER_QUERY, 20))
+login_rate_limit_failures_by_ip = {}
+login_rate_limit_failures_by_login = {}
+login_rate_limit_blocks = {}
 
 ALLOWED_ORIGINS = {
     "https://alfa330.github.io",
@@ -122,8 +127,8 @@ ALLOWED_ORIGINS = {
     "https://base-pmy9.onrender.com"
 }
 
-if not os.getenv('JWT_SECRET'):
-    logging.warning("JWT_SECRET is not set. Falling back to FLASK_API_KEY for signing tokens.")
+if not JWT_SECRET:
+    raise Exception("Переменная окружения JWT_SECRET обязательна.")
 
 
 def _normalize_origin(origin):
@@ -145,7 +150,7 @@ CORS(app, resources={
     r"/api/*": {
         "origins": list(ALLOWED_ORIGINS) + [r"http://localhost:\d+", r"http://127\.0\.0\.1:\d+"],
         "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        "allow_headers": ["Content-Type", "X-API-Key", "X-User-Id", "Authorization", "X-Refresh-Token"],
+        "allow_headers": ["Content-Type", "X-User-Id", "Authorization", "X-Refresh-Token"],
         "supports_credentials": True,
         "max_age": 86400
     }
@@ -180,6 +185,72 @@ def _client_ip():
 def _hash_token(raw_token):
     value = f"{raw_token}:{JWT_TOKEN_PEPPER}"
     return hashlib.sha256(value.encode('utf-8')).hexdigest()
+
+
+def _normalize_login_rate_limit_key(login_value):
+    return str(login_value or '').strip().lower()[:256]
+
+
+def _prune_login_rate_limits_locked(now_ts):
+    cutoff = now_ts - max(1, LOGIN_RATE_LIMIT_WINDOW_SECONDS)
+
+    for bucket in (login_rate_limit_failures_by_ip, login_rate_limit_failures_by_login):
+        stale_keys = []
+        for key, values in bucket.items():
+            fresh_values = [value for value in values if value >= cutoff]
+            if fresh_values:
+                bucket[key] = fresh_values
+            else:
+                stale_keys.append(key)
+        for key in stale_keys:
+            bucket.pop(key, None)
+
+    stale_blocks = [key for key, blocked_until in login_rate_limit_blocks.items() if blocked_until <= now_ts]
+    for key in stale_blocks:
+        login_rate_limit_blocks.pop(key, None)
+
+
+def _login_rate_limit_remaining_seconds(login_value):
+    ip_key = _client_ip() or 'unknown'
+    login_key = _normalize_login_rate_limit_key(login_value)
+    now_ts = time.time()
+
+    with login_rate_limit_lock:
+        _prune_login_rate_limits_locked(now_ts)
+        blocked_until = max(
+            float(login_rate_limit_blocks.get(('ip', ip_key), 0) or 0),
+            float(login_rate_limit_blocks.get(('login', login_key), 0) or 0)
+        )
+
+    if blocked_until <= now_ts:
+        return 0
+    return max(1, int(math.ceil(blocked_until - now_ts)))
+
+
+def _register_login_rate_limit_failure(login_value):
+    ip_key = _client_ip() or 'unknown'
+    login_key = _normalize_login_rate_limit_key(login_value)
+    now_ts = time.time()
+
+    with login_rate_limit_lock:
+        _prune_login_rate_limits_locked(now_ts)
+        login_rate_limit_failures_by_ip.setdefault(ip_key, []).append(now_ts)
+        login_rate_limit_failures_by_login.setdefault(login_key, []).append(now_ts)
+
+        if len(login_rate_limit_failures_by_ip.get(ip_key, [])) >= max(1, LOGIN_RATE_LIMIT_MAX_FAILURES_PER_IP):
+            login_rate_limit_blocks[('ip', ip_key)] = now_ts + max(1, LOGIN_RATE_LIMIT_BLOCK_SECONDS)
+        if len(login_rate_limit_failures_by_login.get(login_key, [])) >= max(1, LOGIN_RATE_LIMIT_MAX_FAILURES_PER_LOGIN):
+            login_rate_limit_blocks[('login', login_key)] = now_ts + max(1, LOGIN_RATE_LIMIT_BLOCK_SECONDS)
+
+
+def _clear_login_rate_limit_failures(login_value):
+    ip_key = _client_ip() or 'unknown'
+    login_key = _normalize_login_rate_limit_key(login_value)
+    with login_rate_limit_lock:
+        login_rate_limit_failures_by_ip.pop(ip_key, None)
+        login_rate_limit_failures_by_login.pop(login_key, None)
+        login_rate_limit_blocks.pop(('ip', ip_key), None)
+        login_rate_limit_blocks.pop(('login', login_key), None)
 
 
 def _get_user_payload(user):
@@ -230,11 +301,82 @@ def _get_user_payload(user):
     }
 
 
+def _extract_request_origin():
+    origin = _normalize_origin(request.headers.get('Origin'))
+    if origin:
+        return origin
+
+    referer = (request.headers.get('Referer') or '').strip()
+    if not referer:
+        return ''
+
+    try:
+        parsed = urlparse(referer)
+        if parsed.scheme and parsed.netloc:
+            return _normalize_origin(f"{parsed.scheme}://{parsed.netloc}")
+    except Exception:
+        return ''
+    return ''
+
+
+def _is_state_changing_api_request():
+    if request.method not in {'POST', 'PUT', 'PATCH', 'DELETE'}:
+        return False
+    if not request.path.startswith('/api/'):
+        return False
+    return request.method != 'OPTIONS'
+
+
+def _validate_user_session_principal(user_id, session_id=None):
+    user = db.get_user(id=user_id)
+    if not user:
+        if session_id:
+            db.revoke_user_session(session_id=session_id, user_id=user_id)
+        raise AuthError("USER_NOT_FOUND", "User not found")
+
+    status_value = ''
+    if isinstance(user, (tuple, list)) and len(user) > 11:
+        status_value = str(user[11] or '').strip().lower()
+    elif isinstance(user, dict):
+        status_value = str(user.get('status') or '').strip().lower()
+
+    if status_value in {'fired', 'dismissal'}:
+        if session_id:
+            db.revoke_user_session(session_id=session_id, user_id=user_id)
+        raise AuthError("USER_INACTIVE", "User account is inactive")
+    return user
+
+
 def _set_request_auth_context(user_id):
     request.environ['HTTP_X_USER_ID'] = str(user_id)
-    request.environ['HTTP_X_API_KEY'] = FLASK_API_KEY
     request.user_id = int(user_id)
     g.user_id = int(user_id)
+
+
+def _get_original_request_user_id_header():
+    raw_value = request.environ.get('ORIGINAL_X_USER_ID')
+    if raw_value is None:
+        raw_value = request.headers.get('X-User-Id')
+    return str(raw_value or '').strip()
+
+
+def _validate_authenticated_identity_header():
+    authenticated_user_id = getattr(g, 'user_id', None)
+    if not authenticated_user_id:
+        return None
+
+    original_header = _get_original_request_user_id_header()
+    if not original_header:
+        return None
+
+    try:
+        header_user_id = int(original_header)
+    except Exception:
+        return jsonify({"error": "Invalid X-User-Id"}), 400
+
+    if header_user_id != int(authenticated_user_id):
+        return jsonify({"error": "X-User-Id does not match authenticated user"}), 403
+    return None
 
 
 def _decode_token(token, expected_type, verify_exp=True):
@@ -432,6 +574,7 @@ def _authenticate_access_cookie(optional=True, touch_session=True):
                 raise AuthError("SESSION_REVOKED", "Session revoked")
             if session["expires_at"] and session["expires_at"] < datetime.utcnow():
                 raise AuthError("SESSION_EXPIRED", "Session expired")
+            _validate_user_session_principal(user_id=user_id, session_id=session_id)
 
             if touch_session:
                 db.touch_user_session(
@@ -474,9 +617,7 @@ def _authenticate_refresh_cookie(optional=True, rotate_tokens=True):
             if session["refresh_token_hash"] != _hash_token(refresh_token):
                 raise AuthError("REFRESH_TOKEN_MISMATCH", "Refresh token mismatch")
 
-            user = db.get_user(id=user_id)
-            if not user:
-                raise AuthError("USER_NOT_FOUND", "User not found")
+            user = _validate_user_session_principal(user_id=user_id, session_id=session_id)
 
             if rotate_tokens:
                 new_access_token = _build_access_token(user, session_id)
@@ -700,6 +841,104 @@ def _authorize_operator_scope(requester, requester_id, operator_id):
     if role == 'operator':
         return requester_id == operator_id
     return False
+
+
+def _target_user_supervisor_id(target_user):
+    try:
+        raw_value = target_user[6]
+    except Exception:
+        raw_value = None
+    try:
+        return int(raw_value) if raw_value is not None else None
+    except Exception:
+        return None
+
+
+def _requester_can_access_target_user(
+    requester,
+    requester_id,
+    target_user,
+    *,
+    allow_self=False,
+    supervisor_target_roles=('operator', 'trainee')
+):
+    requester_role = _normalize_user_role(requester[3])
+    target_role = _normalize_user_role(target_user[3])
+    target_user_id = int(target_user[0])
+
+    if _is_admin_role(requester_role):
+        return True
+    if allow_self and requester_id == target_user_id:
+        return True
+    if _is_supervisor_role(requester_role):
+        if target_role not in set(supervisor_target_roles or ()):
+            return False
+        return _target_user_supervisor_id(target_user) == requester_id
+    return False
+
+
+def _load_target_user_with_scope(
+    requester,
+    requester_id,
+    target_user_id,
+    *,
+    allow_self=False,
+    supervisor_target_roles=('operator', 'trainee'),
+    not_found_message="User not found",
+    forbidden_message="Forbidden"
+):
+    try:
+        target_user_id_int = int(target_user_id)
+    except (TypeError, ValueError):
+        return None, ("Invalid target user id", 400)
+
+    target_user = db.get_user(id=target_user_id_int)
+    if not target_user:
+        return None, (not_found_message, 404)
+
+    if not _requester_can_access_target_user(
+        requester,
+        requester_id,
+        target_user,
+        allow_self=allow_self,
+        supervisor_target_roles=supervisor_target_roles
+    ):
+        return None, (forbidden_message, 403)
+    return target_user, None
+
+
+def _filter_operators_for_requester_scope(requester, requester_id, operators):
+    requester_role = _normalize_user_role(requester[3])
+    items = list(operators or [])
+    if _is_admin_role(requester_role):
+        return items
+    if _is_supervisor_role(requester_role):
+        return [
+            item for item in items
+            if int(item.get('supervisor_id') or 0) == int(requester_id)
+        ]
+    return []
+
+
+def _resolve_management_requester():
+    requester_id, requester, auth_error = _get_authenticated_requester()
+    if auth_error:
+        return None, None, auth_error
+    if not (_is_admin_role(requester[3]) or _is_supervisor_role(requester[3])):
+        return None, None, ("Forbidden", 403)
+    return requester_id, requester, None
+
+
+def _resolve_scoped_operator_for_requester(requester, requester_id, operator_id):
+    return _load_target_user_with_scope(
+        requester,
+        requester_id,
+        operator_id,
+        allow_self=False,
+        supervisor_target_roles=('operator',),
+        not_found_message="Operator not found",
+        forbidden_message="Forbidden for this operator"
+    )
 
 
 def _ensure_call_access_for_requester(call_operator_id, requester, requester_id):
@@ -1591,18 +1830,34 @@ def _resolve_avatar_target_user(requester, requester_id, target_user_id):
     return None, ("You do not have access to manage this avatar", 403)
 
 
-def _resolve_requester():
-    requester_id_raw = request.headers.get('X-User-Id') or getattr(g, 'user_id', None)
+def _get_authenticated_requester():
+    requester_id_raw = getattr(g, 'user_id', None)
     if not requester_id_raw:
-        return None, None, ("X-User-Id header required", 400)
+        return None, None, ("Unauthorized", 401)
+
     try:
         requester_id = int(requester_id_raw)
     except Exception:
-        return None, None, ("Invalid X-User-Id", 400)
+        return None, None, ("Invalid authenticated user context", 401)
+
+    header_user_id = request.headers.get('X-User-Id')
+    if header_user_id not in (None, ''):
+        try:
+            if int(header_user_id) != requester_id:
+                return None, None, ("X-User-Id does not match authenticated user", 403)
+        except Exception:
+            return None, None, ("Invalid X-User-Id", 400)
 
     requester = db.get_user(id=requester_id)
     if not requester:
         return None, None, ("Requester not found", 404)
+    return requester_id, requester, None
+
+
+def _resolve_requester():
+    requester_id, requester, auth_error = _get_authenticated_requester()
+    if auth_error:
+        return None, None, auth_error
     return requester_id, requester, None
 
 
@@ -1698,6 +1953,8 @@ def hydrate_user_context_from_jwt():
     if request.method == 'OPTIONS':
         return None
 
+    request.environ['ORIGINAL_X_USER_ID'] = (request.headers.get('X-User-Id') or '').strip()
+
     if request.path == '/api/auth/refresh':
         return None
 
@@ -1714,23 +1971,59 @@ def hydrate_user_context_from_jwt():
         request.environ['JWT_AUTH_ERROR_CODE'] = refresh_auth_error.code
     return None
 
-def require_api_key(f):
+
+@app.before_request
+def enforce_api_origin_protection():
+    if not _is_state_changing_api_request():
+        return None
+
+    if not (
+        _get_cookie_value(JWT_ACCESS_COOKIE_NAME)
+        or _get_cookie_value(JWT_REFRESH_COOKIE_NAME)
+        or request.path in {'/api/logout', '/api/auth/logout_all', '/api/auth/refresh'}
+    ):
+        return None
+
+    request_origin = _extract_request_origin()
+    if _is_allowed_origin(request_origin):
+        return None
+
+    logging.warning(
+        "Blocked state-changing API request with invalid origin: path=%s method=%s origin=%s ip=%s",
+        request.path,
+        request.method,
+        request_origin or '-',
+        _client_ip()
+    )
+    return jsonify({"error": "Invalid request origin"}), 403
+
+
+def require_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if request.method == 'OPTIONS':
             return _build_cors_preflight_response()
 
         if getattr(g, 'user_id', None):
+            identity_error = _validate_authenticated_identity_header()
+            if identity_error is not None:
+                return identity_error
             return f(*args, **kwargs)
 
         try:
             if _authenticate_access_cookie(optional=True):
+                identity_error = _validate_authenticated_identity_header()
+                if identity_error is not None:
+                    return identity_error
                 return f(*args, **kwargs)
         except AuthError as auth_error:
             request.environ['JWT_AUTH_ERROR_CODE'] = auth_error.code
 
         try:
             if _authenticate_refresh_cookie(optional=True, rotate_tokens=False):
+                identity_error = _validate_authenticated_identity_header()
+                if identity_error is not None:
+                    return identity_error
                 return f(*args, **kwargs)
         except AuthError as refresh_auth_error:
             request.environ['JWT_AUTH_ERROR_CODE'] = refresh_auth_error.code
@@ -1746,6 +2039,9 @@ def require_api_key(f):
         return jsonify({"error": "Unauthorized"}), 401
     return decorated
 
+
+require_api_key = require_auth
+
 def _build_cors_preflight_response():
     origin = _normalize_origin(request.headers.get("Origin"))
     response = jsonify({"status": "ok"})
@@ -1755,7 +2051,7 @@ def _build_cors_preflight_response():
         response.headers["Access-Control-Allow-Credentials"] = "true"
         response.headers["Vary"] = "Origin"
 
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-API-Key, X-User-Id, Authorization, X-Refresh-Token"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-User-Id, Authorization, X-Refresh-Token"
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
     response.headers["Access-Control-Max-Age"] = "86400"
     return response
@@ -1772,8 +2068,16 @@ def after_request(response):
         response.headers['Access-Control-Allow-Credentials'] = 'true'
         response.headers['Vary'] = 'Origin'
 
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key, X-User-Id, Authorization, X-Refresh-Token'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-User-Id, Authorization, X-Refresh-Token'
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS, DELETE, PUT, PATCH'
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    response.headers['Permissions-Policy'] = 'camera=(), microphone=(), geolocation=()'
+
+    if request.path.startswith('/api/'):
+        response.headers['Cache-Control'] = 'no-store'
+        response.headers['Pragma'] = 'no-cache'
 
     pending_tokens = getattr(g, 'pending_auth_tokens', None)
     if pending_tokens:
@@ -1791,7 +2095,7 @@ def health_check():
         return jsonify({"status": "healthy", "database": "connected"}), 200
     except Exception as e:
         logging.error(f"Health check failed: {e}")
-        return jsonify({"status": "unhealthy", "error": str(e)}), 500
+        return jsonify({"status": "unhealthy", "error": "Health check failed"}), 500
 
 @app.route('/api/login', methods=['POST', 'OPTIONS'])
 def login():
@@ -1805,16 +2109,28 @@ def login():
         if not login_value or not password:
             return jsonify({"error": "Missing credentials"}), 400
 
+        retry_after_seconds = _login_rate_limit_remaining_seconds(login_value)
+        if retry_after_seconds > 0:
+            response = jsonify({
+                "error": "Too many login attempts. Please try again later.",
+                "code": "LOGIN_RATE_LIMITED"
+            })
+            response.headers['Retry-After'] = str(retry_after_seconds)
+            return response, 429
+
         user = db.get_user_by_login(login_value)
         if user and db.verify_password(user[0], password):
             user_profile = db.get_user(id=user[0])
             if not user_profile:
+                _register_login_rate_limit_failure(login_value)
                 return jsonify({"error": "Invalid credentials"}), 401
 
             user_status = str(user_profile[11] or '').strip().lower()
             if user_status in ('fired', 'dismissal'):
                 db.revoke_all_user_sessions(user_id=user[0])
                 return jsonify({"error": "User account is inactive"}), 403
+
+            _clear_login_rate_limit_failures(login_value)
 
             session_id = str(uuid.uuid4())
             access_token = _build_access_token(user_profile, session_id)
@@ -1832,17 +2148,16 @@ def login():
             response = jsonify({
                 "status": "success",
                 "user": payload,
-                **payload,
-                "access_token": access_token,
-                "refresh_token": refresh_token
+                **payload
             })
             _set_auth_cookies(response, access_token, refresh_token)
             return response, 200
 
+        _register_login_rate_limit_failure(login_value)
         return jsonify({"error": "Invalid credentials"}), 401
     except Exception as e:
         logging.error(f"Login error: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/auth/me', methods=['GET'])
@@ -1878,10 +2193,6 @@ def refresh_auth():
 
         payload_user = _get_user_payload(user)
         response_payload = {"status": "success", "user": payload_user, **payload_user}
-        pending_tokens = getattr(g, 'pending_auth_tokens', None)
-        if pending_tokens:
-            response_payload["access_token"] = pending_tokens[0]
-            response_payload["refresh_token"] = pending_tokens[1]
         response = jsonify(response_payload)
         return response, 200
     except AuthError as auth_error:
@@ -2292,10 +2603,24 @@ def get_user_profile():
             logging.error(f"Invalid user_id format: {user_id}")
             return jsonify({"error": "Invalid user_id format"}), 400
 
-        user = db.get_user(id=user_id)
-        if not user:
-            logging.warning(f"User not found with ID: {user_id}")
-            return jsonify({"error": "User not found"}), 404
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        user, scope_error = _load_target_user_with_scope(
+            requester,
+            requester_id,
+            user_id,
+            allow_self=True,
+            supervisor_target_roles=('operator', 'trainee'),
+            not_found_message="User not found",
+            forbidden_message="Unauthorized to view this profile"
+        )
+        if scope_error:
+            message, status_code = scope_error
+            logging.warning("Blocked profile access: requester=%s target=%s error=%s", requester_id, user_id, message)
+            return jsonify({"error": message}), status_code
 
         supervisor_name = None
         if user[6]:
@@ -2303,6 +2628,8 @@ def get_user_profile():
             supervisor_name = supervisor[2] if supervisor else None
 
         hire_date = user[5].strftime('%Y-%m-%d') if user[5] else None
+        requester_role = _normalize_user_role(requester[3])
+        can_view_contact_handles = _is_admin_role(requester_role) or requester_id == int(user[0])
 
         profile_data = {
             "id": user[0],
@@ -2311,9 +2638,9 @@ def get_user_profile():
             "direction": user[4],  # Now returns direction name from joined directions table
             "hire_date": hire_date,
             "supervisor_name": supervisor_name,
-            "telegram_id": user[1] or None,
-            "scores_table_url": user[9] or None,
-            "hours_table_url": user[8] or None,
+            "telegram_id": user[1] if can_view_contact_handles else None,
+            "scores_table_url": user[9] if can_view_contact_handles else None,
+            "hours_table_url": user[8] if can_view_contact_handles else None,
             "status": user[11],  # Adjust index based on query
             "rate": float(user[12]) if user[12] else 1.0,
             "avatar_url": _build_avatar_signed_url(user[15], user[16]),
@@ -2324,7 +2651,7 @@ def get_user_profile():
         return jsonify({"status": "success", "profile": profile_data}), 200
     except Exception as e:
         logging.error(f"Error fetching user profile for user_id {user_id}: {e}", exc_info=True)
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 @app.route('/api/user/avatar', methods=['POST', 'DELETE', 'OPTIONS'])
@@ -2514,7 +2841,7 @@ def api_average_scores():
         return jsonify({"status": "success", "data": result}), 200
     except Exception as e:
         logging.exception("Error in /api/average_scores: %s", e)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/baiga/upload_day_csv', methods=['POST', 'OPTIONS'])
@@ -2593,7 +2920,7 @@ def api_baiga_upload_day_csv():
         return jsonify({"status": "success", "totalFound": total_found, "matched": len(operator_scores), "unmatched": unmatched}), 200
     except Exception as e:
         logging.exception("Error in /api/baiga/upload_day_csv: %s", e)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/baiga/day_scores', methods=['GET'])
@@ -2607,7 +2934,7 @@ def api_baiga_day_scores():
         return jsonify({"status": "success", "scores": rows}), 200
     except Exception as e:
         logging.exception("Error in /api/baiga/day_scores: %s", e)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/baiga/period_scores', methods=['GET'])
@@ -2643,15 +2970,21 @@ def api_baiga_period_scores():
         return jsonify({"status": "success", "days": days}), 200
     except Exception as e:
         logging.exception("Error in /api/baiga/period_scores: %s", e)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 @app.route('/api/admin/users', methods=['GET'])
 @require_api_key
 def get_admin_users():
     try:
-        requester_id = int(request.headers.get('X-User-Id'))
-        requester = db.get_user(id=requester_id)
-        requester_role = _normalize_user_role(requester[3]) if requester else ''
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        requester_role = _normalize_user_role(requester[3])
+        if not _is_admin_role(requester_role):
+            return jsonify({"error": "Only admins can access users"}), 403
+
         visible_roles = ['operator', 'trainee', 'trainer']
         if requester_role == 'super_admin':
             visible_roles.append('admin')
@@ -2786,7 +3119,7 @@ def get_admin_users():
         return jsonify({"status": "success", "users": users}), 200
     except Exception as e:
         logging.error(f"Error fetching users: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 @app.route('/api/admin/update_user', methods=['POST'])
 @require_api_key
@@ -2898,24 +3231,50 @@ def admin_update_user():
         else:
             return jsonify({"error": "Invalid field"}), 400
 
-        requester_id = int(request.headers.get('X-User-Id'))
-        requester = db.get_user(id=requester_id)
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
         requester_role = _normalize_user_role(requester[3]) if requester else ''
         if requester_role not in ('super_admin', 'admin', 'sv'):
             return jsonify({"error": "Only admins can update users"}), 403
         if target_role in ('admin', 'super_admin') and requester_role != 'super_admin':
             return jsonify({"error": "Only super admins can update admin users"}), 403
-        if field == 'rate' and requester_role == 'sv':
-            if not _is_supervisor_rate_change_day():
-                return jsonify({"error": "Супервайзер может менять ставку только 1-го числа каждого месяца"}), 403
-            if target_role != 'operator':
-                return jsonify({"error": "Супервайзер может менять ставку только операторам"}), 403
-            try:
-                target_supervisor_id = int(target_user[6])
-            except (TypeError, ValueError):
-                target_supervisor_id = None
-            if target_supervisor_id != requester_id:
-                return jsonify({"error": "Forbidden for this operator"}), 403
+        if requester_role == 'sv':
+            supervisor_allowed_fields = {
+                'rate',
+                'status',
+                'employment_type',
+                'internship_in_company',
+                'front_office_training',
+                'front_office_training_date',
+                'study_place',
+                'study_course'
+            }
+            if field not in supervisor_allowed_fields:
+                return jsonify({"error": "Supervisors cannot modify this field"}), 403
+
+            scoped_target_user, scope_error = _load_target_user_with_scope(
+                requester,
+                requester_id,
+                user_id,
+                allow_self=False,
+                supervisor_target_roles=('operator', 'trainee'),
+                not_found_message="User not found",
+                forbidden_message="Forbidden for this user"
+            )
+            if scope_error:
+                message, status_code = scope_error
+                return jsonify({"error": message}), status_code
+            target_user = scoped_target_user
+            target_role = str(target_user[3] or '').strip().lower()
+
+            if field == 'rate':
+                if not _is_supervisor_rate_change_day():
+                    return jsonify({"error": "Supervisor can change rate only on the first day of the month"}), 403
+                if target_role != 'operator':
+                    return jsonify({"error": "Supervisors can change rate only for operators"}), 403
 
         success = db.update_user(user_id, field, value, changed_by=requester_id)  # Pass changed_by
         if not success:
@@ -2924,7 +3283,7 @@ def admin_update_user():
         return jsonify({"status": "success", "message": "User updated"}), 200
     except Exception as e:
         logging.error(f"Error updating user: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 @app.route('/api/admin/users/bulk_update', methods=['POST'])
 @require_api_key
@@ -2939,8 +3298,11 @@ def admin_bulk_update_users():
         if not isinstance(changes_raw, dict) or not changes_raw:
             return jsonify({"error": "changes must be a non-empty object"}), 400
 
-        requester_id = int(request.headers.get('X-User-Id'))
-        requester = db.get_user(id=requester_id)
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
         requester_role = _normalize_user_role(requester[3]) if requester else ''
         if requester_role not in ('super_admin', 'admin', 'sv'):
             return jsonify({"error": "Only admins can update users"}), 403
@@ -2955,6 +3317,8 @@ def admin_bulk_update_users():
                 user_ids.append(user_id)
 
         allowed_fields = {'direction_id', 'supervisor_id', 'rate'}
+        if requester_role == 'sv':
+            allowed_fields = {'rate'}
         unknown_fields = [field for field in changes_raw.keys() if field not in allowed_fields]
         if unknown_fields:
             return jsonify({"error": f"Unsupported fields: {', '.join(unknown_fields)}"}), 400
@@ -2987,7 +3351,7 @@ def admin_bulk_update_users():
                 return jsonify({"error": "Invalid rate value"}), 400
             updates['rate'] = rate_value
             if requester_role == 'sv' and not _is_supervisor_rate_change_day():
-                return jsonify({"error": "Супервайзер может менять ставку только 1-го числа каждого месяца"}), 403
+                return jsonify({"error": "Supervisor can change rate only on the first day of the month"}), 403
 
         if not updates:
             return jsonify({"error": "No valid changes provided"}), 400
@@ -3001,12 +3365,22 @@ def admin_bulk_update_users():
                     failed_user_ids.append(target_user_id)
                     continue
                 target_role = str(target_user[3] or '').strip().lower()
-                if requester_role == 'sv' and 'rate' in updates:
-                    try:
-                        target_supervisor_id = int(target_user[6])
-                    except (TypeError, ValueError):
-                        target_supervisor_id = None
-                    if target_role != 'operator' or target_supervisor_id != requester_id:
+                if requester_role == 'sv':
+                    scoped_target_user, scope_error = _load_target_user_with_scope(
+                        requester,
+                        requester_id,
+                        target_user_id,
+                        allow_self=False,
+                        supervisor_target_roles=('operator',),
+                        not_found_message="User not found",
+                        forbidden_message="Forbidden for this operator"
+                    )
+                    if scope_error:
+                        failed_user_ids.append(target_user_id)
+                        continue
+                    target_user = scoped_target_user
+                    target_role = str(target_user[3] or '').strip().lower()
+                    if 'rate' in updates and target_role != 'operator':
                         failed_user_ids.append(target_user_id)
                         continue
                 update_ok = True
@@ -3031,7 +3405,7 @@ def admin_bulk_update_users():
         }), 200
     except Exception as e:
         logging.error(f"Error bulk updating users: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 @app.route('/api/admin/promote_to_supervisor', methods=['POST'])
 @require_api_key
@@ -3077,7 +3451,7 @@ def admin_promote_to_supervisor():
         if 'unique_name_role' in str(e):
             return jsonify({"error": "Cannot promote user: a supervisor with this name already exists"}), 409
         logging.error(f"Error promoting user to supervisor: {e}", exc_info=True)
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
     
 @app.route('/api/user/history', methods=['GET'])
 @require_api_key
@@ -3106,7 +3480,7 @@ def get_user_history():
         return jsonify({"status": "success", "history": history}), 200
     except Exception as e:
         logging.error(f"Error fetching user history: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 @app.route('/api/user/change_password', methods=['POST'])
 @require_api_key
@@ -3119,16 +3493,17 @@ def change_password():
 
         user_id = int(data['user_id'])
         new_password = data['new_password']
-        requester_id = int(request.headers.get('X-User-Id', user_id))  # Assume user ID is passed in headers for authentication
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
 
         if not new_password or len(new_password) < 6:
             return jsonify({"error": "New password must be at least 6 characters long"}), 400
 
-        # Fetch requester and target user
-        requester = db.get_user(id=requester_id)
         target_user = db.get_user(id=user_id)
 
-        if not requester or not target_user:
+        if not target_user:
             return jsonify({"error": "User not found"}), 404
 
         # Authorization checks
@@ -3154,7 +3529,7 @@ def change_password():
             telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
             payload = {
                 "chat_id": target_user[1],
-                "text": f"Ваш пароль был успешно изменён. Новый пароль: <b>{new_password}</b>",
+                "text": "Ваш пароль был успешно изменён. Если это были не вы, срочно обратитесь к администратору.",
                 "parse_mode": "HTML"
             }
             response = requests.post(telegram_url, json=payload, timeout=10)
@@ -3166,7 +3541,7 @@ def change_password():
 
     except Exception as e:
         logging.error(f"Error changing password: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 @app.route('/api/sv/preview_calls_table', methods=['POST'])
 @require_api_key
@@ -3230,13 +3605,13 @@ def preview_calls_table():
 
     except Exception as e:
         logging.error(f"Ошибка при предпросмотре таблицы звонков: {e}", exc_info=True)
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 @app.route('/api/sv/update_norm_hours', methods=['POST'])
 @require_api_key
 def update_norm_hours():
     try:
-        data = request.get_json()
+        data = request.get_json() or {}
         operator_id = data.get("operator_id")
         month = data.get("month")
         norm_hours = data.get("norm_hours")
@@ -3244,18 +3619,38 @@ def update_norm_hours():
         if not operator_id or not month:
             return jsonify({"error": "operator_id and month required"}), 400
 
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if not (_is_admin_role(requester[3]) or _is_supervisor_role(requester[3])):
+            return jsonify({"error": "Forbidden"}), 403
+
+        target_user, scope_error = _load_target_user_with_scope(
+            requester,
+            requester_id,
+            operator_id,
+            allow_self=False,
+            supervisor_target_roles=('operator',),
+            not_found_message="Operator not found",
+            forbidden_message="Forbidden for this operator"
+        )
+        if scope_error:
+            message, status_code = scope_error
+            return jsonify({"error": message}), status_code
+
         with db._get_cursor() as cursor:
             cursor.execute("""
                 INSERT INTO work_hours (operator_id, month, norm_hours)
                 VALUES (%s, %s, %s)
                 ON CONFLICT (operator_id, month)
                 DO UPDATE SET norm_hours = EXCLUDED.norm_hours
-            """, (operator_id, month, norm_hours))
+            """, (int(target_user[0]), month, norm_hours))
 
         return jsonify({"status": "success"}), 200
     except Exception as e:
         logging.exception("update_norm_hours error")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 @app.route('/api/sv/daily_hours', methods=['GET'])
 @require_api_key
@@ -3270,55 +3665,19 @@ def sv_daily_hours():
       - X-User-Id (обязательно) — id супервайзера/оператора (проверяется роль)
     """
     try:
-        # parse month
-        month = request.args.get('month')
-        if not month:
-            month = datetime.now().strftime('%Y-%m')
+        month = request.args.get('month') or datetime.now().strftime('%Y-%m')
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
 
-        # requester id header
-        requester_header = request.headers.get('X-User-Id')
-        if not requester_header or not requester_header.isdigit():
-            return jsonify({"error": "Invalid or missing X-User-Id header"}), 400
-        requester_id = int(requester_header)
-
-        # get requester from db
-        requester = db.get_user(id=requester_id)
-        if not requester:
-            return jsonify({"error": "Requester not found"}), 403
-
-        # try to read role in a robust way (support tuple or dict)
-        role = None
-        if isinstance(requester, dict):
-            role = requester.get('role')
-        elif isinstance(requester, (list, tuple)) and len(requester) > 3:
-            role = requester[3]
-        else:
-            # fallback: try attribute access
-            role = getattr(requester, 'role', None)
-
-        if not role:
-            # если роль не определена — ошибка
-            return jsonify({"error": "User role not determined"}), 500
-        role = _normalize_user_role(role)
-
-        # -----------------------
-        # Behavior for supervisors
-        # -----------------------
+        role = _normalize_user_role(requester[3])
         if _is_supervisor_role(role):
-            # Allow optional ?id=<supervisor_id> to view another supervisor's data
-            # (frontend may pass `id` when a supervisor selects another supervisor).
-            # If no id param provided, fall back to requester_id (own team).
             user_param = request.args.get('id')
-            if user_param and str(user_param).isdigit():
-                supervisor_id = int(user_param)
-            else:
-                supervisor_id = requester_id
+            if user_param and str(user_param).isdigit() and int(user_param) != requester_id:
+                return jsonify({"error": "Supervisors can access only their own team"}), 403
 
-            try:
-                result = db.get_daily_hours_by_supervisor_month(supervisor_id, month)
-            except ValueError as e:
-                return jsonify({"error": str(e)}), 400
-            # result expected to contain "operators" list
+            result = db.get_daily_hours_by_supervisor_month(requester_id, month)
             return jsonify({
                 "status": "success",
                 "month": result.get("month", month),
@@ -3326,16 +3685,8 @@ def sv_daily_hours():
                 "operators": result.get("operators", [])
             }), 200
 
-        # -----------------------
-        # Behavior for operators
-        # -----------------------
-        elif role == 'operator':
-            try:
-                result = db.get_daily_hours_for_operator_month(requester_id, month)
-            except Exception as e:
-                logging.exception("Error fetching daily hours for operator")
-                return jsonify({"error": "Failed to fetch daily hours"}), 500
-
+        if role == 'operator':
+            result = db.get_daily_hours_for_operator_month(requester_id, month)
             operator_obj = result.get("operator") if isinstance(result, dict) else None
             return jsonify({
                 "status": "success",
@@ -3344,26 +3695,15 @@ def sv_daily_hours():
                 "operators": [operator_obj] if operator_obj else []
             }), 200
 
-        # -----------------------
-        # Behavior for admins
-        # -----------------------
-        elif _is_admin_role(role):
-            # admin must pass id (supervisor id) as query param "id"
+        if _is_admin_role(role):
             user_id = request.args.get('id')
             if not user_id or not str(user_id).isdigit():
                 return jsonify({"error": "Missing or invalid 'id' parameter (supervisor id)"}), 400
 
             supervisor_id = int(user_id)
-            try:
-                result = db.get_daily_hours_by_supervisor_month(supervisor_id, month)
-            except Exception as e:
-                logging.exception("Error fetching daily hours for supervisor (admin request)")
-                return jsonify({"error": str(e)}), 400
-
-            # Normalize: expect result to contain "operators" list
+            result = db.get_daily_hours_by_supervisor_month(supervisor_id, month)
             operators = result.get("operators") if isinstance(result, dict) else None
             if operators is None:
-                # if older API returned single operator under "operator", handle it
                 single = result.get("operator") if isinstance(result, dict) else None
                 operators = [single] if single else []
 
@@ -3374,12 +3714,11 @@ def sv_daily_hours():
                 "operators": operators
             }), 200
 
-        else:
-            return jsonify({"error": "Only supervisors, operators and admins can request this endpoint"}), 403
+        return jsonify({"error": "Only supervisors, operators and admins can request this endpoint"}), 403
 
     except Exception as e:
         logging.exception("Error in sv_daily_hours")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 @app.route('/api/hours/upload_group_day', methods=['POST'])
 @require_api_key
@@ -3671,7 +4010,7 @@ def upload_group_day():
 
     except Exception as e:
         logging.exception("Error in upload_group_day")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 @app.route('/api/sv/save_table', methods=['POST'])
 @require_api_key
@@ -3727,7 +4066,7 @@ def save_table():
         }), 200
     except Exception as e:
         logging.error(f"Error saving table: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 @app.route('/api/user/change_login', methods=['POST'])
 @require_api_key
@@ -3791,7 +4130,7 @@ def change_login():
 
     except Exception as e:
         logging.error(f"Error changing login: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 @app.route('/api/user/hours', methods=['GET'])
 @require_api_key
@@ -3803,9 +4142,28 @@ def get_user_hours():
             return jsonify({"error": "Missing operator_id parameter"}), 400
         if not month:
             month = datetime.now().strftime('%Y-%m')
-        operator_id = int(operator_id)
+
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        target_user, scope_error = _load_target_user_with_scope(
+            requester,
+            requester_id,
+            operator_id,
+            allow_self=True,
+            supervisor_target_roles=('operator',),
+            not_found_message="Operator not found",
+            forbidden_message="Unauthorized to view this operator's hours"
+        )
+        if scope_error:
+            message, status_code = scope_error
+            return jsonify({"error": message}), status_code
+
+        operator_id = int(target_user[0])
         hours_summary = db.get_hours_summary(operator_id=operator_id, month=month)
-        
+
         if not hours_summary:
             return jsonify({"status": "success", "hours": None}), 200
 
@@ -3815,12 +4173,19 @@ def get_user_hours():
         return jsonify({"status": "success", "hours": hours_data}), 200
     except Exception as e:
         logging.error(f"Error fetching hours data: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 @app.route('/api/admin/sv_list', methods=['GET'])
 @require_api_key
 def get_sv_list():
     try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if not _is_admin_role(requester[3]):
+            return jsonify({"error": "Only admins can access supervisors list"}), 403
+
         with db._get_cursor() as cursor:
             cursor.execute("""
                 SELECT id, name, hours_table_url, role, hire_date, status, gender, birth_date, avatar_bucket, avatar_blob_path
@@ -3848,7 +4213,7 @@ def get_sv_list():
         return jsonify({"status": "success", "sv_list": sv_data})
     except Exception as e:
         logging.error(f"Error fetching SV list: {e}", exc_info=True)
-        return jsonify({"error": f"Failed to fetch supervisors: {str(e)}"}), 500
+        return jsonify({"error": "Failed to fetch supervisors"}), 500
 
 @app.route('/api/call_evaluations', methods=['GET'])
 @require_api_key
@@ -3907,7 +4272,7 @@ def get_call_evaluations():
         })
     except Exception as e:
         logging.error(f"Error fetching evaluations: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 @app.route('/api/call_calibration/rooms', methods=['GET'])
@@ -4000,7 +4365,7 @@ def list_call_calibration_rooms():
         return jsonify({"status": "success", "rooms": rooms}), 200
     except Exception as e:
         logging.exception("Error listing calibration rooms")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 @app.route('/api/call_calibration/rooms', methods=['POST'])
@@ -4047,7 +4412,7 @@ def create_call_calibration_room():
         return jsonify({"status": "success", "room_id": room_id}), 201
     except Exception as e:
         logging.exception("Error creating calibration room")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 @app.route('/api/call_calibration/rooms/<int:room_id>', methods=['DELETE', 'OPTIONS'])
@@ -4075,7 +4440,7 @@ def delete_calibration_room(room_id):
         return jsonify({"status": "success"}), 200
     except Exception as e:
         logging.exception("Error deleting calibration room")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 @app.route('/api/call_calibration/rooms/<int:room_id>', methods=['PATCH', 'OPTIONS'])
@@ -4142,7 +4507,7 @@ def update_calibration_room(room_id):
         }), 200
     except Exception as e:
         logging.exception("Error updating calibration room")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 @app.route('/api/call_calibration/rooms/<int:room_id>/calls', methods=['POST'])
@@ -4321,7 +4686,7 @@ def add_call_to_calibration_room(room_id):
         return jsonify({"status": "success", "room_call_id": room_call_id, "score": total_score}), 201
     except Exception as e:
         logging.exception("Error adding call to calibration room")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 @app.route('/api/call_calibration/rooms/<int:room_id>/calls/<int:call_id>', methods=['DELETE', 'OPTIONS'])
@@ -4355,7 +4720,7 @@ def delete_call_from_calibration_room(room_id, call_id):
         return jsonify({"status": "success"}), 200
     except Exception as e:
         logging.exception("Error deleting call from calibration room")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 @app.route('/api/call_calibration/rooms/<int:room_id>/join', methods=['POST'])
@@ -4386,7 +4751,7 @@ def join_call_calibration_room(room_id):
         return jsonify({"status": "success"}), 200
     except Exception as e:
         logging.exception("Error joining calibration room")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 @app.route('/api/call_calibration/rooms/<int:room_id>', methods=['GET'])
@@ -4674,7 +5039,7 @@ def get_call_calibration_room(room_id):
         }), 200
     except Exception as e:
         logging.exception("Error getting calibration room")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 @app.route('/api/call_calibration/rooms/<int:room_id>/export_excel', methods=['GET'])
@@ -4983,7 +5348,7 @@ def export_call_calibration_room_excel(room_id):
         )
     except Exception as e:
         logging.exception("Error exporting calibration room")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 @app.route('/api/call_calibration/rooms/<int:room_id>/calls/<int:call_id>/etalon', methods=['PATCH'])
@@ -5072,7 +5437,7 @@ def update_call_calibration_etalon(room_id, call_id):
         }), 200
     except Exception as e:
         logging.exception("Error updating calibration etalon")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 @app.route('/api/call_calibration/rooms/<int:room_id>/calls/<int:call_id>/general_comment', methods=['PATCH'])
@@ -5133,7 +5498,7 @@ def update_call_calibration_general_comment(room_id, call_id):
         return jsonify({"status": "success", "call_id": call_id}), 200
     except Exception as e:
         logging.exception("Error updating calibration general comment")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 @app.route('/api/call_calibration/rooms/<int:room_id>/evaluate', methods=['POST'])
@@ -5251,7 +5616,7 @@ def evaluate_call_calibration_room(room_id):
         }), 200
     except Exception as e:
         logging.exception("Error submitting calibration evaluation")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 @app.route('/api/call_calibration/rooms/<int:room_id>/history', methods=['GET', 'OPTIONS'])
@@ -5375,7 +5740,7 @@ def get_calibration_room_history(room_id):
         return jsonify({"status": "success", "events": events}), 200
     except Exception as e:
         logging.exception("Error getting calibration room history")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 @app.route('/api/birthdays/today', methods=['GET'])
@@ -5452,7 +5817,7 @@ def ai_birthday_greeting():
 
     except Exception as e:
         logging.exception("Error in /api/ai/birthday_greeting")
-        return jsonify({"status": "error", "error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"status": "error", "error": f"Internal server error"}), 500
 
 
 @app.route('/api/ai/monthly_feedback', methods=['POST'])
@@ -5525,7 +5890,7 @@ def ai_monthly_feedback():
 
     except Exception as e:
         logging.exception("Error in /api/ai/monthly_feedback")
-        return jsonify({"status": "error", "error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"status": "error", "error": f"Internal server error"}), 500
 
 @app.route('/api/admin/operators_summary', methods=['GET'])
 @require_api_key
@@ -5592,6 +5957,13 @@ def operators_summary():
 @require_api_key
 def change_sv_table():
     try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if not _is_admin_role(requester[3]):
+            return jsonify({"error": "Only admins can change supervisor tables"}), 403
+
         data = request.get_json()
         required_fields = ['id', 'table_url']
         if not data or not all(field in data for field in required_fields):
@@ -5624,7 +5996,7 @@ def change_sv_table():
         })
     except Exception as e:
         logging.error(f"Error updating SV table: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 @app.route('/api/call_evaluation/dispute', methods=['POST'])
 @require_api_key
@@ -5740,7 +6112,7 @@ def dispute_call_evaluation():
         return jsonify({"status": "success", "message": "Dispute sent to supervisor and admin"})
     except Exception as e:
         logging.error(f"Error processing dispute: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 @app.route('/api/hours/send_request', methods=['POST'])
 @require_api_key
@@ -5785,12 +6157,19 @@ def send_request():
         return jsonify({"status": "success", "message": "Request sent to supervisor"}), 200
     except Exception as e:
         logging.error(f"Error sending request: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 @app.route('/api/admin/add_sv', methods=['POST'])
 @require_api_key
 def add_sv():
     try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if not _is_admin_role(requester[3]):
+            return jsonify({"error": "Only admins can add supervisors"}), 403
+
         data = request.get_json()
         required_fields = ['name']  # Removed 'telegram_id' from required fields
         if not data or not all(field in data for field in required_fields):
@@ -5820,21 +6199,17 @@ def add_sv():
         })
     except Exception as e:
         logging.error(f"Error adding SV: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 @app.route('/api/admin/add_user', methods=['POST'])
 @require_api_key
 def add_user():
     try:
         data = request.get_json() or {}
-        requester_id_raw = request.headers.get('X-User-Id')
-        if requester_id_raw in [None, '']:
-            return jsonify({"error": "Missing X-User-Id header"}), 400
-        try:
-            requester_id = int(requester_id_raw)
-        except (TypeError, ValueError):
-            return jsonify({"error": "Invalid X-User-Id header"}), 400
-        requester = db.get_user(id=requester_id)
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
         requester_role = _normalize_user_role(requester[3]) if requester else ''
         if requester_role not in ('super_admin', 'admin', 'sv'):
             return jsonify({"error": "Only admins can add users"}), 403
@@ -5904,6 +6279,22 @@ def add_user():
                 rate = float(data['rate']) if data.get('rate') else 1.0
             except (TypeError, ValueError):
                 return jsonify({"error": "Invalid rate"}), 400
+
+        if requester_role == 'sv':
+            supervisor_id = requester_id
+            if role == 'operator':
+                requester_direction_name = str(requester[4] or '').strip()
+                if requester_direction_name:
+                    requester_direction_id = next(
+                        (
+                            int(item.get('id'))
+                            for item in (db.get_directions() or [])
+                            if str(item.get('name') or '').strip() == requester_direction_name
+                        ),
+                        None
+                    )
+                    if requester_direction_id is not None:
+                        direction_id = requester_direction_id
 
         gender = data.get('gender')
         if gender in [None, '']:
@@ -6111,38 +6502,35 @@ def add_user():
         })
     except Exception as e:
         logging.error(f"Error adding user: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 @app.route('/api/admin/directions', methods=['GET'])
 @require_api_key
 def get_directions():
     try:
-        user_id = request.headers.get('X-User-Id')
-        if not user_id:
-            logging.warning("Missing X-User-Id header in /api/admin/directions request")
-            return jsonify({"error": "Missing X-User-Id header"}), 400
-
-        try:
-            requester_id = int(user_id)
-        except (ValueError, TypeError):
-            logging.error(f"Invalid X-User-Id format: {user_id}")
-            return jsonify({"error": "Invalid X-User-Id format"}), 400
-
-        requester = db.get_user(id=requester_id)
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            logging.warning("Directions auth error: %s", message)
+            return jsonify({"error": message}), status_code
+        if not (_is_admin_role(requester[3]) or _is_supervisor_role(requester[3])):
+            return jsonify({"error": "Only admins and supervisors can access directions"}), 403
 
         directions = db.get_directions()
         return jsonify({"status": "success", "directions": directions}), 200
     except Exception as e:
         logging.error(f"Error fetching directions: {e}", exc_info=True)
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 @app.route('/api/admin/save_directions', methods=['POST'])
 @require_api_key
 def save_directions():
     try:
-        requester_id = int(request.headers.get('X-User-Id'))
-        requester = db.get_user(id=requester_id)
-        if not requester or not _is_admin_role(requester[3]):
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if not _is_admin_role(requester[3]):
             return jsonify({"error": "Only admins can save directions"}), 403
 
         data = request.get_json()
@@ -6163,7 +6551,7 @@ def save_directions():
 
     except Exception as e:
         logging.error(f"Error saving directions: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 @app.route('/api/operator/activity', methods=['GET'])
@@ -6188,19 +6576,20 @@ def get_operator_activity():
         return jsonify({"status": "success", "logs": logs}), 200
     except Exception as e:
         logging.error(f"Error fetching operator activity: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 @app.route('/api/sv/operators', methods=['GET'])
 @require_api_key
 def get_sv_operators_moderka():
     try:
-        supervisor_id = int(request.headers.get('X-User-Id'))
-        requester = db.get_user(id=supervisor_id)
-        if not requester or not _is_supervisor_role(requester[3]):
+        supervisor_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if not _is_supervisor_role(requester[3]):
             return jsonify({"error": "Unauthorized: Only supervisors can access this"}), 403
         
-        # Для супервайзеров отдаём полный список операторов, как в админском режиме.
-        operators = db.get_all_operators_with_details()
+        operators = db.get_operators_by_supervisor(supervisor_id) or []
         for operator in operators:
             operator['avatar_url'] = _build_avatar_signed_url(
                 operator.get('avatar_bucket'),
@@ -6211,7 +6600,7 @@ def get_sv_operators_moderka():
         return jsonify({"status": "success", "operators": operators}), 200
     except Exception as e:
         logging.error(f"Error fetching operators: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 @app.route('/api/sv/data', methods=['GET'])
 @require_api_key
@@ -6236,15 +6625,16 @@ def get_sv_data():
         else:
             month = datetime.now().strftime("%Y-%m")
 
-        requester_role = ""
-        requester_id_raw = request.headers.get('X-User-Id')
-        if requester_id_raw:
-            try:
-                requester_id = int(requester_id_raw)
-                requester = db.get_user(id=requester_id)
-                requester_role = _normalize_user_role(requester[3]) if requester else ""
-            except (TypeError, ValueError):
-                requester_role = ""
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        requester_role = _normalize_user_role(requester[3])
+        if not (_is_admin_role(requester_role) or requester_role == 'sv'):
+            return jsonify({"error": "Forbidden"}), 403
+        if requester_role == 'sv' and user_id != requester_id:
+            return jsonify({"error": "Supervisors can only access their own team data"}), 403
 
         # fetch user (accept any caller role; admin can call this endpoint)
         user = db.get_user(id=user_id)
@@ -6265,10 +6655,10 @@ def get_sv_data():
             "operators": []
         }
 
-        # Для sv отдаём полный список операторов, для admin/super_admin сохраняем выборку по конкретному SV.
+        # Supervisors can only fetch their own team, admins can query a specific supervisor.
         try:
             if requester_role == 'sv':
-                operators = db.get_all_operators_with_details() or []
+                operators = db.get_operators_by_supervisor(requester_id) or []
             else:
                 operators = db.get_operators_by_supervisor(user_id) or []
         except Exception:
@@ -6298,8 +6688,10 @@ def get_sv_data():
                             u.avatar_bucket,
                             u.avatar_blob_path
                         FROM users u
-                        WHERE LOWER(COALESCE(u.role, '')) IN ('sv', 'supervisor')
-                    """)
+                        WHERE u.id = %s
+                          AND LOWER(COALESCE(u.role, '')) IN ('sv', 'supervisor')
+                        LIMIT 1
+                    """, (requester_id,))
                     supervisor_rows = cursor.fetchall()
                 elif target_user_role == 'sv':
                     cursor.execute("""
@@ -6517,6 +6909,13 @@ def get_sv_data():
 @require_api_key
 def notify_supervisor():
     try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if not _is_admin_role(requester[3]):
+            return jsonify({"error": "Only admins can notify supervisors"}), 403
+
         data = request.get_json()
         required_fields = ['sv_id', 'operator_name']
         if not data or not all(field in data for field in required_fields):
@@ -6556,7 +6955,7 @@ def notify_supervisor():
         return jsonify({"status": "success", "message": f"Notification sent to {user[2]}"}), 200
     except Exception as e:
         logging.error(f"Error in notify_supervisor: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 @app.route('/api/surveys', methods=['GET', 'POST', 'OPTIONS'])
@@ -6677,7 +7076,7 @@ def handle_surveys():
         return jsonify({"error": code}), 400
     except Exception as e:
         logging.error(f"Error in handle_surveys: {e}", exc_info=True)
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 @app.route('/api/surveys/<int:survey_id>', methods=['DELETE', 'OPTIONS'])
@@ -6705,7 +7104,7 @@ def delete_survey(survey_id):
         return jsonify({"error": "You do not have access to delete this survey"}), 403
     except Exception as e:
         logging.error(f"Error in delete_survey: {e}", exc_info=True)
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 @app.route('/api/surveys/<int:survey_id>/submit', methods=['POST', 'OPTIONS'])
@@ -6762,7 +7161,7 @@ def submit_survey(survey_id):
         return jsonify({"error": str(permission_error)}), 403
     except Exception as e:
         logging.error(f"Error in submit_survey: {e}", exc_info=True)
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 def _survey_export_format_dt(value):
@@ -7389,7 +7788,7 @@ def export_survey_statistics_excel(survey_id):
         )
     except Exception as e:
         logging.error(f"Error in export_survey_statistics_excel: {e}", exc_info=True)
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 @app.route('/api/tasks/recipients', methods=['GET', 'OPTIONS'])
@@ -7407,7 +7806,7 @@ def get_task_recipients():
         }), 200
     except Exception as e:
         logging.error(f"Error in get_task_recipients: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 @app.route('/api/tasks', methods=['GET', 'POST', 'OPTIONS'])
@@ -7509,7 +7908,7 @@ def handle_tasks():
 
     except Exception as e:
         logging.error(f"Error in handle_tasks: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 @app.route('/api/tasks/<int:task_id>/status', methods=['POST', 'OPTIONS'])
@@ -7649,7 +8048,7 @@ def update_task_status(task_id):
 
     except Exception as e:
         logging.error(f"Error in update_task_status: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 @app.route('/api/tasks/attachments/<int:attachment_id>/download', methods=['GET', 'OPTIONS'])
@@ -7703,7 +8102,7 @@ def download_task_attachment(attachment_id):
         )
     except Exception as e:
         logging.error(f"Error in download_task_attachment: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 @app.route('/api/admin/monthly_report', methods=['GET'])
 @require_api_key
@@ -7937,7 +8336,7 @@ def handle_monthly_report():
 
     except Exception as e:
         logging.error(f"Error in monthly_report: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 @app.route('/api/admin/users_report', methods=['GET'])
 @require_api_key
@@ -7960,7 +8359,7 @@ def get_users_report():
         )
     except Exception as e:
         logging.error(f"Error generating users report: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 @app.route('/api/call_evaluation/sv_request', methods=['POST'])
 @require_api_key
@@ -7968,7 +8367,7 @@ def sv_request_call():
     """
     Супервайзер отправляет запрос на переоценку по конкретному звонку (call_id).
     Тело JSON: { "call_id": int, "comment": "..." }
-    Заголовки: X-User-Id, X-API-Key (require_api_key обеспечит авторизацию)
+    Заголовки: X-User-Id (JWT/cookie авторизация обязательна)
     """
     try:
         data = request.get_json()
@@ -8052,7 +8451,7 @@ def sv_request_call():
 
     except Exception as e:
         logging.error(f"Error in sv_request_call: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 @app.route('/api/call_versions/<int:call_id>', methods=['GET'])
 @require_api_key
@@ -8132,7 +8531,7 @@ def get_call_versions(call_id):
             return jsonify({"status": "success", "versions": versions})
     except Exception as e:
         logging.error(f"Error fetching call versions: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 @app.route('/api/call_evaluations/<int:evaluation_id>', methods=['DELETE'])
 @require_api_key
@@ -8179,7 +8578,7 @@ def delete_draft_evaluation(evaluation_id):
         return jsonify({"status": "success", "message": "Imported call deleted"}), 200
     except Exception as e:
         logging.error(f"Error deleting draft evaluation: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 @app.route('/api/audio/<int:evaluation_id>', methods=['GET'])
 @require_api_key
@@ -8234,7 +8633,7 @@ def get_audio_file(evaluation_id):
         return jsonify({"status": "success", "url": signed_url})
     except Exception as e:
         logging.error(f"Error generating signed audio URL: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 @app.route('/api/admin/shuffle', methods=['POST'])
 @require_api_key
@@ -8264,6 +8663,13 @@ def shuffle_imported_calls():
     }
     """
     try:
+        importer_id, importer, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if not _is_admin_role(importer[3]):
+            return jsonify({"error": "Only admins can import call distribution"}), 403
+
         payload = request.get_json(force=True)
     except Exception:
         return jsonify({"error": "Invalid or missing JSON body"}), 400
@@ -8272,8 +8678,6 @@ def shuffle_imported_calls():
         return jsonify({"error": "Missing required fields: month and distribution"}), 400
 
     try:
-        # ID импортирующего администратора / супервизора
-        importer_id = getattr(request, "user_id", None)
         result = db.import_calls_from_distribution(payload, importer_id=importer_id)
 
         return jsonify({
@@ -8292,7 +8696,7 @@ def shuffle_imported_calls():
         traceback.print_exc()
         return jsonify({
             "status": "error",
-            "message": str(e)
+            "message": "Internal server error"
         }), 500
 
 @app.route('/api/call_evaluation', methods=['POST'])
@@ -8301,6 +8705,15 @@ def receive_call_evaluation():
     try:
         if not request.form:
             return jsonify({"error": "Missing form data"}), 400
+
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        requester_role = _normalize_user_role(requester[3])
+        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role)):
+            return jsonify({"error": "Only admins and supervisors can submit evaluations"}), 403
 
         required_fields = ['evaluator', 'operator', 'phone_number', 'appeal_date', 'score', 'comment', 'month', 'is_draft']
         missing_fields = [field for field in required_fields if field not in request.form]
@@ -8327,13 +8740,10 @@ def receive_call_evaluation():
         operator = db.get_user(name=operator_name)
         if not evaluator or not operator:
             return jsonify({"error": "Evaluator or operator not found"}), 404
+        if not _is_admin_role(requester_role) and evaluator[0] != requester_id:
+            return jsonify({"error": "Supervisors can only submit evaluations on their own behalf"}), 403
 
         if is_correction:
-            requester_id = int(request.headers.get('X-User-Id'))
-            requester = db.get_user(id=requester_id)
-            if not requester:
-                return jsonify({"error": "Requester not found"}), 403
-
             # admins всегда могут делать переоценки
             if _is_admin_role(requester[3]):
                 allowed = True
@@ -8382,7 +8792,7 @@ def receive_call_evaluation():
                     audio_data = file.read()
                 except Exception as e:
                     logging.error(f"Error reading audio file: {e}")
-                    return jsonify({"error": f"Failed to process audio file: {str(e)}"}), 500
+                    return jsonify({"error": "Failed to process audio file"}), 500
                 filename = secure_filename(f"{uuid.uuid4()}.mp3")
                 bucket_name = os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET')
                 upload_folder = os.getenv('UPLOAD_FOLDER', 'Uploads/')
@@ -8398,7 +8808,7 @@ def receive_call_evaluation():
                         audio_path = result[0]
             except Exception as e:
                 logging.error(f"Error retrieving audio_path from previous version: {e}")
-                return jsonify({"error": f"Failed to retrieve audio from previous version: {str(e)}"}), 500
+                return jsonify({"error": "Failed to retrieve audio from previous version"}), 500
 
         evaluation_id = db.add_call_evaluation(
             evaluator_id=evaluator[0],
@@ -8434,7 +8844,7 @@ def receive_call_evaluation():
         return jsonify({"status": "success", "evaluation_id": evaluation_id}), 200
     except Exception as e:
         logging.error(f"Error processing call evaluation: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 def background_upload_and_notify(audio_data, bucket_name, blob_path, evaluation_id, is_draft,
                                  evaluator_name, operator_name, month, phone_number, score, comment,
@@ -8523,6 +8933,13 @@ def send_telegram_notification(evaluator_name, operator_name, month, phone_numbe
 @require_api_key
 def add_operator():
     try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if not _is_admin_role(requester[3]):
+            return jsonify({"error": "Only admins can add operators"}), 403
+
         data = request.get_json()
         required_fields = ['name', 'telegram_id', 'supervisor_id']
         if not data or not all(field in data for field in required_fields):
@@ -8558,7 +8975,7 @@ def add_operator():
         return jsonify({"status": "success", "message": f"Operator {name} added", "id": operator_id})
     except Exception as e:
         logging.error(f"Error adding operator: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 @app.route('/api/user/toggle_active', methods=['POST'])
 @require_api_key
@@ -8607,7 +9024,7 @@ def toggle_user_active():
 
     except Exception as e:
         logging.error(f"Error toggling status: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 @app.route('/api/active_operators', methods=['GET'])
@@ -8619,7 +9036,7 @@ def get_active_operators():
         return jsonify({"status": "success", "operators": operators})
     except Exception as e:
         logging.error(f"Error fetching active operators: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
     
 @app.route('/api/report/monthly', methods=['GET'])
 @require_api_key
@@ -8658,7 +9075,7 @@ def get_monthly_report():
         )
     except Exception as e:
         logging.error(f"Error generating monthly report: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 MONTH_RE = re.compile(r'^\d{4}-\d{2}$')
 
@@ -8750,34 +9167,33 @@ def get_monthly_report_hours():
         if not month or not MONTH_RE.match(month):
             return jsonify({"error": "month required in format YYYY-MM"}), 400
 
-        # requester
-        try:
-            requester_id = int(request.headers.get('X-User-Id'))
-        except Exception:
-            return jsonify({"error": "X-User-Id header required"}), 400
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
 
-        requester = db.get_user(id=requester_id)
-        if not requester:
-            return jsonify({"error": "Requester not found"}), 404
-
-        # роль в requester ожидается в requester[3] как в вашем примере
-        role = _normalize_user_role(requester[3]) 
-
-        # Если supervisor_id не указан — формируем общий отчёт для всех операторов .
-        # Если supervisor_id указан или requester — sv без param, формируем отчёт по конкретному СВ.
+        role = _normalize_user_role(requester[3])
         generate_all = False
-        if not supervisor_id:
-                generate_all = True
-        else:
-            try:
-                supervisor_id = int(supervisor_id)
-            except ValueError:
-                return jsonify({"error": "supervisor_id must be integer"}), 400
 
-        # проверка прав для случая конкретного SV: admin или сам SV
-        if not generate_all:
-            if not _is_admin_role(role) and not _is_supervisor_role(role):
-                return jsonify({"error": "Unauthorized to access this report"}), 403
+        if _is_supervisor_role(role):
+            if supervisor_id not in (None, ''):
+                try:
+                    requested_supervisor_id = int(supervisor_id)
+                except ValueError:
+                    return jsonify({"error": "supervisor_id must be integer"}), 400
+                if requested_supervisor_id != requester_id:
+                    return jsonify({"error": "Supervisors can access only their own report"}), 403
+            supervisor_id = requester_id
+        elif _is_admin_role(role):
+            if supervisor_id in (None, ''):
+                generate_all = True
+            else:
+                try:
+                    supervisor_id = int(supervisor_id)
+                except ValueError:
+                    return jsonify({"error": "supervisor_id must be integer"}), 400
+        else:
+            return jsonify({"error": "Unauthorized to access this report"}), 403
 
         logging.info("Начало генерации отчета: supervisor_id=%s month=%s generate_all=%s", supervisor_id, month, generate_all)
 
@@ -8788,18 +9204,13 @@ def get_monthly_report_hours():
                 operators = db.get_daily_hours_by_supervisor_month(supervisor_id, month)
         except Exception as e:
             logging.exception("Ошибка получения operators из db")
-            return jsonify({"error": f"Ошибка получения операторов: {str(e)}"}), 500
+            return jsonify({"error": "Ошибка получения операторов"}), 500
 
         try:
-            if generate_all:
-                trainings_list = db.get_trainings(None, month)
-            else:
-                trainings_list = db.get_trainings(supervisor_id, month)
+            trainings_list_raw = db.get_trainings(None, month)
         except Exception as e:
             logging.exception("Ошибка получения trainings из db")
-            trainings_list = []
-
-        trainings_map = build_trainings_map(trainings_list)
+            trainings_list_raw = []
 
         try:
             y, m = map(int, month.split('-'))
@@ -8831,6 +9242,10 @@ def get_monthly_report_hours():
             visible_operator_ids = set()
 
         if visible_operator_ids:
+            trainings_list = [
+                item for item in trainings_list_raw
+                if int(item.get("operator_id") or 0) in visible_operator_ids
+            ]
             technical_items = []
             for item in technical_items_raw:
                 try:
@@ -8839,8 +9254,10 @@ def get_monthly_report_hours():
                 except Exception:
                     continue
         else:
-            technical_items = technical_items_raw
+            trainings_list = trainings_list_raw if generate_all else []
+            technical_items = technical_items_raw if generate_all else []
 
+        trainings_map = build_trainings_map(trainings_list)
         technical_issues_map = build_technical_issues_map(technical_items)
 
         try:
@@ -8870,7 +9287,7 @@ def get_monthly_report_hours():
                 except Exception:
                     continue
         else:
-            offline_items = offline_items_raw
+            offline_items = offline_items_raw if generate_all else []
 
         offline_activities_map = build_offline_activities_map(offline_items)
 
@@ -8904,19 +9321,18 @@ def get_monthly_report_hours():
 
     except Exception as e:
         logging.exception("Error generating monthly report")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 @app.route('/api/trainings', methods=['GET'])
 @require_api_key
 def get_trainings():
-    
     try:
-        requester_id = int(request.headers.get('X-User-Id'))
-        requester = db.get_user(id=requester_id)
-        if not requester:
-            logging.warning(f"User not found: {requester_id}")
-            return jsonify({"error": "User not found"}), 404
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            logging.warning(f"Trainings auth error: {message}")
+            return jsonify({"error": message}), status_code
 
         month = request.args.get('month')
         if month:
@@ -8931,26 +9347,100 @@ def get_trainings():
             logging.warning(f"Unauthorized role: {role}")
             return jsonify({"error": "Unauthorized"}), 403
 
-        # Allow optional ?id=<supervisor_id> to fetch trainings for a specific supervisor
-        # If id is absent, default to requester_id (own data)
-        user_param = request.args.get('id')
-        if user_param and str(user_param).isdigit():
-            target_id = int(user_param)
-        else:
-            target_id = requester_id
+        query = """
+            SELECT
+                t.id,
+                t.operator_id,
+                t.training_date,
+                t.start_time,
+                t.end_time,
+                t.reason,
+                t.comment,
+                t.created_at,
+                cb.name as created_by_name,
+                t.count_in_hours
+            FROM trainings t
+            JOIN users u ON t.operator_id = u.id
+            LEFT JOIN users cb ON t.created_by = cb.id
+        """
+        where_clauses = []
+        params = []
 
-        trainings = db.get_trainings(target_id, month)
+        if month:
+            where_clauses.append("TO_CHAR(t.training_date, 'YYYY-MM') = %s")
+            params.append(month)
+
+        if role == 'operator':
+            where_clauses.append("t.operator_id = %s")
+            params.append(requester_id)
+        else:
+            user_param = request.args.get('id')
+            if _is_supervisor_role(role):
+                if user_param and str(user_param).isdigit():
+                    target_user, scope_error = _load_target_user_with_scope(
+                        requester,
+                        requester_id,
+                        user_param,
+                        allow_self=False,
+                        supervisor_target_roles=('operator',),
+                        not_found_message="Operator not found",
+                        forbidden_message="Forbidden for this operator"
+                    )
+                    if scope_error:
+                        message, status_code = scope_error
+                        return jsonify({"error": message}), status_code
+                    where_clauses.append("t.operator_id = %s")
+                    params.append(int(target_user[0]))
+                else:
+                    where_clauses.append("u.supervisor_id = %s")
+                    params.append(requester_id)
+            elif user_param:
+                if not str(user_param).isdigit():
+                    return jsonify({"error": "Invalid id parameter"}), 400
+                target_user = db.get_user(id=int(user_param))
+                if not target_user:
+                    return jsonify({"error": "User not found"}), 404
+                target_role = _normalize_user_role(target_user[3])
+                if target_role == 'sv':
+                    where_clauses.append("u.supervisor_id = %s")
+                    params.append(int(target_user[0]))
+                elif target_role == 'operator':
+                    where_clauses.append("t.operator_id = %s")
+                    params.append(int(target_user[0]))
+                else:
+                    return jsonify({"error": "Unsupported target role"}), 400
+
+        if where_clauses:
+            query += " WHERE " + " AND ".join(where_clauses)
+        query += " ORDER BY t.training_date DESC, t.start_time DESC"
+
+        with db._get_cursor() as cursor:
+            cursor.execute(query, params)
+            trainings = [
+                {
+                    "id": row[0],
+                    "operator_id": row[1],
+                    "date": row[2].strftime('%Y-%m-%d'),
+                    "start_time": row[3].strftime('%H:%M'),
+                    "end_time": row[4].strftime('%H:%M'),
+                    "reason": row[5],
+                    "comment": row[6],
+                    "created_at": row[7].strftime('%Y-%m-%d %H:%M'),
+                    "created_by_name": row[8] if row[8] else "System",
+                    "count_in_hours": bool(row[9])
+                }
+                for row in cursor.fetchall()
+            ]
 
         logging.info(f"Trainings fetched for role {role}, month: {month}, by user {requester_id}")
         return jsonify({"status": "success", "trainings": trainings}), 200
     except Exception as e:
         logging.error(f"Error fetching trainings: {e}", exc_info=True)
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 @app.route('/api/trainings', methods=['POST'])
 @require_api_key
 def add_training():
-    
     try:
         data = request.get_json()
         required_fields = ['operator_id', 'date', 'start_time', 'end_time', 'reason']
@@ -8958,23 +9448,28 @@ def add_training():
             logging.warning(f"Missing required fields in add_training: {data}")
             return jsonify({"error": "Missing required fields"}), 400
 
-        requester_id = int(request.headers.get('X-User-Id'))
-        requester = db.get_user(id=requester_id)
-        if not requester:
-            logging.warning(f"User not found: {requester_id}")
-            return jsonify({"error": "User not found"}), 404
-
-        # Проверка прав: админ или супервайзер оператора
-        operator = db.get_user(id=data['operator_id'])
-        if not operator:
-            logging.warning(f"Operator not found: {data['operator_id']}")
-            return jsonify({"error": "Operator not found"}), 404
-        
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
         if not _is_admin_role(requester[3]) and not _is_supervisor_role(requester[3]):
             logging.warning(f"Unauthorized attempt to add training by user {requester_id}")
             return jsonify({"error": "Unauthorized"}), 403
 
-        # Валидация данных
+        operator, scope_error = _load_target_user_with_scope(
+            requester,
+            requester_id,
+            data['operator_id'],
+            allow_self=False,
+            supervisor_target_roles=('operator',),
+            not_found_message="Operator not found",
+            forbidden_message="Forbidden for this operator"
+        )
+        if scope_error:
+            message, status_code = scope_error
+            logging.warning("Blocked training creation: requester=%s operator=%s error=%s", requester_id, data['operator_id'], message)
+            return jsonify({"error": message}), status_code
+
         try:
             datetime.strptime(data['date'], '%Y-%m-%d')
             datetime.strptime(data['start_time'], '%H:%M')
@@ -8994,7 +9489,7 @@ def add_training():
             return jsonify({"error": "Invalid training reason"}), 400
 
         training_id = db.add_training(
-            operator_id=data['operator_id'],
+            operator_id=int(operator[0]),
             training_date=data['date'],
             start_time=data['start_time'],
             end_time=data['end_time'],
@@ -9007,39 +9502,47 @@ def add_training():
         return jsonify({"status": "success", "id": training_id}), 201
     except Exception as e:
         logging.error(f"Error adding training: {e}", exc_info=True)
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 @app.route('/api/trainings/<int:training_id>', methods=['PUT'])
 @require_api_key
 def update_training(training_id):
-    
     try:
         data = request.get_json()
         if not data:
             logging.warning("No data provided for update_training")
             return jsonify({"error": "No data provided"}), 400
 
-        requester_id = int(request.headers.get('X-User-Id'))
-        requester = db.get_user(id=requester_id)
-        if not requester:
-            logging.warning(f"User not found: {requester_id}")
-            return jsonify({"error": "User not found"}), 404
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if not _is_admin_role(requester[3]) and not _is_supervisor_role(requester[3]):
+            logging.warning(f"Unauthorized attempt to update training {training_id} by user {requester_id}")
+            return jsonify({"error": "Unauthorized"}), 403
 
-        # Проверка прав: админ или создатель тренинга
         with db._get_cursor() as cursor:
             cursor.execute("""
-                SELECT created_by FROM trainings WHERE id = %s
+                SELECT created_by, operator_id FROM trainings WHERE id = %s
             """, (training_id,))
             training = cursor.fetchone()
             if not training:
                 logging.warning(f"Training not found: {training_id}")
                 return jsonify({"error": "Training not found"}), 404
 
-            if not _is_admin_role(requester[3]) and not _is_supervisor_role(requester[3]):
-                logging.warning(f"Unauthorized attempt to update training {training_id} by user {requester_id}")
-                return jsonify({"error": "Unauthorized"}), 403
+        operator, scope_error = _load_target_user_with_scope(
+            requester,
+            requester_id,
+            training[1],
+            allow_self=False,
+            supervisor_target_roles=('operator',),
+            not_found_message="Operator not found",
+            forbidden_message="Forbidden for this operator"
+        )
+        if scope_error:
+            message, status_code = scope_error
+            return jsonify({"error": message}), status_code
 
-        # Валидация данных, если они предоставлены
         if 'date' in data:
             try:
                 datetime.strptime(data['date'], '%Y-%m-%d')
@@ -9082,35 +9585,45 @@ def update_training(training_id):
             logging.warning(f"Failed to update training {training_id}")
             return jsonify({"error": "Failed to update training"}), 500
 
-        logging.info(f"Training updated: ID {training_id}")
+        logging.info(f"Training updated: ID {training_id} for operator {operator[0]}")
         return jsonify({"status": "success", "message": "Training updated"}), 200
     except Exception as e:
         logging.error(f"Error updating training {training_id}: {e}", exc_info=True)
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 @app.route('/api/trainings/<int:training_id>', methods=['DELETE'])
 @require_api_key
 def delete_training(training_id):
     try:
-        requester_id = int(request.headers.get('X-User-Id'))
-        requester = db.get_user(id=requester_id)
-        if not requester:
-            logging.warning(f"User not found: {requester_id}")
-            return jsonify({"error": "User not found"}), 404
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if not _is_admin_role(requester[3]) and not _is_supervisor_role(requester[3]):
+            logging.warning(f"Unauthorized attempt to delete training {training_id} by user {requester_id}")
+            return jsonify({"error": "Unauthorized"}), 403
 
-        # Проверка прав: админ или создатель тренинга
         with db._get_cursor() as cursor:
             cursor.execute("""
-                SELECT created_by FROM trainings WHERE id = %s
+                SELECT created_by, operator_id FROM trainings WHERE id = %s
             """, (training_id,))
             training = cursor.fetchone()
             if not training:
                 logging.warning(f"Training not found: {training_id}")
                 return jsonify({"error": "Training not found"}), 404
-            
-            if not _is_admin_role(requester[3]) and not _is_supervisor_role(requester[3]):
-                logging.warning(f"Unauthorized attempt to delete training {training_id} by user {requester_id}")
-                return jsonify({"error": "Unauthorized"}), 403
+
+        _, scope_error = _load_target_user_with_scope(
+            requester,
+            requester_id,
+            training[1],
+            allow_self=False,
+            supervisor_target_roles=('operator',),
+            not_found_message="Operator not found",
+            forbidden_message="Forbidden for this operator"
+        )
+        if scope_error:
+            message, status_code = scope_error
+            return jsonify({"error": message}), status_code
 
         success = db.delete_training(training_id)
         if not success:
@@ -9121,7 +9634,7 @@ def delete_training(training_id):
         return jsonify({"status": "success", "message": "Training deleted"}), 200
     except Exception as e:
         logging.error(f"Error deleting training {training_id}: {e}", exc_info=True)
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 @app.route('/api/technical_issues/reasons', methods=['GET'])
@@ -9149,7 +9662,7 @@ def technical_issue_reasons():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error fetching technical issue reasons: {e}", exc_info=True)
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 @app.route('/api/technical_issues', methods=['POST'])
@@ -9209,7 +9722,7 @@ def create_technical_issue():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error creating technical issue: {e}", exc_info=True)
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 @app.route('/api/technical_issues', methods=['GET'])
@@ -9261,7 +9774,7 @@ def list_technical_issues():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error listing technical issues: {e}", exc_info=True)
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 @app.route('/api/technical_issues/<int:issue_id>', methods=['DELETE'])
@@ -9301,7 +9814,7 @@ def delete_technical_issue(issue_id):
         return jsonify({"error": error_text}), 400
     except Exception as e:
         logging.error(f"Error deleting technical issue {issue_id}: {e}", exc_info=True)
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 def _recruiting_now_iso():
@@ -9590,7 +10103,7 @@ def list_recruiting_resumes():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error listing recruiting resumes: {e}", exc_info=True)
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 @app.route('/api/recruiting/run', methods=['POST'])
@@ -9693,7 +10206,7 @@ def run_recruiting_parser_manually():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error in manual recruiting parser run: {e}", exc_info=True)
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 @app.route('/api/recruiting/run/status', methods=['GET'])
@@ -9727,7 +10240,7 @@ def get_recruiting_parser_run_status():
         }), 200
     except Exception as e:
         logging.error(f"Error getting recruiting parser status: {e}", exc_info=True)
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 @app.route('/api/offline_activities', methods=['POST'])
@@ -9778,7 +10291,7 @@ def create_offline_activity():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error creating offline activity: {e}", exc_info=True)
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 @app.route('/api/offline_activities', methods=['GET'])
@@ -9825,7 +10338,7 @@ def list_offline_activities():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error listing offline activities: {e}", exc_info=True)
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 @app.route('/api/offline_activities/<int:activity_id>', methods=['DELETE'])
@@ -9865,7 +10378,7 @@ def delete_offline_activity(activity_id):
         return jsonify({"error": error_text}), 400
     except Exception as e:
         logging.error(f"Error deleting offline activity {activity_id}: {e}", exc_info=True)
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 @app.route('/api/technical_issues/export_excel', methods=['GET'])
@@ -9965,7 +10478,7 @@ def export_technical_issues_excel():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error exporting technical issues: {e}", exc_info=True)
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": f"Internal server error"}), 500
 
 
 # ==================== Work Schedules API ====================
@@ -10774,18 +11287,9 @@ def _iter_schedule_excel_dates(start_date_obj, end_date_obj):
 
 
 def _work_schedule_operator_requester():
-    requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
-    if not requester_id:
-        return None, None, ("Unauthorized", 401)
-
-    try:
-        requester_id = int(requester_id)
-    except Exception:
-        return None, None, ("Invalid requester id", 400)
-
-    user_data = db.get_user(id=requester_id)
-    if not user_data:
-        return None, None, ("User not found", 404)
+    requester_id, user_data, auth_error = _get_authenticated_requester()
+    if auth_error:
+        return None, None, auth_error
     if user_data[3] != 'operator':
         return None, None, ("Forbidden", 403)
 
@@ -10841,7 +11345,7 @@ def get_my_work_schedules():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error getting my work schedules: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/work_schedules/direction', methods=['GET'])
@@ -10881,7 +11385,7 @@ def get_direction_work_schedules():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error getting direction work schedules: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/work_schedules/shift_swap/candidates', methods=['GET'])
@@ -10941,7 +11445,7 @@ def get_shift_swap_candidates():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error getting shift swap candidates: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/work_schedules/shift_swap/requests', methods=['GET', 'POST'])
@@ -10999,7 +11503,7 @@ def shift_swap_requests():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error in shift swap requests endpoint: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/work_schedules/shift_swap/respond', methods=['POST'])
@@ -11048,7 +11552,7 @@ def respond_shift_swap_request():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error responding shift swap request: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/work_schedules/shift_swap/journal', methods=['GET'])
@@ -11094,7 +11598,7 @@ def get_shift_swap_journal():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error getting shift swap journal: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/work_schedules/operators', methods=['GET'])
@@ -11111,20 +11615,10 @@ def get_operators_with_schedules():
       - include_offline_activities (optional: 1/true/yes/on, default: true)
     """
     try:
-        user = request.headers.get('X-User-Id')
-        if not user:
-            return jsonify({"error": "Unauthorized"}), 401
-        
-        user_id = int(user)
-        user_data = db.get_user(id=user_id)
-        if not user_data:
-            return jsonify({"error": "User not found"}), 404
-        
-        role = user_data[3]
-        
-        # Только admin и sv могут видеть планировщик смен
-        if not (_is_admin_role(role) or _is_supervisor_role(role)):
-            return jsonify({"error": "Forbidden"}), 403
+        user_id, user_data, auth_error = _resolve_management_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
         
         start_date = (request.args.get('start_date') or '').strip()
         end_date = (request.args.get('end_date') or '').strip()
@@ -11176,6 +11670,7 @@ def get_operators_with_schedules():
             include_technical_issues=include_technical_issues,
             include_offline_activities=include_offline_activities
         )
+        operators = _filter_operators_for_requester_scope(user_data, user_id, operators)
         
         return jsonify({
             "operators": operators,
@@ -11189,7 +11684,7 @@ def get_operators_with_schedules():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error getting operators with schedules: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/work_schedules/break_rules', methods=['GET'])
@@ -11199,17 +11694,12 @@ def get_work_schedule_break_rules():
     Получить правила автоперерывов по направлениям.
     """
     try:
-        requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
-        if not requester_id:
-            return jsonify({"error": "Unauthorized"}), 401
-
-        requester_id = int(requester_id)
-        user_data = db.get_user(id=requester_id)
-        if not user_data:
-            return jsonify({"error": "User not found"}), 404
-
-        if not (_is_admin_role(user_data[3]) or _is_supervisor_role(user_data[3])):
-            return jsonify({"error": "Forbidden"}), 403
+        requester_id, user_data, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if not _is_admin_role(user_data[3]):
+            return jsonify({"error": "Only admins can save break rules"}), 403
 
         direction_rules = db.get_work_schedule_break_rules()
         return jsonify({"direction_rules": direction_rules}), 200
@@ -11218,7 +11708,7 @@ def get_work_schedule_break_rules():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error getting work schedule break rules: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/work_schedules/break_rules', methods=['POST'])
@@ -11238,17 +11728,10 @@ def save_work_schedule_break_rules():
     }
     """
     try:
-        requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
-        if not requester_id:
-            return jsonify({"error": "Unauthorized"}), 401
-
-        requester_id = int(requester_id)
-        user_data = db.get_user(id=requester_id)
-        if not user_data:
-            return jsonify({"error": "User not found"}), 404
-
-        if not (_is_admin_role(user_data[3]) or _is_supervisor_role(user_data[3])):
-            return jsonify({"error": "Forbidden"}), 403
+        requester_id, user_data, auth_error = _resolve_management_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
 
         data = request.get_json(silent=True) or {}
         direction_rules = (
@@ -11271,7 +11754,7 @@ def save_work_schedule_break_rules():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error saving work schedule break rules: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/work_schedules/shift', methods=['POST'])
@@ -11291,19 +11774,10 @@ def save_work_shift():
     }
     """
     try:
-        user = request.headers.get('X-User-Id')
-        if not user:
-            return jsonify({"error": "Unauthorized"}), 401
-        
-        user_id = int(user)
-        user_data = db.get_user(id=user_id)
-        if not user_data:
-            return jsonify({"error": "User not found"}), 404
-        
-        role = user_data[3]
-        
-        if not (_is_admin_role(role) or _is_supervisor_role(role)):
-            return jsonify({"error": "Forbidden"}), 403
+        user_id, user_data, auth_error = _resolve_management_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
         
         data = request.get_json(silent=True) or {}
         operator_id = data.get('operator_id')
@@ -11317,9 +11791,14 @@ def save_work_shift():
         
         if not all([operator_id, shift_date, start_time, end_time]):
             return jsonify({"error": "Missing required fields"}), 400
+
+        target_operator, scope_error = _resolve_scoped_operator_for_requester(user_data, user_id, operator_id)
+        if scope_error:
+            message, status_code = scope_error
+            return jsonify({"error": message}), status_code
         
         shift_id = db.save_shift(
-            operator_id,
+            int(target_operator[0]),
             shift_date,
             start_time,
             end_time,
@@ -11335,7 +11814,7 @@ def save_work_shift():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error saving shift: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/work_schedules/shift', methods=['DELETE'])
@@ -11351,19 +11830,10 @@ def delete_work_shift():
     }
     """
     try:
-        user = request.headers.get('X-User-Id')
-        if not user:
-            return jsonify({"error": "Unauthorized"}), 401
-        
-        user_id = int(user)
-        user_data = db.get_user(id=user_id)
-        if not user_data:
-            return jsonify({"error": "User not found"}), 404
-        
-        role = user_data[3]
-        
-        if not (_is_admin_role(role) or _is_supervisor_role(role)):
-            return jsonify({"error": "Forbidden"}), 403
+        user_id, user_data, auth_error = _resolve_management_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
         
         data = request.get_json(silent=True) or {}
         operator_id = data.get('operator_id')
@@ -11373,8 +11843,13 @@ def delete_work_shift():
         
         if not all([operator_id, shift_date, start_time, end_time]):
             return jsonify({"error": "Missing required fields"}), 400
+
+        target_operator, scope_error = _resolve_scoped_operator_for_requester(user_data, user_id, operator_id)
+        if scope_error:
+            message, status_code = scope_error
+            return jsonify({"error": message}), status_code
         
-        success = db.delete_shift(operator_id, shift_date, start_time, end_time)
+        success = db.delete_shift(int(target_operator[0]), shift_date, start_time, end_time)
         
         if success:
             return jsonify({"message": "Shift deleted successfully"}), 200
@@ -11385,7 +11860,7 @@ def delete_work_shift():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error deleting shift: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/work_schedules/day_off', methods=['POST'])
@@ -11399,19 +11874,10 @@ def toggle_work_day_off():
     }
     """
     try:
-        user = request.headers.get('X-User-Id')
-        if not user:
-            return jsonify({"error": "Unauthorized"}), 401
-        
-        user_id = int(user)
-        user_data = db.get_user(id=user_id)
-        if not user_data:
-            return jsonify({"error": "User not found"}), 404
-        
-        role = user_data[3]
-        
-        if not (_is_admin_role(role) or _is_supervisor_role(role)):
-            return jsonify({"error": "Forbidden"}), 403
+        user_id, user_data, auth_error = _resolve_management_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
         
         data = request.get_json(silent=True) or {}
         operator_id = data.get('operator_id')
@@ -11419,8 +11885,13 @@ def toggle_work_day_off():
         
         if not all([operator_id, day_off_date]):
             return jsonify({"error": "Missing required fields"}), 400
+
+        target_operator, scope_error = _resolve_scoped_operator_for_requester(user_data, user_id, operator_id)
+        if scope_error:
+            message, status_code = scope_error
+            return jsonify({"error": message}), status_code
         
-        is_day_off = db.toggle_day_off(operator_id, day_off_date)
+        is_day_off = db.toggle_day_off(int(target_operator[0]), day_off_date)
         
         return jsonify({
             "message": "Day off toggled successfully",
@@ -11431,7 +11902,7 @@ def toggle_work_day_off():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error toggling day off: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/work_schedules/status_period', methods=['POST'])
@@ -11478,8 +11949,13 @@ def save_work_schedule_status_period():
         if not operator_id or not status_code or not start_date:
             return jsonify({"error": "Missing required fields"}), 400
 
+        target_operator, scope_error = _resolve_scoped_operator_for_requester(user_data, requester_id, operator_id)
+        if scope_error:
+            message, status_code = scope_error
+            return jsonify({"error": message}), status_code
+
         status_period = db.save_schedule_status_period(
-            operator_id=operator_id,
+            operator_id=int(target_operator[0]),
             status_code=status_code,
             start_date=start_date,
             end_date=end_date,
@@ -11491,7 +11967,7 @@ def save_work_schedule_status_period():
 
         operator_snapshot = None
         if range_start and range_end:
-            operator_snapshot = db.get_operator_with_shifts(operator_id, range_start, range_end)
+            operator_snapshot = db.get_operator_with_shifts(int(target_operator[0]), range_start, range_end)
 
         return jsonify({
             "message": "Status period saved successfully",
@@ -11503,7 +11979,7 @@ def save_work_schedule_status_period():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error saving status period: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/work_schedules/status_period', methods=['DELETE'])
@@ -11519,17 +11995,10 @@ def delete_work_schedule_status_period():
     }
     """
     try:
-        requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
-        if not requester_id:
-            return jsonify({"error": "Unauthorized"}), 401
-
-        requester_id = int(requester_id)
-        user_data = db.get_user(id=requester_id)
-        if not user_data:
-            return jsonify({"error": "User not found"}), 404
-
-        if not (_is_admin_role(user_data[3]) or _is_supervisor_role(user_data[3])):
-            return jsonify({"error": "Forbidden"}), 403
+        requester_id, user_data, auth_error = _resolve_management_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
 
         data = request.get_json(silent=True) or {}
         status_period_id = data.get('status_period_id')
@@ -11539,6 +12008,14 @@ def delete_work_schedule_status_period():
 
         if not status_period_id:
             return jsonify({"error": "Missing status_period_id"}), 400
+        if _is_supervisor_role(user_data[3]) and not operator_id:
+            return jsonify({"error": "operator_id is required for supervisor requests"}), 400
+
+        if operator_id:
+            _, scope_error = _resolve_scoped_operator_for_requester(user_data, requester_id, operator_id)
+            if scope_error:
+                message, status_code = scope_error
+                return jsonify({"error": message}), status_code
 
         deleted_period = db.delete_schedule_status_period(
             status_period_id=status_period_id,
@@ -11548,9 +12025,14 @@ def delete_work_schedule_status_period():
             return jsonify({"error": "Status period not found"}), 404
 
         target_operator_id = operator_id or deleted_period.get('operatorId')
+        target_operator, scope_error = _resolve_scoped_operator_for_requester(user_data, requester_id, target_operator_id)
+        if scope_error:
+            message, status_code = scope_error
+            return jsonify({"error": message}), status_code
+
         operator_snapshot = None
         if target_operator_id and range_start and range_end:
-            operator_snapshot = db.get_operator_with_shifts(target_operator_id, range_start, range_end)
+            operator_snapshot = db.get_operator_with_shifts(int(target_operator[0]), range_start, range_end)
 
         return jsonify({
             "message": "Status period deleted successfully",
@@ -11562,7 +12044,7 @@ def delete_work_schedule_status_period():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error deleting status period: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/work_schedules/shifts_bulk', methods=['POST'])
@@ -11584,19 +12066,10 @@ def save_shifts_bulk():
     }
     """
     try:
-        user = request.headers.get('X-User-Id')
-        if not user:
-            return jsonify({"error": "Unauthorized"}), 401
-        
-        user_id = int(user)
-        user_data = db.get_user(id=user_id)
-        if not user_data:
-            return jsonify({"error": "User not found"}), 404
-        
-        role = user_data[3]
-        
-        if not (_is_admin_role(role) or _is_supervisor_role(role)):
-            return jsonify({"error": "Forbidden"}), 403
+        user_id, user_data, auth_error = _resolve_management_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
         
         data = request.get_json(silent=True) or {}
         operator_id = data.get('operator_id')
@@ -11607,8 +12080,13 @@ def save_shifts_bulk():
         
         if not shifts:
             return jsonify({"error": "No shifts provided"}), 400
+
+        target_operator, scope_error = _resolve_scoped_operator_for_requester(user_data, user_id, operator_id)
+        if scope_error:
+            message, status_code = scope_error
+            return jsonify({"error": message}), status_code
         
-        shift_ids = db.save_shifts_bulk(operator_id, shifts)
+        shift_ids = db.save_shifts_bulk(int(target_operator[0]), shifts)
         
         return jsonify({
             "message": f"Successfully saved {len(shift_ids)} shifts",
@@ -11619,7 +12097,7 @@ def save_shifts_bulk():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error saving shifts bulk: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/work_schedules/bulk_actions', methods=['POST'])
@@ -11636,20 +12114,24 @@ def apply_work_schedule_bulk_actions():
     }
     """
     try:
-        requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
-        if not requester_id:
-            return jsonify({"error": "Unauthorized"}), 401
-
-        requester_id = int(requester_id)
-        user_data = db.get_user(id=requester_id)
-        if not user_data:
-            return jsonify({"error": "User not found"}), 404
-
-        if not (_is_admin_role(user_data[3]) or _is_supervisor_role(user_data[3])):
-            return jsonify({"error": "Forbidden"}), 403
+        requester_id, user_data, auth_error = _resolve_management_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
 
         data = request.get_json(silent=True) or {}
         actions = data.get('actions')
+        if not isinstance(actions, list) or not actions:
+            return jsonify({"error": "actions must be a non-empty list"}), 400
+
+        for action in actions:
+            operator_id = (action or {}).get('operator_id')
+            target_operator, scope_error = _resolve_scoped_operator_for_requester(user_data, requester_id, operator_id)
+            if scope_error:
+                message, status_code = scope_error
+                return jsonify({"error": message}), status_code
+            action['operator_id'] = int(target_operator[0])
+
         result = db.apply_work_schedule_bulk_actions(actions)
         return jsonify({
             "message": "Bulk work schedule actions applied successfully",
@@ -11660,7 +12142,7 @@ def apply_work_schedule_bulk_actions():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error applying bulk work schedule actions: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/work_schedules/aggregate', methods=['POST'])
@@ -11677,16 +12159,10 @@ def aggregate_work_schedule_metrics():
     }
     """
     try:
-        requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
-        if not requester_id:
-            return jsonify({"error": "Unauthorized"}), 401
-
-        requester_id = int(requester_id)
-        user_data = db.get_user(id=requester_id)
-        if not user_data:
-            return jsonify({"error": "User not found"}), 404
-        if not (_is_admin_role(user_data[3]) or _is_supervisor_role(user_data[3])):
-            return jsonify({"error": "Forbidden"}), 403
+        requester_id, user_data, auth_error = _resolve_management_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
 
         data = request.get_json(silent=True) or {}
         operator_id = data.get('operator_id')
@@ -11719,6 +12195,15 @@ def aggregate_work_schedule_metrics():
         else:
             return jsonify({"error": "operator_id or operator_ids is required"}), 400
 
+        scoped_operator_ids = []
+        for raw_operator_id in operator_ids:
+            target_operator, scope_error = _resolve_scoped_operator_for_requester(user_data, requester_id, raw_operator_id)
+            if scope_error:
+                message, status_code = scope_error
+                return jsonify({"error": message}), status_code
+            scoped_operator_ids.append(int(target_operator[0]))
+        operator_ids = scoped_operator_ids
+
         if not start_date:
             return jsonify({"error": "start_date (or date) is required"}), 400
         if not end_date:
@@ -11745,7 +12230,7 @@ def aggregate_work_schedule_metrics():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error aggregating work schedule metrics: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/work_schedules/auto_flags/resolve', methods=['POST'])
@@ -11763,16 +12248,10 @@ def resolve_work_schedule_auto_flag():
     }
     """
     try:
-        requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
-        if not requester_id:
-            return jsonify({"error": "Unauthorized"}), 401
-
-        requester_id = int(requester_id)
-        user_data = db.get_user(id=requester_id)
-        if not user_data:
-            return jsonify({"error": "User not found"}), 404
-        if not (_is_admin_role(user_data[3]) or _is_supervisor_role(user_data[3])):
-            return jsonify({"error": "Forbidden"}), 403
+        requester_id, user_data, auth_error = _resolve_management_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
 
         data = request.get_json(silent=True) or {}
         operator_id = data.get('operator_id')
@@ -11785,8 +12264,13 @@ def resolve_work_schedule_auto_flag():
         if not operator_id or not day or not flag_type or not action:
             return jsonify({"error": "Missing required fields"}), 400
 
+        target_operator, scope_error = _resolve_scoped_operator_for_requester(user_data, requester_id, operator_id)
+        if scope_error:
+            message, status_code = scope_error
+            return jsonify({"error": message}), status_code
+
         result = db.resolve_auto_schedule_flag(
-            operator_id=operator_id,
+            operator_id=int(target_operator[0]),
             day=day,
             flag_type=flag_type,
             action=action
@@ -11795,7 +12279,7 @@ def resolve_work_schedule_auto_flag():
         operator_snapshot = None
         if range_start and range_end:
             operator_snapshot = db.get_operator_with_shifts(
-                int(operator_id),
+                int(target_operator[0]),
                 range_start,
                 range_end,
                 include_imported_statuses=False
@@ -11811,7 +12295,7 @@ def resolve_work_schedule_auto_flag():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error resolving work schedule auto flag: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/work_schedules/fines', methods=['POST'])
@@ -11883,7 +12367,7 @@ def add_work_schedule_fine():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error adding work schedule fine: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/work_schedules/export_excel', methods=['GET'])
@@ -11894,16 +12378,10 @@ def export_work_schedules_excel():
     ФИО | Ставка | YYYY-MM-DD даты (в файле выводятся как dd.mm.yyyy)
     """
     try:
-        requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
-        if not requester_id:
-            return jsonify({"error": "Unauthorized"}), 401
-
-        requester_id = int(requester_id)
-        user_data = db.get_user(id=requester_id)
-        if not user_data:
-            return jsonify({"error": "User not found"}), 404
-        if not (_is_admin_role(user_data[3]) or _is_supervisor_role(user_data[3])):
-            return jsonify({"error": "Forbidden"}), 403
+        requester_id, user_data, auth_error = _resolve_management_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
 
         start_date = request.args.get('start_date')
         end_date = request.args.get('end_date')
@@ -11958,8 +12436,9 @@ def export_work_schedules_excel():
         }
 
         operators = db.get_operators_with_shifts(start_date, end_date) or []
+        operators = _filter_operators_for_requester_scope(user_data, requester_id, operators)
 
-        if selected_supervisor_ids:
+        if selected_supervisor_ids and _is_admin_role(user_data[3]):
             operators = [
                 op for op in operators
                 if int(op.get('supervisor_id') or 0) in selected_supervisor_ids
@@ -12075,7 +12554,7 @@ def export_work_schedules_excel():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error exporting work schedules excel: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/work_schedules/import_excel', methods=['POST'])
@@ -12369,7 +12848,7 @@ def import_work_schedules_excel():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error importing work schedules excel: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/work_schedules/import_statuses_csv', methods=['POST'])
@@ -12500,7 +12979,7 @@ def import_work_schedules_statuses_csv():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error importing statuses csv: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
     finally:
         if lock_acquired:
             STATUS_IMPORT_LOCK.release()
@@ -16347,7 +16826,7 @@ def lms_home():
         }), 200
     except Exception as e:
         logging.exception("Error in /api/lms/home")
-        return jsonify({"error": f"Failed to load LMS home: {str(e)}"}), 500
+        return jsonify({"error": "Failed to load LMS home"}), 500
 
 
 @app.route('/api/lms/courses', methods=['GET'])
@@ -16391,7 +16870,7 @@ def lms_courses():
         return jsonify({"status": "success", "courses": items}), 200
     except Exception as e:
         logging.exception("Error in /api/lms/courses")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/lms/courses/<int:course_id>', methods=['GET'])
@@ -16480,7 +16959,7 @@ def lms_course_detail(course_id):
         return jsonify({"status": "success", "course": structure}), 200
     except Exception as e:
         logging.exception("Error in /api/lms/courses/<course_id>")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/lms/courses/<int:course_id>/start', methods=['POST'])
@@ -16515,7 +16994,7 @@ def lms_start_course(course_id):
         }), 200
     except Exception as e:
         logging.exception("Error in /api/lms/courses/<course_id>/start")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/lms/lessons/<int:lesson_id>', methods=['GET'])
@@ -16598,7 +17077,7 @@ def lms_lesson_detail(lesson_id):
         }), 200
     except Exception as e:
         logging.exception("Error in /api/lms/lessons/<lesson_id>")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/lms/lessons/<int:lesson_id>/event', methods=['POST'])
@@ -16697,7 +17176,7 @@ def lms_lesson_event(lesson_id):
         return jsonify({"status": "success"}), 200
     except Exception as e:
         logging.exception("Error in /api/lms/lessons/<lesson_id>/event")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/lms/lessons/<int:lesson_id>/heartbeat', methods=['POST'])
@@ -16857,7 +17336,7 @@ def lms_lesson_heartbeat(lesson_id):
         }), 200
     except Exception as e:
         logging.exception("Error in /api/lms/lessons/<lesson_id>/heartbeat")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/lms/lessons/<int:lesson_id>/complete', methods=['POST'])
@@ -16940,7 +17419,7 @@ def lms_lesson_complete(lesson_id):
         }), 200
     except Exception as e:
         logging.exception("Error in /api/lms/lessons/<lesson_id>/complete")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/lms/tests/<int:test_id>/start', methods=['POST'])
@@ -17106,7 +17585,7 @@ def lms_test_start(test_id):
         }), 200
     except Exception as e:
         logging.exception("Error in /api/lms/tests/<test_id>/start")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/lms/tests/attempts/<int:attempt_id>/answer', methods=['PATCH'])
@@ -17175,7 +17654,7 @@ def lms_test_answer(attempt_id):
         return jsonify({"status": "success", "attempt_id": attempt_id, "question_id": question_id}), 200
     except Exception as e:
         logging.exception("Error in /api/lms/tests/attempts/<attempt_id>/answer")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/lms/tests/attempts/<int:attempt_id>/answers', methods=['PATCH'])
@@ -17276,7 +17755,7 @@ def lms_test_answers_bulk(attempt_id):
         }), 200
     except Exception as e:
         logging.exception("Error in /api/lms/tests/attempts/<attempt_id>/answers")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/lms/tests/attempts/<int:attempt_id>/finish', methods=['POST'])
@@ -17295,7 +17774,7 @@ def lms_test_finish(attempt_id):
         return jsonify({"status": "success", "result": result}), 200
     except Exception as e:
         logging.exception("Error in /api/lms/tests/attempts/<attempt_id>/finish")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/lms/tests/attempts/<int:attempt_id>/result', methods=['GET'])
@@ -17401,7 +17880,7 @@ def lms_test_result(attempt_id):
         }), 200
     except Exception as e:
         logging.exception("Error in /api/lms/tests/attempts/<attempt_id>/result")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/lms/certificates', methods=['GET'])
@@ -17442,7 +17921,7 @@ def lms_certificates():
         return jsonify({"status": "success", "certificates": items}), 200
     except Exception as e:
         logging.exception("Error in /api/lms/certificates")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/lms/certificates/<int:certificate_id>/download', methods=['GET'])
@@ -17491,7 +17970,7 @@ def lms_certificate_download(certificate_id):
             )
     except Exception as e:
         logging.exception("Error in /api/lms/certificates/<certificate_id>/download")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/lms/notifications', methods=['GET'])
@@ -17529,7 +18008,7 @@ def lms_notifications():
         return jsonify({"status": "success", "notifications": items}), 200
     except Exception as e:
         logging.exception("Error in /api/lms/notifications")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/lms/notifications/<int:notification_id>/read', methods=['POST'])
@@ -17556,7 +18035,7 @@ def lms_notification_read(notification_id):
         return jsonify({"status": "success", "notification_id": notification_id}), 200
     except Exception as e:
         logging.exception("Error in /api/lms/notifications/<notification_id>/read")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/lms/certificates/verify/<string:token>', methods=['GET'])
@@ -17608,7 +18087,7 @@ def lms_verify_certificate(token):
             }), 200
     except Exception as e:
         logging.exception("Error in /api/lms/certificates/verify/<token>")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/lms/admin/courses', methods=['GET', 'POST', 'PATCH'])
@@ -17973,7 +18452,7 @@ def lms_admin_courses():
         return jsonify({"error": "Method not allowed"}), 405
     except Exception as e:
         logging.exception("Error in /api/lms/admin/courses")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/lms/admin/courses/<int:course_id>/history', methods=['GET'])
@@ -18031,7 +18510,7 @@ def lms_admin_course_history(course_id):
         return jsonify(response_payload), 200
     except Exception as e:
         logging.exception("Error in /api/lms/admin/courses/<course_id>/history")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/lms/admin/courses/<int:course_id>', methods=['DELETE'])
@@ -18086,7 +18565,7 @@ def lms_admin_delete_course(course_id):
         }), 200
     except Exception as e:
         logging.exception("Error in /api/lms/admin/courses/<course_id> DELETE")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/lms/admin/courses/<int:course_id>/publish', methods=['POST'])
@@ -18220,7 +18699,7 @@ def lms_admin_publish_course(course_id):
         }), 200
     except Exception as e:
         logging.exception("Error in /api/lms/admin/courses/<course_id>/publish")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/lms/admin/courses/<int:course_id>/assignments', methods=['POST'])
@@ -18384,7 +18863,7 @@ def lms_admin_assign_course(course_id):
         }), 200
     except Exception as e:
         logging.exception("Error in /api/lms/admin/courses/<course_id>/assignments")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/lms/admin/learners', methods=['GET'])
@@ -18426,7 +18905,7 @@ def lms_admin_learners():
         return jsonify({"status": "success", "learners": learners}), 200
     except Exception as e:
         logging.exception("Error in /api/lms/admin/learners")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/lms/admin/materials/upload', methods=['POST'])
@@ -18591,7 +19070,7 @@ def lms_admin_upload_materials():
         }), 200
     except Exception as e:
         logging.exception("Error in /api/lms/admin/materials/upload")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/lms/admin/progress', methods=['GET'])
@@ -18627,7 +19106,7 @@ def lms_admin_progress():
         return jsonify({"status": "success", "rows": payload}), 200
     except Exception as e:
         logging.exception("Error in /api/lms/admin/progress")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/lms/admin/analytics', methods=['GET'])
@@ -18873,7 +19352,7 @@ def lms_admin_analytics():
         }), 200
     except Exception as e:
         logging.exception("Error in /api/lms/admin/analytics")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/lms/admin/attempts', methods=['GET'])
@@ -18952,7 +19431,7 @@ def lms_admin_attempts():
         return jsonify({"status": "success", "attempts": attempts}), 200
     except Exception as e:
         logging.exception("Error in /api/lms/admin/attempts")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/lms/admin/certificates/<int:certificate_id>/revoke', methods=['POST'])
@@ -19004,7 +19483,7 @@ def lms_admin_revoke_certificate(certificate_id):
         return jsonify({"status": "success", "certificate_id": certificate_id}), 200
     except Exception as e:
         logging.exception("Error in /api/lms/admin/certificates/<certificate_id>/revoke")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 def extract_fio_and_links(spreadsheet_url):
     try:
@@ -19352,4 +19831,6 @@ if __name__ == '__main__':
     
     # Запускаем бота
     executor.start_polling(dp, skip_updates=True)
+
+
 
