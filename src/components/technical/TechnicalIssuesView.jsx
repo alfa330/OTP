@@ -1335,11 +1335,10 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
 
     const buildHeaders = useCallback(() => {
         const base = {};
-        if (user?.apiKey && String(user.apiKey).trim() !== '') base['X-API-Key'] = user.apiKey;
         if (user?.id !== undefined && user?.id !== null && String(user.id).trim() !== '') base['X-User-Id'] = user.id;
         if (typeof withAccessTokenHeader === 'function') return withAccessTokenHeader(base);
         return base;
-    }, [user?.apiKey, user?.id, withAccessTokenHeader]);
+    }, [user?.id, withAccessTokenHeader]);
 
     const visibleOperators = useMemo(() => {
         const list = Array.isArray(operators) ? operators : [];
@@ -1401,7 +1400,7 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
     const latestReqId    = useRef(0);
     const lastQueryRef   = useRef('');
 
-    useEffect(() => { lastQueryRef.current = ''; }, [apiBaseUrl, user?.id, user?.apiKey, canView]);
+    useEffect(() => { lastQueryRef.current = ''; }, [apiBaseUrl, user?.id, canView]);
 
     // ── fetch reasons ──
     const fetchReasons = useCallback(async () => {

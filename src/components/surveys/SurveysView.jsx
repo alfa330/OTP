@@ -163,8 +163,8 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
     }, []);
 
     const headers = useMemo(
-        () => ({ 'X-API-Key': user?.apiKey, 'X-User-Id': user?.id }),
-        [user?.apiKey, user?.id]
+        () => ({ 'X-User-Id': user?.id }),
+        [user?.id]
     );
 
     const directionNameById = useMemo(() => {
