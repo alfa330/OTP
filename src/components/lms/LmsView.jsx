@@ -1530,69 +1530,6 @@ const buildAnswerPayloadForApi = (question, answerValue) => {
 
 // ─── MAIN APP ─────────────────────────────────────────────────────────────────
 
-const LMS_BLOCKED_SHORTCUTS = new Set([
-  "ctrl+p",
-  "meta+p",
-  "ctrl+s",
-  "meta+s",
-  "ctrl+u",
-  "meta+u",
-  "ctrl+shift+i",
-  "meta+alt+i",
-  "ctrl+shift+j",
-  "meta+alt+j",
-  "ctrl+shift+c",
-  "meta+alt+c",
-  "f12",
-]);
-
-const LMS_WATERMARK_POSITIONS = [
-  { top: "8%", left: "-10%", rotate: -22 },
-  { top: "22%", left: "15%", rotate: -16 },
-  { top: "36%", left: "-8%", rotate: -20 },
-  { top: "52%", left: "14%", rotate: -14 },
-  { top: "67%", left: "-6%", rotate: -18 },
-  { top: "82%", left: "12%", rotate: -21 },
-  { top: "14%", left: "52%", rotate: -17 },
-  { top: "29%", left: "70%", rotate: -22 },
-  { top: "45%", left: "50%", rotate: -15 },
-  { top: "60%", left: "68%", rotate: -19 },
-  { top: "75%", left: "48%", rotate: -13 },
-  { top: "89%", left: "66%", rotate: -21 },
-];
-
-const isEditableLmsTarget = (target) => {
-  if (!(target instanceof Element)) return false;
-  const tag = String(target.tagName || "").toLowerCase();
-  if (tag === "input" || tag === "textarea" || tag === "select") return true;
-  return Boolean(target.closest("[contenteditable=\"true\"]"));
-};
-
-const buildLmsShortcutSignature = (event) => {
-  const parts = [];
-  if (event.ctrlKey) parts.push("ctrl");
-  if (event.metaKey) parts.push("meta");
-  if (event.altKey) parts.push("alt");
-  if (event.shiftKey) parts.push("shift");
-
-  const key = String(event.key || "").toLowerCase();
-  if (key && !["control", "meta", "alt", "shift"].includes(key)) {
-    parts.push(key);
-  }
-  return parts.join("+");
-};
-
-const clearClipboardAfterPrintScreen = async () => {
-  if (typeof navigator === "undefined") return;
-  const clipboard = navigator.clipboard;
-  if (!clipboard || typeof clipboard.writeText !== "function") return;
-  try {
-    await clipboard.writeText("");
-  } catch (_) {
-    // ignore clipboard permission errors
-  }
-};
-
 export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showToast }) {
   const role = normalizeLmsRole(user?.role);
   const canUseLearnerApi = role === "operator" || role === "trainee";
@@ -1611,9 +1548,6 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
   const [quizView, setQuizView] = useState("intro");
   const [quizAnswers, setQuizAnswers] = useState({});
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [contentShieldVisible, setContentShieldVisible] = useState(false);
-  const [contentShieldReason, setContentShieldReason] = useState("");
-  const [watermarkStamp, setWatermarkStamp] = useState(() => Date.now());
 
   const [courses, setCourses] = useState([]);
   const [certificates, setCertificates] = useState([]);
@@ -2103,133 +2037,9 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
     [notifications]
   );
   const isLessonLayout = view === "lesson" && Boolean(selectedLesson) && Boolean(selectedCourse);
-  const isLearnerProtectedView = canUseLearnerApi && (view === "catalog" || view === "course" || view === "lesson");
-  const watermarkIdentity = String(user?.name || user?.login || "LMS User").trim() || "LMS User";
-  const watermarkLabel = `${watermarkIdentity} • ${new Date(watermarkStamp).toLocaleString("ru-RU")} • Protected LMS`;
-
-  useEffect(() => {
-    if (!isLearnerProtectedView || typeof window === "undefined") return undefined;
-    const timerId = window.setInterval(() => {
-      setWatermarkStamp(Date.now());
-    }, 30000);
-    return () => window.clearInterval(timerId);
-  }, [isLearnerProtectedView]);
-
-  useEffect(() => {
-    if (!isLearnerProtectedView) {
-      setContentShieldVisible(false);
-      setContentShieldReason("");
-      return undefined;
-    }
-    if (typeof window === "undefined" || typeof document === "undefined") return undefined;
-
-    let releaseTimerId = null;
-
-    const armShield = (reason) => {
-      setContentShieldReason(String(reason || ""));
-      setContentShieldVisible(true);
-    };
-
-    const disarmShield = () => {
-      if (document.hidden) return;
-      if (typeof document.hasFocus === "function" && !document.hasFocus()) return;
-      setContentShieldVisible(false);
-      setContentShieldReason("");
-    };
-
-    const disarmShieldSoon = () => {
-      if (releaseTimerId != null) {
-        window.clearTimeout(releaseTimerId);
-      }
-      releaseTimerId = window.setTimeout(() => {
-        disarmShield();
-      }, 1200);
-    };
-
-    const handleBlockedTransfer = (event) => {
-      if (isEditableLmsTarget(event.target)) return;
-      event.preventDefault();
-      event.stopPropagation();
-    };
-
-    const handleContextMenu = (event) => {
-      if (isEditableLmsTarget(event.target)) return;
-      event.preventDefault();
-      event.stopPropagation();
-    };
-
-    const handleKeyEvent = (event) => {
-      const key = String(event.key || "").toLowerCase();
-      const shortcut = buildLmsShortcutSignature(event);
-      const isPrintScreen = key === "printscreen";
-      if (!isPrintScreen && !LMS_BLOCKED_SHORTCUTS.has(shortcut)) return;
-      if (!isPrintScreen && isEditableLmsTarget(event.target)) return;
-      event.preventDefault();
-      event.stopPropagation();
-      armShield(isPrintScreen ? "printscreen" : "shortcut");
-      if (isPrintScreen) {
-        void clearClipboardAfterPrintScreen();
-      }
-      disarmShieldSoon();
-    };
-
-    const handleVisibilityChange = () => {
-      if (document.hidden) {
-        armShield("hidden");
-        return;
-      }
-      disarmShield();
-    };
-
-    const handleBlur = () => armShield("blur");
-    const handleFocus = () => disarmShield();
-    const handleBeforePrint = () => armShield("print");
-    const handleAfterPrint = () => disarmShield();
-
-    document.addEventListener("keydown", handleKeyEvent, true);
-    document.addEventListener("keyup", handleKeyEvent, true);
-    document.addEventListener("copy", handleBlockedTransfer, true);
-    document.addEventListener("cut", handleBlockedTransfer, true);
-    document.addEventListener("dragstart", handleBlockedTransfer, true);
-    document.addEventListener("selectstart", handleBlockedTransfer, true);
-    document.addEventListener("contextmenu", handleContextMenu, true);
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-    window.addEventListener("blur", handleBlur);
-    window.addEventListener("focus", handleFocus);
-    window.addEventListener("beforeprint", handleBeforePrint);
-    window.addEventListener("afterprint", handleAfterPrint);
-
-    if (document.hidden || (typeof document.hasFocus === "function" && !document.hasFocus())) {
-      armShield(document.hidden ? "hidden" : "blur");
-    }
-
-    return () => {
-      if (releaseTimerId != null) {
-        window.clearTimeout(releaseTimerId);
-      }
-      document.removeEventListener("keydown", handleKeyEvent, true);
-      document.removeEventListener("keyup", handleKeyEvent, true);
-      document.removeEventListener("copy", handleBlockedTransfer, true);
-      document.removeEventListener("cut", handleBlockedTransfer, true);
-      document.removeEventListener("dragstart", handleBlockedTransfer, true);
-      document.removeEventListener("selectstart", handleBlockedTransfer, true);
-      document.removeEventListener("contextmenu", handleContextMenu, true);
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
-      window.removeEventListener("blur", handleBlur);
-      window.removeEventListener("focus", handleFocus);
-      window.removeEventListener("beforeprint", handleBeforePrint);
-      window.removeEventListener("afterprint", handleAfterPrint);
-    };
-  }, [isLearnerProtectedView]);
 
   return (
-    <div
-      className={`min-h-screen bg-slate-50 font-sans ${isLessonLayout ? "h-screen overflow-hidden" : ""}`}
-      style={{
-        fontFamily: "'DM Sans', system-ui, sans-serif",
-        WebkitTouchCallout: isLearnerProtectedView ? "none" : undefined,
-      }}
-    >
+    <div className={`min-h-screen bg-slate-50 font-sans ${isLessonLayout ? "h-screen overflow-hidden" : ""}`} style={{ fontFamily: "'DM Sans', system-ui, sans-serif" }}>
       <TopNav
         view={view}
         goBack={goBack}
@@ -2320,39 +2130,6 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
           />
         )}
       </main>
-      {isLearnerProtectedView && (
-        <div className="pointer-events-none fixed inset-0 z-[55] overflow-hidden select-none" aria-hidden="true">
-          {LMS_WATERMARK_POSITIONS.map((position, index) => (
-            <div
-              key={`lms-watermark-${index}`}
-              className="absolute text-[11px] font-semibold tracking-wide text-slate-900/15 whitespace-nowrap"
-              style={{
-                top: position.top,
-                left: position.left,
-                transform: `rotate(${position.rotate}deg)`,
-              }}
-            >
-              {watermarkLabel}
-            </div>
-          ))}
-        </div>
-      )}
-      {isLearnerProtectedView && contentShieldVisible && (
-        <div className="fixed inset-0 z-[140] bg-black flex items-center justify-center px-6 text-center">
-          <div className="max-w-sm">
-            <Lock size={34} className="mx-auto mb-3 text-white/80" />
-            <p className="text-white text-sm font-semibold">Protected training content is hidden</p>
-            <p className="text-white/70 text-xs mt-1">
-              {contentShieldReason === "printscreen" && "Screenshot shortcut is blocked."}
-              {contentShieldReason === "shortcut" && "Capture and export shortcuts are blocked."}
-              {contentShieldReason === "print" && "Printing this page is blocked."}
-              {contentShieldReason === "hidden" && "Return to the LMS tab to continue."}
-              {contentShieldReason === "blur" && "Switch back to the LMS window to continue."}
-              {!["printscreen", "shortcut", "print", "hidden", "blur"].includes(contentShieldReason) && "Return focus to continue learning."}
-            </p>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
