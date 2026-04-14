@@ -1,4 +1,4 @@
-﻿import os
+import os
 import logging
 import psycopg2
 from contextlib import contextmanager
@@ -3163,22 +3163,24 @@ class Database:
             return cursor.fetchone() is not None
             
     def get_user(self, **kwargs):
+        from psycopg2 import sql
         conditions = []
         params = []
         for key, value in kwargs.items():
             if key == 'direction':
-                conditions.append("d.name = %s")
+                conditions.append(sql.SQL("d.name = %s"))
                 params.append(value)
             else:
-                conditions.append(f"u.{key} = %s")
+                # Use sql.Identifier to safely quote the column name
+                conditions.append(sql.SQL("u.{} = %s").format(sql.Identifier(key)))
                 params.append(value)
         
-        query = f"""
+        query = sql.SQL("""
             SELECT u.id, u.telegram_id, u.name, u.role, d.name, u.hire_date, u.supervisor_id, u.login, u.hours_table_url, u.scores_table_url, u.is_active, u.status, u.rate, u.gender, u.birth_date, u.avatar_bucket, u.avatar_blob_path, u.avatar_content_type, u.avatar_file_size, u.avatar_updated_at
             FROM users u
             LEFT JOIN directions d ON u.direction_id = d.id
-            WHERE {' AND '.join(conditions)}
-        """
+            WHERE {}
+        """).format(sql.SQL(' AND ').join(conditions))
         
         with self._get_cursor() as cursor:
             cursor.execute(query, params)
