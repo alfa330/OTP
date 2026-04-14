@@ -5907,7 +5907,7 @@ def operators_summary():
             return jsonify({"error": "Invalid month format. Use YYYY-MM"}), 400
 
         # requester identity + role check
-        user_id_header = request.headers.get('X-User-Id') or request.args.get('requester_id')
+        user_id_header = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
         if not user_id_header:
             return jsonify({"error": "Missing X-User-Id header"}), 400
         try:
@@ -19493,7 +19493,7 @@ def extract_fio_and_links(spreadsheet_url):
         file_id = match.group(1)
         export_url = f"https://docs.google.com/spreadsheets/d/{file_id}/export?format=xlsx"
 
-        response = requests.get(export_url)
+        response = requests.get(export_url, timeout=10)
         if response.status_code != 200:
             return None, None, "Ошибка: Не удалось скачать таблицу. Проверьте доступность."
 
@@ -19621,7 +19621,7 @@ def sync_generate_weekly_report():
             for admin_id in admins:
                 files = {'document': (filename, output.getvalue(), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')}
                 data = {'chat_id': admin_id, 'caption': f"[{now}] 📊 Отчет по неделям за {current_month} (до {current_week}-й недели)"}
-                response = requests.post(telegram_url, files=files, data=data)
+                response = requests.post(telegram_url, files=files, data=data, timeout=30)
                 
                 if response.status_code != 200:
                     logging.error(f"Error sending report to admin {admin_id}: {response.text}")
