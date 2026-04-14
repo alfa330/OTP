@@ -2950,11 +2950,9 @@ function CourseDetail({
   const hasCourseAnalytics = isManagerMode && courseAnalytics && typeof courseAnalytics === "object";
   const [analyticsSection, setAnalyticsSection] = useState("summary");
   const handleOpenProgram = useCallback(() => {
-    if (typeof document === "undefined") return;
-    const node = document.getElementById("lms-course-curriculum");
-    if (!node) return;
-    node.scrollIntoView({ behavior: "smooth", block: "start" });
-  }, []);
+    if (!firstLesson) return;
+    onStartLesson(firstLesson);
+  }, [firstLesson, onStartLesson]);
 
   useEffect(() => {
     setOpenModules(modulesData[0]?.id ? [modulesData[0].id] : []);
@@ -3019,11 +3017,11 @@ function CourseDetail({
               }
               if (firstLesson) onStartLesson(firstLesson);
             }}
-            disabled={isManagerMode ? modulesData.length === 0 : !firstLesson}
+            disabled={!firstLesson}
             className="bg-white text-slate-900 font-semibold px-6 py-3 rounded-xl hover:bg-white/90 transition-colors text-sm shadow-lg disabled:opacity-60 disabled:cursor-not-allowed"
           >
             {isManagerMode
-              ? (modulesData.length > 0 ? "Показать программу курса" : "Программа курса пуста")
+              ? (firstLesson ? "Перейти к первому уроку" : "Программа курса пуста")
               : (course.status === "not_started" ? "Начать курс" : course.status === "completed" ? "Повторить" : "Продолжить обучение")}
           </button>
         </div>
@@ -3352,6 +3350,7 @@ function LessonView({
             <TextLesson
               lesson={lesson}
               onCompleteLesson={onCompleteLesson}
+              isManagerMode={isManagerMode}
             />
           ) : (
             <VideoLesson
@@ -3361,6 +3360,7 @@ function LessonView({
               lmsRequest={lmsRequest}
               onCompleteLesson={onCompleteLesson}
               emitToast={emitToast}
+              isManagerMode={isManagerMode}
             />
           )}
         </div>
@@ -3369,7 +3369,7 @@ function LessonView({
   );
 }
 
-function TextLesson({ lesson, onCompleteLesson }) {
+function TextLesson({ lesson, onCompleteLesson, isManagerMode = false }) {
   const [completing, setCompleting] = useState(false);
   const [completed, setCompleted] = useState(String(lesson?.status || "").toLowerCase() === "completed");
   const materials = Array.isArray(lesson?.materials) ? lesson.materials : [];
@@ -3439,7 +3439,7 @@ function TextLesson({ lesson, onCompleteLesson }) {
         </div>
       </div>
 
-      {!completed && (
+      {!isManagerMode && !completed && (
         <div className="flex justify-end">
           <button
             onClick={handleComplete}
@@ -3462,7 +3462,7 @@ function TextLesson({ lesson, onCompleteLesson }) {
 
 // ─── VIDEO LESSON ─────────────────────────────────────────────────────────────
 
-function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest, onCompleteLesson, emitToast }) {
+function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest, onCompleteLesson, emitToast, isManagerMode = false }) {
   const [playing, setPlaying] = useState(false);
   const [progress, setProgress] = useState(Math.max(0, Math.min(100, Number(lesson?.completionRatio ?? (String(lesson?.status || "").toLowerCase() === "completed" ? 100 : 0)))));
   const [activeTab, setActiveTab] = useState("transcript");
@@ -3480,9 +3480,10 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
   const autoCompleteTriggeredRef = useRef(false);
 
   const lessonId = Number(lesson?.apiLessonId || 0);
-  const canTrack = apiMode && typeof lmsRequest === "function" && lessonId > 0;
+  const canTrack = !isManagerMode && apiMode && typeof lmsRequest === "function" && lessonId > 0;
   const completionThreshold = Math.max(1, Math.min(100, Number(lesson?.completionThreshold || 95)));
-  const canSeekForward = Boolean(lesson?.allowFastForward) || completed || progress >= completionThreshold;
+  const canSeekForward = isManagerMode || Boolean(lesson?.allowFastForward) || completed || progress >= completionThreshold;
+  const effectiveBlockTranscriptCopy = !isManagerMode && Boolean(blockTranscriptCopy);
   const materials = Array.isArray(lesson?.materials) ? lesson.materials : [];
   const videoMaterial = materials.find((item) => {
     const type = String(item?.material_type || item?.type || "").toLowerCase();
@@ -3556,6 +3557,7 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
   }, [canTrack, lmsRequest, lessonId, safeTotalSeconds]);
 
   useEffect(() => {
+    if (isManagerMode) return undefined;
     const sendVisibilityEvent = async (isVisible) => {
       if (!canTrack || !lessonId) return;
       try {
@@ -3587,7 +3589,7 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
     };
     document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
-  }, [canTrack, lmsRequest, lessonId, playing]);
+  }, [canTrack, lmsRequest, lessonId, playing, isManagerMode]);
 
   useEffect(() => {
     if (!playing || !canTrack || !lessonId) {
@@ -3730,6 +3732,7 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
   };
 
   const handleComplete = useCallback(async () => {
+    if (isManagerMode) return;
     if (completed || completing) return;
     if (typeof onCompleteLesson !== "function") return;
     setCompleting(true);
@@ -3748,20 +3751,21 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
     } finally {
       setCompleting(false);
     }
-  }, [completed, completing, onCompleteLesson, lesson, syncHeartbeatBeforeComplete, safeTotalSeconds]);
+  }, [completed, completing, onCompleteLesson, lesson, syncHeartbeatBeforeComplete, safeTotalSeconds, isManagerMode]);
 
   useEffect(() => {
+    if (isManagerMode) return;
     if (completed || completing) return;
     if (progress < completionThreshold) return;
     if (autoCompleteTriggeredRef.current) return;
     autoCompleteTriggeredRef.current = true;
     handleComplete();
-  }, [progress, completionThreshold, completed, completing, handleComplete]);
+  }, [progress, completionThreshold, completed, completing, handleComplete, isManagerMode]);
 
   const handleTranscriptCopyAttempt = useCallback((event) => {
-    if (!blockTranscriptCopy) return;
+    if (!effectiveBlockTranscriptCopy) return;
     event.preventDefault();
-  }, [blockTranscriptCopy]);
+  }, [effectiveBlockTranscriptCopy]);
 
   return (
     <div>
@@ -3834,7 +3838,7 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
           </div>
         )}
       </div>
-      {!completed && (
+      {!isManagerMode && !completed && (
         <div className="mb-6 flex justify-end">
           <button
             onClick={handleComplete}
@@ -3864,7 +3868,7 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
               onContextMenu={handleTranscriptCopyAttempt}
               onDragStart={handleTranscriptCopyAttempt}
               onSelectStart={handleTranscriptCopyAttempt}
-              style={blockTranscriptCopy ? { userSelect: "none", WebkitUserSelect: "none" } : undefined}
+              style={effectiveBlockTranscriptCopy ? { userSelect: "none", WebkitUserSelect: "none" } : undefined}
             >
               {transcriptText ? (
                 <RichTextContent value={transcriptText} />
