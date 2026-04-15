@@ -936,7 +936,7 @@ def _requester_can_access_target_user(
     if _is_supervisor_role(requester_role):
         if target_role not in set(supervisor_target_roles or ()):
             return False
-        return _target_user_supervisor_id(target_user) == requester_id
+        return True
     return False
 
 
@@ -976,10 +976,7 @@ def _filter_operators_for_requester_scope(requester, requester_id, operators):
     if _is_admin_role(requester_role):
         return items
     if _is_supervisor_role(requester_role):
-        return [
-            item for item in items
-            if int(item.get('supervisor_id') or 0) == int(requester_id)
-        ]
+        return items
     return []
 
 
@@ -3132,9 +3129,6 @@ def get_admin_users():
 
             return jsonify({"status": "success", "users": users}), 200
 
-        if not _is_admin_role(requester_role):
-            return jsonify({"error": "Only admins can access full users data"}), 403
-
         visible_roles = ['operator', 'trainee', 'trainer']
         if requester_role == 'super_admin':
             visible_roles.append('admin')
@@ -3391,40 +3385,17 @@ def admin_update_user():
             return jsonify({"error": "Only admins can update users"}), 403
         if target_role in ('admin', 'super_admin') and requester_role != 'super_admin':
             return jsonify({"error": "Only super admins can update admin users"}), 403
-        if requester_role == 'sv':
-            supervisor_allowed_fields = {
-                'rate',
-                'status',
-                'employment_type',
-                'internship_in_company',
-                'front_office_training',
-                'front_office_training_date',
-                'study_place',
-                'study_course'
-            }
-            if field not in supervisor_allowed_fields:
-                return jsonify({"error": "Supervisors cannot modify this field"}), 403
-
-            scoped_target_user, scope_error = _load_target_user_with_scope(
-                requester,
-                requester_id,
-                user_id,
-                allow_self=False,
-                supervisor_target_roles=('operator', 'trainee'),
-                not_found_message="User not found",
-                forbidden_message="Forbidden for this user"
-            )
-            if scope_error:
-                message, status_code = scope_error
-                return jsonify({"error": message}), status_code
-            target_user = scoped_target_user
-            target_role = str(target_user[3] or '').strip().lower()
-
-            if field == 'rate':
-                if not _is_supervisor_rate_change_day():
-                    return jsonify({"error": "Supervisor can change rate only on the first day of the month"}), 403
-                if target_role != 'operator':
-                    return jsonify({"error": "Supervisors can change rate only for operators"}), 403
+        if field == 'rate' and requester_role == 'sv':
+            if not _is_supervisor_rate_change_day():
+                return jsonify({"error": "Supervisor can change rate only on the first day of the month"}), 403
+            if target_role != 'operator':
+                return jsonify({"error": "Supervisors can change rate only for operators"}), 403
+            try:
+                target_supervisor_id = int(target_user[6])
+            except (TypeError, ValueError):
+                target_supervisor_id = None
+            if target_supervisor_id != requester_id:
+                return jsonify({"error": "Forbidden for this operator"}), 403
 
         success = db.update_user(user_id, field, value, changed_by=requester_id)  # Pass changed_by
         if not success:
@@ -3467,8 +3438,6 @@ def admin_bulk_update_users():
                 user_ids.append(user_id)
 
         allowed_fields = {'direction_id', 'supervisor_id', 'rate'}
-        if requester_role == 'sv':
-            allowed_fields = {'rate'}
         unknown_fields = [field for field in changes_raw.keys() if field not in allowed_fields]
         if unknown_fields:
             return jsonify({"error": f"Unsupported fields: {', '.join(unknown_fields)}"}), 400
@@ -3515,22 +3484,12 @@ def admin_bulk_update_users():
                     failed_user_ids.append(target_user_id)
                     continue
                 target_role = str(target_user[3] or '').strip().lower()
-                if requester_role == 'sv':
-                    scoped_target_user, scope_error = _load_target_user_with_scope(
-                        requester,
-                        requester_id,
-                        target_user_id,
-                        allow_self=False,
-                        supervisor_target_roles=('operator',),
-                        not_found_message="User not found",
-                        forbidden_message="Forbidden for this operator"
-                    )
-                    if scope_error:
-                        failed_user_ids.append(target_user_id)
-                        continue
-                    target_user = scoped_target_user
-                    target_role = str(target_user[3] or '').strip().lower()
-                    if 'rate' in updates and target_role != 'operator':
+                if requester_role == 'sv' and 'rate' in updates:
+                    try:
+                        target_supervisor_id = int(target_user[6])
+                    except (TypeError, ValueError):
+                        target_supervisor_id = None
+                    if target_role != 'operator' or target_supervisor_id != requester_id:
                         failed_user_ids.append(target_user_id)
                         continue
                 update_ok = True
@@ -3824,10 +3783,12 @@ def sv_daily_hours():
         role = _normalize_user_role(requester[3])
         if _is_supervisor_role(role):
             user_param = request.args.get('id')
-            if user_param and str(user_param).isdigit() and int(user_param) != requester_id:
-                return jsonify({"error": "Supervisors can access only their own team"}), 403
+            if user_param and str(user_param).isdigit():
+                supervisor_id = int(user_param)
+            else:
+                supervisor_id = requester_id
 
-            result = db.get_daily_hours_by_supervisor_month(requester_id, month)
+            result = db.get_daily_hours_by_supervisor_month(supervisor_id, month)
             return jsonify({
                 "status": "success",
                 "month": result.get("month", month),
@@ -4333,8 +4294,8 @@ def get_sv_list():
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
-        if not _is_admin_role(requester[3]):
-            return jsonify({"error": "Only admins can access supervisors list"}), 403
+        if not (_is_admin_role(requester[3]) or _is_supervisor_role(requester[3])):
+            return jsonify({"error": "Only admins or supervisors can access supervisors list"}), 403
 
         with db._get_cursor() as cursor:
             cursor.execute("""
@@ -6111,8 +6072,8 @@ def change_sv_table():
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
-        if not _is_admin_role(requester[3]):
-            return jsonify({"error": "Only admins can change supervisor tables"}), 403
+        if not (_is_admin_role(requester[3]) or _is_supervisor_role(requester[3])):
+            return jsonify({"error": "Only admins or supervisors can change supervisor tables"}), 403
 
         data = request.get_json()
         required_fields = ['id', 'table_url']
@@ -6317,8 +6278,8 @@ def add_sv():
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
-        if not _is_admin_role(requester[3]):
-            return jsonify({"error": "Only admins can add supervisors"}), 403
+        if not (_is_admin_role(requester[3]) or _is_supervisor_role(requester[3])):
+            return jsonify({"error": "Only admins or supervisors can add supervisors"}), 403
 
         data = request.get_json()
         required_fields = ['name']  # Removed 'telegram_id' from required fields
@@ -6740,7 +6701,7 @@ def get_sv_operators_moderka():
         if not _is_supervisor_role(requester[3]):
             return jsonify({"error": "Unauthorized: Only supervisors can access this"}), 403
         
-        operators = db.get_operators_by_supervisor(supervisor_id) or []
+        operators = db.get_all_operators_with_details() or []
         for operator in operators:
             operator['avatar_url'] = _build_avatar_signed_url(
                 operator.get('avatar_bucket'),
@@ -6784,8 +6745,6 @@ def get_sv_data():
         requester_role = _normalize_user_role(requester[3])
         if not (_is_admin_role(requester_role) or requester_role == 'sv'):
             return jsonify({"error": "Forbidden"}), 403
-        if requester_role == 'sv' and user_id != requester_id:
-            return jsonify({"error": "Supervisors can only access their own team data"}), 403
 
         # fetch user (accept any caller role; admin can call this endpoint)
         user = db.get_user(id=user_id)
@@ -6806,10 +6765,10 @@ def get_sv_data():
             "operators": []
         }
 
-        # Supervisors can only fetch their own team, admins can query a specific supervisor.
+        # For supervisors keep legacy access to the full operators list.
         try:
             if requester_role == 'sv':
-                operators = db.get_operators_by_supervisor(requester_id) or []
+                operators = db.get_all_operators_with_details() or []
             else:
                 operators = db.get_operators_by_supervisor(user_id) or []
         except Exception:
@@ -6839,10 +6798,8 @@ def get_sv_data():
                             u.avatar_bucket,
                             u.avatar_blob_path
                         FROM users u
-                        WHERE u.id = %s
-                          AND LOWER(COALESCE(u.role, '')) IN ('sv', 'supervisor')
-                        LIMIT 1
-                    """, (requester_id,))
+                        WHERE LOWER(COALESCE(u.role, '')) IN ('sv', 'supervisor')
+                    """)
                     supervisor_rows = cursor.fetchall()
                 elif target_user_role == 'sv':
                     cursor.execute("""
@@ -7064,8 +7021,8 @@ def notify_supervisor():
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
-        if not _is_admin_role(requester[3]):
-            return jsonify({"error": "Only admins can notify supervisors"}), 403
+        if not (_is_admin_role(requester[3]) or _is_supervisor_role(requester[3])):
+            return jsonify({"error": "Only admins or supervisors can notify supervisors"}), 403
 
         data = request.get_json()
         required_fields = ['sv_id', 'operator_name']
@@ -8818,8 +8775,8 @@ def shuffle_imported_calls():
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
-        if not _is_admin_role(importer[3]):
-            return jsonify({"error": "Only admins can import call distribution"}), 403
+        if not (_is_admin_role(importer[3]) or _is_supervisor_role(importer[3])):
+            return jsonify({"error": "Only admins or supervisors can import call distribution"}), 403
 
         payload = request.get_json(force=True)
     except Exception:
@@ -8891,9 +8848,6 @@ def receive_call_evaluation():
         operator = db.get_user(name=operator_name)
         if not evaluator or not operator:
             return jsonify({"error": "Evaluator or operator not found"}), 404
-        if not _is_admin_role(requester_role) and evaluator[0] != requester_id:
-            return jsonify({"error": "Supervisors can only submit evaluations on their own behalf"}), 403
-
         if is_correction:
             # admins всегда могут делать переоценки
             if _is_admin_role(requester[3]):
@@ -9088,8 +9042,8 @@ def add_operator():
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
-        if not _is_admin_role(requester[3]):
-            return jsonify({"error": "Only admins can add operators"}), 403
+        if not (_is_admin_role(requester[3]) or _is_supervisor_role(requester[3])):
+            return jsonify({"error": "Only admins or supervisors can add operators"}), 403
 
         data = request.get_json()
         required_fields = ['name', 'telegram_id', 'supervisor_id']
@@ -9324,27 +9278,17 @@ def get_monthly_report_hours():
             return jsonify({"error": message}), status_code
 
         role = _normalize_user_role(requester[3])
+        if not (_is_admin_role(role) or _is_supervisor_role(role)):
+            return jsonify({"error": "Unauthorized to access this report"}), 403
         generate_all = False
 
-        if _is_supervisor_role(role):
-            if supervisor_id not in (None, ''):
-                try:
-                    requested_supervisor_id = int(supervisor_id)
-                except ValueError:
-                    return jsonify({"error": "supervisor_id must be integer"}), 400
-                if requested_supervisor_id != requester_id:
-                    return jsonify({"error": "Supervisors can access only their own report"}), 403
-            supervisor_id = requester_id
-        elif _is_admin_role(role):
-            if supervisor_id in (None, ''):
-                generate_all = True
-            else:
-                try:
-                    supervisor_id = int(supervisor_id)
-                except ValueError:
-                    return jsonify({"error": "supervisor_id must be integer"}), 400
+        if not supervisor_id:
+            generate_all = True
         else:
-            return jsonify({"error": "Unauthorized to access this report"}), 403
+            try:
+                supervisor_id = int(supervisor_id)
+            except ValueError:
+                return jsonify({"error": "supervisor_id must be integer"}), 400
 
         logging.info("Начало генерации отчета: supervisor_id=%s month=%s generate_all=%s", supervisor_id, month, generate_all)
 
@@ -9358,7 +9302,10 @@ def get_monthly_report_hours():
             return jsonify({"error": "Ошибка получения операторов"}), 500
 
         try:
-            trainings_list_raw = db.get_trainings(None, month)
+            if generate_all:
+                trainings_list_raw = db.get_trainings(None, month)
+            else:
+                trainings_list_raw = db.get_trainings(supervisor_id, month)
         except Exception as e:
             logging.exception("Ошибка получения trainings из db")
             trainings_list_raw = []
@@ -9526,26 +9473,7 @@ def get_trainings():
             params.append(requester_id)
         else:
             user_param = request.args.get('id')
-            if _is_supervisor_role(role):
-                if user_param and str(user_param).isdigit():
-                    target_user, scope_error = _load_target_user_with_scope(
-                        requester,
-                        requester_id,
-                        user_param,
-                        allow_self=False,
-                        supervisor_target_roles=('operator',),
-                        not_found_message="Operator not found",
-                        forbidden_message="Forbidden for this operator"
-                    )
-                    if scope_error:
-                        message, status_code = scope_error
-                        return jsonify({"error": message}), status_code
-                    where_clauses.append("t.operator_id = %s")
-                    params.append(int(target_user[0]))
-                else:
-                    where_clauses.append("u.supervisor_id = %s")
-                    params.append(requester_id)
-            elif user_param:
+            if user_param:
                 if not str(user_param).isdigit():
                     return jsonify({"error": "Invalid id parameter"}), 400
                 target_user = db.get_user(id=int(user_param))
@@ -9560,6 +9488,9 @@ def get_trainings():
                     params.append(int(target_user[0]))
                 else:
                     return jsonify({"error": "Unsupported target role"}), 400
+            elif _is_supervisor_role(role):
+                where_clauses.append("u.supervisor_id = %s")
+                params.append(requester_id)
 
         if where_clauses:
             query += " WHERE " + " AND ".join(where_clauses)
@@ -11849,8 +11780,8 @@ def get_work_schedule_break_rules():
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
-        if not _is_admin_role(user_data[3]):
-            return jsonify({"error": "Only admins can save break rules"}), 403
+        if not (_is_admin_role(user_data[3]) or _is_supervisor_role(user_data[3])):
+            return jsonify({"error": "Forbidden"}), 403
 
         direction_rules = db.get_work_schedule_break_rules()
         return jsonify({"direction_rules": direction_rules}), 200
@@ -12589,7 +12520,7 @@ def export_work_schedules_excel():
         operators = db.get_operators_with_shifts(start_date, end_date) or []
         operators = _filter_operators_for_requester_scope(user_data, requester_id, operators)
 
-        if selected_supervisor_ids and _is_admin_role(user_data[3]):
+        if selected_supervisor_ids:
             operators = [
                 op for op in operators
                 if int(op.get('supervisor_id') or 0) in selected_supervisor_ids
