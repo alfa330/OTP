@@ -87,22 +87,113 @@ const normalizeClientAuthTransport = (value) => {
     }
     return null;
 };
-const getStoredAuthTransport = () => {
+const authRuntimeState = {
+    transport: null,
+    accessToken: '',
+    refreshToken: ''
+};
+const safeGetBrowserStorage = (storageName) => {
     if (typeof window === 'undefined') return null;
-    return normalizeClientAuthTransport(window.localStorage.getItem(AUTH_TRANSPORT_STORAGE_KEY));
+    try {
+        const storage = window[storageName];
+        if (!storage) return null;
+        storage.getItem('__otp_storage_probe__');
+        return storage;
+    } catch (error) {
+        return null;
+    }
+};
+const safeStorageGetItem = (storage, key) => {
+    if (!storage) return '';
+    try {
+        return String(storage.getItem(key) || '').trim();
+    } catch (error) {
+        return '';
+    }
+};
+const safeStorageSetItem = (storage, key, value) => {
+    if (!storage) return false;
+    try {
+        storage.setItem(key, value);
+        return true;
+    } catch (error) {
+        return false;
+    }
+};
+const safeStorageRemoveItem = (storage, key) => {
+    if (!storage) return;
+    try {
+        storage.removeItem(key);
+    } catch (error) {
+        // Ignore storage removal failures (privacy mode / embedded webviews).
+    }
+};
+const resolveRuntimeTokenField = (storageKey) => {
+    if (storageKey === ACCESS_TOKEN_STORAGE_KEY) return 'accessToken';
+    if (storageKey === REFRESH_TOKEN_STORAGE_KEY) return 'refreshToken';
+    return null;
+};
+const getStoredAuthTransport = () => {
+    const runtimeTransport = normalizeClientAuthTransport(authRuntimeState.transport);
+    if (runtimeTransport) return runtimeTransport;
+
+    const sessionStorageRef = safeGetBrowserStorage('sessionStorage');
+    const sessionTransport = normalizeClientAuthTransport(
+        safeStorageGetItem(sessionStorageRef, AUTH_TRANSPORT_STORAGE_KEY)
+    );
+    if (sessionTransport) {
+        authRuntimeState.transport = sessionTransport;
+        return sessionTransport;
+    }
+
+    const localStorageRef = safeGetBrowserStorage('localStorage');
+    const localTransport = normalizeClientAuthTransport(
+        safeStorageGetItem(localStorageRef, AUTH_TRANSPORT_STORAGE_KEY)
+    );
+    if (localTransport) {
+        authRuntimeState.transport = localTransport;
+        safeStorageSetItem(sessionStorageRef, AUTH_TRANSPORT_STORAGE_KEY, localTransport);
+        return localTransport;
+    }
+    return null;
 };
 const setStoredAuthTransport = (transport) => {
-    if (typeof window === 'undefined') return;
     const normalized = normalizeClientAuthTransport(transport);
+    const sessionStorageRef = safeGetBrowserStorage('sessionStorage');
+    const localStorageRef = safeGetBrowserStorage('localStorage');
+    authRuntimeState.transport = normalized;
+
     if (!normalized) {
-        window.localStorage.removeItem(AUTH_TRANSPORT_STORAGE_KEY);
+        safeStorageRemoveItem(sessionStorageRef, AUTH_TRANSPORT_STORAGE_KEY);
+        safeStorageRemoveItem(localStorageRef, AUTH_TRANSPORT_STORAGE_KEY);
         return;
     }
-    window.localStorage.setItem(AUTH_TRANSPORT_STORAGE_KEY, normalized);
+    safeStorageSetItem(sessionStorageRef, AUTH_TRANSPORT_STORAGE_KEY, normalized);
+    safeStorageSetItem(localStorageRef, AUTH_TRANSPORT_STORAGE_KEY, normalized);
 };
 const getStoredAuthToken = (storageKey) => {
-    if (typeof window === 'undefined') return '';
-    return String(window.localStorage.getItem(storageKey) || '').trim();
+    const runtimeField = resolveRuntimeTokenField(storageKey);
+    const runtimeToken = runtimeField ? String(authRuntimeState[runtimeField] || '').trim() : '';
+    if (runtimeToken) return runtimeToken;
+
+    const sessionStorageRef = safeGetBrowserStorage('sessionStorage');
+    const sessionToken = safeStorageGetItem(sessionStorageRef, storageKey);
+    if (sessionToken) {
+        if (runtimeField) authRuntimeState[runtimeField] = sessionToken;
+        return sessionToken;
+    }
+
+    const localStorageRef = safeGetBrowserStorage('localStorage');
+    const legacyToken = safeStorageGetItem(localStorageRef, storageKey);
+    if (legacyToken) {
+        if (runtimeField) authRuntimeState[runtimeField] = legacyToken;
+        if (safeStorageSetItem(sessionStorageRef, storageKey, legacyToken)) {
+            safeStorageRemoveItem(localStorageRef, storageKey);
+        }
+        return legacyToken;
+    }
+
+    return '';
 };
 const hasStoredBearerTokens = () => {
     return Boolean(
@@ -111,14 +202,22 @@ const hasStoredBearerTokens = () => {
     );
 };
 const clearStoredBearerTokens = () => {
-    if (typeof window === 'undefined') return;
-    window.localStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY);
-    window.localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
+    authRuntimeState.accessToken = '';
+    authRuntimeState.refreshToken = '';
+    const sessionStorageRef = safeGetBrowserStorage('sessionStorage');
+    const localStorageRef = safeGetBrowserStorage('localStorage');
+    safeStorageRemoveItem(sessionStorageRef, ACCESS_TOKEN_STORAGE_KEY);
+    safeStorageRemoveItem(sessionStorageRef, REFRESH_TOKEN_STORAGE_KEY);
+    safeStorageRemoveItem(localStorageRef, ACCESS_TOKEN_STORAGE_KEY);
+    safeStorageRemoveItem(localStorageRef, REFRESH_TOKEN_STORAGE_KEY);
 };
 const clearAuthTokens = () => {
-    if (typeof window === 'undefined') return;
     clearStoredBearerTokens();
-    window.localStorage.removeItem(AUTH_TRANSPORT_STORAGE_KEY);
+    authRuntimeState.transport = null;
+    const sessionStorageRef = safeGetBrowserStorage('sessionStorage');
+    const localStorageRef = safeGetBrowserStorage('localStorage');
+    safeStorageRemoveItem(sessionStorageRef, AUTH_TRANSPORT_STORAGE_KEY);
+    safeStorageRemoveItem(localStorageRef, AUTH_TRANSPORT_STORAGE_KEY);
 };
 const isLikelyCookieRestrictedMobileContext = () => {
     if (typeof window === 'undefined' || typeof navigator === 'undefined') return false;
@@ -145,14 +244,27 @@ const activateCookieAuthTransport = () => {
     setStoredAuthTransport('cookie');
 };
 const persistBearerAuthTokens = (payload) => {
-    if (typeof window === 'undefined') return false;
     const accessToken = String(payload?.access_token || '').trim();
     const refreshToken = String(payload?.refresh_token || '').trim();
     if (!accessToken || !refreshToken) {
         return false;
     }
-    window.localStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, accessToken);
-    window.localStorage.setItem(REFRESH_TOKEN_STORAGE_KEY, refreshToken);
+
+    authRuntimeState.accessToken = accessToken;
+    authRuntimeState.refreshToken = refreshToken;
+
+    const sessionStorageRef = safeGetBrowserStorage('sessionStorage');
+    const localStorageRef = safeGetBrowserStorage('localStorage');
+
+    const accessPersistedToSession = safeStorageSetItem(sessionStorageRef, ACCESS_TOKEN_STORAGE_KEY, accessToken);
+    const refreshPersistedToSession = safeStorageSetItem(sessionStorageRef, REFRESH_TOKEN_STORAGE_KEY, refreshToken);
+
+    if (accessPersistedToSession) safeStorageRemoveItem(localStorageRef, ACCESS_TOKEN_STORAGE_KEY);
+    else safeStorageSetItem(localStorageRef, ACCESS_TOKEN_STORAGE_KEY, accessToken);
+
+    if (refreshPersistedToSession) safeStorageRemoveItem(localStorageRef, REFRESH_TOKEN_STORAGE_KEY);
+    else safeStorageSetItem(localStorageRef, REFRESH_TOKEN_STORAGE_KEY, refreshToken);
+
     setStoredAuthTransport('bearer');
     return true;
 };
