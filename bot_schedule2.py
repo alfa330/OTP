@@ -92,6 +92,7 @@ JWT_REFRESH_TOKEN_DAYS = int(os.getenv('JWT_REFRESH_TOKEN_DAYS', '30'))
 JWT_ACCESS_COOKIE_NAME = os.getenv('JWT_ACCESS_COOKIE_NAME', 'otp_access_token')
 JWT_REFRESH_COOKIE_NAME = os.getenv('JWT_REFRESH_COOKIE_NAME', 'otp_refresh_token')
 JWT_REFRESH_HEADER_NAME = os.getenv('JWT_REFRESH_HEADER_NAME', 'X-Refresh-Token')
+JWT_AUTH_TRANSPORT_HEADER_NAME = os.getenv('JWT_AUTH_TRANSPORT_HEADER_NAME', 'X-Auth-Transport')
 JWT_COOKIE_DOMAIN = os.getenv('JWT_COOKIE_DOMAIN', None)
 JWT_COOKIE_SAMESITE = os.getenv('JWT_COOKIE_SAMESITE', 'None')
 JWT_COOKIE_SECURE = os.getenv('JWT_COOKIE_SECURE', 'true').lower() == 'true'
@@ -150,7 +151,7 @@ CORS(app, resources={
     r"/api/*": {
         "origins": list(ALLOWED_ORIGINS) + [r"http://localhost:\d+", r"http://127\.0\.0\.1:\d+"],
         "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        "allow_headers": ["Content-Type", "X-User-Id", "Authorization", "X-Refresh-Token"],
+        "allow_headers": ["Content-Type", "X-User-Id", "Authorization", "X-Refresh-Token", "X-Auth-Transport"],
         "supports_credentials": True,
         "max_age": 86400
     }
@@ -185,6 +186,41 @@ def _client_ip():
 def _hash_token(raw_token):
     value = f"{raw_token}:{JWT_TOKEN_PEPPER}"
     return hashlib.sha256(value.encode('utf-8')).hexdigest()
+
+
+def _normalize_auth_transport(value):
+    normalized = str(value or '').strip().lower()
+    if normalized in {'cookie', 'bearer'}:
+        return normalized
+    return None
+
+
+def _requested_auth_transport(payload=None):
+    if isinstance(payload, dict):
+        payload_transport = _normalize_auth_transport(payload.get('auth_transport'))
+        if payload_transport:
+            return payload_transport
+
+    header_transport = _normalize_auth_transport(request.headers.get(JWT_AUTH_TRANSPORT_HEADER_NAME))
+    if header_transport:
+        return header_transport
+
+    return 'cookie'
+
+
+def _build_auth_response_payload(user_payload, transport='cookie', access_token=None, refresh_token=None):
+    response_payload = {
+        "status": "success",
+        "user": user_payload,
+        "auth_transport": transport,
+        **user_payload
+    }
+    if transport == 'bearer':
+        if access_token:
+            response_payload["access_token"] = access_token
+        if refresh_token:
+            response_payload["refresh_token"] = refresh_token
+    return response_payload
 
 
 def _normalize_login_rate_limit_key(login_value):
@@ -1980,7 +2016,6 @@ def enforce_api_origin_protection():
     if not (
         _get_cookie_value(JWT_ACCESS_COOKIE_NAME)
         or _get_cookie_value(JWT_REFRESH_COOKIE_NAME)
-        or request.path in {'/api/logout', '/api/auth/logout_all', '/api/auth/refresh'}
     ):
         return None
 
@@ -2051,7 +2086,7 @@ def _build_cors_preflight_response():
         response.headers["Access-Control-Allow-Credentials"] = "true"
         response.headers["Vary"] = "Origin"
 
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-User-Id, Authorization, X-Refresh-Token"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-User-Id, Authorization, X-Refresh-Token, X-Auth-Transport"
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
     response.headers["Access-Control-Max-Age"] = "86400"
     return response
@@ -2068,7 +2103,7 @@ def after_request(response):
         response.headers['Access-Control-Allow-Credentials'] = 'true'
         response.headers['Vary'] = 'Origin'
 
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-User-Id, Authorization, X-Refresh-Token'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-User-Id, Authorization, X-Refresh-Token, X-Auth-Transport'
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS, DELETE, PUT, PATCH'
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['X-Frame-Options'] = 'DENY'
@@ -2104,6 +2139,7 @@ def login():
             return _build_cors_preflight_response()
 
         data = request.get_json() or {}
+        auth_transport = _requested_auth_transport(data)
         login_value = data.get('login', '').strip()
         password = data.get('password', '')
         if not login_value or not password:
@@ -2145,11 +2181,14 @@ def login():
             )
             _set_request_auth_context(user[0])
             payload = _get_user_payload(user_profile)
-            response = jsonify({
-                "status": "success",
-                "user": payload,
-                **payload
-            })
+            response_payload = _build_auth_response_payload(
+                payload,
+                transport=auth_transport,
+                access_token=access_token,
+                refresh_token=refresh_token
+            )
+            response = jsonify(response_payload)
+            response.headers[JWT_AUTH_TRANSPORT_HEADER_NAME] = auth_transport
             _set_auth_cookies(response, access_token, refresh_token)
             return response, 200
 
@@ -2183,6 +2222,7 @@ def refresh_auth():
         if request.method == 'OPTIONS':
             return _build_cors_preflight_response()
 
+        auth_transport = _requested_auth_transport()
         _authenticate_refresh_cookie(optional=False, rotate_tokens=True)
         user_id = getattr(g, 'user_id', None)
         if not user_id:
@@ -2192,8 +2232,15 @@ def refresh_auth():
             raise AuthError("USER_NOT_FOUND", "User not found")
 
         payload_user = _get_user_payload(user)
-        response_payload = {"status": "success", "user": payload_user, **payload_user}
+        pending_tokens = getattr(g, 'pending_auth_tokens', None) or (None, None)
+        response_payload = _build_auth_response_payload(
+            payload_user,
+            transport=auth_transport,
+            access_token=pending_tokens[0],
+            refresh_token=pending_tokens[1]
+        )
         response = jsonify(response_payload)
+        response.headers[JWT_AUTH_TRANSPORT_HEADER_NAME] = auth_transport
         return response, 200
     except AuthError as auth_error:
         response = jsonify({"error": auth_error.message, "code": auth_error.code})
