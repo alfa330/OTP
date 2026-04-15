@@ -238,14 +238,8 @@ const isLikelyCookieRestrictedMobileContext = () => {
     if (typeof window === 'undefined' || typeof navigator === 'undefined') return false;
     const userAgent = String(navigator.userAgent || '').toLowerCase();
     const isMobileDevice = /(android|iphone|ipad|ipod|iemobile|opera mini|mobile|windows phone)/i.test(userAgent);
-    const isEmbeddedWebView = /\bwv\b|; wv\)|fbav|fban|instagram|line\//i.test(userAgent);
-    try {
-        new URL(API_BASE_URL, window.location.origin);
-        return isMobileDevice || isEmbeddedWebView;
-    } catch (error) {
-        console.warn('Failed to detect auth transport context:', error);
-        return isMobileDevice || isEmbeddedWebView;
-    }
+    const isEmbeddedWebView = /\bwv\b|; wv\)|fbav|fban|instagram|line\/|tgweb|telegrambot/i.test(userAgent);
+    return isMobileDevice || isEmbeddedWebView;
 };
 const isCrossOriginApiContext = () => {
     if (typeof window === 'undefined') return false;
@@ -288,10 +282,12 @@ const persistBearerAuthTokens = (payload) => {
     const localStorageRef = safeGetBrowserStorage('localStorage');
 
     if (shouldUseLegacyMobileBearerStorage()) {
+        // Store tokens in localStorage (persistent across reloads) AND sessionStorage
+        // (same-session fallback when localStorage is blocked or cleared by ITP/private mode).
         safeStorageSetItem(localStorageRef, ACCESS_TOKEN_STORAGE_KEY, accessToken);
         safeStorageSetItem(localStorageRef, REFRESH_TOKEN_STORAGE_KEY, refreshToken);
-        safeStorageRemoveItem(sessionStorageRef, ACCESS_TOKEN_STORAGE_KEY);
-        safeStorageRemoveItem(sessionStorageRef, REFRESH_TOKEN_STORAGE_KEY);
+        safeStorageSetItem(sessionStorageRef, ACCESS_TOKEN_STORAGE_KEY, accessToken);
+        safeStorageSetItem(sessionStorageRef, REFRESH_TOKEN_STORAGE_KEY, refreshToken);
         setStoredAuthTransport('bearer');
         return true;
     }
@@ -573,6 +569,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             }
 
                             await window.__otpRefreshPromise;
+                            // Strip stale auth headers so the request interceptor
+                            // re-injects fresh tokens on retry.
+                            if (originalRequest.headers) {
+                                delete originalRequest.headers['Authorization'];
+                                delete originalRequest.headers['authorization'];
+                            }
                             return axios(originalRequest);
                         }
 
