@@ -138,8 +138,8 @@ LMS_DEFAULT_PASS_THRESHOLD = float(os.getenv('LMS_DEFAULT_PASS_THRESHOLD', '80')
 LMS_DEFAULT_ATTEMPT_LIMIT = int(os.getenv('LMS_DEFAULT_ATTEMPT_LIMIT', '3'))
 LMS_CERTIFICATE_STORAGE = (os.getenv('LMS_CERTIFICATE_STORAGE') or 'db').strip().lower()
 LMS_CERTIFICATE_TEMPLATE_VERSION = (
-    (os.getenv('LMS_CERTIFICATE_TEMPLATE_VERSION') or 'bold_split_v4_html_2026_04').strip()
-    or 'bold_split_v4_html_2026_04'
+    (os.getenv('LMS_CERTIFICATE_TEMPLATE_VERSION') or 'bold_split_v4_exact_html_2026_04_15').strip()
+    or 'bold_split_v4_exact_html_2026_04_15'
 )
 try:
     LMS_CERTIFICATE_RASTER_SCALE = int(str(os.getenv('LMS_CERTIFICATE_RASTER_SCALE', '3')).strip() or '3')
@@ -15557,422 +15557,244 @@ def _lms_escape_html(value):
 def _lms_build_bold_split_certificate_html(certificate_number, learner_name, course_title, issued_at):
     issue_dt = issued_at if isinstance(issued_at, datetime) else _lms_now()
     issue_date_ru = _lms_format_certificate_ru_date(issue_dt)
-    issue_date_short = issue_dt.strftime("%d.%m.%Y")
     cert_number = _lms_escape_html(certificate_number or "-")
     learner = _lms_escape_html(learner_name or "-")
     course = _lms_escape_html(course_title or "-")
-    sig_name_1 = _lms_escape_html(os.getenv("LMS_CERTIFICATE_SIGNER_1_NAME") or "Алексей Иванов")
-    sig_role_1 = _lms_escape_html(os.getenv("LMS_CERTIFICATE_SIGNER_1_ROLE") or "Генеральный директор")
-    sig_name_2 = _lms_escape_html(os.getenv("LMS_CERTIFICATE_SIGNER_2_NAME") or "Мария Смирнова")
-    sig_role_2 = _lms_escape_html(os.getenv("LMS_CERTIFICATE_SIGNER_2_ROLE") or "Руководитель программ")
-    issue_date_ru_html = _lms_escape_html(issue_date_ru)
-    issue_date_short_html = _lms_escape_html(issue_date_short)
+
+    sig_name_1 = _lms_escape_html(
+        os.getenv("LMS_CERTIFICATE_SIGNER_1_NAME")
+        or "\u0410\u043b\u0435\u043a\u0441\u0435\u0439 \u0418\u0432\u0430\u043d\u043e\u0432"
+    )
+    sig_role_1 = _lms_escape_html(
+        os.getenv("LMS_CERTIFICATE_SIGNER_1_ROLE")
+        or "\u0413\u0435\u043d\u0435\u0440\u0430\u043b\u044c\u043d\u044b\u0439 \u0434\u0438\u0440\u0435\u043a\u0442\u043e\u0440"
+    )
+    sig_name_2 = _lms_escape_html(
+        os.getenv("LMS_CERTIFICATE_SIGNER_2_NAME")
+        or "\u041c\u0430\u0440\u0438\u044f \u0421\u043c\u0438\u0440\u043d\u043e\u0432\u0430"
+    )
+    sig_role_2 = _lms_escape_html(
+        os.getenv("LMS_CERTIFICATE_SIGNER_2_ROLE")
+        or "\u0420\u0443\u043a\u043e\u0432\u043e\u0434\u0438\u0442\u0435\u043b\u044c \u043f\u0440\u043e\u0433\u0440\u0430\u043c\u043c"
+    )
+
+    issue_date_html = _lms_escape_html(issue_date_ru)
+
+    text_official = "\u041e\u0444\u0438\u0446\u0438\u0430\u043b\u044c\u043d\u044b\u0439 \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442"
+    text_cert_title = "\u0421\u0435\u0440\u0442\u0438&shy;\u0444\u0438\u043a\u0430\u0442"
+    text_training = "\u043e \u043f\u0440\u043e\u0445\u043e\u0436\u0434\u0435\u043d\u0438\u0438 \u043e\u0431\u0443\u0447\u0435\u043d\u0438\u044f"
+    text_cert_num = "\u041d\u043e\u043c\u0435\u0440 \u0441\u0435\u0440\u0442\u0438\u0444\u0438\u043a\u0430\u0442\u0430"
+    text_issue_date = "\u0414\u0430\u0442\u0430 \u0432\u044b\u0434\u0430\u0447\u0438"
+    text_issued_by = "\u0412\u044b\u0434\u0430\u043d"
+    text_awarded = "\u0412\u0440\u0443\u0447\u0430\u0435\u0442\u0441\u044f"
+    desc_1 = "\u041d\u0430\u0441\u0442\u043e\u044f\u0449\u0438\u0439 \u0441\u0435\u0440\u0442\u0438\u0444\u0438\u043a\u0430\u0442 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0430\u0435\u0442, \u0447\u0442\u043e"
+    desc_2 = "\u0443\u0441\u043f\u0435\u0448\u043d\u043e \u043f\u0440\u043e\u0448\u0435\u043b(\u0430) \u043a\u0443\u0440\u0441"
+    desc_3 = "\u043f\u0440\u043e\u0434\u0435\u043c\u043e\u043d\u0441\u0442\u0440\u0438\u0440\u043e\u0432\u0430\u0432 \u0432\u044b\u0441\u043e\u043a\u0438\u0439 \u0443\u0440\u043e\u0432\u0435\u043d\u044c \u043f\u0440\u043e\u0444\u0435\u0441\u0441\u0438\u043e\u043d\u0430\u043b\u044c\u043d\u044b\u0445 \u043a\u043e\u043c\u043f\u0435\u0442\u0435\u043d\u0446\u0438\u0439"
+    desc_4 = "\u0432 \u0441\u043e\u043e\u0442\u0432\u0435\u0442\u0441\u0442\u0432\u0438\u0438 \u0441 \u043f\u0440\u043e\u0433\u0440\u0430\u043c\u043c\u043e\u0439 \u043e\u0431\u0443\u0447\u0435\u043d\u0438\u044f iGroup."
 
     return f"""<!DOCTYPE html>
-<html lang="ru">
+<html lang=\"ru\">
 <head>
-  <meta charset="UTF-8" />
-  <style>
-    @page {{
-      size: 1123px 794px;
-      margin: 0;
-    }}
-    html, body {{
-      width: 1123px;
-      height: 794px;
-      margin: 0;
-      padding: 0;
-    }}
-    :root {{
-      --y: #FDB700;
-      --k: #000000;
-      --w: #FFFFFF;
-      --g2: #EEECE6;
-      --g4: #9B9890;
-      --g5: #4A4845;
-    }}
-    * {{
-      box-sizing: border-box;
-    }}
-    body {{
-      font-family: "Montserrat", "DejaVu Sans", "Arial", sans-serif;
-      background: #fff;
-    }}
-    .cert-wrap {{
-      width: 1123px;
-      height: 794px;
-      position: relative;
-      overflow: hidden;
-      background: #fff;
-    }}
-    .v4 {{
-      display: block;
-      position: relative;
-    }}
-    .left-panel {{
-      position: absolute;
-      left: 0;
-      top: 0;
-      width: 340px;
-      height: 794px;
-      background: var(--k);
-      overflow: hidden;
-    }}
-    .right-panel {{
-      position: absolute;
-      left: 340px;
-      top: 0;
-      width: 783px;
-      height: 794px;
-      background: var(--w);
-      overflow: hidden;
-    }}
-    .lp-strip {{
-      position: absolute;
-      left: 0;
-      top: 0;
-      right: 0;
-      height: 6px;
-      background: var(--y);
-    }}
-    .lp-circle1 {{
-      position: absolute;
-      width: 360px;
-      height: 360px;
-      border: 1px solid rgba(253,183,0,.12);
-      border-radius: 180px;
-      left: -120px;
-      top: 434px;
-    }}
-    .lp-circle2 {{
-      position: absolute;
-      width: 220px;
-      height: 220px;
-      border: 1px solid rgba(253,183,0,.20);
-      border-radius: 110px;
-      left: -50px;
-      top: 544px;
-    }}
-    .lp-dots {{
-      position: absolute;
-      top: 0;
-      right: 0;
-      width: 120px;
-      height: 140px;
-      background-image: radial-gradient(circle, rgba(253,183,0,.30) 1.5px, transparent 1.5px);
-      background-size: 16px 16px;
-    }}
-    .rp-dots {{
-      position: absolute;
-      right: 0;
-      bottom: 0;
-      width: 160px;
-      height: 160px;
-      background-image: radial-gradient(circle, rgba(253,183,0,.20) 1.5px, transparent 1.5px);
-      background-size: 18px 18px;
-    }}
-    .rp-ring {{
-      position: absolute;
-      width: 400px;
-      height: 400px;
-      top: -180px;
-      right: -140px;
-      border: 1px solid rgba(0,0,0,.05);
-      border-radius: 200px;
-    }}
-    .logo-v4 {{
-      position: absolute;
-      left: 44px;
-      top: 52px;
-      height: 34px;
-    }}
-    .logo-v4 .li {{
-      position: absolute;
-      left: 0;
-      top: 0;
-      width: 34px;
-      height: 34px;
-      line-height: 34px;
-      text-align: center;
-      background: var(--y);
-      color: var(--k);
-      font-size: 20px;
-      font-weight: 900;
-    }}
-    .logo-v4 .lg {{
-      position: absolute;
-      left: 34px;
-      top: 0;
-      height: 34px;
-      line-height: 34px;
-      padding: 0 10px;
-      background: var(--w);
-      color: var(--k);
-      font-size: 10px;
-      font-weight: 700;
-      letter-spacing: 3px;
-      text-transform: uppercase;
-    }}
-    .lp-cert-label {{
-      position: absolute;
-      left: 44px;
-      top: 466px;
-      font-size: 9px;
-      font-weight: 700;
-      letter-spacing: 4px;
-      text-transform: uppercase;
-      color: var(--y);
-    }}
-    .lp-cert-title {{
-      position: absolute;
-      left: 44px;
-      top: 486px;
-      font-size: 36px;
-      font-weight: 800;
-      line-height: 1.1;
-      letter-spacing: -1px;
-      color: var(--w);
-    }}
-    .lp-sub {{
-      position: absolute;
-      left: 44px;
-      top: 534px;
-      font-size: 10px;
-      font-weight: 400;
-      letter-spacing: 3px;
-      text-transform: uppercase;
-      color: rgba(255,255,255,.35);
-    }}
-    .lp-divider {{
-      position: absolute;
-      left: 44px;
-      top: 566px;
-      width: 40px;
-      height: 3px;
-      background: var(--y);
-    }}
-    .lp-info-label {{
-      font-size: 8px;
-      font-weight: 700;
-      letter-spacing: 3px;
-      text-transform: uppercase;
-      color: rgba(255,255,255,.3);
-      margin-bottom: 3px;
-    }}
-    .lp-info-val {{
-      font-size: 11px;
-      font-weight: 600;
-      letter-spacing: .5px;
-      color: rgba(255,255,255,.7);
-    }}
-    .lp-info-1 {{
-      position: absolute;
-      left: 44px;
-      top: 589px;
-      width: 252px;
-    }}
-    .lp-info-2 {{
-      position: absolute;
-      left: 44px;
-      top: 632px;
-      width: 252px;
-    }}
-    .cert-id {{
-      position: absolute;
-      right: 60px;
-      top: 52px;
-      text-align: right;
-    }}
-    .cert-id-label {{
-      font-size: 8px;
-      font-weight: 600;
-      letter-spacing: 3px;
-      text-transform: uppercase;
-      color: var(--g4);
-      margin-bottom: 3px;
-    }}
-    .cert-id-val {{
-      font-size: 11px;
-      font-weight: 700;
-      letter-spacing: 2px;
-      color: var(--k);
-    }}
-    .rp-recip-hint {{
-      position: absolute;
-      left: 60px;
-      top: 332px;
-      font-size: 9px;
-      font-weight: 700;
-      letter-spacing: 3px;
-      text-transform: uppercase;
-      color: var(--g4);
-    }}
-    .rp-recip {{
-      position: absolute;
-      left: 60px;
-      top: 352px;
-      width: 663px;
-      font-size: 52px;
-      font-weight: 800;
-      letter-spacing: -2px;
-      line-height: 1;
-      color: var(--k);
-      word-wrap: break-word;
-    }}
-    .rp-bar {{
-      position: absolute;
-      left: 60px;
-      top: 430px;
-      width: 52px;
-      height: 5px;
-      background: var(--y);
-    }}
-    .rp-desc {{
-      position: absolute;
-      left: 60px;
-      top: 454px;
-      width: 663px;
-      font-size: 12.5px;
-      font-weight: 400;
-      line-height: 1.75;
-      color: var(--g5);
-    }}
-    .rp-desc strong {{
-      color: var(--k);
-      font-weight: 600;
-    }}
-    .course-tag {{
-      background: var(--y);
-      color: var(--k);
-      font-weight: 700;
-      font-size: 12px;
-      padding: 2px 8px;
-      display: inline-block;
-    }}
-    .rp-bottom {{
-      position: absolute;
-      left: 60px;
-      right: 60px;
-      bottom: 48px;
-      height: 108px;
-      border-top: 1px solid var(--g2);
-    }}
-    .sig {{
-      position: absolute;
-      top: 24px;
-      width: 130px;
-    }}
-    .sig1 {{
-      left: 0;
-    }}
-    .sig2 {{
-      left: 174px;
-    }}
-    .sig-line {{
-      width: 130px;
-      height: 1px;
-      background: var(--k);
-      margin-bottom: 8px;
-    }}
-    .sig-name {{
-      font-size: 11px;
-      font-weight: 600;
-      color: var(--k);
-      margin-bottom: 2px;
-    }}
-    .sig-role {{
-      font-size: 8.5px;
-      letter-spacing: 2px;
-      text-transform: uppercase;
-      color: var(--g4);
-    }}
-    .date-blk {{
-      position: absolute;
-      right: 0;
-      top: 24px;
-      text-align: right;
-    }}
-    .date-label {{
-      font-size: 8px;
-      font-weight: 600;
-      letter-spacing: 3px;
-      text-transform: uppercase;
-      color: var(--g4);
-      margin-bottom: 4px;
-    }}
-    .date-val {{
-      font-size: 18px;
-      font-weight: 700;
-      color: var(--k);
-    }}
-    .date-bar {{
-      width: 36px;
-      height: 3px;
-      background: var(--y);
-      margin-left: auto;
-      margin-top: 6px;
-    }}
-  </style>
+<meta charset=\"UTF-8\">
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
+<title>iGroup - Certificate</title>
+<style>
+:root {{
+  --y: #FDB700;
+  --yd: #C98E00;
+  --yl: #FFD966;
+  --k: #000000;
+  --w: #FFFFFF;
+  --g1: #F7F6F2;
+  --g2: #EEECE6;
+  --g3: #D4D0C8;
+  --g4: #9B9890;
+  --g5: #4A4845;
+  --sans: 'Montserrat', 'DejaVu Sans', Arial, sans-serif;
+}}
+* {{ margin:0; padding:0; box-sizing:border-box; }}
+
+@page {{
+  size: 1123px 794px;
+  margin: 0;
+}}
+
+html, body {{
+  width: 1123px;
+  height: 794px;
+  margin: 0;
+  padding: 0;
+}}
+
+body {{
+  background: #fff;
+  font-family: var(--sans);
+  padding: 0;
+}}
+
+.cert-wrap {{
+  width: 1123px; height: 794px;
+  margin: 0 auto;
+  position: relative; overflow: hidden;
+}}
+
+.v4 {{ background:var(--w); display:flex; }}
+
+.v4 .left-panel {{
+  width:340px; flex-shrink:0;
+  background:var(--k); position:relative;
+  display:flex; flex-direction:column;
+  padding:52px 44px 48px;
+  overflow:hidden;
+}}
+.v4 .right-panel {{
+  flex:1; position:relative;
+  display:flex; flex-direction:column;
+  padding:52px 60px 48px;
+  overflow:hidden;
+}}
+
+.v4 .lp-circle1 {{
+  position:absolute; width:360px; height:360px;
+  border:1px solid rgba(253,183,0,.12); border-radius:50%;
+  bottom:-120px; left:-120px;
+}}
+.v4 .lp-circle2 {{
+  position:absolute; width:220px; height:220px;
+  border:1px solid rgba(253,183,0,.2); border-radius:50%;
+  bottom:-50px; left:-50px;
+}}
+.v4 .lp-dots {{
+  position:absolute; top:0; right:0; width:120px; height:140px;
+  background-image: radial-gradient(circle, rgba(253,183,0,.3) 1.5px, transparent 1.5px);
+  background-size:16px 16px;
+}}
+.v4 .lp-strip {{
+  position:absolute; top:0; left:0; right:0; height:6px;
+  background:var(--y);
+}}
+.v4 .lp-content {{ position:relative; z-index:5; flex:1; display:flex; flex-direction:column; }}
+
+.logo-v4 {{ display:flex; align-items:center; margin-bottom:auto; }}
+.logo-v4 .li {{ background:var(--y); color:var(--k); font-size:20px; font-weight:900; width:34px; height:34px; display:flex; align-items:center; justify-content:center; }}
+.logo-v4 .lg {{ background:var(--w); color:var(--k); font-size:10px; font-weight:700; height:34px; padding:0 10px; display:flex; align-items:center; letter-spacing:3px; text-transform:uppercase; }}
+
+.v4 .lp-cert-label {{ font-size:9px; font-weight:700; letter-spacing:4px; text-transform:uppercase; color:var(--y); margin-bottom:8px; margin-top:auto; }}
+.v4 .lp-cert-title {{ font-size:36px; font-weight:800; color:var(--w); line-height:1.1; letter-spacing:-1px; margin-bottom:24px; }}
+.v4 .lp-sub {{ font-size:10px; font-weight:400; letter-spacing:3px; text-transform:uppercase; color:rgba(255,255,255,.35); margin-bottom:32px; }}
+
+.v4 .lp-divider {{ width:40px; height:3px; background:var(--y); margin-bottom:20px; }}
+
+.v4 .lp-info-row {{ margin-bottom:12px; }}
+.v4 .lp-info-label {{ font-size:8px; font-weight:700; letter-spacing:3px; text-transform:uppercase; color:rgba(255,255,255,.3); margin-bottom:3px; }}
+.v4 .lp-info-val {{ font-size:11px; font-weight:600; color:rgba(255,255,255,.7); letter-spacing:.5px; }}
+
+.v4 .rp-dots {{
+  position:absolute; bottom:0; right:0; width:160px; height:160px;
+  background-image: radial-gradient(circle, rgba(253,183,0,.2) 1.5px, transparent 1.5px);
+  background-size:18px 18px;
+}}
+.v4 .rp-ring {{
+  position:absolute; width:400px; height:400px;
+  border:1px solid rgba(0,0,0,.05); border-radius:50%;
+  top:-180px; right:-140px;
+}}
+.v4 .rp-content {{ position:relative; z-index:5; flex:1; display:flex; flex-direction:column; }}
+
+.v4 .rp-top {{ display:flex; justify-content:flex-end; margin-bottom:auto; }}
+.v4 .cert-id {{ text-align:right; }}
+.v4 .cert-id-label {{ font-size:8px; font-weight:600; letter-spacing:3px; text-transform:uppercase; color:var(--g4); margin-bottom:3px; }}
+.v4 .cert-id-val {{ font-size:11px; font-weight:700; letter-spacing:2px; color:var(--k); }}
+
+.v4 .rp-recip-hint {{ font-size:9px; font-weight:700; letter-spacing:3px; text-transform:uppercase; color:var(--g4); margin-bottom:10px; margin-top:auto; }}
+.v4 .rp-recip {{ font-size:52px; font-weight:800; color:var(--k); letter-spacing:-2px; line-height:1; margin-bottom:16px; }}
+.v4 .rp-bar {{ width:52px; height:5px; background:var(--y); margin-bottom:20px; }}
+
+.v4 .rp-desc {{ font-size:12.5px; font-weight:400; color:var(--g5); line-height:1.75; margin-bottom:auto; }}
+.v4 .rp-desc strong {{ color:var(--k); font-weight:600; }}
+.v4 .course-tag {{ background:var(--y); color:var(--k); font-weight:700; font-size:12px; padding:2px 8px; display:inline-block; }}
+
+.v4 .rp-bottom {{ display:flex; justify-content:space-between; align-items:flex-end; padding-top:24px; border-top:1px solid var(--g2); }}
+.v4 .sig-group {{ display:flex; gap:44px; }}
+.v4 .sig-line {{ width:130px; height:1px; background:var(--k); margin-bottom:8px; }}
+.v4 .sig-name {{ font-size:11px; font-weight:600; color:var(--k); margin-bottom:2px; }}
+.v4 .sig-role {{ font-size:8.5px; letter-spacing:2px; text-transform:uppercase; color:var(--g4); }}
+.v4 .date-blk {{ text-align:right; }}
+.v4 .date-label {{ font-size:8px; font-weight:600; letter-spacing:3px; text-transform:uppercase; color:var(--g4); margin-bottom:4px; }}
+.v4 .date-val {{ font-size:18px; font-weight:700; color:var(--k); }}
+.v4 .date-bar {{ width:36px; height:3px; background:var(--y); margin-left:auto; margin-top:6px; }}
+</style>
 </head>
 <body>
-  <div class="cert-wrap v4">
-    <div class="left-panel">
-      <div class="lp-strip"></div>
-      <div class="lp-circle1"></div>
-      <div class="lp-circle2"></div>
-      <div class="lp-dots"></div>
-      <div class="logo-v4"><div class="li">i</div><div class="lg">Group</div></div>
-      <div class="lp-cert-label">Официальный документ</div>
-      <div class="lp-cert-title">Серти&shy;фикат</div>
-      <div class="lp-sub">о прохождении обучения</div>
-      <div class="lp-divider"></div>
-      <div class="lp-info-1">
-        <div class="lp-info-label">Номер сертификата</div>
-        <div class="lp-info-val">{cert_number}</div>
-      </div>
-      <div class="lp-info-2">
-        <div class="lp-info-label">Дата выдачи</div>
-        <div class="lp-info-val">{issue_date_ru_html}</div>
-      </div>
-    </div>
-    <div class="right-panel">
-      <div class="rp-dots"></div>
-      <div class="rp-ring"></div>
-      <div class="cert-id">
-        <div class="cert-id-label">Выдан</div>
-        <div class="cert-id-val">iGroup Education</div>
-      </div>
-      <div class="rp-recip-hint">Вручается</div>
-      <div class="rp-recip">{learner}</div>
-      <div class="rp-bar"></div>
-      <div class="rp-desc">
-        Настоящий сертификат подтверждает, что <strong>{learner}</strong>
-        успешно прошел(а) курс <span class="course-tag">{course}</span>,
-        продемонстрировав высокий уровень профессиональных компетенций
-        в соответствии с программой обучения iGroup.
-      </div>
-      <div class="rp-bottom">
-        <div class="sig sig1">
-          <div class="sig-line"></div>
-          <div class="sig-name">{sig_name_1}</div>
-          <div class="sig-role">{sig_role_1}</div>
+
+<div class=\"cert-wrap v4\">
+  <div class=\"left-panel\">
+    <div class=\"lp-strip\"></div>
+    <div class=\"lp-circle1\"></div><div class=\"lp-circle2\"></div>
+    <div class=\"lp-dots\"></div>
+    <div class=\"lp-content\">
+      <div class=\"logo-v4\"><div class=\"li\">i</div><div class=\"lg\">Group</div></div>
+      <div style=\"margin-top:auto;\">
+        <div class=\"lp-cert-label\">{text_official}</div>
+        <div class=\"lp-cert-title\">{text_cert_title}</div>
+        <div class=\"lp-sub\">{text_training}</div>
+        <div class=\"lp-divider\"></div>
+        <div class=\"lp-info-row\">
+          <div class=\"lp-info-label\">{text_cert_num}</div>
+          <div class=\"lp-info-val\">{cert_number}</div>
         </div>
-        <div class="sig sig2">
-          <div class="sig-line"></div>
-          <div class="sig-name">{sig_name_2}</div>
-          <div class="sig-role">{sig_role_2}</div>
-        </div>
-        <div class="date-blk">
-          <div class="date-label">Дата выдачи</div>
-          <div class="date-val">{issue_date_short_html}</div>
-          <div class="date-bar"></div>
+        <div class=\"lp-info-row\">
+          <div class=\"lp-info-label\">{text_issue_date}</div>
+          <div class=\"lp-info-val\">{issue_date_html}</div>
         </div>
       </div>
     </div>
   </div>
+  <div class=\"right-panel\">
+    <div class=\"rp-dots\"></div><div class=\"rp-ring\"></div>
+    <div class=\"rp-content\">
+      <div class=\"rp-top\">
+        <div class=\"cert-id\">
+          <div class=\"cert-id-label\">{text_issued_by}</div>
+          <div class=\"cert-id-val\">iGroup Education</div>
+        </div>
+      </div>
+      <div class=\"rp-recip-hint\">{text_awarded}</div>
+      <div class=\"rp-recip\">{learner}</div>
+      <div class=\"rp-bar\"></div>
+      <div class=\"rp-desc\">
+        {desc_1}
+        <strong>{learner}</strong>
+        {desc_2}
+        <span class=\"course-tag\">{course}</span>,
+        {desc_3}
+        {desc_4}
+      </div>
+      <div class=\"rp-bottom\">
+        <div class=\"sig-group\">
+          <div class=\"sig\">
+            <div class=\"sig-line\"></div>
+            <div class=\"sig-name\">{sig_name_1}</div>
+            <div class=\"sig-role\">{sig_role_1}</div>
+          </div>
+          <div class=\"sig\">
+            <div class=\"sig-line\"></div>
+            <div class=\"sig-name\">{sig_name_2}</div>
+            <div class=\"sig-role\">{sig_role_2}</div>
+          </div>
+        </div>
+        <div class=\"date-blk\">
+          <div class=\"date-label\">{text_issue_date}</div>
+          <div class=\"date-val\">{issue_date_html}</div>
+          <div class=\"date-bar\"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>"""
-
 
 def _lms_build_pdf_from_html(html_markup):
     markup = str(html_markup or "").strip()
@@ -16222,7 +16044,7 @@ def _lms_build_bold_split_certificate_pdf(certificate_number, learner_name, cour
     top_pad = S(52)
 
     logo_i_font = _lms_certificate_font(S(20), bold=True)
-    logo_group_font = _lms_certificate_font(S(13), bold=True)
+    logo_group_font = _lms_certificate_font(S(10), bold=True)
     draw.rectangle((left_pad_x, top_pad, left_pad_x + S(34), top_pad + S(34)), fill=col_y)
     i_w, i_h = _lms_text_size(draw, "i", logo_i_font)
     draw.text(
@@ -16315,7 +16137,7 @@ def _lms_build_bold_split_certificate_pdf(certificate_number, learner_name, cour
     date_label_font = _lms_certificate_font(S(8), bold=True)
     date_value_font = _lms_certificate_font(S(18), bold=True)
     date_label = "ДАТА ВЫДАЧИ"
-    date_value = issue_date_short
+    date_value = issue_date_ru
     date_label_w, _ = _lms_text_size(draw, date_label, date_label_font)
     date_value_w, date_value_h = _lms_text_size(draw, date_value, date_value_font)
     date_x = rp_right - max(date_label_w, date_value_w)
