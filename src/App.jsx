@@ -177,10 +177,21 @@ const stripLegacyAuthHeaders = (headers = {}) => {
     return nextHeaders;
 };
 
+const resolveAuthTransportFromHeaders = (headers = {}) => {
+    if (!headers || typeof headers !== 'object') return null;
+    return (
+        normalizeClientAuthTransport(headers['X-Auth-Transport']) ||
+        normalizeClientAuthTransport(headers['x-auth-transport'])
+    );
+};
+
 const withAccessTokenHeader = (headers = {}, options = {}) => {
     const { includeRefreshToken = false, transportOverride = null } = options || {};
     const nextHeaders = stripLegacyAuthHeaders(headers);
-    const authTransport = normalizeClientAuthTransport(transportOverride) || getPreferredAuthTransport();
+    const authTransport =
+        normalizeClientAuthTransport(transportOverride) ||
+        resolveAuthTransportFromHeaders(headers) ||
+        getPreferredAuthTransport();
     nextHeaders['X-Auth-Transport'] = authTransport;
 
     if (authTransport === 'bearer') {
@@ -29676,7 +29687,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setSensitiveAccess(prev => ({ ...prev, loading: true }));
                 try {
                     const response = await axios.get(`${API_BASE_URL}/api/sensitive-access/status`, {
-                        headers: { 'X-User-Id': user.id }
+                        withCredentials: true,
+                        headers: withAccessTokenHeader(
+                            { 'X-User-Id': user.id },
+                            { transportOverride: 'cookie' }
+                        )
                     });
                     const data = response.data || {};
                     if (data.status === 'success') {
@@ -29722,7 +29737,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const response = await axios.post(
                         `${API_BASE_URL}/api/sensitive-access/qr/request`,
                         {},
-                        { headers: { 'X-User-Id': user.id } }
+                        {
+                            withCredentials: true,
+                            headers: withAccessTokenHeader(
+                                { 'X-User-Id': user.id },
+                                { transportOverride: 'cookie' }
+                            )
+                        }
                     );
                     const data = response.data || {};
                     if (data.status !== 'success' || !(data.qr_payload || data.token)) {
@@ -29837,7 +29858,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const response = await axios.post(
                         `${API_BASE_URL}/api/sensitive-access/approve`,
                         { token },
-                        { headers: { 'X-User-Id': user.id } }
+                        {
+                            withCredentials: true,
+                            headers: withAccessTokenHeader(
+                                { 'X-User-Id': user.id },
+                                { transportOverride: 'cookie' }
+                            )
+                        }
                     );
                     const data = response.data || {};
                     if (data.status === 'success') {
