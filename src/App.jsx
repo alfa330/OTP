@@ -177,13 +177,28 @@ const getStoredAuthToken = (storageKey) => {
     if (runtimeToken) return runtimeToken;
 
     const sessionStorageRef = safeGetBrowserStorage('sessionStorage');
+    const localStorageRef = safeGetBrowserStorage('localStorage');
+
+    if (shouldUseLegacyMobileBearerStorage()) {
+        const mobileLocalToken = safeStorageGetItem(localStorageRef, storageKey);
+        if (mobileLocalToken) {
+            if (runtimeField) authRuntimeState[runtimeField] = mobileLocalToken;
+            return mobileLocalToken;
+        }
+        const mobileSessionToken = safeStorageGetItem(sessionStorageRef, storageKey);
+        if (mobileSessionToken) {
+            if (runtimeField) authRuntimeState[runtimeField] = mobileSessionToken;
+            return mobileSessionToken;
+        }
+        return '';
+    }
+
     const sessionToken = safeStorageGetItem(sessionStorageRef, storageKey);
     if (sessionToken) {
         if (runtimeField) authRuntimeState[runtimeField] = sessionToken;
         return sessionToken;
     }
 
-    const localStorageRef = safeGetBrowserStorage('localStorage');
     const legacyToken = safeStorageGetItem(localStorageRef, storageKey);
     if (legacyToken) {
         if (runtimeField) authRuntimeState[runtimeField] = legacyToken;
@@ -245,6 +260,9 @@ const isCrossOriginApiContext = () => {
 const shouldForceBearerAuthTransport = () => {
     return isCrossOriginApiContext() || isLikelyCookieRestrictedMobileContext();
 };
+const shouldUseLegacyMobileBearerStorage = () => {
+    return isLikelyCookieRestrictedMobileContext();
+};
 const getPreferredAuthTransport = () => {
     if (hasStoredBearerTokens()) return 'bearer';
     if (shouldForceBearerAuthTransport()) return 'bearer';
@@ -268,6 +286,15 @@ const persistBearerAuthTokens = (payload) => {
 
     const sessionStorageRef = safeGetBrowserStorage('sessionStorage');
     const localStorageRef = safeGetBrowserStorage('localStorage');
+
+    if (shouldUseLegacyMobileBearerStorage()) {
+        safeStorageSetItem(localStorageRef, ACCESS_TOKEN_STORAGE_KEY, accessToken);
+        safeStorageSetItem(localStorageRef, REFRESH_TOKEN_STORAGE_KEY, refreshToken);
+        safeStorageRemoveItem(sessionStorageRef, ACCESS_TOKEN_STORAGE_KEY);
+        safeStorageRemoveItem(sessionStorageRef, REFRESH_TOKEN_STORAGE_KEY);
+        setStoredAuthTransport('bearer');
+        return true;
+    }
 
     const accessPersistedToSession = safeStorageSetItem(sessionStorageRef, ACCESS_TOKEN_STORAGE_KEY, accessToken);
     const refreshPersistedToSession = safeStorageSetItem(sessionStorageRef, REFRESH_TOKEN_STORAGE_KEY, refreshToken);
@@ -463,7 +490,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 window.__otpRefreshPromise = null;
 
                 axios.interceptors.response.use(
-                    (response) => response,
+                    (response) => {
+                        const data = response?.data || {};
+                        if (shouldUseLegacyMobileBearerStorage() && (data.access_token || data.refresh_token)) {
+                            persistBearerAuthTokens({
+                                access_token: data.access_token || getStoredAuthToken(ACCESS_TOKEN_STORAGE_KEY),
+                                refresh_token: data.refresh_token || getStoredAuthToken(REFRESH_TOKEN_STORAGE_KEY)
+                            });
+                        }
+                        return response;
+                    },
                     async (error) => {
                         const status = error?.response?.status;
                         const code = error?.response?.data?.code;
