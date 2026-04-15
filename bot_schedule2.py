@@ -51,6 +51,14 @@ except Exception:
     ImageOps = None
     ImageDraw = None
     ImageFont = None
+try:
+    from weasyprint import HTML as WeasyHTML
+except Exception:
+    WeasyHTML = None
+try:
+    from xhtml2pdf import pisa as Xhtml2PdfPisa
+except Exception:
+    Xhtml2PdfPisa = None
 
 os.environ['TZ'] = 'Asia/Almaty'
 time.tzset()
@@ -129,6 +137,10 @@ LMS_COMPLETION_THRESHOLD = float(os.getenv('LMS_COMPLETION_THRESHOLD', '95'))
 LMS_DEFAULT_PASS_THRESHOLD = float(os.getenv('LMS_DEFAULT_PASS_THRESHOLD', '80'))
 LMS_DEFAULT_ATTEMPT_LIMIT = int(os.getenv('LMS_DEFAULT_ATTEMPT_LIMIT', '3'))
 LMS_CERTIFICATE_STORAGE = (os.getenv('LMS_CERTIFICATE_STORAGE') or 'db').strip().lower()
+LMS_CERTIFICATE_TEMPLATE_VERSION = (
+    (os.getenv('LMS_CERTIFICATE_TEMPLATE_VERSION') or 'bold_split_v4_html_2026_04').strip()
+    or 'bold_split_v4_html_2026_04'
+)
 try:
     RECRUITING_PAGES_PER_QUERY = int(os.getenv('RECRUITING_PAGES_PER_QUERY', '5'))
 except Exception:
@@ -15524,6 +15536,528 @@ def _lms_build_simple_pdf(lines):
     return bytes(data)
 
 
+def _lms_certificate_metadata_needs_refresh(metadata):
+    info = metadata if isinstance(metadata, dict) else _lms_parse_json(metadata, {})
+    if not isinstance(info, dict):
+        info = {}
+    template_version = str(info.get("template_version") or "").strip()
+    return template_version != LMS_CERTIFICATE_TEMPLATE_VERSION
+
+
+def _lms_escape_html(value):
+    return html.escape(str(value or ""), quote=True)
+
+
+def _lms_build_bold_split_certificate_html(certificate_number, learner_name, course_title, issued_at):
+    issue_dt = issued_at if isinstance(issued_at, datetime) else _lms_now()
+    issue_date_ru = _lms_format_certificate_ru_date(issue_dt)
+    issue_date_short = issue_dt.strftime("%d.%m.%Y")
+    cert_number = _lms_escape_html(certificate_number or "-")
+    learner = _lms_escape_html(learner_name or "-")
+    course = _lms_escape_html(course_title or "-")
+    sig_name_1 = _lms_escape_html(os.getenv("LMS_CERTIFICATE_SIGNER_1_NAME") or "Алексей Иванов")
+    sig_role_1 = _lms_escape_html(os.getenv("LMS_CERTIFICATE_SIGNER_1_ROLE") or "Генеральный директор")
+    sig_name_2 = _lms_escape_html(os.getenv("LMS_CERTIFICATE_SIGNER_2_NAME") or "Мария Смирнова")
+    sig_role_2 = _lms_escape_html(os.getenv("LMS_CERTIFICATE_SIGNER_2_ROLE") or "Руководитель программ")
+    issue_date_ru_html = _lms_escape_html(issue_date_ru)
+    issue_date_short_html = _lms_escape_html(issue_date_short)
+
+    return f"""<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <style>
+    @page {{
+      size: 1123px 794px;
+      margin: 0;
+    }}
+    html, body {{
+      width: 1123px;
+      height: 794px;
+      margin: 0;
+      padding: 0;
+    }}
+    :root {{
+      --y: #FDB700;
+      --k: #000000;
+      --w: #FFFFFF;
+      --g2: #EEECE6;
+      --g4: #9B9890;
+      --g5: #4A4845;
+    }}
+    * {{
+      box-sizing: border-box;
+    }}
+    body {{
+      font-family: "Montserrat", "DejaVu Sans", "Arial", sans-serif;
+      background: #fff;
+    }}
+    .cert-wrap {{
+      width: 1123px;
+      height: 794px;
+      position: relative;
+      overflow: hidden;
+      background: #fff;
+    }}
+    .v4 {{
+      display: block;
+      position: relative;
+    }}
+    .left-panel {{
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 340px;
+      height: 794px;
+      background: var(--k);
+      overflow: hidden;
+    }}
+    .right-panel {{
+      position: absolute;
+      left: 340px;
+      top: 0;
+      width: 783px;
+      height: 794px;
+      background: var(--w);
+      overflow: hidden;
+    }}
+    .lp-strip {{
+      position: absolute;
+      left: 0;
+      top: 0;
+      right: 0;
+      height: 6px;
+      background: var(--y);
+    }}
+    .lp-circle1 {{
+      position: absolute;
+      width: 360px;
+      height: 360px;
+      border: 1px solid rgba(253,183,0,.12);
+      border-radius: 180px;
+      left: -120px;
+      top: 434px;
+    }}
+    .lp-circle2 {{
+      position: absolute;
+      width: 220px;
+      height: 220px;
+      border: 1px solid rgba(253,183,0,.20);
+      border-radius: 110px;
+      left: -50px;
+      top: 544px;
+    }}
+    .lp-dots {{
+      position: absolute;
+      top: 0;
+      right: 0;
+      width: 120px;
+      height: 140px;
+      background-image: radial-gradient(circle, rgba(253,183,0,.30) 1.5px, transparent 1.5px);
+      background-size: 16px 16px;
+    }}
+    .rp-dots {{
+      position: absolute;
+      right: 0;
+      bottom: 0;
+      width: 160px;
+      height: 160px;
+      background-image: radial-gradient(circle, rgba(253,183,0,.20) 1.5px, transparent 1.5px);
+      background-size: 18px 18px;
+    }}
+    .rp-ring {{
+      position: absolute;
+      width: 400px;
+      height: 400px;
+      top: -180px;
+      right: -140px;
+      border: 1px solid rgba(0,0,0,.05);
+      border-radius: 200px;
+    }}
+    .logo-v4 {{
+      position: absolute;
+      left: 44px;
+      top: 52px;
+      height: 34px;
+    }}
+    .logo-v4 .li {{
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 34px;
+      height: 34px;
+      line-height: 34px;
+      text-align: center;
+      background: var(--y);
+      color: var(--k);
+      font-size: 20px;
+      font-weight: 900;
+    }}
+    .logo-v4 .lg {{
+      position: absolute;
+      left: 34px;
+      top: 0;
+      height: 34px;
+      line-height: 34px;
+      padding: 0 10px;
+      background: var(--w);
+      color: var(--k);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+    }}
+    .lp-cert-label {{
+      position: absolute;
+      left: 44px;
+      top: 466px;
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 4px;
+      text-transform: uppercase;
+      color: var(--y);
+    }}
+    .lp-cert-title {{
+      position: absolute;
+      left: 44px;
+      top: 486px;
+      font-size: 36px;
+      font-weight: 800;
+      line-height: 1.1;
+      letter-spacing: -1px;
+      color: var(--w);
+    }}
+    .lp-sub {{
+      position: absolute;
+      left: 44px;
+      top: 534px;
+      font-size: 10px;
+      font-weight: 400;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      color: rgba(255,255,255,.35);
+    }}
+    .lp-divider {{
+      position: absolute;
+      left: 44px;
+      top: 566px;
+      width: 40px;
+      height: 3px;
+      background: var(--y);
+    }}
+    .lp-info-label {{
+      font-size: 8px;
+      font-weight: 700;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      color: rgba(255,255,255,.3);
+      margin-bottom: 3px;
+    }}
+    .lp-info-val {{
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: .5px;
+      color: rgba(255,255,255,.7);
+    }}
+    .lp-info-1 {{
+      position: absolute;
+      left: 44px;
+      top: 589px;
+      width: 252px;
+    }}
+    .lp-info-2 {{
+      position: absolute;
+      left: 44px;
+      top: 632px;
+      width: 252px;
+    }}
+    .cert-id {{
+      position: absolute;
+      right: 60px;
+      top: 52px;
+      text-align: right;
+    }}
+    .cert-id-label {{
+      font-size: 8px;
+      font-weight: 600;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      color: var(--g4);
+      margin-bottom: 3px;
+    }}
+    .cert-id-val {{
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 2px;
+      color: var(--k);
+    }}
+    .rp-recip-hint {{
+      position: absolute;
+      left: 60px;
+      top: 332px;
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      color: var(--g4);
+    }}
+    .rp-recip {{
+      position: absolute;
+      left: 60px;
+      top: 352px;
+      width: 663px;
+      font-size: 52px;
+      font-weight: 800;
+      letter-spacing: -2px;
+      line-height: 1;
+      color: var(--k);
+      word-wrap: break-word;
+    }}
+    .rp-bar {{
+      position: absolute;
+      left: 60px;
+      top: 430px;
+      width: 52px;
+      height: 5px;
+      background: var(--y);
+    }}
+    .rp-desc {{
+      position: absolute;
+      left: 60px;
+      top: 454px;
+      width: 663px;
+      font-size: 12.5px;
+      font-weight: 400;
+      line-height: 1.75;
+      color: var(--g5);
+    }}
+    .rp-desc strong {{
+      color: var(--k);
+      font-weight: 600;
+    }}
+    .course-tag {{
+      background: var(--y);
+      color: var(--k);
+      font-weight: 700;
+      font-size: 12px;
+      padding: 2px 8px;
+      display: inline-block;
+    }}
+    .rp-bottom {{
+      position: absolute;
+      left: 60px;
+      right: 60px;
+      bottom: 48px;
+      height: 108px;
+      border-top: 1px solid var(--g2);
+    }}
+    .sig {{
+      position: absolute;
+      top: 24px;
+      width: 130px;
+    }}
+    .sig1 {{
+      left: 0;
+    }}
+    .sig2 {{
+      left: 174px;
+    }}
+    .sig-line {{
+      width: 130px;
+      height: 1px;
+      background: var(--k);
+      margin-bottom: 8px;
+    }}
+    .sig-name {{
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--k);
+      margin-bottom: 2px;
+    }}
+    .sig-role {{
+      font-size: 8.5px;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      color: var(--g4);
+    }}
+    .date-blk {{
+      position: absolute;
+      right: 0;
+      top: 24px;
+      text-align: right;
+    }}
+    .date-label {{
+      font-size: 8px;
+      font-weight: 600;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      color: var(--g4);
+      margin-bottom: 4px;
+    }}
+    .date-val {{
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--k);
+    }}
+    .date-bar {{
+      width: 36px;
+      height: 3px;
+      background: var(--y);
+      margin-left: auto;
+      margin-top: 6px;
+    }}
+  </style>
+</head>
+<body>
+  <div class="cert-wrap v4">
+    <div class="left-panel">
+      <div class="lp-strip"></div>
+      <div class="lp-circle1"></div>
+      <div class="lp-circle2"></div>
+      <div class="lp-dots"></div>
+      <div class="logo-v4"><div class="li">i</div><div class="lg">Group</div></div>
+      <div class="lp-cert-label">Официальный документ</div>
+      <div class="lp-cert-title">Серти&shy;фикат</div>
+      <div class="lp-sub">о прохождении обучения</div>
+      <div class="lp-divider"></div>
+      <div class="lp-info-1">
+        <div class="lp-info-label">Номер сертификата</div>
+        <div class="lp-info-val">{cert_number}</div>
+      </div>
+      <div class="lp-info-2">
+        <div class="lp-info-label">Дата выдачи</div>
+        <div class="lp-info-val">{issue_date_ru_html}</div>
+      </div>
+    </div>
+    <div class="right-panel">
+      <div class="rp-dots"></div>
+      <div class="rp-ring"></div>
+      <div class="cert-id">
+        <div class="cert-id-label">Выдан</div>
+        <div class="cert-id-val">iGroup Education</div>
+      </div>
+      <div class="rp-recip-hint">Вручается</div>
+      <div class="rp-recip">{learner}</div>
+      <div class="rp-bar"></div>
+      <div class="rp-desc">
+        Настоящий сертификат подтверждает, что <strong>{learner}</strong>
+        успешно прошел(а) курс <span class="course-tag">{course}</span>,
+        продемонстрировав высокий уровень профессиональных компетенций
+        в соответствии с программой обучения iGroup.
+      </div>
+      <div class="rp-bottom">
+        <div class="sig sig1">
+          <div class="sig-line"></div>
+          <div class="sig-name">{sig_name_1}</div>
+          <div class="sig-role">{sig_role_1}</div>
+        </div>
+        <div class="sig sig2">
+          <div class="sig-line"></div>
+          <div class="sig-name">{sig_name_2}</div>
+          <div class="sig-role">{sig_role_2}</div>
+        </div>
+        <div class="date-blk">
+          <div class="date-label">Дата выдачи</div>
+          <div class="date-val">{issue_date_short_html}</div>
+          <div class="date-bar"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>"""
+
+
+def _lms_build_pdf_from_html(html_markup):
+    markup = str(html_markup or "").strip()
+    if not markup:
+        return None
+
+    if WeasyHTML is not None:
+        try:
+            rendered = WeasyHTML(string=markup, base_url=os.getcwd()).write_pdf()
+            if rendered:
+                return rendered
+        except Exception:
+            logging.exception("WeasyPrint certificate render failed")
+
+    if Xhtml2PdfPisa is not None:
+        try:
+            out = BytesIO()
+            result = Xhtml2PdfPisa.CreatePDF(src=markup, dest=out, encoding='utf-8')
+            if not getattr(result, 'err', 0):
+                rendered = out.getvalue()
+                if rendered:
+                    return rendered
+        except Exception:
+            logging.exception("xhtml2pdf certificate render failed")
+
+    return None
+
+
+def _lms_store_certificate_pdf_payload(certificate_number, issued_at, pdf_bytes):
+    storage_type = 'db'
+    pdf_data = pdf_bytes
+    gcs_bucket = None
+    gcs_blob_path = None
+
+    if LMS_CERTIFICATE_STORAGE == 'gcs':
+        bucket_name = _lms_bucket_name()
+        if bucket_name:
+            try:
+                safe_number = str(certificate_number or '').strip() or f"lms-cert-{secrets.token_hex(6)}"
+                dt_value = issued_at if isinstance(issued_at, datetime) else _lms_now()
+                client = get_gcs_client()
+                bucket = client.bucket(bucket_name)
+                blob_path = (
+                    f"lms/certificates/{dt_value.strftime('%Y/%m/%d')}/"
+                    f"{safe_number}.pdf"
+                )
+                blob = bucket.blob(blob_path)
+                blob.upload_from_string(pdf_bytes, content_type='application/pdf')
+                storage_type = 'gcs'
+                pdf_data = None
+                gcs_bucket = bucket_name
+                gcs_blob_path = blob_path
+            except Exception:
+                storage_type = 'db'
+                pdf_data = pdf_bytes
+                gcs_bucket = None
+                gcs_blob_path = None
+
+    return storage_type, pdf_data, gcs_bucket, gcs_blob_path
+
+
+def _lms_update_certificate_pdf_tx(cursor, certificate_id, certificate_number, issued_at, pdf_bytes, metadata):
+    storage_type, pdf_data, gcs_bucket, gcs_blob_path = _lms_store_certificate_pdf_payload(
+        certificate_number=certificate_number,
+        issued_at=issued_at,
+        pdf_bytes=pdf_bytes
+    )
+    cursor.execute("""
+        UPDATE lms_certificates
+        SET pdf_storage_type = %s,
+            pdf_data = %s,
+            gcs_bucket = %s,
+            gcs_blob_path = %s,
+            metadata = %s::jsonb
+        WHERE id = %s
+    """, (
+        storage_type,
+        pdf_data,
+        gcs_bucket,
+        gcs_blob_path,
+        json.dumps(metadata or {}, ensure_ascii=False),
+        int(certificate_id)
+    ))
+    return {
+        "storage_type": storage_type,
+        "pdf_data": pdf_data,
+        "gcs_bucket": gcs_bucket,
+        "gcs_blob_path": gcs_blob_path
+    }
+
+
 @lru_cache(maxsize=128)
 def _lms_certificate_font(size, bold=False):
     if ImageFont is None:
@@ -15781,6 +16315,19 @@ def _lms_build_bold_split_certificate_pdf(certificate_number, learner_name, cour
 def _lms_generate_certificate_pdf(certificate_number, learner_name, course_title, issued_at, score_percent, verify_token):
     issue_dt = issued_at if isinstance(issued_at, datetime) else _lms_now()
     try:
+        html_markup = _lms_build_bold_split_certificate_html(
+            certificate_number=certificate_number,
+            learner_name=learner_name,
+            course_title=course_title,
+            issued_at=issue_dt
+        )
+        html_pdf = _lms_build_pdf_from_html(html_markup)
+        if html_pdf:
+            return html_pdf
+    except Exception:
+        logging.exception("LMS HTML certificate render fallback")
+
+    try:
         bold_split_pdf = _lms_build_bold_split_certificate_pdf(
             certificate_number=certificate_number,
             learner_name=learner_name,
@@ -15988,14 +16535,51 @@ def _lms_get_lesson_context_tx(cursor, user_id, lesson_id):
 
 def _lms_try_issue_certificate_tx(cursor, assignment_id, user_id, score_percent=None, test_attempt_id=None):
     cursor.execute("""
-        SELECT id, certificate_number, verify_token, status, issued_at
+        SELECT id, certificate_number, verify_token, status, issued_at, metadata, score_percent
         FROM lms_certificates
         WHERE assignment_id = %s
+          AND user_id = %s
         ORDER BY id DESC
         LIMIT 1
-    """, (assignment_id,))
+    """, (assignment_id, user_id))
     existing = cursor.fetchone()
     if existing and existing[3] == 'active':
+        existing_metadata = _lms_parse_json(existing[5], {})
+        if not isinstance(existing_metadata, dict):
+            existing_metadata = {}
+
+        if _lms_certificate_metadata_needs_refresh(existing_metadata):
+            cursor.execute("""
+                SELECT a.course_id, c.title, u.name
+                FROM lms_course_assignments a
+                JOIN lms_courses c ON c.id = a.course_id
+                JOIN users u ON u.id = a.user_id
+                WHERE a.id = %s AND a.user_id = %s
+                LIMIT 1
+            """, (assignment_id, user_id))
+            base = cursor.fetchone()
+            if base:
+                refresh_issued_at = existing[4] if isinstance(existing[4], datetime) else _lms_now()
+                refresh_score = score_percent if score_percent is not None else existing[6]
+                refresh_pdf_bytes = _lms_generate_certificate_pdf(
+                    certificate_number=existing[1],
+                    learner_name=base[2],
+                    course_title=base[1],
+                    issued_at=refresh_issued_at,
+                    score_percent=refresh_score,
+                    verify_token=existing[2]
+                )
+                refreshed_metadata = dict(existing_metadata)
+                refreshed_metadata["verify_url"] = _lms_verify_url(existing[2])
+                refreshed_metadata["template_version"] = LMS_CERTIFICATE_TEMPLATE_VERSION
+                _lms_update_certificate_pdf_tx(
+                    cursor,
+                    certificate_id=existing[0],
+                    certificate_number=existing[1],
+                    issued_at=refresh_issued_at,
+                    pdf_bytes=refresh_pdf_bytes,
+                    metadata=refreshed_metadata
+                )
         return {
             "id": int(existing[0]),
             "certificate_number": existing[1],
@@ -16041,31 +16625,11 @@ def _lms_try_issue_certificate_tx(cursor, assignment_id, user_id, score_percent=
         verify_token=verify_token
     )
 
-    storage_type = 'db'
-    pdf_data = pdf_bytes
-    gcs_bucket = None
-    gcs_blob_path = None
-    if LMS_CERTIFICATE_STORAGE == 'gcs':
-        bucket_name = _lms_bucket_name()
-        if bucket_name:
-            try:
-                client = get_gcs_client()
-                bucket = client.bucket(bucket_name)
-                blob_path = (
-                    f"lms/certificates/{issued_at.strftime('%Y/%m/%d')}/"
-                    f"{certificate_number}.pdf"
-                )
-                blob = bucket.blob(blob_path)
-                blob.upload_from_string(pdf_bytes, content_type='application/pdf')
-                storage_type = 'gcs'
-                pdf_data = None
-                gcs_bucket = bucket_name
-                gcs_blob_path = blob_path
-            except Exception:
-                storage_type = 'db'
-                pdf_data = pdf_bytes
-                gcs_bucket = None
-                gcs_blob_path = None
+    storage_type, pdf_data, gcs_bucket, gcs_blob_path = _lms_store_certificate_pdf_payload(
+        certificate_number=certificate_number,
+        issued_at=issued_at,
+        pdf_bytes=pdf_bytes
+    )
 
     cursor.execute("""
         INSERT INTO lms_certificates (
@@ -16089,7 +16653,8 @@ def _lms_try_issue_certificate_tx(cursor, assignment_id, user_id, score_percent=
         gcs_bucket,
         gcs_blob_path,
         json.dumps({
-            "verify_url": _lms_verify_url(verify_token)
+            "verify_url": _lms_verify_url(verify_token),
+            "template_version": LMS_CERTIFICATE_TEMPLATE_VERSION
         }, ensure_ascii=False)
     ))
     cert_id = int(cursor.fetchone()[0])
@@ -18322,25 +18887,78 @@ def lms_certificate_download(certificate_id):
         with db._get_cursor() as cursor:
             cursor.execute("""
                 SELECT
-                    certificate_number, pdf_storage_type, pdf_data, gcs_bucket, gcs_blob_path, status
-                FROM lms_certificates
-                WHERE id = %s
-                  AND user_id = %s
+                    c.id,
+                    c.certificate_number,
+                    c.pdf_storage_type,
+                    c.pdf_data,
+                    c.gcs_bucket,
+                    c.gcs_blob_path,
+                    c.status,
+                    c.verify_token,
+                    c.issued_at,
+                    c.metadata,
+                    c.score_percent,
+                    cr.title,
+                    u.name
+                FROM lms_certificates c
+                LEFT JOIN lms_courses cr ON cr.id = c.course_id
+                LEFT JOIN users u ON u.id = c.user_id
+                WHERE c.id = %s
+                  AND c.user_id = %s
                 LIMIT 1
             """, (certificate_id, requester_id))
             row = cursor.fetchone()
             if not row:
                 return jsonify({"error": "Certificate not found"}), 404
 
-            cert_number = row[0] or f"LMS-{certificate_id}"
-            storage_type = row[1] or 'db'
+            cert_id = int(row[0])
+            cert_number = row[1] or f"LMS-{certificate_id}"
+            storage_type = row[2] or 'db'
+            pdf_data = row[3]
+            gcs_bucket = row[4]
+            gcs_blob_path = row[5]
+            cert_status = str(row[6] or '').strip().lower()
+            verify_token = row[7]
+            issued_at = row[8] if isinstance(row[8], datetime) else _lms_now()
+            metadata = _lms_parse_json(row[9], {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+            score_percent = row[10]
+            course_title = row[11] or '-'
+            learner_name = row[12] or '-'
 
-            if storage_type == 'gcs' and row[3] and row[4]:
-                signed_url = _lms_signed_url(row[3], row[4], expires_minutes=30)
+            force_refresh = str(request.args.get('refresh') or '').strip().lower() in {'1', 'true', 'yes'}
+            needs_refresh = force_refresh or _lms_certificate_metadata_needs_refresh(metadata)
+            if cert_status == 'active' and needs_refresh:
+                refreshed_pdf = _lms_generate_certificate_pdf(
+                    certificate_number=cert_number,
+                    learner_name=learner_name,
+                    course_title=course_title,
+                    issued_at=issued_at,
+                    score_percent=score_percent,
+                    verify_token=verify_token
+                )
+                refreshed_metadata = dict(metadata)
+                refreshed_metadata["verify_url"] = _lms_verify_url(verify_token)
+                refreshed_metadata["template_version"] = LMS_CERTIFICATE_TEMPLATE_VERSION
+                updated_storage = _lms_update_certificate_pdf_tx(
+                    cursor,
+                    certificate_id=cert_id,
+                    certificate_number=cert_number,
+                    issued_at=issued_at,
+                    pdf_bytes=refreshed_pdf,
+                    metadata=refreshed_metadata
+                )
+                storage_type = updated_storage["storage_type"]
+                pdf_data = updated_storage["pdf_data"]
+                gcs_bucket = updated_storage["gcs_bucket"]
+                gcs_blob_path = updated_storage["gcs_blob_path"]
+
+            if storage_type == 'gcs' and gcs_bucket and gcs_blob_path:
+                signed_url = _lms_signed_url(gcs_bucket, gcs_blob_path, expires_minutes=30)
                 if signed_url:
                     return redirect(signed_url, code=302)
 
-            pdf_data = row[2]
             if isinstance(pdf_data, memoryview):
                 pdf_data = pdf_data.tobytes()
             elif isinstance(pdf_data, bytearray):
