@@ -7,8 +7,16 @@ import FaIcon from '../components/common/FaIcon';
 const API_BASE_URL = 'https://otp-2-fos4.onrender.com';
 const AUTH_REFRESH_URL = `${API_BASE_URL}/api/auth/refresh`;
 const EMBED_STATE_KEY = 'call_evaluation_embed_state';
+const AUTH_TRANSPORT_STORAGE_KEY = 'otp_auth_transport';
+const ACCESS_TOKEN_STORAGE_KEY = 'otp_access_token';
+const REFRESH_TOKEN_STORAGE_KEY = 'otp_refresh_token';
 let refreshPromise = null;
 const audioUrlCache = {};
+const authRuntimeState = {
+    transport: null,
+    accessToken: '',
+    refreshToken: ''
+};
 
 const readEmbedState = () => {
     try {
@@ -33,14 +41,390 @@ const writeEmbedState = ({ user = null, initialSelection = null } = {}) => {
 
 const readJsonSafe = async (r) => { try { return await r.json(); } catch { return null; } };
 
-const authFetch = async (url, opts = {}, retry = true) => {
-    const res = await fetch(url, { credentials: 'include', ...opts, headers: { ...(opts.headers || {}) } });
-    if (res.status !== 401 || !retry) return res;
-    const body = await readJsonSafe(res.clone());
-    if (!body || body.code !== 'TOKEN_EXPIRED') return res;
-    if (!refreshPromise) {
-        refreshPromise = fetch(AUTH_REFRESH_URL, { method: 'POST', credentials: 'include' }).finally(() => { refreshPromise = null; });
+const normalizeClientAuthTransport = (value) => {
+    const normalized = String(value || '').trim().toLowerCase();
+    if (normalized === 'bearer' || normalized === 'cookie') return normalized;
+    return null;
+};
+
+const safeGetBrowserStorage = (storageName) => {
+    if (typeof window === 'undefined') return null;
+    try {
+        const storage = window[storageName];
+        if (!storage) return null;
+        storage.getItem('__otp_storage_probe__');
+        return storage;
+    } catch {
+        return null;
     }
+};
+
+const safeStorageGetItem = (storage, key) => {
+    if (!storage) return '';
+    try {
+        return String(storage.getItem(key) || '').trim();
+    } catch {
+        return '';
+    }
+};
+
+const safeStorageSetItem = (storage, key, value) => {
+    if (!storage) return false;
+    try {
+        storage.setItem(key, value);
+        return true;
+    } catch {
+        return false;
+    }
+};
+
+const safeStorageRemoveItem = (storage, key) => {
+    if (!storage) return;
+    try {
+        storage.removeItem(key);
+    } catch {}
+};
+
+const isLikelyCookieRestrictedMobileContext = () => {
+    if (typeof window === 'undefined' || typeof navigator === 'undefined') return false;
+    const userAgent = String(navigator.userAgent || '').toLowerCase();
+    const isMobileDevice = /(android|iphone|ipad|ipod|iemobile|opera mini|mobile|windows phone)/i.test(userAgent);
+    const isEmbeddedWebView = /\bwv\b|; wv\)|fbav|fban|instagram|line\/|tgweb|telegrambot/i.test(userAgent);
+    return isMobileDevice || isEmbeddedWebView;
+};
+
+const isCrossOriginApiContext = () => {
+    if (typeof window === 'undefined') return false;
+    try {
+        const apiUrl = new URL(API_BASE_URL, window.location.origin);
+        return apiUrl.origin !== window.location.origin;
+    } catch {
+        return true;
+    }
+};
+
+const shouldForceBearerAuthTransport = () => {
+    return isCrossOriginApiContext() || isLikelyCookieRestrictedMobileContext();
+};
+
+const shouldUseLegacyMobileBearerStorage = () => {
+    return isLikelyCookieRestrictedMobileContext();
+};
+
+const resolveRuntimeTokenField = (storageKey) => {
+    if (storageKey === ACCESS_TOKEN_STORAGE_KEY) return 'accessToken';
+    if (storageKey === REFRESH_TOKEN_STORAGE_KEY) return 'refreshToken';
+    return null;
+};
+
+const getStoredAuthTransport = () => {
+    const runtimeTransport = normalizeClientAuthTransport(authRuntimeState.transport);
+    if (runtimeTransport) return runtimeTransport;
+
+    const sessionStorageRef = safeGetBrowserStorage('sessionStorage');
+    const sessionTransport = normalizeClientAuthTransport(
+        safeStorageGetItem(sessionStorageRef, AUTH_TRANSPORT_STORAGE_KEY)
+    );
+    if (sessionTransport) {
+        authRuntimeState.transport = sessionTransport;
+        return sessionTransport;
+    }
+
+    const localStorageRef = safeGetBrowserStorage('localStorage');
+    const localTransport = normalizeClientAuthTransport(
+        safeStorageGetItem(localStorageRef, AUTH_TRANSPORT_STORAGE_KEY)
+    );
+    if (localTransport) {
+        authRuntimeState.transport = localTransport;
+        safeStorageSetItem(sessionStorageRef, AUTH_TRANSPORT_STORAGE_KEY, localTransport);
+        return localTransport;
+    }
+    return null;
+};
+
+const setStoredAuthTransport = (transport) => {
+    const normalized = normalizeClientAuthTransport(transport);
+    const sessionStorageRef = safeGetBrowserStorage('sessionStorage');
+    const localStorageRef = safeGetBrowserStorage('localStorage');
+    authRuntimeState.transport = normalized;
+
+    if (!normalized) {
+        safeStorageRemoveItem(sessionStorageRef, AUTH_TRANSPORT_STORAGE_KEY);
+        safeStorageRemoveItem(localStorageRef, AUTH_TRANSPORT_STORAGE_KEY);
+        return;
+    }
+    safeStorageSetItem(sessionStorageRef, AUTH_TRANSPORT_STORAGE_KEY, normalized);
+    safeStorageSetItem(localStorageRef, AUTH_TRANSPORT_STORAGE_KEY, normalized);
+};
+
+const getStoredAuthToken = (storageKey) => {
+    const runtimeField = resolveRuntimeTokenField(storageKey);
+    const runtimeToken = runtimeField ? String(authRuntimeState[runtimeField] || '').trim() : '';
+    if (runtimeToken) return runtimeToken;
+
+    const sessionStorageRef = safeGetBrowserStorage('sessionStorage');
+    const localStorageRef = safeGetBrowserStorage('localStorage');
+
+    if (shouldUseLegacyMobileBearerStorage()) {
+        const mobileLocalToken = safeStorageGetItem(localStorageRef, storageKey);
+        if (mobileLocalToken) {
+            if (runtimeField) authRuntimeState[runtimeField] = mobileLocalToken;
+            return mobileLocalToken;
+        }
+        const mobileSessionToken = safeStorageGetItem(sessionStorageRef, storageKey);
+        if (mobileSessionToken) {
+            if (runtimeField) authRuntimeState[runtimeField] = mobileSessionToken;
+            return mobileSessionToken;
+        }
+        return '';
+    }
+
+    const sessionToken = safeStorageGetItem(sessionStorageRef, storageKey);
+    if (sessionToken) {
+        if (runtimeField) authRuntimeState[runtimeField] = sessionToken;
+        return sessionToken;
+    }
+
+    const legacyToken = safeStorageGetItem(localStorageRef, storageKey);
+    if (legacyToken) {
+        if (runtimeField) authRuntimeState[runtimeField] = legacyToken;
+        if (safeStorageSetItem(sessionStorageRef, storageKey, legacyToken)) {
+            safeStorageRemoveItem(localStorageRef, storageKey);
+        }
+        return legacyToken;
+    }
+    return '';
+};
+
+const hasStoredBearerTokens = () => {
+    return Boolean(
+        getStoredAuthToken(ACCESS_TOKEN_STORAGE_KEY) &&
+        getStoredAuthToken(REFRESH_TOKEN_STORAGE_KEY)
+    );
+};
+
+const clearStoredBearerTokens = () => {
+    authRuntimeState.accessToken = '';
+    authRuntimeState.refreshToken = '';
+    const sessionStorageRef = safeGetBrowserStorage('sessionStorage');
+    const localStorageRef = safeGetBrowserStorage('localStorage');
+    safeStorageRemoveItem(sessionStorageRef, ACCESS_TOKEN_STORAGE_KEY);
+    safeStorageRemoveItem(sessionStorageRef, REFRESH_TOKEN_STORAGE_KEY);
+    safeStorageRemoveItem(localStorageRef, ACCESS_TOKEN_STORAGE_KEY);
+    safeStorageRemoveItem(localStorageRef, REFRESH_TOKEN_STORAGE_KEY);
+};
+
+const clearAuthTokens = () => {
+    clearStoredBearerTokens();
+    authRuntimeState.transport = null;
+    const sessionStorageRef = safeGetBrowserStorage('sessionStorage');
+    const localStorageRef = safeGetBrowserStorage('localStorage');
+    safeStorageRemoveItem(sessionStorageRef, AUTH_TRANSPORT_STORAGE_KEY);
+    safeStorageRemoveItem(localStorageRef, AUTH_TRANSPORT_STORAGE_KEY);
+};
+
+const getPreferredAuthTransport = () => {
+    if (hasStoredBearerTokens()) return 'bearer';
+    if (shouldForceBearerAuthTransport()) return 'bearer';
+    const storedTransport = getStoredAuthTransport();
+    if (storedTransport) return storedTransport;
+    return 'cookie';
+};
+
+const activateCookieAuthTransport = () => {
+    clearStoredBearerTokens();
+    setStoredAuthTransport('cookie');
+};
+
+const persistBearerAuthTokens = (payload) => {
+    const accessToken = String(payload?.access_token || '').trim();
+    const refreshToken = String(payload?.refresh_token || '').trim();
+    if (!accessToken || !refreshToken) return false;
+
+    authRuntimeState.accessToken = accessToken;
+    authRuntimeState.refreshToken = refreshToken;
+
+    const sessionStorageRef = safeGetBrowserStorage('sessionStorage');
+    const localStorageRef = safeGetBrowserStorage('localStorage');
+
+    if (shouldUseLegacyMobileBearerStorage()) {
+        safeStorageSetItem(localStorageRef, ACCESS_TOKEN_STORAGE_KEY, accessToken);
+        safeStorageSetItem(localStorageRef, REFRESH_TOKEN_STORAGE_KEY, refreshToken);
+        safeStorageSetItem(sessionStorageRef, ACCESS_TOKEN_STORAGE_KEY, accessToken);
+        safeStorageSetItem(sessionStorageRef, REFRESH_TOKEN_STORAGE_KEY, refreshToken);
+        setStoredAuthTransport('bearer');
+        return true;
+    }
+
+    const accessPersistedToSession = safeStorageSetItem(sessionStorageRef, ACCESS_TOKEN_STORAGE_KEY, accessToken);
+    const refreshPersistedToSession = safeStorageSetItem(sessionStorageRef, REFRESH_TOKEN_STORAGE_KEY, refreshToken);
+    if (accessPersistedToSession) safeStorageRemoveItem(localStorageRef, ACCESS_TOKEN_STORAGE_KEY);
+    else safeStorageSetItem(localStorageRef, ACCESS_TOKEN_STORAGE_KEY, accessToken);
+    if (refreshPersistedToSession) safeStorageRemoveItem(localStorageRef, REFRESH_TOKEN_STORAGE_KEY);
+    else safeStorageSetItem(localStorageRef, REFRESH_TOKEN_STORAGE_KEY, refreshToken);
+    setStoredAuthTransport('bearer');
+    return true;
+};
+
+const stripLegacyAuthHeaders = (headers = {}) => {
+    const nextHeaders = { ...(headers || {}) };
+    delete nextHeaders['Authorization'];
+    delete nextHeaders['authorization'];
+    delete nextHeaders['X-Refresh-Token'];
+    delete nextHeaders['x-refresh-token'];
+    return nextHeaders;
+};
+
+const resolveAuthTransportFromHeaders = (headers = {}) => {
+    if (!headers || typeof headers !== 'object') return null;
+    return (
+        normalizeClientAuthTransport(headers['X-Auth-Transport']) ||
+        normalizeClientAuthTransport(headers['x-auth-transport'])
+    );
+};
+
+const withAccessTokenHeader = (headers = {}, options = {}) => {
+    const { includeRefreshToken = false, transportOverride = null } = options || {};
+    const nextHeaders = stripLegacyAuthHeaders(headers);
+    const authTransport =
+        normalizeClientAuthTransport(transportOverride) ||
+        resolveAuthTransportFromHeaders(headers) ||
+        getPreferredAuthTransport();
+    nextHeaders['X-Auth-Transport'] = authTransport;
+
+    if (authTransport === 'bearer') {
+        const accessToken = getStoredAuthToken(ACCESS_TOKEN_STORAGE_KEY);
+        const refreshToken = includeRefreshToken ? getStoredAuthToken(REFRESH_TOKEN_STORAGE_KEY) : '';
+        if (accessToken) nextHeaders.Authorization = `Bearer ${accessToken}`;
+        if (refreshToken) nextHeaders['X-Refresh-Token'] = refreshToken;
+    }
+
+    return nextHeaders;
+};
+
+const persistRotatedBearerTokens = (response, data = null) => {
+    const payload = data && typeof data === 'object' ? data : {};
+    const newAccessToken =
+        response?.headers?.get('x-new-access-token') ||
+        response?.headers?.get('X-New-Access-Token') ||
+        payload.access_token;
+    const newRefreshToken =
+        response?.headers?.get('x-new-refresh-token') ||
+        response?.headers?.get('X-New-Refresh-Token') ||
+        payload.refresh_token;
+    if (!newAccessToken && !newRefreshToken) return;
+
+    persistBearerAuthTokens({
+        access_token: newAccessToken || getStoredAuthToken(ACCESS_TOKEN_STORAGE_KEY),
+        refresh_token: newRefreshToken || getStoredAuthToken(REFRESH_TOKEN_STORAGE_KEY)
+    });
+};
+
+const isRecoverableAuthError = (body = null) => {
+    const code = body?.code;
+    const apiErrorText = body?.error;
+    return (
+        code === 'TOKEN_EXPIRED' ||
+        code === 'INVALID_TOKEN' ||
+        code === 'INVALID_TOKEN_TYPE' ||
+        code === 'MISSING_TOKEN' ||
+        code === 'SESSION_EXPIRED' ||
+        code === 'SESSION_NOT_FOUND' ||
+        code === 'SESSION_REVOKED' ||
+        apiErrorText === 'JWT authentication failed'
+    );
+};
+
+const authFetch = async (url, opts = {}, retry = true) => {
+    const requestHeaders = withAccessTokenHeader(opts.headers || {});
+    const res = await fetch(url, {
+        credentials: 'include',
+        ...opts,
+        headers: requestHeaders
+    });
+
+    const body = await readJsonSafe(res.clone());
+    const transportFromResponse =
+        normalizeClientAuthTransport(res.headers.get('x-auth-transport')) ||
+        normalizeClientAuthTransport(body?.auth_transport);
+    const resolvedTransport = shouldForceBearerAuthTransport()
+        ? 'bearer'
+        : (transportFromResponse || getPreferredAuthTransport());
+
+    if (resolvedTransport === 'bearer') {
+        persistRotatedBearerTokens(res, body);
+    } else if (resolvedTransport === 'cookie') {
+        activateCookieAuthTransport();
+    }
+
+    if (res.status !== 401 || !retry || !isRecoverableAuthError(body)) return res;
+
+    if (!refreshPromise) {
+        const refreshTransport = getPreferredAuthTransport();
+        const refreshToken = refreshTransport === 'bearer'
+            ? getStoredAuthToken(REFRESH_TOKEN_STORAGE_KEY)
+            : '';
+
+        refreshPromise = fetch(AUTH_REFRESH_URL, {
+            method: 'POST',
+            credentials: 'include',
+            headers: withAccessTokenHeader(
+                { 'Content-Type': 'application/json' },
+                {
+                    includeRefreshToken: true,
+                    transportOverride: refreshTransport
+                }
+            ),
+            body: JSON.stringify(
+                refreshTransport === 'bearer'
+                    ? {
+                        auth_transport: 'bearer',
+                        refresh_token: refreshToken || undefined
+                    }
+                    : {
+                        auth_transport: 'cookie'
+                    }
+            )
+        }).then(async (refreshResponse) => {
+            const refreshData = await readJsonSafe(refreshResponse.clone());
+            if (!refreshResponse.ok) {
+                clearAuthTokens();
+                return refreshResponse;
+            }
+
+            const refreshResolvedTransport = shouldForceBearerAuthTransport()
+                ? 'bearer'
+                : (
+                    normalizeClientAuthTransport(refreshData?.auth_transport) ||
+                    normalizeClientAuthTransport(refreshResponse.headers.get('x-auth-transport')) ||
+                    getPreferredAuthTransport()
+                );
+
+            if (refreshResolvedTransport === 'bearer') {
+                if (!persistBearerAuthTokens({
+                    access_token:
+                        refreshResponse.headers.get('x-new-access-token') ||
+                        refreshData?.access_token,
+                    refresh_token:
+                        refreshResponse.headers.get('x-new-refresh-token') ||
+                        refreshData?.refresh_token
+                })) {
+                    clearAuthTokens();
+                    throw new Error('Bearer refresh succeeded without rotated tokens');
+                }
+            } else {
+                activateCookieAuthTransport();
+            }
+
+            return refreshResponse;
+        }).catch((refreshError) => {
+            clearAuthTokens();
+            throw refreshError;
+        }).finally(() => {
+            refreshPromise = null;
+        });
+    }
+
     const rr = await refreshPromise;
     if (!rr.ok) return res;
     return authFetch(url, opts, false);
