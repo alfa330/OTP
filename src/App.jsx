@@ -342,7 +342,10 @@ const resolveAuthTransportFromHeaders = (headers = {}) => {
 };
 
 const withAccessTokenHeader = (headers = {}, options = {}) => {
-    const { includeRefreshToken = false, transportOverride = null } = options || {};
+    const {
+        includeRefreshToken = shouldUseLegacyMobileBearerStorage(),
+        transportOverride = null
+    } = options || {};
     const nextHeaders = stripLegacyAuthHeaders(headers);
     const authTransport =
         normalizeClientAuthTransport(transportOverride) ||
@@ -29114,7 +29117,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     }, {
                         headers: withAccessTokenHeader(
                             { 'Content-Type': 'application/json' },
-                            { transportOverride: requestedAuthTransport }
+                            {
+                                transportOverride: requestedAuthTransport,
+                                includeRefreshToken: false
+                            }
                         )
                     });
                     const data = response.data;

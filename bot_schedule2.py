@@ -222,6 +222,11 @@ def _requested_auth_transport(payload=None):
     if header_transport:
         return header_transport
 
+    # Fallback for legacy/mobile clients that can lose X-Auth-Transport
+    # but still send bearer credentials.
+    if _get_bearer_access_token() or _get_refresh_header_token():
+        return 'bearer'
+
     return 'cookie'
 
 
@@ -232,11 +237,12 @@ def _build_auth_response_payload(user_payload, transport='cookie', access_token=
         "auth_transport": transport,
         **user_payload
     }
-    if transport == 'bearer':
-        if access_token:
-            response_payload["access_token"] = access_token
-        if refresh_token:
-            response_payload["refresh_token"] = refresh_token
+    # Keep tokens in JSON body for compatibility with mobile/webview clients
+    # that rely on Bearer storage and cannot always persist cookies.
+    if access_token:
+        response_payload["access_token"] = access_token
+    if refresh_token:
+        response_payload["refresh_token"] = refresh_token
     return response_payload
 
 
