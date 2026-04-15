@@ -462,6 +462,15 @@ def _build_refresh_token(user_id, session_id):
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
+def _is_mobile_or_embedded_user_agent():
+    user_agent = str(request.headers.get('User-Agent') or '').lower()
+    if not user_agent:
+        return False
+    mobile_pattern = r'(android|iphone|ipad|ipod|iemobile|opera mini|mobile|windows phone)'
+    embedded_pattern = r'(\bwv\b|; wv\)|fbav|fban|instagram|line/)'
+    return re.search(mobile_pattern, user_agent) is not None or re.search(embedded_pattern, user_agent) is not None
+
+
 def _cookie_options():
     secure = JWT_COOKIE_SECURE
     origin = request.headers.get('Origin', '')
@@ -472,7 +481,14 @@ def _cookie_options():
     if not secure and str(samesite).lower() == 'none':
         samesite = 'Lax'
 
-    partitioned = bool(JWT_COOKIE_PARTITIONED and secure and str(samesite).lower() == 'none')
+    if _is_mobile_or_embedded_user_agent():
+        # Older mobile browsers/webviews often mishandle SameSite=None/Partitioned cookies.
+        # Keep desktop cross-site protections, but prefer a compatible cookie shape on mobile.
+        if str(samesite).lower() == 'none':
+            samesite = 'Lax'
+        partitioned = False
+    else:
+        partitioned = bool(JWT_COOKIE_PARTITIONED and secure and str(samesite).lower() == 'none')
 
     return {
         "httponly": True,

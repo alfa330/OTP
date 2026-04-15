@@ -126,17 +126,17 @@ const isLikelyCookieRestrictedMobileContext = () => {
     const isMobileDevice = /(android|iphone|ipad|ipod|iemobile|opera mini|mobile|windows phone)/i.test(userAgent);
     const isEmbeddedWebView = /\bwv\b|; wv\)|fbav|fban|instagram|line\//i.test(userAgent);
     try {
-        const apiOrigin = new URL(API_BASE_URL, window.location.origin).origin;
-        return apiOrigin !== window.location.origin && (isMobileDevice || isEmbeddedWebView);
+        new URL(API_BASE_URL, window.location.origin);
+        return isMobileDevice || isEmbeddedWebView;
     } catch (error) {
         console.warn('Failed to detect auth transport context:', error);
         return isMobileDevice || isEmbeddedWebView;
     }
 };
 const getPreferredAuthTransport = () => {
-    const storedTransport = getStoredAuthTransport();
     if (hasStoredBearerTokens()) return 'bearer';
     if (isLikelyCookieRestrictedMobileContext()) return 'bearer';
+    const storedTransport = getStoredAuthTransport();
     if (storedTransport) return storedTransport;
     return 'cookie';
 };
