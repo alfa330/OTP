@@ -104,6 +104,12 @@ const getStoredAuthToken = (storageKey) => {
     if (typeof window === 'undefined') return '';
     return String(window.localStorage.getItem(storageKey) || '').trim();
 };
+const hasStoredBearerTokens = () => {
+    return Boolean(
+        getStoredAuthToken(ACCESS_TOKEN_STORAGE_KEY) &&
+        getStoredAuthToken(REFRESH_TOKEN_STORAGE_KEY)
+    );
+};
 const clearStoredBearerTokens = () => {
     if (typeof window === 'undefined') return;
     window.localStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY);
@@ -129,8 +135,10 @@ const isLikelyCookieRestrictedMobileContext = () => {
 };
 const getPreferredAuthTransport = () => {
     const storedTransport = getStoredAuthTransport();
+    if (hasStoredBearerTokens()) return 'bearer';
+    if (isLikelyCookieRestrictedMobileContext()) return 'bearer';
     if (storedTransport) return storedTransport;
-    return isLikelyCookieRestrictedMobileContext() ? 'bearer' : 'cookie';
+    return 'cookie';
 };
 const activateCookieAuthTransport = () => {
     clearStoredBearerTokens();
@@ -356,12 +364,27 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         ) {
                             originalRequest.__isRetryRequest = true;
                             if (!window.__otpRefreshPromise) {
+                                const refreshTransport = getPreferredAuthTransport();
+                                const refreshToken = refreshTransport === 'bearer'
+                                    ? getStoredAuthToken(REFRESH_TOKEN_STORAGE_KEY)
+                                    : '';
                                 window.__otpRefreshPromise = axios.post(
                                     AUTH_REFRESH_URL,
-                                    {},
+                                    refreshTransport === 'bearer'
+                                        ? {
+                                            auth_transport: 'bearer',
+                                            refresh_token: refreshToken || undefined
+                                        }
+                                        : {},
                                     {
                                         withCredentials: true,
-                                        headers: withAccessTokenHeader({}, { includeRefreshToken: true })
+                                        headers: withAccessTokenHeader(
+                                            {},
+                                            {
+                                                includeRefreshToken: true,
+                                                transportOverride: refreshTransport
+                                            }
+                                        )
                                     }
                                 ).then((refreshResponse) => {
                                     const refreshData = refreshResponse?.data || {};

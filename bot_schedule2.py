@@ -574,6 +574,14 @@ def _get_refresh_header_token():
     return token or None
 
 
+def _get_refresh_body_token():
+    if request.path != '/api/auth/refresh':
+        return None
+    data = request.get_json(silent=True) or {}
+    token = str(data.get('refresh_token') or '').strip()
+    return token or None
+
+
 def _get_access_token_values():
     tokens = _get_cookie_values(JWT_ACCESS_COOKIE_NAME)
     header_token = _get_bearer_access_token()
@@ -587,6 +595,9 @@ def _get_refresh_token_values():
     header_token = _get_refresh_header_token()
     if header_token:
         tokens.append(header_token)
+    body_token = _get_refresh_body_token()
+    if body_token:
+        tokens.append(body_token)
     return tokens
 
 
