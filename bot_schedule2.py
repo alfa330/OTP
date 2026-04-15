@@ -3018,8 +3018,48 @@ def get_admin_users():
             return jsonify({"error": message}), status_code
 
         requester_role = _normalize_user_role(requester[3])
+
+        if requester_role == 'operator':
+            # Operator can only read a limited user projection.
+            visible_roles = ['operator', 'trainee', 'trainer']
+            with db._get_cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT
+                        u.id,
+                        u.name,
+                        u.role,
+                        u.rate,
+                        u.direction_id,
+                        d.name AS direction,
+                        u.supervisor_id,
+                        s.name AS supervisor_name
+                    FROM users u
+                    LEFT JOIN directions d ON u.direction_id = d.id
+                    LEFT JOIN users s ON u.supervisor_id = s.id
+                    WHERE LOWER(COALESCE(u.role, '')) = ANY(%s)
+                    ORDER BY u.name
+                    """,
+                    (visible_roles,)
+                )
+
+                users = []
+                for row in cursor.fetchall():
+                    users.append({
+                        "id": row[0],
+                        "name": row[1],
+                        "role": _normalize_user_role(row[2]),
+                        "rate": float(row[3]) if row[3] is not None else 1.0,
+                        "direction_id": row[4],
+                        "direction": row[5] or "",
+                        "supervisor_id": row[6],
+                        "supervisor_name": row[7] or ""
+                    })
+
+            return jsonify({"status": "success", "users": users}), 200
+
         if not _is_admin_role(requester_role):
-            return jsonify({"error": "Only admins can access users"}), 403
+            return jsonify({"error": "Only admins can access full users data"}), 403
 
         visible_roles = ['operator', 'trainee', 'trainer']
         if requester_role == 'super_admin':
@@ -6549,8 +6589,9 @@ def get_directions():
             message, status_code = auth_error
             logging.warning("Directions auth error: %s", message)
             return jsonify({"error": message}), status_code
-        if not (_is_admin_role(requester[3]) or _is_supervisor_role(requester[3])):
-            return jsonify({"error": "Only admins and supervisors can access directions"}), 403
+        role = _normalize_user_role(requester[3])
+        if not (_is_admin_role(role) or _is_supervisor_role(role) or role == 'operator'):
+            return jsonify({"error": "Only admins, supervisors and operators can access directions"}), 403
 
         directions = db.get_directions()
         return jsonify({"status": "success", "directions": directions}), 200
