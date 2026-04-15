@@ -29636,26 +29636,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             };
 
-            const revokeSensitiveAccess = async () => {
-                if (!user || user.role !== 'operator') return;
-                try {
-                    await axios.post(
-                        `${API_BASE_URL}/api/sensitive-access/revoke`,
-                        {},
-                        { headers: { 'X-User-Id': user.id } }
-                    );
-                    setSensitiveAccess(prev => ({ ...prev, granted: false }));
-                    setAudioUrl(null);
-                    setLoadingAudioId(null);
-                    setExpandedEvaluation(null);
-                    setExpandedEvalId(null);
-                    await fetchOperatorData();
-                    showToast('Доступ к чувствительным данным отключен', 'success');
-                } catch (err) {
-                    showToast(err.response?.data?.error || 'Не удалось отключить доступ', 'error');
-                }
-            };
-
             const startQrScanner = async () => {
                 if (!user || !(isAdminLikeRoleFn(user?.role) || isSupervisorRole(user?.role))) return;
                 setQrScannerError('');
@@ -33634,14 +33614,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     className="px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm font-medium transition"
                                                 >
                                                     <FaIcon className="fas fa-qrcode mr-2"></FaIcon>Сгенерировать QR
-                                                </button>
-                                                )}
-                                                {sensitiveAccess.granted && (
-                                                <button
-                                                    onClick={revokeSensitiveAccess}
-                                                    className="px-4 py-2 rounded-lg bg-gray-200 text-gray-800 hover:bg-gray-300 text-sm font-medium transition"
-                                                >
-                                                    Закрыть доступ
                                                 </button>
                                                 )}
                                             </div>
