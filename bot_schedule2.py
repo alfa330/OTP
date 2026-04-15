@@ -2079,7 +2079,7 @@ def require_auth(f):
             request.environ['JWT_AUTH_ERROR_CODE'] = auth_error.code
 
         try:
-            if _authenticate_refresh_cookie(optional=True, rotate_tokens=False):
+            if _authenticate_refresh_cookie(optional=True, rotate_tokens=True):
                 identity_error = _validate_authenticated_identity_header()
                 if identity_error is not None:
                     return identity_error
@@ -2246,7 +2246,8 @@ def refresh_auth():
         if request.method == 'OPTIONS':
             return _build_cors_preflight_response()
 
-        auth_transport = _requested_auth_transport()
+        data_body = request.get_json(silent=True) or {}
+        auth_transport = _requested_auth_transport(data_body)
         _authenticate_refresh_cookie(optional=False, rotate_tokens=True)
         user_id = getattr(g, 'user_id', None)
         if not user_id:
