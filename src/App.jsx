@@ -448,6 +448,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             if (!window.__otpAxiosAuthRequestInterceptorInstalled) {
                 window.__otpAxiosAuthRequestInterceptorInstalled = true;
                 axios.interceptors.request.use((config) => {
+                    const url = String(config?.url || '');
+                    if (url.includes('/api/login') || url.includes('/api/auth/refresh')) {
+                        return config;
+                    }
                     const nextConfig = config || {};
                     nextConfig.headers = withAccessTokenHeader(nextConfig.headers || {});
                     return nextConfig;
@@ -29054,6 +29058,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return;
                 }
                 setIsLoading(true);
+                clearStoredBearerTokens();
                 
                 try {
                     const requestedAuthTransport = getPreferredAuthTransport();
