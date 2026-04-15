@@ -146,8 +146,9 @@ try:
 except Exception:
     LMS_CERTIFICATE_RASTER_SCALE = 3
 LMS_CERTIFICATE_RASTER_SCALE = max(2, min(6, LMS_CERTIFICATE_RASTER_SCALE))
-LMS_CERTIFICATE_USE_XHTML2PDF = str(os.getenv('LMS_CERTIFICATE_USE_XHTML2PDF', 'false')).strip().lower() in {'1', 'true', 'yes'}
+LMS_CERTIFICATE_USE_XHTML2PDF = str(os.getenv('LMS_CERTIFICATE_USE_XHTML2PDF', 'true')).strip().lower() in {'1', 'true', 'yes'}
 LMS_CERTIFICATE_ENABLE_RASTER_FALLBACK = str(os.getenv('LMS_CERTIFICATE_ENABLE_RASTER_FALLBACK', 'false')).strip().lower() in {'1', 'true', 'yes'}
+LMS_CERTIFICATE_HTML_ENGINE_WARNED = False
 try:
     RECRUITING_PAGES_PER_QUERY = int(os.getenv('RECRUITING_PAGES_PER_QUERY', '5'))
 except Exception:
@@ -15798,6 +15799,7 @@ body {{
 </html>"""
 
 def _lms_build_pdf_from_html(html_markup):
+    global LMS_CERTIFICATE_HTML_ENGINE_WARNED
     markup = str(html_markup or "").strip()
     if not markup:
         return None
@@ -15820,6 +15822,14 @@ def _lms_build_pdf_from_html(html_markup):
                     return rendered
         except Exception:
             logging.exception("xhtml2pdf certificate render failed")
+
+    if not LMS_CERTIFICATE_HTML_ENGINE_WARNED:
+        if WeasyHTML is None and (not LMS_CERTIFICATE_USE_XHTML2PDF or Xhtml2PdfPisa is None):
+            logging.warning(
+                "LMS certificate HTML->PDF engines are unavailable (weasyprint/xhtml2pdf). "
+                "Install dependencies and restart backend to get copyable designed certificates."
+            )
+            LMS_CERTIFICATE_HTML_ENGINE_WARNED = True
 
     return None
 
