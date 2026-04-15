@@ -29896,10 +29896,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 try {
                     const response = await axios.get(`${API_BASE_URL}/api/sensitive-access/status`, {
                         withCredentials: true,
-                        headers: withAccessTokenHeader(
-                            { 'X-User-Id': user.id },
-                            { transportOverride: 'cookie' }
-                        )
+                        headers: withAccessTokenHeader({ 'X-User-Id': user.id })
                     });
                     const data = response.data || {};
                     if (data.status === 'success') {
@@ -29947,10 +29944,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         {},
                         {
                             withCredentials: true,
-                            headers: withAccessTokenHeader(
-                                { 'X-User-Id': user.id },
-                                { transportOverride: 'cookie' }
-                            )
+                            headers: withAccessTokenHeader({ 'X-User-Id': user.id })
                         }
                     );
                     const data = response.data || {};
@@ -30068,10 +30062,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         { token },
                         {
                             withCredentials: true,
-                            headers: withAccessTokenHeader(
-                                { 'X-User-Id': user.id },
-                                { transportOverride: 'cookie' }
-                            )
+                            headers: withAccessTokenHeader({ 'X-User-Id': user.id })
                         }
                     );
                     const data = response.data || {};
