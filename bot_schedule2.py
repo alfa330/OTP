@@ -138,8 +138,8 @@ LMS_DEFAULT_PASS_THRESHOLD = float(os.getenv('LMS_DEFAULT_PASS_THRESHOLD', '80')
 LMS_DEFAULT_ATTEMPT_LIMIT = int(os.getenv('LMS_DEFAULT_ATTEMPT_LIMIT', '3'))
 LMS_CERTIFICATE_STORAGE = (os.getenv('LMS_CERTIFICATE_STORAGE') or 'db').strip().lower()
 LMS_CERTIFICATE_TEMPLATE_VERSION = (
-    (os.getenv('LMS_CERTIFICATE_TEMPLATE_VERSION') or 'bold_split_v4_exact_html_2026_04_15').strip()
-    or 'bold_split_v4_exact_html_2026_04_15'
+    (os.getenv('LMS_CERTIFICATE_TEMPLATE_VERSION') or 'bold_split_v4_exact_html_copyable_2026_04_15').strip()
+    or 'bold_split_v4_exact_html_copyable_2026_04_15'
 )
 try:
     LMS_CERTIFICATE_RASTER_SCALE = int(str(os.getenv('LMS_CERTIFICATE_RASTER_SCALE', '3')).strip() or '3')
@@ -147,6 +147,7 @@ except Exception:
     LMS_CERTIFICATE_RASTER_SCALE = 3
 LMS_CERTIFICATE_RASTER_SCALE = max(2, min(6, LMS_CERTIFICATE_RASTER_SCALE))
 LMS_CERTIFICATE_USE_XHTML2PDF = str(os.getenv('LMS_CERTIFICATE_USE_XHTML2PDF', 'false')).strip().lower() in {'1', 'true', 'yes'}
+LMS_CERTIFICATE_ENABLE_RASTER_FALLBACK = str(os.getenv('LMS_CERTIFICATE_ENABLE_RASTER_FALLBACK', 'false')).strip().lower() in {'1', 'true', 'yes'}
 try:
     RECRUITING_PAGES_PER_QUERY = int(os.getenv('RECRUITING_PAGES_PER_QUERY', '5'))
 except Exception:
@@ -16173,17 +16174,20 @@ def _lms_generate_certificate_pdf(certificate_number, learner_name, course_title
     except Exception:
         logging.exception("LMS HTML certificate render fallback")
 
-    try:
-        bold_split_pdf = _lms_build_bold_split_certificate_pdf(
-            certificate_number=certificate_number,
-            learner_name=learner_name,
-            course_title=course_title,
-            issued_at=issue_dt
-        )
-        if bold_split_pdf:
-            return bold_split_pdf
-    except Exception:
-        logging.exception("LMS certificate render fallback to simple PDF")
+    if LMS_CERTIFICATE_ENABLE_RASTER_FALLBACK:
+        try:
+            bold_split_pdf = _lms_build_bold_split_certificate_pdf(
+                certificate_number=certificate_number,
+                learner_name=learner_name,
+                course_title=course_title,
+                issued_at=issue_dt
+            )
+            if bold_split_pdf:
+                return bold_split_pdf
+        except Exception:
+            logging.exception("LMS certificate raster fallback failed")
+    else:
+        logging.warning("LMS certificate raster fallback disabled; returning copyable text PDF fallback")
 
     verify_url = _lms_verify_url(verify_token)
     lines = [
