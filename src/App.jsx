@@ -232,9 +232,22 @@ const isLikelyCookieRestrictedMobileContext = () => {
         return isMobileDevice || isEmbeddedWebView;
     }
 };
+const isCrossOriginApiContext = () => {
+    if (typeof window === 'undefined') return false;
+    try {
+        const apiUrl = new URL(API_BASE_URL, window.location.origin);
+        return apiUrl.origin !== window.location.origin;
+    } catch (error) {
+        console.warn('Failed to detect API origin context:', error);
+        return true;
+    }
+};
+const shouldForceBearerAuthTransport = () => {
+    return isCrossOriginApiContext() || isLikelyCookieRestrictedMobileContext();
+};
 const getPreferredAuthTransport = () => {
     if (hasStoredBearerTokens()) return 'bearer';
-    if (isLikelyCookieRestrictedMobileContext()) return 'bearer';
+    if (shouldForceBearerAuthTransport()) return 'bearer';
     const storedTransport = getStoredAuthTransport();
     if (storedTransport) return storedTransport;
     return 'cookie';
@@ -500,7 +513,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     }
                                 ).then((refreshResponse) => {
                                     const refreshData = refreshResponse?.data || {};
-                                    const resolvedTransport = normalizeClientAuthTransport(refreshData.auth_transport) || getPreferredAuthTransport();
+                                    const resolvedTransport = shouldForceBearerAuthTransport()
+                                        ? 'bearer'
+                                        : (normalizeClientAuthTransport(refreshData.auth_transport) || getPreferredAuthTransport());
                                     if (resolvedTransport === 'bearer') {
                                         if (!persistBearerAuthTokens(refreshData)) {
                                             throw new Error('Bearer refresh succeeded without rotated tokens');
@@ -29054,7 +29069,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
-                        const resolvedTransport = normalizeClientAuthTransport(data.auth_transport) || requestedAuthTransport;
+                        const resolvedTransport = shouldForceBearerAuthTransport()
+                            ? 'bearer'
+                            : (normalizeClientAuthTransport(data.auth_transport) || requestedAuthTransport);
                         if (resolvedTransport === 'bearer') {
                             if (!persistBearerAuthTokens(data)) {
                                 throw new Error('Bearer login succeeded without tokens in response');
