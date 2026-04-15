@@ -142,6 +142,12 @@ LMS_CERTIFICATE_TEMPLATE_VERSION = (
     or 'bold_split_v4_html_2026_04'
 )
 try:
+    LMS_CERTIFICATE_RASTER_SCALE = int(str(os.getenv('LMS_CERTIFICATE_RASTER_SCALE', '3')).strip() or '3')
+except Exception:
+    LMS_CERTIFICATE_RASTER_SCALE = 3
+LMS_CERTIFICATE_RASTER_SCALE = max(2, min(6, LMS_CERTIFICATE_RASTER_SCALE))
+LMS_CERTIFICATE_USE_XHTML2PDF = str(os.getenv('LMS_CERTIFICATE_USE_XHTML2PDF', 'false')).strip().lower() in {'1', 'true', 'yes'}
+try:
     RECRUITING_PAGES_PER_QUERY = int(os.getenv('RECRUITING_PAGES_PER_QUERY', '5'))
 except Exception:
     RECRUITING_PAGES_PER_QUERY = 5
@@ -15981,7 +15987,7 @@ def _lms_build_pdf_from_html(html_markup):
         except Exception:
             logging.exception("WeasyPrint certificate render failed")
 
-    if Xhtml2PdfPisa is not None:
+    if LMS_CERTIFICATE_USE_XHTML2PDF and Xhtml2PdfPisa is not None:
         try:
             out = BytesIO()
             result = Xhtml2PdfPisa.CreatePDF(src=markup, dest=out, encoding='utf-8')
@@ -16185,8 +16191,13 @@ def _lms_build_bold_split_certificate_pdf(certificate_number, learner_name, cour
     issue_date_short = issue_dt.strftime("%d.%m.%Y")
     course_label = course if any(token in course for token in ("«", "»", "\"", "'")) else f"«{course}»"
 
-    canvas_w, canvas_h = 1123, 794
-    left_w = 340
+    raster_scale = max(2, min(6, int(LMS_CERTIFICATE_RASTER_SCALE or 3)))
+
+    def S(value):
+        return int(round(float(value) * float(raster_scale)))
+
+    canvas_w, canvas_h = S(1123), S(794)
+    left_w = S(340)
     right_x = left_w
     image = Image.new("RGBA", (canvas_w, canvas_h), (255, 255, 255, 255))
     draw = ImageDraw.Draw(image, "RGBA")
@@ -16199,116 +16210,129 @@ def _lms_build_bold_split_certificate_pdf(certificate_number, learner_name, cour
     col_g5 = (74, 72, 69, 255)
 
     draw.rectangle((0, 0, left_w, canvas_h), fill=col_k)
-    draw.rectangle((0, 0, left_w, 6), fill=col_y)
-    draw.ellipse((-120, 314, 240, 674), outline=(253, 183, 0, 31), width=1)
-    draw.ellipse((-50, 524, 170, 744), outline=(253, 183, 0, 51), width=1)
-    _lms_draw_dot_grid(draw, left_w - 120, 0, 120, 140, 16, 1, (253, 183, 0, 77))
+    draw.rectangle((0, 0, left_w, S(6)), fill=col_y)
+    draw.ellipse((S(-120), S(314), S(240), S(674)), outline=(253, 183, 0, 31), width=max(1, S(1)))
+    draw.ellipse((S(-50), S(524), S(170), S(744)), outline=(253, 183, 0, 51), width=max(1, S(1)))
+    _lms_draw_dot_grid(draw, left_w - S(120), 0, S(120), S(140), S(16), S(1), (253, 183, 0, 77))
 
-    draw.ellipse((583, -180, 983, 220), outline=(0, 0, 0, 13), width=1)
-    _lms_draw_dot_grid(draw, canvas_w - 160, canvas_h - 160, 160, 160, 18, 1, (253, 183, 0, 51))
+    draw.ellipse((S(583), S(-180), S(983), S(220)), outline=(0, 0, 0, 13), width=max(1, S(1)))
+    _lms_draw_dot_grid(draw, canvas_w - S(160), canvas_h - S(160), S(160), S(160), S(18), S(1), (253, 183, 0, 51))
 
-    left_pad_x = 44
-    top_pad = 52
+    left_pad_x = S(44)
+    top_pad = S(52)
 
-    logo_i_font = _lms_certificate_font(20, bold=True)
-    logo_group_font = _lms_certificate_font(13, bold=True)
-    draw.rectangle((left_pad_x, top_pad, left_pad_x + 34, top_pad + 34), fill=col_y)
+    logo_i_font = _lms_certificate_font(S(20), bold=True)
+    logo_group_font = _lms_certificate_font(S(13), bold=True)
+    draw.rectangle((left_pad_x, top_pad, left_pad_x + S(34), top_pad + S(34)), fill=col_y)
     i_w, i_h = _lms_text_size(draw, "i", logo_i_font)
-    draw.text((left_pad_x + (34 - i_w) / 2, top_pad + (34 - i_h) / 2 - 1), "i", font=logo_i_font, fill=col_k)
-    draw.rectangle((left_pad_x + 34, top_pad, left_pad_x + 132, top_pad + 34), fill=col_w)
-    draw.text((left_pad_x + 44, top_pad + 9), "Group", font=logo_group_font, fill=col_k)
+    draw.text(
+        (left_pad_x + (S(34) - i_w) / 2, top_pad + (S(34) - i_h) / 2 - S(1)),
+        "i",
+        font=logo_i_font,
+        fill=col_k
+    )
+    draw.rectangle((left_pad_x + S(34), top_pad, left_pad_x + S(132), top_pad + S(34)), fill=col_w)
+    draw.text((left_pad_x + S(44), top_pad + S(9)), "Group", font=logo_group_font, fill=col_k)
 
-    left_label_font = _lms_certificate_font(9, bold=True)
-    left_title_font = _lms_certificate_font(36, bold=True)
-    left_sub_font = _lms_certificate_font(10, bold=False)
-    info_label_font = _lms_certificate_font(9, bold=True)
-    info_value_font = _lms_certificate_font(11, bold=True)
+    left_label_font = _lms_certificate_font(S(9), bold=True)
+    left_title_font = _lms_certificate_font(S(36), bold=True)
+    left_sub_font = _lms_certificate_font(S(10), bold=False)
+    info_label_font = _lms_certificate_font(S(9), bold=True)
+    info_value_font = _lms_certificate_font(S(11), bold=True)
 
-    block_y = canvas_h - 280
+    block_y = canvas_h - S(280)
     draw.text((left_pad_x, block_y), "ОФИЦИАЛЬНЫЙ ДОКУМЕНТ", font=left_label_font, fill=col_y)
-    draw.text((left_pad_x, block_y + 22), "Сертификат", font=left_title_font, fill=col_w)
-    draw.text((left_pad_x, block_y + 88), "о прохождении обучения", font=left_sub_font, fill=(255, 255, 255, 89))
-    draw.rectangle((left_pad_x, block_y + 116, left_pad_x + 40, block_y + 119), fill=col_y)
+    draw.text((left_pad_x, block_y + S(22)), "Сертификат", font=left_title_font, fill=col_w)
+    draw.text((left_pad_x, block_y + S(88)), "о прохождении обучения", font=left_sub_font, fill=(255, 255, 255, 89))
+    draw.rectangle((left_pad_x, block_y + S(116), left_pad_x + S(40), block_y + S(119)), fill=col_y)
 
-    info_y = block_y + 140
+    info_y = block_y + S(140)
     draw.text((left_pad_x, info_y), "НОМЕР СЕРТИФИКАТА", font=info_label_font, fill=(255, 255, 255, 77))
-    draw.text((left_pad_x, info_y + 14), cert_number, font=info_value_font, fill=(255, 255, 255, 181))
-    draw.text((left_pad_x, info_y + 42), "ДАТА ВЫДАЧИ", font=info_label_font, fill=(255, 255, 255, 77))
-    draw.text((left_pad_x, info_y + 56), issue_date_ru, font=info_value_font, fill=(255, 255, 255, 181))
+    draw.text((left_pad_x, info_y + S(14)), cert_number, font=info_value_font, fill=(255, 255, 255, 181))
+    draw.text((left_pad_x, info_y + S(42)), "ДАТА ВЫДАЧИ", font=info_label_font, fill=(255, 255, 255, 77))
+    draw.text((left_pad_x, info_y + S(56)), issue_date_ru, font=info_value_font, fill=(255, 255, 255, 181))
 
-    rp_left = right_x + 60
-    rp_right = canvas_w - 60
-    rp_top = 52
-    rp_bottom = canvas_h - 48
+    rp_left = right_x + S(60)
+    rp_right = canvas_w - S(60)
+    rp_top = S(52)
+    rp_bottom = canvas_h - S(48)
 
-    cert_label_font = _lms_certificate_font(8, bold=True)
-    cert_value_font = _lms_certificate_font(11, bold=True)
+    cert_label_font = _lms_certificate_font(S(8), bold=True)
+    cert_value_font = _lms_certificate_font(S(11), bold=True)
     cert_label = "Выдан"
     cert_value = "iGroup Education"
     cert_label_w, _ = _lms_text_size(draw, cert_label, cert_label_font)
     cert_value_w, _ = _lms_text_size(draw, cert_value, cert_value_font)
     draw.text((rp_right - cert_label_w, rp_top), cert_label, font=cert_label_font, fill=col_g4)
-    draw.text((rp_right - cert_value_w, rp_top + 15), cert_value, font=cert_value_font, fill=col_k)
+    draw.text((rp_right - cert_value_w, rp_top + S(15)), cert_value, font=cert_value_font, fill=col_k)
 
-    recipient_hint_font = _lms_certificate_font(9, bold=True)
-    recipient_font = _lms_fit_font(draw, learner, rp_right - rp_left, 52, 30, bold=True)
-    recipient_hint_y = 312
+    recipient_hint_font = _lms_certificate_font(S(9), bold=True)
+    recipient_font = _lms_fit_font(draw, learner, rp_right - rp_left, S(52), S(30), bold=True)
+    recipient_hint_y = S(312)
     draw.text((rp_left, recipient_hint_y), "ВРУЧАЕТСЯ", font=recipient_hint_font, fill=col_g4)
-    draw.text((rp_left, recipient_hint_y + 20), learner, font=recipient_font, fill=col_k)
+    draw.text((rp_left, recipient_hint_y + S(20)), learner, font=recipient_font, fill=col_k)
     _, recip_h = _lms_text_size(draw, learner, recipient_font)
 
-    bar_y = recipient_hint_y + 20 + recip_h + 14
-    draw.rectangle((rp_left, bar_y, rp_left + 52, bar_y + 5), fill=col_y)
+    bar_y = recipient_hint_y + S(20) + recip_h + S(14)
+    draw.rectangle((rp_left, bar_y, rp_left + S(52), bar_y + S(5)), fill=col_y)
 
-    desc_font = _lms_certificate_font(13, bold=False)
+    desc_font = _lms_certificate_font(S(13), bold=False)
     desc_text = (
         f"Настоящий сертификат подтверждает, что {learner} успешно прошел(а) курс {course_label}, "
         "продемонстрировав высокий уровень профессиональных компетенций в соответствии с программой обучения iGroup."
     )
     desc_lines = _lms_wrap_text(draw, desc_text, desc_font, rp_right - rp_left)
-    desc_y = bar_y + 24
+    desc_y = bar_y + S(24)
     _, desc_line_h = _lms_text_size(draw, "Ag", desc_font)
-    desc_step = max(18, desc_line_h + 7)
+    desc_step = max(S(18), desc_line_h + S(7))
     max_desc_lines = 7
     for index, line in enumerate(desc_lines[:max_desc_lines]):
         draw.text((rp_left, desc_y + index * desc_step), line, font=desc_font, fill=col_g5)
 
-    bottom_divider_y = rp_bottom - 95
-    draw.line((rp_left, bottom_divider_y, rp_right, bottom_divider_y), fill=col_g2, width=1)
-    sig_top = bottom_divider_y + 24
+    bottom_divider_y = rp_bottom - S(95)
+    draw.line((rp_left, bottom_divider_y, rp_right, bottom_divider_y), fill=col_g2, width=max(1, S(1)))
+    sig_top = bottom_divider_y + S(24)
 
-    sig_name_font = _lms_certificate_font(11, bold=True)
-    sig_role_font = _lms_certificate_font(9, bold=False)
-    sig_line_w = 130
-    sig_gap = 44
+    sig_name_font = _lms_certificate_font(S(11), bold=True)
+    sig_role_font = _lms_certificate_font(S(9), bold=False)
+    sig_line_w = S(130)
+    sig_gap = S(44)
     sig1_x = rp_left
     sig2_x = rp_left + sig_line_w + sig_gap
-    sig_name_1 = "Алексей Иванов"
-    sig_role_1 = "Генеральный директор"
-    sig_name_2 = "Мария Смирнова"
-    sig_role_2 = "Руководитель программ"
+    sig_name_1 = str(os.getenv("LMS_CERTIFICATE_SIGNER_1_NAME") or "Алексей Иванов").strip()
+    sig_role_1 = str(os.getenv("LMS_CERTIFICATE_SIGNER_1_ROLE") or "Генеральный директор").strip()
+    sig_name_2 = str(os.getenv("LMS_CERTIFICATE_SIGNER_2_NAME") or "Мария Смирнова").strip()
+    sig_role_2 = str(os.getenv("LMS_CERTIFICATE_SIGNER_2_ROLE") or "Руководитель программ").strip()
 
-    draw.line((sig1_x, sig_top, sig1_x + sig_line_w, sig_top), fill=col_k, width=1)
-    draw.text((sig1_x, sig_top + 8), sig_name_1, font=sig_name_font, fill=col_k)
-    draw.text((sig1_x, sig_top + 24), sig_role_1.upper(), font=sig_role_font, fill=col_g4)
+    draw.line((sig1_x, sig_top, sig1_x + sig_line_w, sig_top), fill=col_k, width=max(1, S(1)))
+    draw.text((sig1_x, sig_top + S(8)), sig_name_1, font=sig_name_font, fill=col_k)
+    draw.text((sig1_x, sig_top + S(24)), sig_role_1.upper(), font=sig_role_font, fill=col_g4)
 
-    draw.line((sig2_x, sig_top, sig2_x + sig_line_w, sig_top), fill=col_k, width=1)
-    draw.text((sig2_x, sig_top + 8), sig_name_2, font=sig_name_font, fill=col_k)
-    draw.text((sig2_x, sig_top + 24), sig_role_2.upper(), font=sig_role_font, fill=col_g4)
+    draw.line((sig2_x, sig_top, sig2_x + sig_line_w, sig_top), fill=col_k, width=max(1, S(1)))
+    draw.text((sig2_x, sig_top + S(8)), sig_name_2, font=sig_name_font, fill=col_k)
+    draw.text((sig2_x, sig_top + S(24)), sig_role_2.upper(), font=sig_role_font, fill=col_g4)
 
-    date_label_font = _lms_certificate_font(8, bold=True)
-    date_value_font = _lms_certificate_font(18, bold=True)
+    date_label_font = _lms_certificate_font(S(8), bold=True)
+    date_value_font = _lms_certificate_font(S(18), bold=True)
     date_label = "ДАТА ВЫДАЧИ"
     date_value = issue_date_short
     date_label_w, _ = _lms_text_size(draw, date_label, date_label_font)
     date_value_w, date_value_h = _lms_text_size(draw, date_value, date_value_font)
     date_x = rp_right - max(date_label_w, date_value_w)
     draw.text((date_x, sig_top), date_label, font=date_label_font, fill=col_g4)
-    draw.text((rp_right - date_value_w, sig_top + 15), date_value, font=date_value_font, fill=col_k)
-    draw.rectangle((rp_right - 36, sig_top + 15 + date_value_h + 7, rp_right, sig_top + 15 + date_value_h + 10), fill=col_y)
+    draw.text((rp_right - date_value_w, sig_top + S(15)), date_value, font=date_value_font, fill=col_k)
+    draw.rectangle(
+        (rp_right - S(36), sig_top + S(15) + date_value_h + S(7), rp_right, sig_top + S(15) + date_value_h + S(10)),
+        fill=col_y
+    )
 
     out = BytesIO()
-    image.convert("RGB").save(out, format="PDF", resolution=96.0)
+    image.convert("RGB").save(
+        out,
+        format="PDF",
+        resolution=float(96 * raster_scale),
+        quality=95
+    )
     return out.getvalue()
 
 
