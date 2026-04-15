@@ -488,11 +488,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 axios.interceptors.response.use(
                     (response) => {
                         const data = response?.data || {};
-                        if (shouldUseLegacyMobileBearerStorage() && (data.access_token || data.refresh_token)) {
-                            persistBearerAuthTokens({
-                                access_token: data.access_token || getStoredAuthToken(ACCESS_TOKEN_STORAGE_KEY),
-                                refresh_token: data.refresh_token || getStoredAuthToken(REFRESH_TOKEN_STORAGE_KEY)
-                            });
+                        if (shouldUseLegacyMobileBearerStorage()) {
+                            // First priority: headers (for silent rotation in standard requests)
+                            // Second priority: JSON body (for direct backend login/refresh responses)
+                            const newAccessToken = response?.headers?.['x-new-access-token'] || data.access_token;
+                            const newRefreshToken = response?.headers?.['x-new-refresh-token'] || data.refresh_token;
+
+                            if (newAccessToken || newRefreshToken) {
+                                persistBearerAuthTokens({
+                                    access_token: newAccessToken || getStoredAuthToken(ACCESS_TOKEN_STORAGE_KEY),
+                                    refresh_token: newRefreshToken || getStoredAuthToken(REFRESH_TOKEN_STORAGE_KEY)
+                                });
+                            }
                         }
                         return response;
                     },

@@ -85,6 +85,23 @@ RECRUITING_RUNTIME_MAX_JOBS = 20
 
 # === Flask-сервер ================================================================================================
 app = Flask(__name__)
+
+@app.after_request
+def debug_401_responses(response):
+    if response.status_code == 401:
+        auth_hdr = request.headers.get('Authorization', '')
+        auth_hdr_trunc = auth_hdr[:20] + '...' if len(auth_hdr) > 20 else auth_hdr
+        x_trans = request.headers.get('X-Auth-Transport', '')
+        err_code = request.environ.get('JWT_AUTH_ERROR_CODE', 'none')
+        cookie_hdr = 'yes' if 'Cookie' in request.headers else 'no'
+        logging.error(
+            f">>> 401 ERROR: {request.path} | "
+            f"Code: {err_code} | "
+            f"Trans: {x_trans} | "
+            f"AuthHdr: '{auth_hdr_trunc}' | "
+            f"Cookies: {cookie_hdr}"
+        )
+    return response
 JWT_SECRET = (os.getenv('JWT_SECRET') or '').strip()
 JWT_ALGORITHM = "HS256"
 JWT_ACCESS_TOKEN_MINUTES = int(os.getenv('JWT_ACCESS_TOKEN_MINUTES', '30'))
@@ -2142,6 +2159,19 @@ def after_request(response):
     if pending_tokens:
         access_token, refresh_token = pending_tokens
         _set_auth_cookies(response, access_token, refresh_token)
+        
+        # Inject custom headers for Bearer clients so they can intercept rotated tokens
+        response.headers['X-New-Access-Token'] = access_token
+        response.headers['X-New-Refresh-Token'] = refresh_token
+        
+        exposed = response.headers.get('Access-Control-Expose-Headers', '')
+        new_exposed = 'X-New-Access-Token, X-New-Refresh-Token'
+        if exposed:
+            # check if already added
+            if 'X-New-Access-Token' not in exposed:
+                response.headers['Access-Control-Expose-Headers'] = f"{exposed}, {new_exposed}"
+        else:
+            response.headers['Access-Control-Expose-Headers'] = new_exposed
 
     return response
 
