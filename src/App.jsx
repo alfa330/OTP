@@ -1846,6 +1846,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             return 'fas fa-exclamation-circle';
         }
 
+        function getBonusIcon(type) {
+            const t = String(type || '').toLowerCase();
+            if (t.includes('приведи') || t.includes('друг')) return 'fas fa-user-plus';
+            if (t.includes('обуч')) return 'fas fa-graduation-cap';
+            if (t.includes('съем') || t.includes('съемки') || t.includes('съём')) return 'fas fa-video';
+            return 'fas fa-gift';
+        }
+
         const hasNonZeroMetric = (value) => {
             const num = Number(value);
             return Number.isFinite(num) && Math.abs(num) > 0;
@@ -2239,6 +2247,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 ))}
             </div>
             ) : null;
+            const bonusIcons = (bonuses && bonuses.length > 0) ? (
+            <div className="absolute top-[1.58rem] right-[-8px] flex gap-1 text-xs">
+                {Array.from(new Set(bonuses.map(b => String(b.type || b.bonus_type || '').trim()))).slice(0,3).map((t, i) => (
+                t ? <FaIcon key={i} className={`${getBonusIcon(t)} text-green-700`} title={t} style={{fontSize: '12px'}} /> : null
+                ))}
+            </div>
+            ) : null;
 
             if (selectedTab === 'work_time') {
             const baseWork = d ? Number(d.work_time || 0) : 0;
@@ -2259,7 +2274,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     {technicalIssues.length > 0 && <div className="absolute top-1 right-4 w-2 h-2 rounded-full bg-violet-500 ring-1 ring-violet-700" title={`Тех причины: ${technicalIssues.length}`}></div>}
                     {offlineActivities.length > 0 && <div className="absolute top-1 right-7 w-2 h-2 rounded-full bg-emerald-500 ring-1 ring-emerald-700" title={`Офлайн активность: ${offlineActivities.length}`}></div>}
                     {fines.length > 0 && <div className="absolute top-4 right-1 w-2 h-2 rounded-full bg-red-400 ring-1 ring-red-500" title={`Штрафы: ${fines.length}`}></div>}
-                    {bonuses.length > 0 && <div className="absolute top-4 right-4 w-2 h-2 rounded-full bg-green-400 ring-1 ring-green-500" title={`Бонусы: ${bonuses.length}`}></div>}
                 </div>
                 );
             }
@@ -2271,7 +2285,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     {technicalIssues.length > 0 && <div className="absolute top-1 right-4 w-2 h-2 rounded-full bg-violet-500 ring-1 ring-violet-700" title={`Тех причины: ${technicalIssues.length}`}></div>}
                     {offlineActivities.length > 0 && <div className="absolute top-1 right-7 w-2 h-2 rounded-full bg-emerald-500 ring-1 ring-emerald-700" title={`Офлайн активность: ${offlineActivities.length}`}></div>}
                     {fines.length > 0 && <div className="absolute top-4 right-1 w-2 h-2 rounded-full bg-red-400 ring-1 ring-red-500" title={`Штрафы: ${fines.length}`}></div>}
-                    {bonuses.length > 0 && <div className="absolute top-4 right-4 w-2 h-2 rounded-full bg-green-400 ring-1 ring-green-500" title={`Бонусы: ${bonuses.length}`}></div>}
                 </div>
                 );
             }
@@ -2283,7 +2296,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     {technicalIssues.length > 0 && <div className="absolute top-1 right-4 w-2 h-2 rounded-full bg-violet-500 ring-1 ring-violet-700" title={`Тех причины: ${technicalIssues.length}`}></div>}
                     {offlineActivities.length > 0 && <div className="absolute top-1 right-7 w-2 h-2 rounded-full bg-emerald-500 ring-1 ring-emerald-700" title={`Офлайн активность: ${offlineActivities.length}`}></div>}
                     {fines.length > 0 && <div className="absolute top-4 right-1 w-2 h-2 rounded-full bg-red-400 ring-1 ring-red-500" title={`Штрафы: ${fines.length}`}></div>}
-                    {bonuses.length > 0 && <div className="absolute top-4 right-4 w-2 h-2 rounded-full bg-green-400 ring-1 ring-green-500" title={`Бонусы: ${bonuses.length}`}></div>}
                 </div>
                 );
             }
@@ -2301,7 +2313,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 {technicalIssues.length > 0 && <div className="absolute top-1 right-4 w-2 h-2 rounded-full bg-violet-500 ring-1 ring-violet-700" title={`Тех причины: ${technicalIssues.length}`}></div>}
                 {offlineActivities.length > 0 && <div className="absolute top-1 right-7 w-2 h-2 rounded-full bg-emerald-500 ring-1 ring-emerald-700" title={`Офлайн активность: ${offlineActivities.length}`}></div>}
                 {fines.length > 0 && <div className="absolute top-4 right-1 w-2 h-2 rounded-full bg-red-400 ring-1 ring-red-500" title={`Штрафы: ${fines.length}`}></div>}
-                {bonuses.length > 0 && <div className="absolute top-4 right-4 w-2 h-2 rounded-full bg-green-400 ring-1 ring-green-500" title={`Бонусы: ${bonuses.length}`}></div>}
                 </div>
             );
             }
@@ -2402,6 +2413,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         className={`relative w-full h-8 rounded-md flex items-center justify-center text-gray-900`}
                         style={{ backgroundColor: bg }}
                     >
+                        {bonusIcons}
                         <span
                             className="text-xs font-medium truncate"
                             title={formatted}
@@ -26984,7 +26996,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         + Number(offlineHoursForDay || 0);
 
                     const hasFines = Array.isArray(dayData?.fines) && dayData.fines.length > 0;
-                    const hasBonuses = Array.isArray(dayData?.bonuses) && dayData.bonuses.length > 0;
                     cells.push({
                         day,
                         dateStr,
@@ -26998,7 +27009,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         isToday,
                         hasTraining,
                         hasFines,
-                        hasBonuses,
                         hasTechnicalIssues,
                         hasOfflineActivities,
                         technicalIssues: technicalIssuesForDay,
@@ -27135,8 +27145,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             {cell.hasOfflineActivities && <span className="absolute top-1 right-10 w-2 h-2 rounded-full bg-emerald-500 shadow" />}
                             {/* 🔴 Маркер штрафов */}
                             {cell.hasFines && <span className="absolute top-1 right-4 w-2 h-2 rounded-full bg-red-400 shadow" />}
-                            {/* 🟢 Маркер бонусов */}
-                            {cell.hasBonuses && <span className="absolute top-1 right-[52px] w-2 h-2 rounded-full bg-green-500 shadow" />}
 
                             {/* Tooltip ячейки (дата) */}
                             <div className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-1 bg-gray-900 text-white text-xs rounded-lg shadow-lg opacity-0 group-hover:opacity-100 group-focus:opacity-100 z-50 transition-opacity">
@@ -27183,9 +27191,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         {/* 🔴 Маркер штрафа */}
                         <span className="inline-flex items-center gap-1">
                             <span className="inline-block w-2 h-2 rounded-full bg-red-400" /> Штраф
-                        </span>
-                        <span className="inline-flex items-center gap-1">
-                            <span className="inline-block w-2 h-2 rounded-full bg-green-500" /> Бонус
                         </span>
                         </p>
                     </div>
@@ -27585,14 +27590,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         const type = String(b.type || b.bonus_type || '').trim();
                                         const amt = Number(b.amount || 0) || 0;
                                         const qty = Number(b.quantity || 1) || 1;
-                                        const trainingHours = Number(b.training_hours || 0) || 0;
                                         return (
                                         <div key={idx} className="p-3 bg-green-50 border-l-4 border-green-400 rounded-md">
                                             <div className="flex items-start justify-between">
                                             <div className="flex-1 min-w-0">
                                                 <p className="text-sm text-gray-800"><span className="font-semibold">Тип:</span> {type || '—'}</p>
                                                 <p className="text-sm text-gray-800"><span className="font-semibold">Сумма:</span> {amt}</p>
-                                                {type === 'Обучение' && <p className="text-sm text-gray-800"><span className="font-semibold">Часы обучения:</span> {trainingHours}</p>}
                                                 {(type === 'Приведи друга' || type === 'Съемки') && <p className="text-sm text-gray-800"><span className="font-semibold">Количество:</span> {qty}</p>}
                                                 {b.friend_names && <p className="text-sm text-gray-800"><span className="font-semibold">Имена друзей:</span> {b.friend_names}</p>}
                                                 {b.video_links && <p className="text-sm text-gray-800"><span className="font-semibold">Ссылки:</span> {b.video_links}</p>}
