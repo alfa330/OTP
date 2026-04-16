@@ -138,8 +138,8 @@ LMS_DEFAULT_PASS_THRESHOLD = float(os.getenv('LMS_DEFAULT_PASS_THRESHOLD', '80')
 LMS_DEFAULT_ATTEMPT_LIMIT = int(os.getenv('LMS_DEFAULT_ATTEMPT_LIMIT', '3'))
 LMS_CERTIFICATE_STORAGE = (os.getenv('LMS_CERTIFICATE_STORAGE') or 'db').strip().lower()
 LMS_CERTIFICATE_TEMPLATE_VERSION = (
-    (os.getenv('LMS_CERTIFICATE_TEMPLATE_VERSION') or 'bold_split_v4_raster_hq_logo_bg_2026_04_16').strip()
-    or 'bold_split_v4_raster_hq_logo_bg_2026_04_16'
+    (os.getenv('LMS_CERTIFICATE_TEMPLATE_VERSION') or 'bold_split_v4_raster_hq_logo_bg_v2_2026_04_16').strip()
+    or 'bold_split_v4_raster_hq_logo_bg_v2_2026_04_16'
 )
 try:
     LMS_CERTIFICATE_RASTER_SCALE = int(str(os.getenv('LMS_CERTIFICATE_RASTER_SCALE', '4')).strip() or '4')
@@ -16079,11 +16079,11 @@ def _lms_build_bold_split_certificate_pdf(certificate_number, learner_name, cour
             with Image.open(logo_path) as logo_source:
                 logo_rgba = logo_source.convert("RGBA")
                 resample = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
-                logo_rgba = logo_rgba.resize((S(300), S(249)), resample=resample)
-                alpha_mask = logo_rgba.split()[3].point(lambda px: int(px * 0.12))
+                logo_rgba = logo_rgba.resize((S(430), S(357)), resample=resample)
+                alpha_mask = logo_rgba.split()[3].point(lambda px: int(px * 0.14))
                 logo_overlay = Image.new("RGBA", logo_rgba.size, (150, 150, 150, 0))
                 logo_overlay.putalpha(alpha_mask)
-                image.alpha_composite(logo_overlay, (right_x + S(250), S(118)))
+                image.alpha_composite(logo_overlay, (right_x + S(130), S(250)))
         except Exception:
             logging.exception("LMS certificate background logo render failed")
 
