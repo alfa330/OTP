@@ -138,8 +138,8 @@ LMS_DEFAULT_PASS_THRESHOLD = float(os.getenv('LMS_DEFAULT_PASS_THRESHOLD', '80')
 LMS_DEFAULT_ATTEMPT_LIMIT = int(os.getenv('LMS_DEFAULT_ATTEMPT_LIMIT', '3'))
 LMS_CERTIFICATE_STORAGE = (os.getenv('LMS_CERTIFICATE_STORAGE') or 'db').strip().lower()
 LMS_CERTIFICATE_TEMPLATE_VERSION = (
-    (os.getenv('LMS_CERTIFICATE_TEMPLATE_VERSION') or 'bold_split_v4_raster_hq_logo_bg_v10_2026_04_16').strip()
-    or 'bold_split_v4_raster_hq_logo_bg_v10_2026_04_16'
+    (os.getenv('LMS_CERTIFICATE_TEMPLATE_VERSION') or 'bold_split_v4_raster_hq_logo_bg_v12_2026_04_16').strip()
+    or 'bold_split_v4_raster_hq_logo_bg_v12_2026_04_16'
 )
 try:
     LMS_CERTIFICATE_RASTER_SCALE = int(str(os.getenv('LMS_CERTIFICATE_RASTER_SCALE', '4')).strip() or '4')
@@ -15671,17 +15671,17 @@ body {{
 
 .v4 .lp-circle1 {{
   position:absolute; width:360px; height:360px;
-  border:1px solid rgba(180,150,90,.10); border-radius:50%;
+  border:1px solid rgba(90,80,60,.06); border-radius:50%;
   bottom:-120px; left:-120px;
 }}
 .v4 .lp-circle2 {{
   position:absolute; width:220px; height:220px;
-  border:1px solid rgba(180,150,90,.16); border-radius:50%;
+  border:1px solid rgba(90,80,60,.10); border-radius:50%;
   bottom:-50px; left:-50px;
 }}
 .v4 .lp-dots {{
   position:absolute; top:0; right:0; width:120px; height:140px;
-  background-image: radial-gradient(circle, rgba(180,150,90,.16) 1.5px, transparent 1.5px);
+  background-image: radial-gradient(circle, rgba(90,80,60,.10) 1.5px, transparent 1.5px);
   background-size:16px 16px;
 }}
 .v4 .lp-strip {{
@@ -15711,12 +15711,12 @@ body {{
 }}
 .v4 .rp-ring {{
   position:absolute; width:420px; height:420px;
-  border:1px solid rgba(155,155,155,.15); border-radius:50%;
+  border:1px solid rgba(185,185,185,.22); border-radius:50%;
   top:-190px; right:-150px;
 }}
 .v4 .rp-ring2 {{
   position:absolute; width:260px; height:260px;
-  border:1px solid rgba(155,155,155,.12); border-radius:50%;
+  border:1px solid rgba(185,185,185,.18); border-radius:50%;
   top:-110px; right:-70px;
 }}
 .v4 .rp-content {{ position:relative; z-index:5; flex:1; display:flex; flex-direction:column; }}
@@ -16106,12 +16106,12 @@ def _lms_build_bold_split_certificate_pdf(certificate_number, learner_name, cour
 
     draw.rectangle((0, 0, left_w, canvas_h), fill=col_k)
     draw.rectangle((0, 0, left_w, S(6)), fill=col_y)
-    draw.ellipse((S(-120), S(554), S(240), S(914)), outline=(180, 150, 90, 26), width=max(1, S(1)))
-    draw.ellipse((S(-50), S(624), S(170), S(844)), outline=(180, 150, 90, 41), width=max(1, S(1)))
-    _lms_draw_dot_grid(draw, left_w - S(120), 0, S(120), S(140), S(16), S(1), (180, 150, 90, 41))
+    draw.ellipse((S(-120), S(554), S(240), S(914)), outline=(90, 80, 60, 15), width=max(1, S(1)))
+    draw.ellipse((S(-50), S(624), S(170), S(844)), outline=(90, 80, 60, 26), width=max(1, S(1)))
+    _lms_draw_dot_grid(draw, left_w - S(120), 0, S(120), S(140), S(16), S(1), (90, 80, 60, 26))
 
-    draw.ellipse((S(853), S(-190), S(1273), S(230)), outline=(155, 155, 155, 38), width=max(1, S(1)))
-    draw.ellipse((S(933), S(-110), S(1193), S(150)), outline=(155, 155, 155, 31), width=max(1, S(1)))
+    draw.ellipse((S(853), S(-190), S(1273), S(230)), outline=(185, 185, 185, 56), width=max(1, S(1)))
+    draw.ellipse((S(933), S(-110), S(1193), S(150)), outline=(185, 185, 185, 46), width=max(1, S(1)))
     _lms_draw_dot_grid(draw, canvas_w - S(160), canvas_h - S(160), S(160), S(160), S(18), S(1), (253, 183, 0, 56))
 
     logo_path = _lms_certificate_logo_path()
