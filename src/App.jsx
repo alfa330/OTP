@@ -761,6 +761,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         { key: "trainings", label: "Тренинги", unit: "" }, // новый таб
         { key: "technical_issues", label: "Тех причины", unit: "ч" },
         { key: "offline_activity", label: "Офлайн активность", unit: "ч" },
+        { key: "bonuses", label: "Бонусы", unit: "₸" },
         { key: "fines", label: "Штрафы", unit: "₸" }
         ];
 
@@ -1358,6 +1359,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return [{ amount: amt, minutes: String(reason) === 'Опоздание' ? Math.round(amt / 50) : null, reason, comment: dayData.fine_comment || '' }];
                 })() : []
             ),
+            bonuses: Array.isArray(dayData.bonuses) && dayData.bonuses.length > 0 ? dayData.bonuses.map((b) => {
+                const type = String(b?.type || b?.bonus_type || '').trim();
+                const quantityRaw = Number(b?.quantity ?? 1);
+                const quantity = Number.isFinite(quantityRaw) && quantityRaw > 0 ? Math.floor(quantityRaw) : 1;
+                const trainingHoursRaw = Number(b?.training_hours ?? b?.hours ?? 0);
+                const trainingHours = Number.isFinite(trainingHoursRaw) && trainingHoursRaw > 0 ? Number(trainingHoursRaw) : 0;
+                const amountRaw = Number(b?.amount ?? 0);
+                const amount = Number.isFinite(amountRaw) ? amountRaw : 0;
+                return {
+                type,
+                quantity: type === 'Обучение' ? 1 : quantity,
+                training_hours: type === 'Обучение' ? trainingHours : 0,
+                amount: computeBonusAmountByType(type, quantity, amount, trainingHours),
+                friend_names: b?.friend_names || '',
+                video_links: b?.video_links || '',
+                comment: b?.comment || ''
+                };
+            }) : [],
             month
             });
         }
@@ -1443,6 +1462,68 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             });
         }
 
+        function computeBonusAmountByType(type, quantity, currentAmount = 0, trainingHours = 0) {
+            const normalizedType = String(type || '').trim();
+            const qtyRaw = Number(quantity);
+            const qty = Number.isFinite(qtyRaw) && qtyRaw > 0 ? Math.floor(qtyRaw) : 1;
+            const hoursRaw = Number(trainingHours);
+            const hours = Number.isFinite(hoursRaw) && hoursRaw > 0 ? hoursRaw : 0;
+            if (normalizedType === 'Обучение') return hours * 500;
+            if (normalizedType === 'Приведи друга' || normalizedType === 'Съемки') return qty * 5000;
+            return Number(currentAmount || 0);
+        }
+
+        function addBonus() {
+            setCellModel(prev => {
+            if (!prev) return prev;
+            const next = { ...prev };
+            next.bonuses = Array.isArray(next.bonuses)
+                ? [...next.bonuses, { type: '', quantity: 1, training_hours: 0, amount: 0, friend_names: '', video_links: '', comment: '' }]
+                : [{ type: '', quantity: 1, training_hours: 0, amount: 0, friend_names: '', video_links: '', comment: '' }];
+            return next;
+            });
+        }
+
+        function updateBonusField(idx, field, value) {
+            setCellModel(prev => {
+            if (!prev) return prev;
+            const next = { ...prev };
+            next.bonuses = Array.isArray(next.bonuses) ? next.bonuses.map((bonus, i) => {
+                if (i !== idx) return bonus;
+                const updated = { ...bonus };
+                if (field === 'quantity') {
+                const qty = Number(value);
+                updated.quantity = Number.isFinite(qty) && qty > 0 ? Math.floor(qty) : 1;
+                } else if (field === 'training_hours') {
+                const hours = Number(value);
+                updated.training_hours = Number.isFinite(hours) && hours > 0 ? Number(hours) : 0;
+                } else {
+                updated[field] = value;
+                }
+
+                const type = String(updated.type || '').trim();
+                if (type === 'Обучение') {
+                updated.quantity = 1;
+                if (!Number.isFinite(Number(updated.training_hours)) || Number(updated.training_hours) < 0) {
+                    updated.training_hours = 0;
+                }
+                }
+                updated.amount = computeBonusAmountByType(type, updated.quantity, updated.amount, updated.training_hours);
+                return updated;
+            }) : [];
+            return next;
+            });
+        }
+
+        function removeBonus(idx) {
+            setCellModel(prev => {
+            if (!prev) return prev;
+            const next = { ...prev };
+            next.bonuses = Array.isArray(next.bonuses) ? next.bonuses.filter((_, i) => i !== idx) : [];
+            return next;
+            });
+        }
+
                 // Clear all editable fields in the cell modal (does not delete trainings)
                 function clearCellFields() {
                     setCellModel(prev => {
@@ -1459,6 +1540,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     next.fine_comment = '';
                     // clear multiple fines array
                     next.fines = [];
+                    next.bonuses = [];
                     return next;
                     });
                 }
@@ -1489,6 +1571,25 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 fine_amount: (Array.isArray(cellModel.fines) ? cellModel.fines.reduce((s, f) => s + Number(f.amount || 0), 0) : Number(cellModel.fine_amount || 0)) || 0,
                 fine_reason: (Array.isArray(cellModel.fines) && cellModel.fines.length > 0) ? (cellModel.fines[0].reason || null) : (cellModel.fine_reason || null),
                 fine_comment: (Array.isArray(cellModel.fines) && cellModel.fines.length > 0) ? cellModel.fines.map(f => f.comment || '').filter(Boolean).join('; ') : (cellModel.fine_comment || null),
+                bonuses: Array.isArray(cellModel.bonuses) ? cellModel.bonuses.map((b) => {
+                const type = String(b?.type || b?.bonus_type || '').trim();
+                const quantityRaw = Number(b?.quantity ?? 1);
+                const trainingHoursRaw = Number(b?.training_hours ?? b?.hours ?? 0);
+                const trainingHours = Number.isFinite(trainingHoursRaw) && trainingHoursRaw > 0 ? Number(trainingHoursRaw) : 0;
+                const quantity = type === 'Обучение'
+                    ? 1
+                    : (Number.isFinite(quantityRaw) && quantityRaw > 0 ? Math.floor(quantityRaw) : 1);
+                const amount = computeBonusAmountByType(type, quantity, b?.amount, trainingHours);
+                return {
+                    type: type || null,
+                    quantity,
+                    training_hours: type === 'Обучение' ? trainingHours : null,
+                    amount,
+                    friend_names: String(b?.friend_names || '').trim() || null,
+                    video_links: String(b?.video_links || '').trim() || null,
+                    comment: String(b?.comment || '').trim() || null
+                };
+                }).filter((b) => Boolean(b.type)) : [],
                 month: cellModel.month
                 }]
             };
@@ -1552,6 +1653,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 fine_reason: null,
                 fine_comment: null,
                 fines: [],
+                bonuses: [],
                 month
             });
             }
@@ -1768,6 +1870,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             if (
             hasNonZeroMetric(op.fines) ||
+            hasNonZeroMetric(op.bonuses) ||
             hasNonZeroMetric(op.training_hours) ||
             hasNonZeroMetric(op.technical_issue_hours) ||
             hasNonZeroMetric(op.offline_activity_hours)
@@ -1801,6 +1904,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 hasNonZeroMetric(fine.amount ?? fine.fine_amount) ||
                 String(fine.reason || fine.fine_reason || '').trim() ||
                 String(fine.comment || fine.fine_comment || '').trim()
+                ) {
+                return true;
+                }
+            }
+
+            const dayBonuses = Array.isArray(dayData.bonuses) ? dayData.bonuses : [];
+            for (const bonus of dayBonuses) {
+                if (!bonus || typeof bonus !== 'object') continue;
+                if (
+                hasNonZeroMetric(bonus.amount) ||
+                hasNonZeroMetric(bonus.quantity) ||
+                String(bonus.type || bonus.bonus_type || '').trim() ||
+                String(bonus.friend_names || '').trim() ||
+                String(bonus.video_links || '').trim() ||
+                String(bonus.comment || '').trim()
                 ) {
                 return true;
                 }
@@ -2002,6 +2120,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             let technicalIssuesTotal = 0;
             let offlineActivitiesTotal = 0;
             let sumFines = 0;
+            let sumBonuses = 0;
 
             for (const op of filteredOperators) {
             const aggr = op.aggregates || {};
@@ -2063,6 +2182,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 } else if (dd.fine_amount) {
                     sumFines += Number(dd.fine_amount || 0) || 0;
                 }
+                if (Array.isArray(dd.bonuses)) {
+                    for (const b of dd.bonuses) {
+                    sumBonuses += Number(b.amount || 0) || 0;
+                    }
+                }
                 }
             }
 
@@ -2078,6 +2202,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             sumNorm,
             sumEff,
             sumFines,
+            sumBonuses,
             avgOcc,
             trainingsTotal,
             trainingsCounted,
@@ -2105,6 +2230,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const technicalIssues = (technicalIssuesMap[op.operator_id] && technicalIssuesMap[op.operator_id][day]) || [];
             const offlineActivities = (offlineActivitiesMap[op.operator_id] && offlineActivitiesMap[op.operator_id][day]) || [];
             const fines = (op.daily && op.daily[dayKey] && Array.isArray(op.daily[dayKey].fines)) ? op.daily[dayKey].fines : [];
+            const bonuses = (op.daily && op.daily[dayKey] && Array.isArray(op.daily[dayKey].bonuses)) ? op.daily[dayKey].bonuses : [];
 
             const fineIcons = (fines && fines.length > 0) ? (
             <div className="absolute top-[1.58rem] right-[-8px] flex gap-1 text-xs">
@@ -2133,6 +2259,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     {technicalIssues.length > 0 && <div className="absolute top-1 right-4 w-2 h-2 rounded-full bg-violet-500 ring-1 ring-violet-700" title={`Тех причины: ${technicalIssues.length}`}></div>}
                     {offlineActivities.length > 0 && <div className="absolute top-1 right-7 w-2 h-2 rounded-full bg-emerald-500 ring-1 ring-emerald-700" title={`Офлайн активность: ${offlineActivities.length}`}></div>}
                     {fines.length > 0 && <div className="absolute top-4 right-1 w-2 h-2 rounded-full bg-red-400 ring-1 ring-red-500" title={`Штрафы: ${fines.length}`}></div>}
+                    {bonuses.length > 0 && <div className="absolute top-4 right-4 w-2 h-2 rounded-full bg-green-400 ring-1 ring-green-500" title={`Бонусы: ${bonuses.length}`}></div>}
                 </div>
                 );
             }
@@ -2144,6 +2271,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     {technicalIssues.length > 0 && <div className="absolute top-1 right-4 w-2 h-2 rounded-full bg-violet-500 ring-1 ring-violet-700" title={`Тех причины: ${technicalIssues.length}`}></div>}
                     {offlineActivities.length > 0 && <div className="absolute top-1 right-7 w-2 h-2 rounded-full bg-emerald-500 ring-1 ring-emerald-700" title={`Офлайн активность: ${offlineActivities.length}`}></div>}
                     {fines.length > 0 && <div className="absolute top-4 right-1 w-2 h-2 rounded-full bg-red-400 ring-1 ring-red-500" title={`Штрафы: ${fines.length}`}></div>}
+                    {bonuses.length > 0 && <div className="absolute top-4 right-4 w-2 h-2 rounded-full bg-green-400 ring-1 ring-green-500" title={`Бонусы: ${bonuses.length}`}></div>}
                 </div>
                 );
             }
@@ -2155,6 +2283,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     {technicalIssues.length > 0 && <div className="absolute top-1 right-4 w-2 h-2 rounded-full bg-violet-500 ring-1 ring-violet-700" title={`Тех причины: ${technicalIssues.length}`}></div>}
                     {offlineActivities.length > 0 && <div className="absolute top-1 right-7 w-2 h-2 rounded-full bg-emerald-500 ring-1 ring-emerald-700" title={`Офлайн активность: ${offlineActivities.length}`}></div>}
                     {fines.length > 0 && <div className="absolute top-4 right-1 w-2 h-2 rounded-full bg-red-400 ring-1 ring-red-500" title={`Штрафы: ${fines.length}`}></div>}
+                    {bonuses.length > 0 && <div className="absolute top-4 right-4 w-2 h-2 rounded-full bg-green-400 ring-1 ring-green-500" title={`Бонусы: ${bonuses.length}`}></div>}
                 </div>
                 );
             }
@@ -2172,6 +2301,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 {technicalIssues.length > 0 && <div className="absolute top-1 right-4 w-2 h-2 rounded-full bg-violet-500 ring-1 ring-violet-700" title={`Тех причины: ${technicalIssues.length}`}></div>}
                 {offlineActivities.length > 0 && <div className="absolute top-1 right-7 w-2 h-2 rounded-full bg-emerald-500 ring-1 ring-emerald-700" title={`Офлайн активность: ${offlineActivities.length}`}></div>}
                 {fines.length > 0 && <div className="absolute top-4 right-1 w-2 h-2 rounded-full bg-red-400 ring-1 ring-red-500" title={`Штрафы: ${fines.length}`}></div>}
+                {bonuses.length > 0 && <div className="absolute top-4 right-4 w-2 h-2 rounded-full bg-green-400 ring-1 ring-green-500" title={`Бонусы: ${bonuses.length}`}></div>}
                 </div>
             );
             }
@@ -2253,6 +2383,34 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 </div>
                 </div>
             );
+            }
+
+            if (selectedTab === 'bonuses') {
+                if (!bonuses || bonuses.length === 0) return <div className="text-sm text-gray-400">—</div>;
+
+                let total = 0;
+                for (const b of bonuses) total += Number(b.amount || 0) || 0;
+
+                const formatted = formatMoney(total);
+                const maxBonuses = 10000;
+                const ratio = Math.min(1, total / maxBonuses);
+                const alpha = 0.18 + 0.77 * ratio;
+                const bg = `rgba(16,185,129, ${alpha})`;
+
+                return (
+                    <div
+                        className={`relative w-full h-8 rounded-md flex items-center justify-center text-gray-900`}
+                        style={{ backgroundColor: bg }}
+                    >
+                        <span
+                            className="text-xs font-medium truncate"
+                            title={formatted}
+                            style={{ maxWidth: '110px', display: 'inline-block' }}
+                        >
+                            {formatted}
+                        </span>
+                    </div>
+                );
             }
 
             if (selectedTab === 'fines') {
@@ -2703,6 +2861,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Офлайн активность (ч)</div>
                     </>
                     )}
+                    {selectedTab === 'bonuses' && (
+                    <>
+                        <div className="w-44 p-2 text-center border-l bg-gray-50 text-sm font-medium">Бонусы (₸)</div>
+                    </>
+                    )}
                     {selectedTab === 'fines' && (
                     <>
                         <div className="w-44 p-2 text-center border-l bg-gray-50 text-sm font-medium">Штрафы (₸)</div>
@@ -2767,6 +2930,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                             // compute total fines for the operator across days
                             let finesTotal = 0;
+                            let bonusesTotal = 0;
                             if (op.daily) {
                             for (const dKey of Object.keys(op.daily)) {
                                 const dd = op.daily[dKey] || {};
@@ -2776,6 +2940,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 }
                                 } else if (dd.fine_amount) {
                                 finesTotal += Number(dd.fine_amount || 0) || 0;
+                                }
+                                if (Array.isArray(dd.bonuses)) {
+                                for (const b of dd.bonuses) {
+                                    bonusesTotal += Number(b.amount || 0) || 0;
+                                }
                                 }
                             }
                             }
@@ -2873,6 +3042,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <div className="w-36 p-2 text-sm text-center border-l">{totalOfflineActivityHours.toFixed(2)}</div>
                                 </>
                                 )}
+                                {selectedTab === 'bonuses' && (
+                                <div className="w-44 p-2 text-sm text-center border-l">
+                                    {bonusesTotal ? (
+                                    <div className="flex items-center justify-center">
+                                        <span className="text-sm font-medium truncate" title={String(bonusesTotal ? formatMoney(bonusesTotal) : '')} style={{maxWidth: '140px', display: 'inline-block'}}>{formatMoney(bonusesTotal)}</span>
+                                    </div>
+                                    ) : '—'}
+                                </div>
+                                )}
                                 {selectedTab === 'fines' && (
                                 <div className="w-44 p-2 text-sm text-center border-l">
                                     {finesTotal ? (
@@ -2937,6 +3115,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         {selectedTab === 'offline_activity' && (
                         <>
                             <div className="w-36 p-2 text-sm text-center border-l">{footerTotals.offlineActivitiesTotal.toFixed(2)}</div>
+                        </>
+                        )}
+                        {selectedTab === 'bonuses' && (
+                        <>
+                            <div className="w-44 p-2 text-sm text-center border-l"><span className="truncate" title={footerTotals ? formatMoney(footerTotals.sumBonuses) : ''} style={{display:'inline-block', maxWidth: '140px'}}>{formatMoney(footerTotals.sumBonuses)}</span></div>
                         </>
                         )}
                         {selectedTab === 'fines' && (
@@ -3430,6 +3613,153 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     onChange={e => updateFineField(idx, 'comment', e.target.value)}
                                     placeholder="Кратко опишите обстоятельства (необязательно)"
                                     aria-label="comment"
+                                    />
+                                </div>
+                                </div>
+                            </div>
+                            );
+                        })}
+                        </div>
+                    )}
+                    </div>
+
+                    <div className="mt-6">
+                    <div className="flex items-center justify-between mb-4">
+                        <h4 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
+                        <FaIcon className="fas fa-gift" aria-hidden="true" /> Бонусы
+                        </h4>
+                        <button
+                        type="button"
+                        onClick={addBonus}
+                        className="inline-flex items-center gap-2 px-3 py-1.5 rounded-md border bg-white text-sm font-medium shadow-sm hover:shadow focus:outline-none focus:ring-2 focus:ring-offset-1"
+                        aria-label="Добавить бонус"
+                        >
+                        <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                            <path d="M12 5v14M5 12h14" />
+                        </svg>
+                        Добавить
+                        </button>
+                    </div>
+
+                    {(!cellModel.bonuses || cellModel.bonuses.length === 0) ? (
+                        <div className="rounded-md border border-dashed p-4 text-sm text-gray-500">Бонусов нет.</div>
+                    ) : (
+                        <div className="space-y-3">
+                        {(cellModel.bonuses || []).map((bonus, idx) => {
+                            const type = String(bonus?.type || '').trim();
+                            const isRefer = type === 'Приведи друга';
+                            const isTraining = type === 'Обучение';
+                            const isFilming = type === 'Съемки';
+                            const hasQuantity = isRefer || isFilming;
+                            const quantityRaw = Number(bonus?.quantity ?? 1);
+                            const quantity = Number.isFinite(quantityRaw) && quantityRaw > 0 ? Math.floor(quantityRaw) : 1;
+                            const trainingHoursRaw = Number(bonus?.training_hours ?? bonus?.hours ?? 0);
+                            const trainingHours = Number.isFinite(trainingHoursRaw) && trainingHoursRaw > 0 ? Number(trainingHoursRaw) : 0;
+                            const computedAmount = computeBonusAmountByType(type, quantity, bonus?.amount, trainingHours);
+
+                            return (
+                            <div
+                                key={bonus.id ?? idx}
+                                className="p-3 rounded-lg border bg-white shadow-sm flex flex-col gap-3"
+                                role="group"
+                                aria-label={`Бонус ${idx + 1}`}
+                            >
+                                <div className="grid grid-cols-1 md:grid-cols-6 gap-3 items-end" style={{ alignItems: 'start' }}>
+                                <div className="col-span-2">
+                                    <label className="text-xs text-gray-700 mb-1 block">Тип бонуса</label>
+                                    <select
+                                    className="w-full p-2 rounded-md border bg-white"
+                                    value={type}
+                                    onChange={(e) => updateBonusField(idx, 'type', e.target.value)}
+                                    aria-label="bonus-type"
+                                    >
+                                    <option value="">—</option>
+                                    <option>Приведи друга</option>
+                                    <option>Обучение</option>
+                                    <option>Съемки</option>
+                                    </select>
+                                </div>
+
+                                <div className="col-span-1">
+                                    <label className="text-xs text-gray-700 mb-1 block">{isTraining ? 'Часы' : 'Кол-во'}</label>
+                                    <input
+                                    type="number"
+                                    min={isTraining ? '0' : '1'}
+                                    step={isTraining ? '0.1' : '1'}
+                                    disabled={!(hasQuantity || isTraining)}
+                                    className={`w-full p-2 rounded-md border ${(hasQuantity || isTraining) ? 'bg-white' : 'bg-gray-50 text-gray-500 cursor-not-allowed'}`}
+                                    value={isTraining ? trainingHours : (hasQuantity ? quantity : 1)}
+                                    onChange={(e) => updateBonusField(idx, isTraining ? 'training_hours' : 'quantity', e.target.value)}
+                                    aria-label="bonus-quantity"
+                                    />
+                                </div>
+
+                                <div className="col-span-2">
+                                    <label className="text-xs text-gray-700 mb-1 block">Сумма</label>
+                                    <input
+                                    type="text"
+                                    readOnly
+                                    className="w-full p-2 rounded-md border bg-gray-50 text-gray-700 cursor-not-allowed"
+                                    value={Number(computedAmount || 0).toLocaleString('ru-RU')}
+                                    aria-label="bonus-amount"
+                                    />
+                                </div>
+
+                                <div className="col-span-1 flex items-center justify-end md:justify-end">
+                                    <button
+                                    type="button"
+                                    onClick={() => removeBonus(idx)}
+                                    className="inline-flex items-center gap-2 text-sm text-red-600 px-2 py-1 rounded hover:bg-red-50 focus:outline-none"
+                                    aria-label={`Удалить бонус ${idx + 1}`}
+                                    >
+                                    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                                        <polyline points="3 6 5 6 21 6" />
+                                        <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                                        <path d="M10 11v6M14 11v6" />
+                                        <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+                                    </svg>
+                                    </button>
+                                </div>
+                                </div>
+
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                {isRefer && (
+                                    <div>
+                                    <label className="text-xs text-gray-700 mb-1 block">Имена друзей (опционально)</label>
+                                    <input
+                                        type="text"
+                                        className="w-full p-2 rounded-md border"
+                                        value={bonus.friend_names ?? ''}
+                                        onChange={(e) => updateBonusField(idx, 'friend_names', e.target.value)}
+                                        placeholder="Например: Айжан, Нурсултан"
+                                        aria-label="friend-names"
+                                    />
+                                    </div>
+                                )}
+
+                                {isFilming && (
+                                    <div>
+                                    <label className="text-xs text-gray-700 mb-1 block">Ссылки на видео (опционально)</label>
+                                    <input
+                                        type="text"
+                                        className="w-full p-2 rounded-md border"
+                                        value={bonus.video_links ?? ''}
+                                        onChange={(e) => updateBonusField(idx, 'video_links', e.target.value)}
+                                        placeholder="Можно несколько через ;"
+                                        aria-label="video-links"
+                                    />
+                                    </div>
+                                )}
+
+                                <div className={isRefer || isFilming ? 'md:col-span-2' : 'md:col-span-2'}>
+                                    <label className="text-xs text-gray-700 mb-1 block">Комментарий</label>
+                                    <input
+                                    type="text"
+                                    className="w-full p-2 rounded-md border"
+                                    value={bonus.comment ?? ''}
+                                    onChange={(e) => updateBonusField(idx, 'comment', e.target.value)}
+                                    placeholder="Краткий комментарий (опционально)"
+                                    aria-label="bonus-comment"
                                     />
                                 </div>
                                 </div>
@@ -26654,6 +26984,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         + Number(offlineHoursForDay || 0);
 
                     const hasFines = Array.isArray(dayData?.fines) && dayData.fines.length > 0;
+                    const hasBonuses = Array.isArray(dayData?.bonuses) && dayData.bonuses.length > 0;
                     cells.push({
                         day,
                         dateStr,
@@ -26667,6 +26998,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         isToday,
                         hasTraining,
                         hasFines,
+                        hasBonuses,
                         hasTechnicalIssues,
                         hasOfflineActivities,
                         technicalIssues: technicalIssuesForDay,
@@ -26803,6 +27135,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             {cell.hasOfflineActivities && <span className="absolute top-1 right-10 w-2 h-2 rounded-full bg-emerald-500 shadow" />}
                             {/* 🔴 Маркер штрафов */}
                             {cell.hasFines && <span className="absolute top-1 right-4 w-2 h-2 rounded-full bg-red-400 shadow" />}
+                            {/* 🟢 Маркер бонусов */}
+                            {cell.hasBonuses && <span className="absolute top-1 right-[52px] w-2 h-2 rounded-full bg-green-500 shadow" />}
 
                             {/* Tooltip ячейки (дата) */}
                             <div className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-1 bg-gray-900 text-white text-xs rounded-lg shadow-lg opacity-0 group-hover:opacity-100 group-focus:opacity-100 z-50 transition-opacity">
@@ -26849,6 +27183,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         {/* 🔴 Маркер штрафа */}
                         <span className="inline-flex items-center gap-1">
                             <span className="inline-block w-2 h-2 rounded-full bg-red-400" /> Штраф
+                        </span>
+                        <span className="inline-flex items-center gap-1">
+                            <span className="inline-block w-2 h-2 rounded-full bg-green-500" /> Бонус
                         </span>
                         </p>
                     </div>
@@ -27221,6 +27558,45 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 {minutes !== null && <p className="text-sm text-gray-800"><span className="font-semibold">Минуты:</span> {minutes}</p>}
                                                 {f.comment && <p className="text-sm text-gray-600 italic">"{f.comment}"</p>}
                                                 <p className="text-xs text-gray-500 mt-1">Добавлено: {f.created_at || ''}</p>
+                                            </div>
+                                            </div>
+                                        </div>
+                                        );
+                                    })}
+                                    </div>
+                                </div>
+                                );
+                            })()}
+
+                            {/* Бонусы (если есть) */}
+                            {(() => {
+                                const bonusesOnDay = Array.isArray(selectedDay.dayData?.bonuses) ? selectedDay.dayData.bonuses : [];
+                                if (bonusesOnDay.length === 0) return null;
+                                const total = bonusesOnDay.reduce((s, b) => s + (Number(b.amount || 0) || 0), 0);
+                                return (
+                                <div className="mb-4">
+                                    <div className="flex items-center justify-between mb-2">
+                                    <h4 className="text-md font-semibold text-gray-800">Бонусы</h4>
+                                    <div className="text-sm text-gray-600">Сумма: <span className="font-medium">{total}</span></div>
+                                    </div>
+
+                                    <div className="space-y-2">
+                                    {bonusesOnDay.map((b, idx) => {
+                                        const type = String(b.type || b.bonus_type || '').trim();
+                                        const amt = Number(b.amount || 0) || 0;
+                                        const qty = Number(b.quantity || 1) || 1;
+                                        const trainingHours = Number(b.training_hours || 0) || 0;
+                                        return (
+                                        <div key={idx} className="p-3 bg-green-50 border-l-4 border-green-400 rounded-md">
+                                            <div className="flex items-start justify-between">
+                                            <div className="flex-1 min-w-0">
+                                                <p className="text-sm text-gray-800"><span className="font-semibold">Тип:</span> {type || '—'}</p>
+                                                <p className="text-sm text-gray-800"><span className="font-semibold">Сумма:</span> {amt}</p>
+                                                {type === 'Обучение' && <p className="text-sm text-gray-800"><span className="font-semibold">Часы обучения:</span> {trainingHours}</p>}
+                                                {(type === 'Приведи друга' || type === 'Съемки') && <p className="text-sm text-gray-800"><span className="font-semibold">Количество:</span> {qty}</p>}
+                                                {b.friend_names && <p className="text-sm text-gray-800"><span className="font-semibold">Имена друзей:</span> {b.friend_names}</p>}
+                                                {b.video_links && <p className="text-sm text-gray-800"><span className="font-semibold">Ссылки:</span> {b.video_links}</p>}
+                                                {b.comment && <p className="text-sm text-gray-600 italic">"{b.comment}"</p>}
                                             </div>
                                             </div>
                                         </div>

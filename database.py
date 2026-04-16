@@ -909,6 +909,34 @@ class Database:
                 );
             """)
             cursor.execute("""
+                CREATE TABLE IF NOT EXISTS daily_bonuses (
+                    id SERIAL PRIMARY KEY,
+                    daily_hours_id UUID REFERENCES daily_hours(id) ON DELETE CASCADE,
+                    operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    day DATE NOT NULL,
+                    bonus_type VARCHAR(64) NOT NULL,
+                    quantity INTEGER NOT NULL DEFAULT 1,
+                    training_hours FLOAT,
+                    amount FLOAT NOT NULL DEFAULT 0,
+                    friend_names TEXT,
+                    video_links TEXT,
+                    comment TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cursor.execute("""
+                ALTER TABLE daily_bonuses
+                ADD COLUMN IF NOT EXISTS training_hours FLOAT;
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_daily_bonuses_operator_day
+                ON daily_bonuses(operator_id, day);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_daily_bonuses_daily_hours_id
+                ON daily_bonuses(daily_hours_id);
+            """)
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS operator_technical_issues (
                     id SERIAL PRIMARY KEY,
                     batch_id UUID NOT NULL,
@@ -2299,7 +2327,8 @@ class Database:
     def insert_or_update_daily_hours(self, operator_id, day, work_time=0.0, break_time=0.0,
                                     talk_time=0.0, calls=0, efficiency=0.0,
                                     fine_amount=0.0, fine_reason=None, fine_comment=None,
-                                    fines: List[Dict[str, Any]] = None):
+                                    fines: List[Dict[str, Any]] = None,
+                                    bonuses: List[Dict[str, Any]] = None):
         """
         Вставляет/обновляет запись daily_hours (operator_id + day).
         efficiency и fine_amount ожидаются в часах/суммах соответственно.
@@ -2363,6 +2392,77 @@ class Database:
                     UPDATE daily_hours SET fine_amount = %s, fine_reason = %s, fine_comment = %s
                     WHERE id = %s
                 """, (float(total_amount), first_reason, agg_comment, daily_id))
+
+            if daily_id and isinstance(bonuses, list):
+                cursor.execute("DELETE FROM daily_bonuses WHERE daily_hours_id = %s", (daily_id,))
+                insert_bonus_vals = []
+
+                for b in bonuses:
+                    if not isinstance(b, dict):
+                        continue
+
+                    bonus_type = str(b.get('type') or b.get('bonus_type') or '').strip()
+                    if not bonus_type:
+                        continue
+
+                    quantity_raw = b.get('quantity')
+                    try:
+                        quantity = max(int(float(quantity_raw)), 1) if quantity_raw not in (None, '') else 1
+                    except Exception:
+                        quantity = 1
+
+                    training_hours_raw = b.get('training_hours')
+                    if training_hours_raw in (None, ''):
+                        training_hours_raw = b.get('hours')
+                    try:
+                        training_hours = float(training_hours_raw) if training_hours_raw not in (None, '') else 0.0
+                    except Exception:
+                        training_hours = 0.0
+                    if training_hours < 0:
+                        training_hours = 0.0
+
+                    if bonus_type == 'Обучение':
+                        quantity = 1
+
+                    amount_raw = b.get('amount')
+                    if bonus_type == 'Обучение':
+                        amount = float(training_hours * 500.0)
+                    elif bonus_type in ('Приведи друга', 'Съемки'):
+                        amount = float(quantity * 5000.0)
+                    elif amount_raw in (None, ''):
+                        amount = 0.0
+                    else:
+                        try:
+                            amount = float(amount_raw)
+                        except Exception:
+                            amount = 0.0
+
+                    friend_names = str(b.get('friend_names') or '').strip() or None
+                    video_links = str(b.get('video_links') or '').strip() or None
+                    comment = str(b.get('comment') or '').strip() or None
+
+                    insert_bonus_vals.append((
+                        daily_id,
+                        operator_id,
+                        day,
+                        bonus_type,
+                        int(quantity),
+                        float(training_hours) if bonus_type == 'Обучение' else None,
+                        float(amount),
+                        friend_names,
+                        video_links,
+                        comment
+                    ))
+
+                if insert_bonus_vals:
+                    cursor.executemany(
+                        """
+                        INSERT INTO daily_bonuses (
+                            daily_hours_id, operator_id, day, bonus_type, quantity, training_hours, amount, friend_names, video_links, comment
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        insert_bonus_vals
+                    )
 
     def _load_technical_issues_by_operator_day_tx(self, cursor, operator_ids, start_date, end_date):
         """
@@ -2561,7 +2661,8 @@ class Database:
                     "fine_amount": float(row[6]) if row[6] is not None else 0.0,
                     "fine_reason": row[7],
                     "fine_comment": row[8],
-                    "fines": []  # will populate from daily_fines table if present
+                    "fines": [],  # will populate from daily_fines table if present
+                    "bonuses": []  # will populate from daily_bonuses table if present
                 }
 
             # fetch fines for this operator in the date range
@@ -2592,6 +2693,32 @@ class Database:
                     pass
                 if entry is not None:
                     entry.setdefault('fines', []).append(fine_obj)
+
+            cursor.execute(
+                """
+                SELECT bonus_type, quantity, training_hours, amount, friend_names, video_links, comment, day
+                FROM daily_bonuses
+                WHERE operator_id = %s AND day >= %s AND day <= %s
+                ORDER BY day, id
+                """,
+                (operator_id, start, end)
+            )
+            bonuses_rows = cursor.fetchall()
+            for bonus_type, quantity, training_hours, amount, friend_names, video_links, comment, day_obj in bonuses_rows:
+                day_key = str(int(day_obj.day))
+                entry = daily_map.get(day_key)
+                if entry is None:
+                    continue
+                entry.setdefault('bonuses', []).append({
+                    "type": bonus_type,
+                    "bonus_type": bonus_type,
+                    "quantity": int(quantity) if quantity is not None else 1,
+                    "training_hours": float(training_hours) if training_hours is not None else None,
+                    "amount": float(amount) if amount is not None else 0.0,
+                    "friend_names": friend_names,
+                    "video_links": video_links,
+                    "comment": comment
+                })
 
             technical_map_by_operator, technical_totals_by_operator = self._load_technical_issues_by_operator_day_tx(
                 cursor=cursor,
@@ -2741,7 +2868,8 @@ class Database:
                     "fine_amount": float(fine_amount) if fine_amount is not None else 0.0,
                     "fine_reason": fine_reason,
                     "fine_comment": fine_comment,
-                    "fines": []
+                    "fines": [],
+                    "bonuses": []
                 }
                 daily_map.setdefault(op_id, {})[day_num] = d
 
@@ -2764,6 +2892,29 @@ class Database:
                     pass
                 if op_id in daily_map and day_num in daily_map[op_id]:
                     daily_map[op_id][day_num].setdefault('fines', []).append(fine_obj)
+
+            cursor.execute("""
+                SELECT db.operator_id, db.bonus_type, db.quantity, db.training_hours, db.amount, db.friend_names, db.video_links, db.comment, db.day
+                FROM daily_bonuses db
+                WHERE db.operator_id = ANY(%s)
+                AND db.day >= %s AND db.day <= %s
+                ORDER BY db.operator_id, db.day, db.id
+            """, (op_ids, start, end))
+            bonuses_rows = cursor.fetchall()
+            for op_id, bonus_type, quantity, training_hours, amount, friend_names, video_links, comment, day_obj in bonuses_rows:
+                day_num = str(int(day_obj.day))
+                bonus_obj = {
+                    "type": bonus_type,
+                    "bonus_type": bonus_type,
+                    "quantity": int(quantity) if quantity is not None else 1,
+                    "training_hours": float(training_hours) if training_hours is not None else None,
+                    "amount": float(amount) if amount is not None else 0.0,
+                    "friend_names": friend_names,
+                    "video_links": video_links,
+                    "comment": comment
+                }
+                if op_id in daily_map and day_num in daily_map[op_id]:
+                    daily_map[op_id][day_num].setdefault('bonuses', []).append(bonus_obj)
 
             technical_map_by_operator, technical_totals_by_operator = self._load_technical_issues_by_operator_day_tx(
                 cursor=cursor,
@@ -2876,7 +3027,8 @@ class Database:
                     "fine_amount": float(fine_amount) if fine_amount is not None else 0.0,
                     "fine_reason": fine_reason,
                     "fine_comment": fine_comment,
-                    "fines": []
+                    "fines": [],
+                    "bonuses": []
                 }
                 daily_map.setdefault(op_id, {})[day_num] = d
 
@@ -2898,6 +3050,29 @@ class Database:
                     pass
                 if op_id in daily_map and day_num in daily_map[op_id]:
                     daily_map[op_id][day_num].setdefault('fines', []).append(fine_obj)
+
+            cursor.execute("""
+                SELECT db.operator_id, db.bonus_type, db.quantity, db.training_hours, db.amount, db.friend_names, db.video_links, db.comment, db.day
+                FROM daily_bonuses db
+                WHERE db.operator_id = ANY(%s)
+                AND db.day >= %s AND db.day <= %s
+                ORDER BY db.operator_id, db.day, db.id
+            """, (op_ids, start, end))
+            bonuses_rows = cursor.fetchall()
+            for op_id, bonus_type, quantity, training_hours, amount, friend_names, video_links, comment, day_obj in bonuses_rows:
+                day_num = str(int(day_obj.day))
+                bonus_obj = {
+                    "type": bonus_type,
+                    "bonus_type": bonus_type,
+                    "quantity": int(quantity) if quantity is not None else 1,
+                    "training_hours": float(training_hours) if training_hours is not None else None,
+                    "amount": float(amount) if amount is not None else 0.0,
+                    "friend_names": friend_names,
+                    "video_links": video_links,
+                    "comment": comment
+                }
+                if op_id in daily_map and day_num in daily_map[op_id]:
+                    daily_map[op_id][day_num].setdefault('bonuses', []).append(bonus_obj)
 
             technical_map_by_operator, technical_totals_by_operator = self._load_technical_issues_by_operator_day_tx(
                 cursor=cursor,
