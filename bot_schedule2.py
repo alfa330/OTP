@@ -138,8 +138,8 @@ LMS_DEFAULT_PASS_THRESHOLD = float(os.getenv('LMS_DEFAULT_PASS_THRESHOLD', '80')
 LMS_DEFAULT_ATTEMPT_LIMIT = int(os.getenv('LMS_DEFAULT_ATTEMPT_LIMIT', '3'))
 LMS_CERTIFICATE_STORAGE = (os.getenv('LMS_CERTIFICATE_STORAGE') or 'db').strip().lower()
 LMS_CERTIFICATE_TEMPLATE_VERSION = (
-    (os.getenv('LMS_CERTIFICATE_TEMPLATE_VERSION') or 'bold_split_v4_raster_hq_logo_bg_v13_2026_04_16').strip()
-    or 'bold_split_v4_raster_hq_logo_bg_v13_2026_04_16'
+    (os.getenv('LMS_CERTIFICATE_TEMPLATE_VERSION') or 'bold_split_v4_raster_hq_logo_bg_v14_2026_04_16').strip()
+    or 'bold_split_v4_raster_hq_logo_bg_v14_2026_04_16'
 )
 try:
     LMS_CERTIFICATE_RASTER_SCALE = int(str(os.getenv('LMS_CERTIFICATE_RASTER_SCALE', '4')).strip() or '4')
@@ -15680,7 +15680,7 @@ body {{
   bottom:-50px; left:-50px;
 }}
 .v4 .lp-dots {{
-  position:absolute; top:0; right:0; width:120px; height:140px;
+  position:absolute; top:10px; right:0; width:120px; height:140px;
   background-image: radial-gradient(circle, rgba(90,80,60,.10) 1.5px, transparent 1.5px);
   background-size:16px 16px;
 }}
@@ -16108,7 +16108,7 @@ def _lms_build_bold_split_certificate_pdf(certificate_number, learner_name, cour
     draw.rectangle((0, 0, left_w, S(6)), fill=col_y)
     draw.ellipse((S(-120), S(554), S(240), S(914)), outline=(90, 80, 60, 15), width=max(1, S(1)))
     draw.ellipse((S(-50), S(624), S(170), S(844)), outline=(90, 80, 60, 26), width=max(1, S(1)))
-    _lms_draw_dot_grid(draw, left_w - S(120), 0, S(120), S(140), S(16), S(1), (90, 80, 60, 26))
+    _lms_draw_dot_grid(draw, left_w - S(120), S(10), S(120), S(140), S(16), S(1), (90, 80, 60, 26))
 
     draw.ellipse((S(853), S(-190), S(1273), S(230)), outline=(185, 185, 185, 56), width=max(1, S(1)))
     draw.ellipse((S(933), S(-110), S(1193), S(150)), outline=(185, 185, 185, 46), width=max(1, S(1)))
