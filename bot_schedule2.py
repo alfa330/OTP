@@ -138,8 +138,8 @@ LMS_DEFAULT_PASS_THRESHOLD = float(os.getenv('LMS_DEFAULT_PASS_THRESHOLD', '80')
 LMS_DEFAULT_ATTEMPT_LIMIT = int(os.getenv('LMS_DEFAULT_ATTEMPT_LIMIT', '3'))
 LMS_CERTIFICATE_STORAGE = (os.getenv('LMS_CERTIFICATE_STORAGE') or 'db').strip().lower()
 LMS_CERTIFICATE_TEMPLATE_VERSION = (
-    (os.getenv('LMS_CERTIFICATE_TEMPLATE_VERSION') or 'bold_split_v4_raster_hq_logo_bg_v14_2026_04_16').strip()
-    or 'bold_split_v4_raster_hq_logo_bg_v14_2026_04_16'
+    (os.getenv('LMS_CERTIFICATE_TEMPLATE_VERSION') or 'bold_split_v4_raster_hq_logo_bg_v15_2026_04_16').strip()
+    or 'bold_split_v4_raster_hq_logo_bg_v15_2026_04_16'
 )
 try:
     LMS_CERTIFICATE_RASTER_SCALE = int(str(os.getenv('LMS_CERTIFICATE_RASTER_SCALE', '4')).strip() or '4')
@@ -15690,8 +15690,8 @@ body {{
 }}
 .v4 .lp-content {{ position:relative; z-index:5; flex:1; display:flex; flex-direction:column; }}
 
-.logo-v4 {{ margin-bottom:auto; display:flex; justify-content:center; }}
-.logo-v4 .logo-v4-img {{ width: 230px; max-width: 100%; height: auto; display: block; }}
+.logo-v4 {{ margin-bottom:auto; display:flex; justify-content:center; align-items:center; height:80px; }}
+.logo-v4 .logo-v4-img {{ width: 260px; max-width: 100%; height: auto; display: block; }}
 .logo-v4 .logo-v4-fallback {{ color: var(--w); font-size: 22px; font-weight: 700; letter-spacing: 1px; }}
 
 .v4 .lp-cert-label {{ font-size:9px; font-weight:700; letter-spacing:4px; text-transform:uppercase; color:var(--y); margin-bottom:8px; margin-top:auto; }}
@@ -16138,14 +16138,16 @@ def _lms_build_bold_split_certificate_pdf(certificate_number, learner_name, cour
                 full_logo_rgba = full_logo_source.convert("RGBA")
                 resample = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
                 src_w, src_h = full_logo_rgba.size
-                max_w = S(230)
-                max_h = S(80)
+                max_w = S(260)
+                max_h = S(92)
                 scale = min(max_w / float(max(1, src_w)), max_h / float(max(1, src_h)))
                 dst_w = max(1, int(round(src_w * scale)))
                 dst_h = max(1, int(round(src_h * scale)))
                 full_logo_rgba = full_logo_rgba.resize((dst_w, dst_h), resample=resample)
                 logo_x = max(0, int(round((left_w - dst_w) / 2.0)))
-                image.alpha_composite(full_logo_rgba, (logo_x, top_pad - S(4)))
+                logo_center_y = top_pad + S(36)
+                logo_y = int(round(logo_center_y - (dst_h / 2.0)))
+                image.alpha_composite(full_logo_rgba, (logo_x, logo_y))
         except Exception:
             logging.exception("LMS certificate full logo render failed")
 
