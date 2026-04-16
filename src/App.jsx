@@ -34051,6 +34051,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             const regularBase = Number(op.aggregates?.regular_hours ?? 0);
                                             const norm = Number(op.norm_hours ?? 0);
                                             const fines = Number(op.fines ?? 0);
+                                            const bonuses = (() => {
+                                                const daily = (op && typeof op.daily === 'object' && !Array.isArray(op.daily)) ? op.daily : {};
+                                                let total = 0;
+                                                for (const dayData of Object.values(daily)) {
+                                                if (!dayData || typeof dayData !== 'object') continue;
+                                                if (Array.isArray(dayData.bonuses)) {
+                                                    for (const b of dayData.bonuses) {
+                                                    total += Number(b?.amount || 0) || 0;
+                                                    }
+                                                }
+                                                }
+                                                return Number(total) || 0;
+                                            })();
                                             const totalCalls = Number(op.aggregates?.total_calls ?? 0);
                                             const opTechnicalField = Number(op.technical_issue_hours ?? 0);
                                             const opOfflineField = Number(op.offline_activity_hours ?? 0);
@@ -34209,6 +34222,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     </p>
                                                     <p className="text-xl font-bold text-red-600">
                                                     {safeNum(fines).toFixed(2)}
+                                                    </p>
+                                                </div>
+
+                                                <div className="p-5 workhours-card bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
+                                                    <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
+                                                    <FaIcon className="fas fa-gift text-gray-400"></FaIcon> Бонусы
+                                                    </p>
+                                                    <p className="text-xl font-bold text-green-600">
+                                                    {safeNum(bonuses).toFixed(2)}
                                                     </p>
                                                 </div>
 
