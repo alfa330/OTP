@@ -138,8 +138,8 @@ LMS_DEFAULT_PASS_THRESHOLD = float(os.getenv('LMS_DEFAULT_PASS_THRESHOLD', '80')
 LMS_DEFAULT_ATTEMPT_LIMIT = int(os.getenv('LMS_DEFAULT_ATTEMPT_LIMIT', '3'))
 LMS_CERTIFICATE_STORAGE = (os.getenv('LMS_CERTIFICATE_STORAGE') or 'db').strip().lower()
 LMS_CERTIFICATE_TEMPLATE_VERSION = (
-    (os.getenv('LMS_CERTIFICATE_TEMPLATE_VERSION') or 'bold_split_v4_raster_hq_2026_04_15').strip()
-    or 'bold_split_v4_raster_hq_2026_04_15'
+    (os.getenv('LMS_CERTIFICATE_TEMPLATE_VERSION') or 'bold_split_v4_raster_hq_logo_bg_2026_04_16').strip()
+    or 'bold_split_v4_raster_hq_logo_bg_2026_04_16'
 )
 try:
     LMS_CERTIFICATE_RASTER_SCALE = int(str(os.getenv('LMS_CERTIFICATE_RASTER_SCALE', '4')).strip() or '4')
@@ -16012,6 +16012,28 @@ def _lms_fit_font(draw, text, max_width, start_size, min_size, bold=False):
     return _lms_certificate_font(min_size, bold=bold)
 
 
+@lru_cache(maxsize=1)
+def _lms_certificate_logo_path():
+    custom_logo_path = str(os.getenv("LMS_CERTIFICATE_LOGO_PATH") or "").strip()
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = []
+    if custom_logo_path:
+        candidates.append(custom_logo_path)
+    candidates.extend([
+        os.path.join(base_dir, "src", "components", "lms", "iGroup-logo-300-249px.png"),
+        os.path.join(base_dir, "lms", "iGroup-logo-300-249px.png"),
+        os.path.join(os.getcwd(), "src", "components", "lms", "iGroup-logo-300-249px.png"),
+    ])
+
+    for candidate in candidates:
+        try:
+            if candidate and os.path.isfile(candidate):
+                return candidate
+        except Exception:
+            continue
+    return None
+
+
 def _lms_build_bold_split_certificate_pdf(certificate_number, learner_name, course_title, issued_at):
     if Image is None or ImageDraw is None or ImageFont is None:
         return None
@@ -16050,6 +16072,20 @@ def _lms_build_bold_split_certificate_pdf(certificate_number, learner_name, cour
 
     draw.ellipse((S(583), S(-180), S(983), S(220)), outline=(0, 0, 0, 13), width=max(1, S(1)))
     _lms_draw_dot_grid(draw, canvas_w - S(160), canvas_h - S(160), S(160), S(160), S(18), S(1), (253, 183, 0, 51))
+
+    logo_path = _lms_certificate_logo_path()
+    if logo_path:
+        try:
+            with Image.open(logo_path) as logo_source:
+                logo_rgba = logo_source.convert("RGBA")
+                resample = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
+                logo_rgba = logo_rgba.resize((S(300), S(249)), resample=resample)
+                alpha_mask = logo_rgba.split()[3].point(lambda px: int(px * 0.12))
+                logo_overlay = Image.new("RGBA", logo_rgba.size, (150, 150, 150, 0))
+                logo_overlay.putalpha(alpha_mask)
+                image.alpha_composite(logo_overlay, (right_x + S(250), S(118)))
+        except Exception:
+            logging.exception("LMS certificate background logo render failed")
 
     left_pad_x = S(44)
     top_pad = S(52)
