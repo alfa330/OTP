@@ -138,8 +138,8 @@ LMS_DEFAULT_PASS_THRESHOLD = float(os.getenv('LMS_DEFAULT_PASS_THRESHOLD', '80')
 LMS_DEFAULT_ATTEMPT_LIMIT = int(os.getenv('LMS_DEFAULT_ATTEMPT_LIMIT', '3'))
 LMS_CERTIFICATE_STORAGE = (os.getenv('LMS_CERTIFICATE_STORAGE') or 'db').strip().lower()
 LMS_CERTIFICATE_TEMPLATE_VERSION = (
-    (os.getenv('LMS_CERTIFICATE_TEMPLATE_VERSION') or 'bold_split_v4_raster_hq_logo_bg_v3_2026_04_16').strip()
-    or 'bold_split_v4_raster_hq_logo_bg_v3_2026_04_16'
+    (os.getenv('LMS_CERTIFICATE_TEMPLATE_VERSION') or 'bold_split_v4_raster_hq_logo_bg_v5_2026_04_16').strip()
+    or 'bold_split_v4_raster_hq_logo_bg_v5_2026_04_16'
 )
 try:
     LMS_CERTIFICATE_RASTER_SCALE = int(str(os.getenv('LMS_CERTIFICATE_RASTER_SCALE', '4')).strip() or '4')
@@ -16066,11 +16066,11 @@ def _lms_build_bold_split_certificate_pdf(certificate_number, learner_name, cour
 
     draw.rectangle((0, 0, left_w, canvas_h), fill=col_k)
     draw.rectangle((0, 0, left_w, S(6)), fill=col_y)
-    draw.ellipse((S(-120), S(314), S(240), S(674)), outline=(253, 183, 0, 20), width=max(1, S(1)))
-    draw.ellipse((S(-50), S(384), S(170), S(604)), outline=(253, 183, 0, 30), width=max(1, S(1)))
+    draw.ellipse((S(-120), S(554), S(240), S(914)), outline=(253, 183, 0, 14), width=max(1, S(1)))
+    draw.ellipse((S(-50), S(624), S(170), S(844)), outline=(253, 183, 0, 22), width=max(1, S(1)))
     _lms_draw_dot_grid(draw, left_w - S(120), 0, S(120), S(140), S(16), S(1), (253, 183, 0, 77))
 
-    draw.ellipse((S(863), S(-180), S(1263), S(220)), outline=(0, 0, 0, 7), width=max(1, S(1)))
+    draw.ellipse((S(863), S(-180), S(1263), S(220)), outline=(0, 0, 0, 4), width=max(1, S(1)))
     _lms_draw_dot_grid(draw, canvas_w - S(160), canvas_h - S(160), S(160), S(160), S(18), S(1), (253, 183, 0, 51))
 
     logo_path = _lms_certificate_logo_path()
@@ -16083,7 +16083,7 @@ def _lms_build_bold_split_certificate_pdf(certificate_number, learner_name, cour
                 alpha_mask = logo_rgba.split()[3].point(lambda px: int(px * 0.14))
                 logo_overlay = Image.new("RGBA", logo_rgba.size, (150, 150, 150, 0))
                 logo_overlay.putalpha(alpha_mask)
-                image.alpha_composite(logo_overlay, (right_x + S(130), S(250)))
+                image.alpha_composite(logo_overlay, (right_x + S(130), S(215)))
         except Exception:
             logging.exception("LMS certificate background logo render failed")
 
@@ -16146,17 +16146,55 @@ def _lms_build_bold_split_certificate_pdf(certificate_number, learner_name, cour
     draw.rectangle((rp_left, bar_y, rp_left + S(52), bar_y + S(5)), fill=col_y)
 
     desc_font = _lms_certificate_font(S(13), bold=False)
-    desc_text = (
-        f"Настоящий сертификат подтверждает, что {learner} успешно прошел(а) курс {course_label}, "
-        "продемонстрировав высокий уровень профессиональных компетенций в соответствии с программой обучения iGroup."
-    )
-    desc_lines = _lms_wrap_text(draw, desc_text, desc_font, rp_right - rp_left)
+    desc_bold_font = _lms_certificate_font(S(13), bold=True)
+    desc_segments = [
+        {"text": "Настоящий сертификат подтверждает, что ", "font": desc_font, "fill": col_g5},
+        {"text": learner, "font": desc_bold_font, "fill": col_k},
+        {"text": " успешно прошел(а) курс ", "font": desc_font, "fill": col_g5},
+        {"text": course_label, "font": desc_bold_font, "fill": col_k, "bg": col_y},
+        {"text": ", продемонстрировав высокий уровень профессиональных компетенций в соответствии с программой обучения iGroup.", "font": desc_font, "fill": col_g5},
+    ]
     desc_y = bar_y + S(24)
-    _, desc_line_h = _lms_text_size(draw, "Ag", desc_font)
+    _, desc_line_h = _lms_text_size(draw, "Ag", desc_bold_font)
     desc_step = max(S(18), desc_line_h + S(7))
     max_desc_lines = 7
-    for index, line in enumerate(desc_lines[:max_desc_lines]):
-        draw.text((rp_left, desc_y + index * desc_step), line, font=desc_font, fill=col_g5)
+    max_desc_width = rp_right - rp_left
+    cursor_x = rp_left
+    cursor_y = desc_y
+    line_index = 0
+    for segment in desc_segments:
+        font = segment["font"]
+        fill = segment["fill"]
+        bg = segment.get("bg")
+        tokens = re.findall(r"\S+|\s+", str(segment.get("text") or ""))
+        for token in tokens:
+            if line_index >= max_desc_lines:
+                break
+            token_width, token_height = _lms_text_size(draw, token, font)
+            if not token_width:
+                continue
+            if token.strip() and cursor_x > rp_left and (cursor_x - rp_left + token_width > max_desc_width):
+                line_index += 1
+                if line_index >= max_desc_lines:
+                    break
+                cursor_x = rp_left
+                cursor_y += desc_step
+            if not token.strip() and cursor_x == rp_left:
+                continue
+            if bg and token.strip():
+                draw.rectangle(
+                    (
+                        cursor_x - S(2),
+                        cursor_y - S(1),
+                        cursor_x + token_width + S(2),
+                        cursor_y + token_height + S(3),
+                    ),
+                    fill=bg
+                )
+            draw.text((cursor_x, cursor_y), token, font=font, fill=fill)
+            cursor_x += token_width
+        if line_index >= max_desc_lines:
+            break
 
     bottom_divider_y = rp_bottom - S(95)
     draw.line((rp_left, bottom_divider_y, rp_right, bottom_divider_y), fill=col_g2, width=max(1, S(1)))
