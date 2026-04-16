@@ -138,8 +138,8 @@ LMS_DEFAULT_PASS_THRESHOLD = float(os.getenv('LMS_DEFAULT_PASS_THRESHOLD', '80')
 LMS_DEFAULT_ATTEMPT_LIMIT = int(os.getenv('LMS_DEFAULT_ATTEMPT_LIMIT', '3'))
 LMS_CERTIFICATE_STORAGE = (os.getenv('LMS_CERTIFICATE_STORAGE') or 'db').strip().lower()
 LMS_CERTIFICATE_TEMPLATE_VERSION = (
-    (os.getenv('LMS_CERTIFICATE_TEMPLATE_VERSION') or 'bold_split_v4_raster_hq_logo_bg_v5_2026_04_16').strip()
-    or 'bold_split_v4_raster_hq_logo_bg_v5_2026_04_16'
+    (os.getenv('LMS_CERTIFICATE_TEMPLATE_VERSION') or 'bold_split_v4_raster_hq_logo_bg_v7_2026_04_16').strip()
+    or 'bold_split_v4_raster_hq_logo_bg_v7_2026_04_16'
 )
 try:
     LMS_CERTIFICATE_RASTER_SCALE = int(str(os.getenv('LMS_CERTIFICATE_RASTER_SCALE', '4')).strip() or '4')
@@ -15565,7 +15565,7 @@ def _lms_build_bold_split_certificate_html(certificate_number, learner_name, cou
 
     sig_name_1 = _lms_escape_html(
         os.getenv("LMS_CERTIFICATE_SIGNER_1_NAME")
-        or "\u0410\u043b\u0435\u043a\u0441\u0435\u0439 \u0418\u0432\u0430\u043d\u043e\u0432"
+        or "\u041c\u043e\u043b\u0434\u0430\u0433\u0430\u043b\u0438\u0435\u0432 \u041a\u043e\u0436\u0430\u043d"
     )
     sig_role_1 = _lms_escape_html(
         os.getenv("LMS_CERTIFICATE_SIGNER_1_ROLE")
@@ -15573,7 +15573,7 @@ def _lms_build_bold_split_certificate_html(certificate_number, learner_name, cou
     )
     sig_name_2 = _lms_escape_html(
         os.getenv("LMS_CERTIFICATE_SIGNER_2_NAME")
-        or "\u041c\u0430\u0440\u0438\u044f \u0421\u043c\u0438\u0440\u043d\u043e\u0432\u0430"
+        or "\u0410\u043b\u0438\u0435\u0432\u0430 \u0417\u0430\u0440\u0438\u043d\u0430"
     )
     sig_role_2 = _lms_escape_html(
         os.getenv("LMS_CERTIFICATE_SIGNER_2_ROLE")
@@ -15582,7 +15582,7 @@ def _lms_build_bold_split_certificate_html(certificate_number, learner_name, cou
 
     issue_date_html = _lms_escape_html(issue_date_ru)
 
-    text_official = "\u041e\u0444\u0438\u0446\u0438\u0430\u043b\u044c\u043d\u044b\u0439 \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442"
+    text_official = "\u0412\u041d\u0423\u0422\u0420\u0415\u041d\u0418\u0418\u0419"
     text_cert_title = "\u0421\u0435\u0440\u0442\u0438&shy;\u0444\u0438\u043a\u0430\u0442"
     text_training = "\u043e \u043f\u0440\u043e\u0445\u043e\u0436\u0434\u0435\u043d\u0438\u0438 \u043e\u0431\u0443\u0447\u0435\u043d\u0438\u044f"
     text_cert_num = "\u041d\u043e\u043c\u0435\u0440 \u0441\u0435\u0440\u0442\u0438\u0444\u0438\u043a\u0430\u0442\u0430"
@@ -15663,7 +15663,7 @@ body {{
 }}
 .v4 .lp-circle2 {{
   position:absolute; width:220px; height:220px;
-  border:1px solid rgba(253,183,0,.2); border-radius:50%;
+  border:1px solid rgba(253,183,0,.22); border-radius:50%;
   bottom:-50px; left:-50px;
 }}
 .v4 .lp-dots {{
@@ -15693,13 +15693,18 @@ body {{
 
 .v4 .rp-dots {{
   position:absolute; bottom:0; right:0; width:160px; height:160px;
-  background-image: radial-gradient(circle, rgba(253,183,0,.2) 1.5px, transparent 1.5px);
+  background-image: radial-gradient(circle, rgba(253,183,0,.22) 1.5px, transparent 1.5px);
   background-size:18px 18px;
 }}
 .v4 .rp-ring {{
-  position:absolute; width:400px; height:400px;
+  position:absolute; width:420px; height:420px;
   border:1px solid rgba(0,0,0,.05); border-radius:50%;
-  top:-180px; right:-140px;
+  top:-190px; right:-150px;
+}}
+.v4 .rp-ring2 {{
+  position:absolute; width:260px; height:260px;
+  border:1px solid rgba(0,0,0,.04); border-radius:50%;
+  top:-110px; right:-70px;
 }}
 .v4 .rp-content {{ position:relative; z-index:5; flex:1; display:flex; flex-direction:column; }}
 
@@ -15710,11 +15715,11 @@ body {{
 
 .v4 .rp-recip-hint {{ font-size:9px; font-weight:700; letter-spacing:3px; text-transform:uppercase; color:var(--g4); margin-bottom:10px; margin-top:auto; }}
 .v4 .rp-recip {{ font-size:52px; font-weight:800; color:var(--k); letter-spacing:-2px; line-height:1; margin-bottom:16px; }}
-.v4 .rp-bar {{ width:52px; height:5px; background:var(--y); margin-bottom:20px; }}
+.v4 .rp-bar {{ width:52px; height:5px; background:var(--y); margin-bottom:22px; }}
 
 .v4 .rp-desc {{ font-size:12.5px; font-weight:400; color:var(--g5); line-height:1.75; margin-bottom:auto; }}
 .v4 .rp-desc strong {{ color:var(--k); font-weight:600; }}
-.v4 .course-tag {{ background:var(--y); color:var(--k); font-weight:700; font-size:12px; padding:2px 8px; display:inline-block; }}
+.v4 .course-tag {{ background:var(--y); color:var(--k); font-weight:700; font-size:12.5px; padding:2px 9px; display:inline-block; }}
 
 .v4 .rp-bottom {{ display:flex; justify-content:space-between; align-items:flex-end; padding-top:24px; border-top:1px solid var(--g2); }}
 .v4 .sig-group {{ display:flex; gap:44px; }}
@@ -15753,7 +15758,7 @@ body {{
     </div>
   </div>
   <div class=\"right-panel\">
-    <div class=\"rp-dots\"></div><div class=\"rp-ring\"></div>
+    <div class=\"rp-dots\"></div><div class=\"rp-ring\"></div><div class=\"rp-ring2\"></div>
     <div class=\"rp-content\">
       <div class=\"rp-top\">
         <div class=\"cert-id\">
@@ -16066,12 +16071,13 @@ def _lms_build_bold_split_certificate_pdf(certificate_number, learner_name, cour
 
     draw.rectangle((0, 0, left_w, canvas_h), fill=col_k)
     draw.rectangle((0, 0, left_w, S(6)), fill=col_y)
-    draw.ellipse((S(-120), S(554), S(240), S(914)), outline=(253, 183, 0, 14), width=max(1, S(1)))
-    draw.ellipse((S(-50), S(624), S(170), S(844)), outline=(253, 183, 0, 22), width=max(1, S(1)))
+    draw.ellipse((S(-120), S(314), S(240), S(674)), outline=(253, 183, 0, 31), width=max(1, S(1)))
+    draw.ellipse((S(-50), S(524), S(170), S(744)), outline=(253, 183, 0, 56), width=max(1, S(1)))
     _lms_draw_dot_grid(draw, left_w - S(120), 0, S(120), S(140), S(16), S(1), (253, 183, 0, 77))
 
-    draw.ellipse((S(863), S(-180), S(1263), S(220)), outline=(0, 0, 0, 4), width=max(1, S(1)))
-    _lms_draw_dot_grid(draw, canvas_w - S(160), canvas_h - S(160), S(160), S(160), S(18), S(1), (253, 183, 0, 51))
+    draw.ellipse((S(853), S(-190), S(1273), S(230)), outline=(0, 0, 0, 13), width=max(1, S(1)))
+    draw.ellipse((S(933), S(-110), S(1193), S(150)), outline=(0, 0, 0, 10), width=max(1, S(1)))
+    _lms_draw_dot_grid(draw, canvas_w - S(160), canvas_h - S(160), S(160), S(160), S(18), S(1), (253, 183, 0, 56))
 
     logo_path = _lms_certificate_logo_path()
     if logo_path:
@@ -16110,7 +16116,7 @@ def _lms_build_bold_split_certificate_pdf(certificate_number, learner_name, cour
     info_value_font = _lms_certificate_font(S(11), bold=True)
 
     block_y = canvas_h - S(280)
-    draw.text((left_pad_x, block_y), "ОФИЦИАЛЬНЫЙ ДОКУМЕНТ", font=left_label_font, fill=col_y)
+    draw.text((left_pad_x, block_y), "ВНУТРЕНИИЙ", font=left_label_font, fill=col_y)
     draw.text((left_pad_x, block_y + S(22)), "Сертификат", font=left_title_font, fill=col_w)
     draw.text((left_pad_x, block_y + S(88)), "о прохождении обучения", font=left_sub_font, fill=(255, 255, 255, 89))
     draw.rectangle((left_pad_x, block_y + S(116), left_pad_x + S(40), block_y + S(119)), fill=col_y)
@@ -16147,12 +16153,13 @@ def _lms_build_bold_split_certificate_pdf(certificate_number, learner_name, cour
 
     desc_font = _lms_certificate_font(S(13), bold=False)
     desc_bold_font = _lms_certificate_font(S(13), bold=True)
+    course_tag_font = _lms_certificate_font(S(13), bold=True)
     desc_segments = [
-        {"text": "Настоящий сертификат подтверждает, что ", "font": desc_font, "fill": col_g5},
-        {"text": learner, "font": desc_bold_font, "fill": col_k},
-        {"text": " успешно прошел(а) курс ", "font": desc_font, "fill": col_g5},
-        {"text": course_label, "font": desc_bold_font, "fill": col_k, "bg": col_y},
-        {"text": ", продемонстрировав высокий уровень профессиональных компетенций в соответствии с программой обучения iGroup.", "font": desc_font, "fill": col_g5},
+        {"kind": "text", "text": "Настоящий сертификат подтверждает, что ", "font": desc_font, "fill": col_g5},
+        {"kind": "text", "text": learner, "font": desc_bold_font, "fill": col_k},
+        {"kind": "text", "text": " успешно прошел(а) курс ", "font": desc_font, "fill": col_g5},
+        {"kind": "tag", "text": course_label, "font": course_tag_font, "fill": col_k, "bg": col_y, "pad_x": S(9), "pad_y": S(2)},
+        {"kind": "text", "text": ", продемонстрировав высокий уровень профессиональных компетенций в соответствии с программой обучения iGroup.", "font": desc_font, "fill": col_g5},
     ]
     desc_y = bar_y + S(24)
     _, desc_line_h = _lms_text_size(draw, "Ag", desc_bold_font)
@@ -16162,39 +16169,71 @@ def _lms_build_bold_split_certificate_pdf(certificate_number, learner_name, cour
     cursor_x = rp_left
     cursor_y = desc_y
     line_index = 0
+
+    def _desc_new_line():
+        nonlocal cursor_x, cursor_y, line_index
+        line_index += 1
+        cursor_x = rp_left
+        cursor_y += desc_step
+
     for segment in desc_segments:
-        font = segment["font"]
-        fill = segment["fill"]
-        bg = segment.get("bg")
+        if line_index >= max_desc_lines:
+            break
+
+        kind = str(segment.get("kind") or "text")
+        font = segment.get("font") or desc_font
+        fill = segment.get("fill") or col_g5
+
+        if kind == "tag":
+            tag_text = str(segment.get("text") or "").strip()
+            if not tag_text:
+                continue
+            tag_bg = segment.get("bg") or col_y
+            pad_x = int(segment.get("pad_x") or S(9))
+            pad_y = int(segment.get("pad_y") or S(2))
+            tag_w, tag_h = _lms_text_size(draw, tag_text, font)
+            box_w = tag_w + pad_x * 2
+
+            if cursor_x > rp_left and (cursor_x - rp_left + box_w > max_desc_width):
+                _desc_new_line()
+            if line_index >= max_desc_lines:
+                break
+
+            if box_w > max_desc_width:
+                fit_font = _lms_fit_font(
+                    draw,
+                    tag_text,
+                    max(1, max_desc_width - (pad_x * 2)),
+                    S(13),
+                    S(9),
+                    bold=True
+                )
+                font = fit_font
+                tag_w, tag_h = _lms_text_size(draw, tag_text, fit_font)
+                box_w = tag_w + pad_x * 2
+
+            rect_top = cursor_y - S(1)
+            rect_bottom = cursor_y + tag_h + S(3)
+            draw.rectangle((cursor_x, rect_top, cursor_x + box_w, rect_bottom), fill=tag_bg)
+            draw.text((cursor_x + pad_x, cursor_y), tag_text, font=font, fill=fill)
+            cursor_x += box_w
+            continue
+
         tokens = re.findall(r"\S+|\s+", str(segment.get("text") or ""))
         for token in tokens:
             if line_index >= max_desc_lines:
                 break
-            token_width, token_height = _lms_text_size(draw, token, font)
+            token_width, _ = _lms_text_size(draw, token, font)
             if not token_width:
                 continue
             if token.strip() and cursor_x > rp_left and (cursor_x - rp_left + token_width > max_desc_width):
-                line_index += 1
+                _desc_new_line()
                 if line_index >= max_desc_lines:
                     break
-                cursor_x = rp_left
-                cursor_y += desc_step
             if not token.strip() and cursor_x == rp_left:
                 continue
-            if bg and token.strip():
-                draw.rectangle(
-                    (
-                        cursor_x - S(2),
-                        cursor_y - S(1),
-                        cursor_x + token_width + S(2),
-                        cursor_y + token_height + S(3),
-                    ),
-                    fill=bg
-                )
             draw.text((cursor_x, cursor_y), token, font=font, fill=fill)
             cursor_x += token_width
-        if line_index >= max_desc_lines:
-            break
 
     bottom_divider_y = rp_bottom - S(95)
     draw.line((rp_left, bottom_divider_y, rp_right, bottom_divider_y), fill=col_g2, width=max(1, S(1)))
@@ -16206,9 +16245,9 @@ def _lms_build_bold_split_certificate_pdf(certificate_number, learner_name, cour
     sig_gap = S(44)
     sig1_x = rp_left
     sig2_x = rp_left + sig_line_w + sig_gap
-    sig_name_1 = str(os.getenv("LMS_CERTIFICATE_SIGNER_1_NAME") or "Алексей Иванов").strip()
+    sig_name_1 = str(os.getenv("LMS_CERTIFICATE_SIGNER_1_NAME") or "Молдагалиев Кожан").strip()
     sig_role_1 = str(os.getenv("LMS_CERTIFICATE_SIGNER_1_ROLE") or "Генеральный директор").strip()
-    sig_name_2 = str(os.getenv("LMS_CERTIFICATE_SIGNER_2_NAME") or "Мария Смирнова").strip()
+    sig_name_2 = str(os.getenv("LMS_CERTIFICATE_SIGNER_2_NAME") or "Алиева Зарина").strip()
     sig_role_2 = str(os.getenv("LMS_CERTIFICATE_SIGNER_2_ROLE") or "Руководитель программ").strip()
 
     draw.line((sig1_x, sig_top, sig1_x + sig_line_w, sig_top), fill=col_k, width=max(1, S(1)))
