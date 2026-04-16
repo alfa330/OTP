@@ -138,16 +138,16 @@ LMS_DEFAULT_PASS_THRESHOLD = float(os.getenv('LMS_DEFAULT_PASS_THRESHOLD', '80')
 LMS_DEFAULT_ATTEMPT_LIMIT = int(os.getenv('LMS_DEFAULT_ATTEMPT_LIMIT', '3'))
 LMS_CERTIFICATE_STORAGE = (os.getenv('LMS_CERTIFICATE_STORAGE') or 'db').strip().lower()
 LMS_CERTIFICATE_TEMPLATE_VERSION = (
-    (os.getenv('LMS_CERTIFICATE_TEMPLATE_VERSION') or 'bold_split_v4_exact_html_copyable_2026_04_15').strip()
-    or 'bold_split_v4_exact_html_copyable_2026_04_15'
+    (os.getenv('LMS_CERTIFICATE_TEMPLATE_VERSION') or 'bold_split_v4_raster_hq_2026_04_15').strip()
+    or 'bold_split_v4_raster_hq_2026_04_15'
 )
 try:
-    LMS_CERTIFICATE_RASTER_SCALE = int(str(os.getenv('LMS_CERTIFICATE_RASTER_SCALE', '3')).strip() or '3')
+    LMS_CERTIFICATE_RASTER_SCALE = int(str(os.getenv('LMS_CERTIFICATE_RASTER_SCALE', '4')).strip() or '4')
 except Exception:
-    LMS_CERTIFICATE_RASTER_SCALE = 3
-LMS_CERTIFICATE_RASTER_SCALE = max(2, min(6, LMS_CERTIFICATE_RASTER_SCALE))
-LMS_CERTIFICATE_USE_XHTML2PDF = str(os.getenv('LMS_CERTIFICATE_USE_XHTML2PDF', 'true')).strip().lower() in {'1', 'true', 'yes'}
-LMS_CERTIFICATE_ENABLE_RASTER_FALLBACK = str(os.getenv('LMS_CERTIFICATE_ENABLE_RASTER_FALLBACK', 'false')).strip().lower() in {'1', 'true', 'yes'}
+    LMS_CERTIFICATE_RASTER_SCALE = 4
+LMS_CERTIFICATE_RASTER_SCALE = max(3, min(8, LMS_CERTIFICATE_RASTER_SCALE))
+LMS_CERTIFICATE_USE_XHTML2PDF = str(os.getenv('LMS_CERTIFICATE_USE_XHTML2PDF', 'false')).strip().lower() in {'1', 'true', 'yes'}
+LMS_CERTIFICATE_ENABLE_HTML_RENDER = str(os.getenv('LMS_CERTIFICATE_ENABLE_HTML_RENDER', 'false')).strip().lower() in {'1', 'true', 'yes'}
 LMS_CERTIFICATE_HTML_ENGINE_WARNED = False
 try:
     RECRUITING_PAGES_PER_QUERY = int(os.getenv('RECRUITING_PAGES_PER_QUERY', '5'))
@@ -16024,7 +16024,7 @@ def _lms_build_bold_split_certificate_pdf(certificate_number, learner_name, cour
     issue_date_short = issue_dt.strftime("%d.%m.%Y")
     course_label = course if any(token in course for token in ("«", "»", "\"", "'")) else f"«{course}»"
 
-    raster_scale = max(2, min(6, int(LMS_CERTIFICATE_RASTER_SCALE or 3)))
+    raster_scale = max(3, min(8, int(LMS_CERTIFICATE_RASTER_SCALE or 4)))
 
     def S(value):
         return int(round(float(value) * float(raster_scale)))
@@ -16163,8 +16163,8 @@ def _lms_build_bold_split_certificate_pdf(certificate_number, learner_name, cour
     image.convert("RGB").save(
         out,
         format="PDF",
-        resolution=float(96 * raster_scale),
-        quality=95
+        resolution=float(120 * raster_scale),
+        quality=100
     )
     return out.getvalue()
 
@@ -16172,32 +16172,30 @@ def _lms_build_bold_split_certificate_pdf(certificate_number, learner_name, cour
 def _lms_generate_certificate_pdf(certificate_number, learner_name, course_title, issued_at, score_percent, verify_token):
     issue_dt = issued_at if isinstance(issued_at, datetime) else _lms_now()
     try:
-        html_markup = _lms_build_bold_split_certificate_html(
+        bold_split_pdf = _lms_build_bold_split_certificate_pdf(
             certificate_number=certificate_number,
             learner_name=learner_name,
             course_title=course_title,
             issued_at=issue_dt
         )
-        html_pdf = _lms_build_pdf_from_html(html_markup)
-        if html_pdf:
-            return html_pdf
+        if bold_split_pdf:
+            return bold_split_pdf
     except Exception:
-        logging.exception("LMS HTML certificate render fallback")
+        logging.exception("LMS raster certificate render failed")
 
-    if LMS_CERTIFICATE_ENABLE_RASTER_FALLBACK:
+    if LMS_CERTIFICATE_ENABLE_HTML_RENDER:
         try:
-            bold_split_pdf = _lms_build_bold_split_certificate_pdf(
+            html_markup = _lms_build_bold_split_certificate_html(
                 certificate_number=certificate_number,
                 learner_name=learner_name,
                 course_title=course_title,
                 issued_at=issue_dt
             )
-            if bold_split_pdf:
-                return bold_split_pdf
+            html_pdf = _lms_build_pdf_from_html(html_markup)
+            if html_pdf:
+                return html_pdf
         except Exception:
-            logging.exception("LMS certificate raster fallback failed")
-    else:
-        logging.warning("LMS certificate raster fallback disabled; returning copyable text PDF fallback")
+            logging.exception("LMS HTML certificate render fallback")
 
     verify_url = _lms_verify_url(verify_token)
     lines = [
