@@ -138,8 +138,8 @@ LMS_DEFAULT_PASS_THRESHOLD = float(os.getenv('LMS_DEFAULT_PASS_THRESHOLD', '80')
 LMS_DEFAULT_ATTEMPT_LIMIT = int(os.getenv('LMS_DEFAULT_ATTEMPT_LIMIT', '3'))
 LMS_CERTIFICATE_STORAGE = (os.getenv('LMS_CERTIFICATE_STORAGE') or 'db').strip().lower()
 LMS_CERTIFICATE_TEMPLATE_VERSION = (
-    (os.getenv('LMS_CERTIFICATE_TEMPLATE_VERSION') or 'bold_split_v4_raster_hq_logo_bg_v2_2026_04_16').strip()
-    or 'bold_split_v4_raster_hq_logo_bg_v2_2026_04_16'
+    (os.getenv('LMS_CERTIFICATE_TEMPLATE_VERSION') or 'bold_split_v4_raster_hq_logo_bg_v3_2026_04_16').strip()
+    or 'bold_split_v4_raster_hq_logo_bg_v3_2026_04_16'
 )
 try:
     LMS_CERTIFICATE_RASTER_SCALE = int(str(os.getenv('LMS_CERTIFICATE_RASTER_SCALE', '4')).strip() or '4')
@@ -16066,11 +16066,11 @@ def _lms_build_bold_split_certificate_pdf(certificate_number, learner_name, cour
 
     draw.rectangle((0, 0, left_w, canvas_h), fill=col_k)
     draw.rectangle((0, 0, left_w, S(6)), fill=col_y)
-    draw.ellipse((S(-120), S(314), S(240), S(674)), outline=(253, 183, 0, 31), width=max(1, S(1)))
-    draw.ellipse((S(-50), S(524), S(170), S(744)), outline=(253, 183, 0, 51), width=max(1, S(1)))
+    draw.ellipse((S(-120), S(314), S(240), S(674)), outline=(253, 183, 0, 20), width=max(1, S(1)))
+    draw.ellipse((S(-50), S(384), S(170), S(604)), outline=(253, 183, 0, 30), width=max(1, S(1)))
     _lms_draw_dot_grid(draw, left_w - S(120), 0, S(120), S(140), S(16), S(1), (253, 183, 0, 77))
 
-    draw.ellipse((S(583), S(-180), S(983), S(220)), outline=(0, 0, 0, 13), width=max(1, S(1)))
+    draw.ellipse((S(863), S(-180), S(1263), S(220)), outline=(0, 0, 0, 7), width=max(1, S(1)))
     _lms_draw_dot_grid(draw, canvas_w - S(160), canvas_h - S(160), S(160), S(160), S(18), S(1), (253, 183, 0, 51))
 
     logo_path = _lms_certificate_logo_path()
