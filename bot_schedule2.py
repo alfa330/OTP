@@ -138,8 +138,8 @@ LMS_DEFAULT_PASS_THRESHOLD = float(os.getenv('LMS_DEFAULT_PASS_THRESHOLD', '80')
 LMS_DEFAULT_ATTEMPT_LIMIT = int(os.getenv('LMS_DEFAULT_ATTEMPT_LIMIT', '3'))
 LMS_CERTIFICATE_STORAGE = (os.getenv('LMS_CERTIFICATE_STORAGE') or 'db').strip().lower()
 LMS_CERTIFICATE_TEMPLATE_VERSION = (
-    (os.getenv('LMS_CERTIFICATE_TEMPLATE_VERSION') or 'bold_split_v4_raster_hq_logo_bg_v7_2026_04_16').strip()
-    or 'bold_split_v4_raster_hq_logo_bg_v7_2026_04_16'
+    (os.getenv('LMS_CERTIFICATE_TEMPLATE_VERSION') or 'bold_split_v4_raster_hq_logo_bg_v9_2026_04_16').strip()
+    or 'bold_split_v4_raster_hq_logo_bg_v9_2026_04_16'
 )
 try:
     LMS_CERTIFICATE_RASTER_SCALE = int(str(os.getenv('LMS_CERTIFICATE_RASTER_SCALE', '4')).strip() or '4')
@@ -15581,6 +15581,19 @@ def _lms_build_bold_split_certificate_html(certificate_number, learner_name, cou
     )
 
     issue_date_html = _lms_escape_html(issue_date_ru)
+    full_logo_path = _lms_certificate_full_logo_path()
+    full_logo_uri = ""
+    if full_logo_path:
+        try:
+            from pathlib import Path
+            full_logo_uri = Path(full_logo_path).resolve().as_uri()
+        except Exception:
+            full_logo_uri = str(full_logo_path)
+    logo_markup = (
+        f"<img class=\"logo-v4-img\" src=\"{_lms_escape_html(full_logo_uri)}\" alt=\"iGroup\"/>"
+        if full_logo_uri
+        else "<div class=\"logo-v4-fallback\">iGroup</div>"
+    )
 
     text_official = "\u0412\u041d\u0423\u0422\u0420\u0415\u041d\u0418\u0418\u0419"
     text_cert_title = "\u0421\u0435\u0440\u0442\u0438&shy;\u0444\u0438\u043a\u0430\u0442"
@@ -15658,12 +15671,12 @@ body {{
 
 .v4 .lp-circle1 {{
   position:absolute; width:360px; height:360px;
-  border:1px solid rgba(253,183,0,.12); border-radius:50%;
+  border:1px solid rgba(220,178,84,.14); border-radius:50%;
   bottom:-120px; left:-120px;
 }}
 .v4 .lp-circle2 {{
   position:absolute; width:220px; height:220px;
-  border:1px solid rgba(253,183,0,.22); border-radius:50%;
+  border:1px solid rgba(220,178,84,.20); border-radius:50%;
   bottom:-50px; left:-50px;
 }}
 .v4 .lp-dots {{
@@ -15677,9 +15690,9 @@ body {{
 }}
 .v4 .lp-content {{ position:relative; z-index:5; flex:1; display:flex; flex-direction:column; }}
 
-.logo-v4 {{ display:flex; align-items:center; margin-bottom:auto; }}
-.logo-v4 .li {{ background:var(--y); color:var(--k); font-size:20px; font-weight:900; width:34px; height:34px; display:flex; align-items:center; justify-content:center; }}
-.logo-v4 .lg {{ background:var(--w); color:var(--k); font-size:10px; font-weight:700; height:34px; padding:0 10px; display:flex; align-items:center; letter-spacing:3px; text-transform:uppercase; }}
+.logo-v4 {{ margin-bottom:auto; }}
+.logo-v4 .logo-v4-img {{ width: 180px; height: auto; display: block; }}
+.logo-v4 .logo-v4-fallback {{ color: var(--w); font-size: 22px; font-weight: 700; letter-spacing: 1px; }}
 
 .v4 .lp-cert-label {{ font-size:9px; font-weight:700; letter-spacing:4px; text-transform:uppercase; color:var(--y); margin-bottom:8px; margin-top:auto; }}
 .v4 .lp-cert-title {{ font-size:36px; font-weight:800; color:var(--w); line-height:1.1; letter-spacing:-1px; margin-bottom:24px; }}
@@ -15698,12 +15711,12 @@ body {{
 }}
 .v4 .rp-ring {{
   position:absolute; width:420px; height:420px;
-  border:1px solid rgba(0,0,0,.05); border-radius:50%;
+  border:1px solid rgba(120,120,120,.10); border-radius:50%;
   top:-190px; right:-150px;
 }}
 .v4 .rp-ring2 {{
   position:absolute; width:260px; height:260px;
-  border:1px solid rgba(0,0,0,.04); border-radius:50%;
+  border:1px solid rgba(120,120,120,.08); border-radius:50%;
   top:-110px; right:-70px;
 }}
 .v4 .rp-content {{ position:relative; z-index:5; flex:1; display:flex; flex-direction:column; }}
@@ -15740,7 +15753,7 @@ body {{
     <div class=\"lp-circle1\"></div><div class=\"lp-circle2\"></div>
     <div class=\"lp-dots\"></div>
     <div class=\"lp-content\">
-      <div class=\"logo-v4\"><div class=\"li\">i</div><div class=\"lg\">Group</div></div>
+      <div class=\"logo-v4\">{logo_markup}</div>
       <div style=\"margin-top:auto;\">
         <div class=\"lp-cert-label\">{text_official}</div>
         <div class=\"lp-cert-title\">{text_cert_title}</div>
@@ -16039,6 +16052,28 @@ def _lms_certificate_logo_path():
     return None
 
 
+@lru_cache(maxsize=1)
+def _lms_certificate_full_logo_path():
+    custom_logo_path = str(os.getenv("LMS_CERTIFICATE_FULL_LOGO_PATH") or "").strip()
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = []
+    if custom_logo_path:
+        candidates.append(custom_logo_path)
+    candidates.extend([
+        os.path.join(base_dir, "src", "components", "lms", "iGroup-full-logo-855-292px.png"),
+        os.path.join(base_dir, "lms", "iGroup-full-logo-855-292px.png"),
+        os.path.join(os.getcwd(), "src", "components", "lms", "iGroup-full-logo-855-292px.png"),
+    ])
+
+    for candidate in candidates:
+        try:
+            if candidate and os.path.isfile(candidate):
+                return candidate
+        except Exception:
+            continue
+    return None
+
+
 def _lms_build_bold_split_certificate_pdf(certificate_number, learner_name, course_title, issued_at):
     if Image is None or ImageDraw is None or ImageFont is None:
         return None
@@ -16071,12 +16106,12 @@ def _lms_build_bold_split_certificate_pdf(certificate_number, learner_name, cour
 
     draw.rectangle((0, 0, left_w, canvas_h), fill=col_k)
     draw.rectangle((0, 0, left_w, S(6)), fill=col_y)
-    draw.ellipse((S(-120), S(314), S(240), S(674)), outline=(253, 183, 0, 31), width=max(1, S(1)))
-    draw.ellipse((S(-50), S(524), S(170), S(744)), outline=(253, 183, 0, 56), width=max(1, S(1)))
+    draw.ellipse((S(-120), S(554), S(240), S(914)), outline=(220, 178, 84, 36), width=max(1, S(1)))
+    draw.ellipse((S(-50), S(624), S(170), S(844)), outline=(220, 178, 84, 51), width=max(1, S(1)))
     _lms_draw_dot_grid(draw, left_w - S(120), 0, S(120), S(140), S(16), S(1), (253, 183, 0, 77))
 
-    draw.ellipse((S(853), S(-190), S(1273), S(230)), outline=(0, 0, 0, 13), width=max(1, S(1)))
-    draw.ellipse((S(933), S(-110), S(1193), S(150)), outline=(0, 0, 0, 10), width=max(1, S(1)))
+    draw.ellipse((S(853), S(-190), S(1273), S(230)), outline=(120, 120, 120, 26), width=max(1, S(1)))
+    draw.ellipse((S(933), S(-110), S(1193), S(150)), outline=(120, 120, 120, 20), width=max(1, S(1)))
     _lms_draw_dot_grid(draw, canvas_w - S(160), canvas_h - S(160), S(160), S(160), S(18), S(1), (253, 183, 0, 56))
 
     logo_path = _lms_certificate_logo_path()
@@ -16096,18 +16131,22 @@ def _lms_build_bold_split_certificate_pdf(certificate_number, learner_name, cour
     left_pad_x = S(44)
     top_pad = S(52)
 
-    logo_i_font = _lms_certificate_font(S(20), bold=True)
-    logo_group_font = _lms_certificate_font(S(10), bold=True)
-    draw.rectangle((left_pad_x, top_pad, left_pad_x + S(34), top_pad + S(34)), fill=col_y)
-    i_w, i_h = _lms_text_size(draw, "i", logo_i_font)
-    draw.text(
-        (left_pad_x + (S(34) - i_w) / 2, top_pad + (S(34) - i_h) / 2 - S(1)),
-        "i",
-        font=logo_i_font,
-        fill=col_k
-    )
-    draw.rectangle((left_pad_x + S(34), top_pad, left_pad_x + S(132), top_pad + S(34)), fill=col_w)
-    draw.text((left_pad_x + S(44), top_pad + S(9)), "Group", font=logo_group_font, fill=col_k)
+    full_logo_path = _lms_certificate_full_logo_path()
+    if full_logo_path:
+        try:
+            with Image.open(full_logo_path) as full_logo_source:
+                full_logo_rgba = full_logo_source.convert("RGBA")
+                resample = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
+                src_w, src_h = full_logo_rgba.size
+                max_w = S(180)
+                max_h = S(54)
+                scale = min(max_w / float(max(1, src_w)), max_h / float(max(1, src_h)))
+                dst_w = max(1, int(round(src_w * scale)))
+                dst_h = max(1, int(round(src_h * scale)))
+                full_logo_rgba = full_logo_rgba.resize((dst_w, dst_h), resample=resample)
+                image.alpha_composite(full_logo_rgba, (left_pad_x, top_pad - S(4)))
+        except Exception:
+            logging.exception("LMS certificate full logo render failed")
 
     left_label_font = _lms_certificate_font(S(9), bold=True)
     left_title_font = _lms_certificate_font(S(36), bold=True)
