@@ -219,7 +219,7 @@ styleTag.textContent = `
     align-items: center;
     justify-content: flex-start;
     gap: 8px;
-    margin: 9px 2px 5px;
+    margin: 9px 2px 5px 10px;
     color: var(--ink-3);
     font-size: 11px;
     font-weight: 600;
@@ -720,6 +720,15 @@ const fmt = (v) => {
   return isNaN(d) ? String(v) : d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' });
 };
 
+const pluralRu = (n, one, few, many) => {
+  const absN = Math.abs(Number(n) || 0);
+  const n10 = absN % 10;
+  const n100 = absN % 100;
+  if (n10 === 1 && n100 !== 11) return one;
+  if (n10 >= 2 && n10 <= 4 && (n100 < 12 || n100 > 14)) return few;
+  return many;
+};
+
 const taskDateKey = (v) => {
   if (!v) return 'unknown';
   const d = new Date(v);
@@ -735,12 +744,26 @@ const taskDateLabel = (v) => {
   const d = new Date(v);
   if (Number.isNaN(d.getTime())) return 'Без даты';
   const now = new Date();
-  const nowDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const itemDay = new Date(d.getFullYear(), d.getMonth(), d.getDate());
-  const diff = Math.round((nowDay.getTime() - itemDay.getTime()) / 86400000);
-  if (diff === 0) return 'Сегодня';
-  if (diff === 1) return 'Вчера';
-  return d.toLocaleDateString('ru-RU', { day: '2-digit', month: 'long', year: 'numeric' });
+  let diffMs = now.getTime() - d.getTime();
+  if (diffMs < 0) diffMs = 0;
+
+  const diffDays = Math.floor(diffMs / 86400000);
+  if (diffDays <= 0) return 'Сегодня';
+  if (diffDays < 30) {
+    return `${diffDays} ${pluralRu(diffDays, 'день', 'дня', 'дней')} назад`;
+  }
+
+  const rawMonths =
+    (now.getFullYear() - d.getFullYear()) * 12 +
+    (now.getMonth() - d.getMonth()) -
+    (now.getDate() < d.getDate() ? 1 : 0);
+  const months = Math.max(1, rawMonths);
+  if (months < 12) {
+    return `${months} ${pluralRu(months, 'месяц', 'месяца', 'месяцев')} назад`;
+  }
+
+  const years = Math.max(1, Math.floor(months / 12));
+  return `${years} ${pluralRu(years, 'год', 'года', 'лет')} назад`;
 };
 
 const withDateSeparators = (list) => {
@@ -863,7 +886,7 @@ const TaskRow = React.memo(({ task, onClick }) => {
           <AvatarCircle className="tv-avatar-xs" name={assigneeName} avatarUrl={assigneeAvatarUrl} />
           {assigneeName}
         </span>
-        <span className="tv-task-row-date">{fmt(task.created_at)}</span>
+        <span className="tv-task-row-date">{taskDateLabel(task.created_at)}</span>
         <ChevronRight />
       </span>
     </div>
