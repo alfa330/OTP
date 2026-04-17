@@ -708,6 +708,174 @@ const SvRequestButton = ({ call, userId, userRole, fetchEvaluations, onReevaluat
     return null;
 };
 
+const toDateInputValue = (value) => {
+    if (!value) return '';
+    const text = String(value).trim();
+    const m = text.match(/^(\d{4}-\d{2}-\d{2})/);
+    return m ? m[1] : '';
+};
+
+const toTimeInputValue = (value) => {
+    if (!value) return '';
+    const text = String(value).trim();
+    const m = text.match(/^(\d{2}:\d{2})/);
+    return m ? m[1] : '';
+};
+
+const FeedbackModal = ({
+    isOpen,
+    onClose,
+    call,
+    userId,
+    onSaved
+}) => {
+    const [feedbackComment, setFeedbackComment] = useState('');
+    const [deliveryComment, setDeliveryComment] = useState('');
+    const [feedbackDate, setFeedbackDate] = useState('');
+    const [startTime, setStartTime] = useState('');
+    const [endTime, setEndTime] = useState('');
+    const [isSubmitting, setIsSubmitting] = useState(false);
+
+    useEffect(() => {
+        if (!isOpen) return;
+        const currentFeedback = call?.feedback || null;
+        const now = new Date();
+        const defaultDate = now.toISOString().slice(0, 10);
+
+        setFeedbackComment(String(currentFeedback?.feedback_comment || '').trim());
+        setDeliveryComment(String(currentFeedback?.delivery_comment || '').trim());
+        setFeedbackDate(toDateInputValue(currentFeedback?.date) || defaultDate);
+        setStartTime(toTimeInputValue(currentFeedback?.start_time));
+        setEndTime(toTimeInputValue(currentFeedback?.end_time));
+    }, [isOpen, call]);
+
+    if (!isOpen || !call) return null;
+
+    const hasExistingFeedback = !!call?.feedback?.id;
+    const isDisabled =
+        isSubmitting ||
+        !feedbackComment.trim() ||
+        !deliveryComment.trim() ||
+        !feedbackDate ||
+        !startTime ||
+        !endTime;
+
+    const submit = async () => {
+        if (isDisabled) return;
+        if (endTime <= startTime) {
+            emitCallEvaluationToast('Время окончания должно быть позже времени начала', 'error');
+            return;
+        }
+
+        setIsSubmitting(true);
+        try {
+            const r = await authFetch(`${API_BASE_URL}/api/call_evaluations/${call.id}/feedback`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-User-Id': userId
+                },
+                body: JSON.stringify({
+                    feedback_comment: feedbackComment.trim(),
+                    delivery_comment: deliveryComment.trim(),
+                    date: feedbackDate,
+                    start_time: startTime,
+                    end_time: endTime
+                })
+            });
+            const d = await r.json();
+            if (!r.ok || d.status !== 'success') {
+                throw new Error(d?.error || 'Не удалось сохранить обратную связь');
+            }
+
+            emitCallEvaluationToast(hasExistingFeedback ? 'Обратная связь обновлена' : 'Обратная связь добавлена', 'success');
+            if (typeof onSaved === 'function') onSaved(d.feedback || null);
+            onClose?.();
+        } catch (e) {
+            emitCallEvaluationToast(`Ошибка: ${e.message}`, 'error');
+        } finally {
+            setIsSubmitting(false);
+        }
+    };
+
+    return (
+        <div className="modal-backdrop" onClick={onClose}>
+            <div className="modal request-modal" style={{maxWidth: 560}} onClick={e => e.stopPropagation()}>
+                <div className="modal-header">
+                    <div>
+                        <h2>Обратная связь</h2>
+                        <div className="modal-header-sub">Call ID: {call.id}</div>
+                    </div>
+                    <button className="close-btn" onClick={onClose}><FaIcon className="fas fa-times" /></button>
+                </div>
+                <div className="modal-body">
+                    <div className="field">
+                        <label className="label">Обратная связь</label>
+                        <textarea
+                            className="textarea"
+                            rows={3}
+                            placeholder="Что было донесено оператору"
+                            value={feedbackComment}
+                            onChange={e => setFeedbackComment(e.target.value)}
+                        />
+                    </div>
+                    <div className="field">
+                        <label className="label">Как проведена обратная связь</label>
+                        <textarea
+                            className="textarea"
+                            rows={3}
+                            placeholder="Например: индивидуальный разбор, прослушивание звонка, чек-лист ошибок"
+                            value={deliveryComment}
+                            onChange={e => setDeliveryComment(e.target.value)}
+                        />
+                    </div>
+                    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10}}>
+                        <div className="field" style={{marginBottom: 0}}>
+                            <label className="label">Дата</label>
+                            <input
+                                className="input"
+                                type="date"
+                                value={feedbackDate}
+                                onChange={e => setFeedbackDate(e.target.value)}
+                            />
+                        </div>
+                        <div className="field" style={{marginBottom: 0}}>
+                            <label className="label">Начало</label>
+                            <input
+                                className="input"
+                                type="time"
+                                value={startTime}
+                                onChange={e => setStartTime(e.target.value)}
+                            />
+                        </div>
+                        <div className="field" style={{marginBottom: 0}}>
+                            <label className="label">Окончание</label>
+                            <input
+                                className="input"
+                                type="time"
+                                value={endTime}
+                                onChange={e => setEndTime(e.target.value)}
+                            />
+                        </div>
+                    </div>
+                    <div style={{marginTop: 10, fontSize: 12, color:'var(--text-2)'}}>
+                        При сохранении будет автоматически создан/обновлен тренинг с причиной
+                        <strong style={{color:'var(--text)'}}> «Тренинг по качеству. Разбор ошибок»</strong>.
+                    </div>
+                </div>
+                <div className="modal-footer">
+                    <button className="btn btn-secondary" onClick={onClose}>Отмена</button>
+                    <button className="btn btn-primary" onClick={submit} disabled={isDisabled}>
+                        {isSubmitting
+                            ? <><span className="spinner" /> Сохранение...</>
+                            : (hasExistingFeedback ? 'Обновить ОС' : 'Сохранить ОС')}
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
 // ─── Date Range Picker ─────────────────────────────────
 const DateRangePicker = ({ minDate, maxDate, setFromDate, setToDate }) => {
     const ref = useRef(null);
@@ -1615,6 +1783,8 @@ const App = ({ user, initialSelection }) => {
     const [expandedId, setExpandedId] = useState(null);
     const [editingEval, setEditingEval] = useState(null);
     const [showEvalModal, setShowEvalModal] = useState(false);
+    const [showFeedbackModal, setShowFeedbackModal] = useState(false);
+    const [feedbackTargetCall, setFeedbackTargetCall] = useState(null);
     const [evalModalMode, setEvalModalMode] = useState('journal');
     const [evaluationTarget, setEvaluationTarget] = useState(null);
     const [isLoading, setIsLoading] = useState(false);
@@ -1699,6 +1869,7 @@ const App = ({ user, initialSelection }) => {
         sv_request_approved_by_name: ev.sv_request_approved_by_name || null,
         sv_request_approved_at: ev.sv_request_approved_at || null,
         commentVisibleToOperator: ev.comment_visible_to_operator !== false,
+        feedback: ev.feedback || null,
         _rawEvaluation: ev
     }), []);
 
@@ -2112,6 +2283,7 @@ const App = ({ user, initialSelection }) => {
                 phoneNumber: data.phoneNumber, assignedMonth: data.assignedMonth, isCorrection: data.isCorrection,
                 appeal_date: data.appeal_date, is_imported: false,
                 commentVisibleToOperator: data.commentVisibleToOperator !== false,
+                feedback: null,
                 sv_request: false, sv_request_approved: false,
                 _rawEvaluation: {
                     comment_visible_to_operator: data.commentVisibleToOperator !== false
@@ -2130,6 +2302,12 @@ const App = ({ user, initialSelection }) => {
         setEditingEval(null);
         if (!data?.isDraft) fetchEvaluations({ force: true });
     };
+
+    const handleFeedbackSaved = useCallback(async () => {
+        setShowFeedbackModal(false);
+        setFeedbackTargetCall(null);
+        await fetchEvaluations({ force: true });
+    }, [fetchEvaluations]);
 
     const handleSelectCall = async (callId) => {
         const call = calls.find(c => c.id === callId);
@@ -2641,6 +2819,18 @@ const App = ({ user, initialSelection }) => {
                                                             </>
                                                         ) : (
                                                             <>
+                                                                {(isAdminRole || isSupervisorRole) && !call.isDraft && (
+                                                                    <button
+                                                                        className={`btn btn-sm ${call.feedback ? 'btn-secondary' : 'btn-primary'}`}
+                                                                        onClick={() => {
+                                                                            setFeedbackTargetCall(call);
+                                                                            setShowFeedbackModal(true);
+                                                                        }}
+                                                                    >
+                                                                        <FaIcon className={`fas fa-${call.feedback ? 'pen' : 'comments'}`} />
+                                                                        {call.feedback ? 'Ред. ОС' : 'ОС'}
+                                                                    </button>
+                                                                )}
                                                                 <SvRequestButton call={call} userId={userId} userRole={isSupervisorRole ? 'sv' : userRole} fetchEvaluations={fetchEvaluations} onReevaluate={() => { setEvalModalMode('journal'); setEditingEval({...call,isReevaluation:true}); setShowEvalModal(true); }} />
                                                                 {isAdminRole && !call.isDraft && (
                                                                     <>
@@ -2682,6 +2872,19 @@ const App = ({ user, initialSelection }) => {
                                                         <div style={{marginBottom:12, fontSize:13, color:'var(--text-2)'}}>
                                                             <strong style={{color:'var(--text)'}}>Общий комментарий:</strong> {call.combinedComment?.trim() || '—'}
                                                         </div>
+                                                        {call.feedback && (
+                                                            <div style={{marginBottom:12, fontSize:13, color:'var(--text-2)', padding:'10px 12px', border:'1px solid var(--border)', borderRadius:'var(--radius)', background:'var(--surface-2)'}}>
+                                                                <div style={{marginBottom:4}}>
+                                                                    <strong style={{color:'var(--text)'}}>Обратная связь:</strong> {call.feedback.feedback_comment || '—'}
+                                                                </div>
+                                                                <div style={{marginBottom:4}}>
+                                                                    <strong style={{color:'var(--text)'}}>Как проведена:</strong> {call.feedback.delivery_comment || '—'}
+                                                                </div>
+                                                                <div>
+                                                                    <strong style={{color:'var(--text)'}}>Время:</strong> {call.feedback.date || '—'} {call.feedback.start_time || '—'}–{call.feedback.end_time || '—'}
+                                                                </div>
+                                                            </div>
+                                                        )}
                                                         {call.audioUrl && call.directions?.[0]?.hasFileUpload && (
                                                             <div className="audio-wrap" style={{marginBottom:14,maxWidth:480}}>
                                                                 <div className="audio-label">Аудиозапись</div>
@@ -3220,6 +3423,13 @@ const App = ({ user, initialSelection }) => {
                 submitMode={evalModalMode}
                 calibrationRoomId={activeCalibrationRoomId}
                 onCalibrationCallCreated={handleCalibrationCallCreated}
+            />
+            <FeedbackModal
+                isOpen={showFeedbackModal}
+                onClose={() => { setShowFeedbackModal(false); setFeedbackTargetCall(null); }}
+                call={feedbackTargetCall}
+                userId={userId}
+                onSaved={handleFeedbackSaved}
             />
             <CalibrationRoomCreateModal
                 isOpen={showCalibrationCreateModal}
