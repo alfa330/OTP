@@ -6407,9 +6407,27 @@ class Database:
             cursor.execute("""
                 INSERT INTO trainings (operator_id, training_date, start_time, end_time, reason, comment, created_by, count_in_hours)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (operator_id, training_date, start_time, end_time) DO NOTHING
                 RETURNING id
             """, (operator_id, training_date, start_time, end_time, reason, comment, created_by, count_in_hours))
-            return cursor.fetchone()[0]
+            inserted = cursor.fetchone()
+            if inserted:
+                return inserted[0]
+
+            cursor.execute("""
+                SELECT id
+                FROM trainings
+                WHERE operator_id = %s
+                  AND training_date = %s
+                  AND start_time = %s
+                  AND end_time = %s
+                LIMIT 1
+            """, (operator_id, training_date, start_time, end_time))
+            existing = cursor.fetchone()
+            if existing:
+                return existing[0]
+
+            raise RuntimeError("Failed to persist training record")
 
 
     def get_trainings(self, requester_id=None, month=None):
