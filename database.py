@@ -767,6 +767,24 @@ class Database:
                     UNIQUE(operator_id, training_date, start_time, end_time)
                 );
             """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS call_feedbacks (
+                    id SERIAL PRIMARY KEY,
+                    call_id INTEGER NOT NULL UNIQUE REFERENCES calls(id) ON DELETE CASCADE,
+                    operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    supervisor_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    training_id INTEGER UNIQUE REFERENCES trainings(id) ON DELETE SET NULL,
+                    feedback_comment TEXT NOT NULL,
+                    delivery_comment TEXT NOT NULL,
+                    feedback_date DATE NOT NULL,
+                    start_time TIME NOT NULL,
+                    end_time TIME NOT NULL,
+                    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
             
             # Work hours table with fines column
             cursor.execute("""
@@ -1656,6 +1674,10 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_work_hours_calls_per_hour ON work_hours(calls_per_hour);
                 CREATE INDEX IF NOT EXISTS idx_trainings_operator_id ON trainings(operator_id);
                 CREATE INDEX IF NOT EXISTS idx_trainings_training_date ON trainings(training_date);
+                CREATE INDEX IF NOT EXISTS idx_call_feedbacks_call_id ON call_feedbacks(call_id);
+                CREATE INDEX IF NOT EXISTS idx_call_feedbacks_training_id ON call_feedbacks(training_id);
+                CREATE INDEX IF NOT EXISTS idx_call_feedbacks_operator_id ON call_feedbacks(operator_id);
+                CREATE INDEX IF NOT EXISTS idx_call_feedbacks_feedback_date ON call_feedbacks(feedback_date);
                 CREATE INDEX IF NOT EXISTS idx_operator_technical_issues_issue_date
                 ON operator_technical_issues(issue_date);
                 CREATE INDEX IF NOT EXISTS idx_operator_technical_issues_issue_date_time
@@ -5113,13 +5135,26 @@ class Database:
                 TO_CHAR(c.sv_request_approved_at, 'YYYY-MM-DD HH24:MI') AS sv_request_approved_at,
                 NULL::numeric AS duration, -- у оценённых нет длительности
                 FALSE AS is_imported,
-                COALESCE(c.comment_visible_to_operator, TRUE) AS comment_visible_to_operator
+                COALESCE(c.comment_visible_to_operator, TRUE) AS comment_visible_to_operator,
+                cf.id AS feedback_id,
+                cf.feedback_comment,
+                cf.delivery_comment,
+                cf.feedback_date,
+                cf.start_time,
+                cf.end_time,
+                cf.training_id,
+                TO_CHAR(cf.updated_at, 'YYYY-MM-DD HH24:MI') AS feedback_updated_at,
+                cf_creator.name AS feedback_created_by_name,
+                cf_updater.name AS feedback_updated_by_name
             FROM calls c
             JOIN latest_calls lc ON c.id::text = lc.id_text
             LEFT JOIN directions d ON c.direction_id = d.id  
             LEFT JOIN users u ON c.evaluator_id = u.id
             LEFT JOIN users su ON c.sv_request_by = su.id
             LEFT JOIN users apu ON c.sv_request_approved_by = apu.id
+            LEFT JOIN call_feedbacks cf ON cf.call_id = c.id
+            LEFT JOIN users cf_creator ON cf.created_by = cf_creator.id
+            LEFT JOIN users cf_updater ON cf.updated_by = cf_updater.id
             WHERE c.operator_id = %s
         """
         params = [operator_id, operator_id, operator_id]
@@ -5160,7 +5195,17 @@ class Database:
                 NULL::text AS sv_request_approved_at,
                 ic.duration_sec::numeric AS duration, -- берем из imported_calls
                 TRUE AS is_imported,
-                TRUE AS comment_visible_to_operator
+                TRUE AS comment_visible_to_operator,
+                NULL::integer AS feedback_id,
+                NULL::text AS feedback_comment,
+                NULL::text AS delivery_comment,
+                NULL::date AS feedback_date,
+                NULL::time AS start_time,
+                NULL::time AS end_time,
+                NULL::integer AS training_id,
+                NULL::text AS feedback_updated_at,
+                NULL::text AS feedback_created_by_name,
+                NULL::text AS feedback_updated_by_name
             FROM imported_calls ic
             WHERE ic.operator_id = %s AND ic.status = 'not_evaluated'
         """
@@ -5232,6 +5277,34 @@ class Database:
                     "duration": float(row[27]) if row[27] is not None else None,
                     "is_imported": bool(row[28]),
                     "comment_visible_to_operator": bool(row[29]) if row[29] is not None else True,
+                    "feedback": (
+                        {
+                            "id": row[30],
+                            "feedback_comment": row[31] or "",
+                            "delivery_comment": row[32] or "",
+                            "date": (
+                                row[33].strftime('%Y-%m-%d')
+                                if row[33] and hasattr(row[33], "strftime")
+                                else (row[33] if row[33] else None)
+                            ),
+                            "start_time": (
+                                row[34].strftime('%H:%M')
+                                if row[34] and hasattr(row[34], "strftime")
+                                else (row[34] if row[34] else None)
+                            ),
+                            "end_time": (
+                                row[35].strftime('%H:%M')
+                                if row[35] and hasattr(row[35], "strftime")
+                                else (row[35] if row[35] else None)
+                            ),
+                            "training_id": row[36],
+                            "updated_at": row[37],
+                            "created_by_name": row[38],
+                            "updated_by_name": row[39],
+                        }
+                        if row[30] is not None
+                        else None
+                    ),
                 }
                 for row in rows
             ]

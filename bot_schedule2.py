@@ -166,6 +166,7 @@ ALLOWED_ORIGINS = {
     "https://table-7kx.pages.dev",
     "https://base-pmy9.onrender.com"
 }
+CALL_FEEDBACK_TRAINING_REASON = "Тренинг по качеству. Разбор ошибок"
 
 if not JWT_SECRET:
     raise Exception("Переменная окружения JWT_SECRET обязательна.")
@@ -1056,6 +1057,14 @@ def _ensure_call_access_for_requester(call_operator_id, requester, requester_id)
         operator = db.get_user(id=call_operator_id)
         return bool(operator and operator[3] == 'operator' and operator[6] == requester_id)
     return False
+
+
+def _build_call_feedback_training_comment(call_id, feedback_comment, delivery_comment):
+    return (
+        f"ОС по оценке #{call_id}\n"
+        f"Обратная связь: {feedback_comment}\n"
+        f"Как проведена: {delivery_comment}"
+    )
 
 
 def _is_supervisor_role(role: str) -> bool:
@@ -4525,6 +4534,257 @@ def get_call_evaluations():
         })
     except Exception as e:
         logging.error(f"Error fetching evaluations: {e}")
+        return jsonify({"error": f"Internal server error"}), 500
+
+
+@app.route('/api/call_evaluations/<int:call_id>/feedback', methods=['PUT'])
+@require_api_key
+def upsert_call_feedback(call_id):
+    try:
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return jsonify({"error": "Invalid JSON body"}), 400
+
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        requester_role = _normalize_user_role(requester[3])
+        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role)):
+            return jsonify({"error": "Only admins and supervisors can submit feedback"}), 403
+
+        feedback_comment = str(data.get('feedback_comment') or '').strip()
+        delivery_comment = str(data.get('delivery_comment') or '').strip()
+        feedback_date_raw = str(data.get('date') or '').strip()
+        start_time_raw = str(data.get('start_time') or '').strip()
+        end_time_raw = str(data.get('end_time') or '').strip()
+
+        if not feedback_comment:
+            return jsonify({"error": "feedback_comment is required"}), 400
+        if not delivery_comment:
+            return jsonify({"error": "delivery_comment is required"}), 400
+        if not feedback_date_raw or not start_time_raw or not end_time_raw:
+            return jsonify({"error": "date, start_time and end_time are required"}), 400
+
+        if len(feedback_comment) > 4000:
+            return jsonify({"error": "feedback_comment is too long (max 4000 chars)"}), 400
+        if len(delivery_comment) > 4000:
+            return jsonify({"error": "delivery_comment is too long (max 4000 chars)"}), 400
+
+        try:
+            feedback_date = datetime.strptime(feedback_date_raw, '%Y-%m-%d').date()
+        except ValueError:
+            return jsonify({"error": "Invalid date format. Use YYYY-MM-DD"}), 400
+
+        try:
+            start_time_value = datetime.strptime(start_time_raw, '%H:%M').time()
+            end_time_value = datetime.strptime(end_time_raw, '%H:%M').time()
+        except ValueError:
+            return jsonify({"error": "Invalid time format. Use HH:MM"}), 400
+
+        if end_time_value <= start_time_value:
+            return jsonify({"error": "end_time must be later than start_time"}), 400
+
+        training_comment = _build_call_feedback_training_comment(
+            call_id,
+            feedback_comment,
+            delivery_comment
+        )
+
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT c.id, c.operator_id, c.is_draft
+                FROM calls c
+                WHERE c.id = %s
+            """, (call_id,))
+            call_row = cursor.fetchone()
+            if not call_row:
+                return jsonify({"error": "Call not found"}), 404
+
+            operator_id = int(call_row[1]) if call_row[1] is not None else None
+            is_draft = bool(call_row[2])
+            if operator_id is None:
+                return jsonify({"error": "Operator not found for this call"}), 404
+            if is_draft:
+                return jsonify({"error": "Feedback is available only for submitted evaluations"}), 400
+
+            if not _ensure_call_access_for_requester(operator_id, requester, requester_id):
+                return jsonify({"error": "Forbidden for this operator"}), 403
+
+            cursor.execute("""
+                SELECT id, training_id
+                FROM call_feedbacks
+                WHERE call_id = %s
+                LIMIT 1
+            """, (call_id,))
+            existing_feedback = cursor.fetchone()
+            feedback_id = int(existing_feedback[0]) if existing_feedback and existing_feedback[0] is not None else None
+            linked_training_id = int(existing_feedback[1]) if existing_feedback and existing_feedback[1] is not None else None
+
+            cursor.execute("""
+                SELECT id
+                FROM trainings
+                WHERE operator_id = %s
+                  AND training_date = %s
+                  AND start_time = %s
+                  AND end_time = %s
+                LIMIT 1
+            """, (operator_id, feedback_date, start_time_value, end_time_value))
+            occupied_slot = cursor.fetchone()
+            if occupied_slot:
+                occupied_training_id = int(occupied_slot[0])
+                if linked_training_id is None or occupied_training_id != linked_training_id:
+                    return jsonify({"error": "Selected date/time already has another training"}), 409
+
+            training_id = linked_training_id
+            if training_id is not None:
+                cursor.execute("""
+                    UPDATE trainings
+                    SET
+                        training_date = %s,
+                        start_time = %s,
+                        end_time = %s,
+                        reason = %s,
+                        comment = %s,
+                        count_in_hours = TRUE
+                    WHERE id = %s AND operator_id = %s
+                    RETURNING id
+                """, (
+                    feedback_date,
+                    start_time_value,
+                    end_time_value,
+                    CALL_FEEDBACK_TRAINING_REASON,
+                    training_comment,
+                    training_id,
+                    operator_id
+                ))
+                updated_training = cursor.fetchone()
+                if not updated_training:
+                    training_id = None
+
+            if training_id is None:
+                cursor.execute("""
+                    INSERT INTO trainings (
+                        operator_id,
+                        training_date,
+                        start_time,
+                        end_time,
+                        reason,
+                        comment,
+                        created_by,
+                        count_in_hours
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE)
+                    RETURNING id
+                """, (
+                    operator_id,
+                    feedback_date,
+                    start_time_value,
+                    end_time_value,
+                    CALL_FEEDBACK_TRAINING_REASON,
+                    training_comment,
+                    requester_id
+                ))
+                training_id = int(cursor.fetchone()[0])
+
+            if feedback_id is not None:
+                cursor.execute("""
+                    UPDATE call_feedbacks
+                    SET
+                        training_id = %s,
+                        supervisor_id = %s,
+                        feedback_comment = %s,
+                        delivery_comment = %s,
+                        feedback_date = %s,
+                        start_time = %s,
+                        end_time = %s,
+                        updated_by = %s,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    RETURNING id
+                """, (
+                    training_id,
+                    requester_id,
+                    feedback_comment,
+                    delivery_comment,
+                    feedback_date,
+                    start_time_value,
+                    end_time_value,
+                    requester_id,
+                    feedback_id
+                ))
+                cursor.fetchone()
+            else:
+                cursor.execute("""
+                    INSERT INTO call_feedbacks (
+                        call_id,
+                        operator_id,
+                        supervisor_id,
+                        training_id,
+                        feedback_comment,
+                        delivery_comment,
+                        feedback_date,
+                        start_time,
+                        end_time,
+                        created_by,
+                        updated_by
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                """, (
+                    call_id,
+                    operator_id,
+                    requester_id,
+                    training_id,
+                    feedback_comment,
+                    delivery_comment,
+                    feedback_date,
+                    start_time_value,
+                    end_time_value,
+                    requester_id,
+                    requester_id
+                ))
+                feedback_id = int(cursor.fetchone()[0])
+
+            cursor.execute("""
+                SELECT
+                    cf.id,
+                    cf.feedback_comment,
+                    cf.delivery_comment,
+                    cf.feedback_date,
+                    cf.start_time,
+                    cf.end_time,
+                    cf.training_id,
+                    TO_CHAR(cf.updated_at, 'YYYY-MM-DD HH24:MI') AS updated_at,
+                    cb.name AS created_by_name,
+                    ub.name AS updated_by_name
+                FROM call_feedbacks cf
+                LEFT JOIN users cb ON cb.id = cf.created_by
+                LEFT JOIN users ub ON ub.id = cf.updated_by
+                WHERE cf.id = %s
+            """, (feedback_id,))
+            feedback_row = cursor.fetchone()
+
+        if not feedback_row:
+            return jsonify({"error": "Failed to save feedback"}), 500
+
+        feedback_payload = {
+            "id": int(feedback_row[0]),
+            "feedback_comment": feedback_row[1] or "",
+            "delivery_comment": feedback_row[2] or "",
+            "date": feedback_row[3].strftime('%Y-%m-%d') if feedback_row[3] else None,
+            "start_time": feedback_row[4].strftime('%H:%M') if feedback_row[4] else None,
+            "end_time": feedback_row[5].strftime('%H:%M') if feedback_row[5] else None,
+            "training_id": int(feedback_row[6]) if feedback_row[6] is not None else None,
+            "updated_at": feedback_row[7],
+            "created_by_name": feedback_row[8],
+            "updated_by_name": feedback_row[9],
+        }
+
+        return jsonify({"status": "success", "feedback": feedback_payload}), 200
+    except Exception as e:
+        logging.exception("Error saving call feedback")
         return jsonify({"error": f"Internal server error"}), 500
 
 
