@@ -291,12 +291,13 @@ styleTag.textContent = `
   }
   .tv-task-row-meta {
     display: grid;
-    grid-template-columns: 108px 122px 196px 112px 12px;
+    grid-template-columns: auto auto 196px 112px 12px;
     align-items: center;
     column-gap: 8px;
     flex-shrink: 0;
     padding-left: 8px;
   }
+  .tv-task-row-meta .tv-badge { justify-self: start; }
   .tv-task-row-meta > * { min-width: 0; }
   .tv-task-row-assignee-chip {
     display: inline-flex; align-items: center; gap: 5px;
@@ -626,22 +627,53 @@ styleTag.textContent = `
   }
   .tv-completion-block .tv-block-label { color: var(--indigo); }
 
-  .tv-history-list { display: flex; flex-direction: column; }
+  .tv-history-list { display: flex; flex-direction: column; gap: 8px; padding: 4px 0; }
   .tv-history-item {
-    display: flex; align-items: baseline; gap: 8px;
-    padding: 9px 0; border-bottom: 1px solid var(--border);
-    font-size: 12.5px; flex-wrap: wrap;
+    display: flex;
     width: 100%;
   }
-  .tv-history-item:last-child { border-bottom: none; }
-  .tv-history-item-sender { justify-content: flex-start; text-align: left; }
-  .tv-history-item-recipient { justify-content: flex-end; text-align: right; }
-  .tv-history-item-neutral { justify-content: center; text-align: center; }
-  .tv-history-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--border-strong); flex-shrink: 0; margin-top: 5px; }
-  .tv-history-status { font-weight: 500; color: var(--ink); }
-  .tv-history-time   { color: var(--ink-3); font-size: 11.5px; }
-  .tv-history-who    { color: var(--ink-2); font-style: italic; }
-  .tv-history-comment{ color: var(--ink-2); }
+  .tv-history-bubble {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 8px 12px;
+    border-radius: 12px;
+    font-size: 12.5px;
+    max-width: 85%;
+    word-break: break-word;
+  }
+  .tv-history-item-sender {
+    justify-content: flex-start;
+  }
+  .tv-history-item-sender .tv-history-bubble {
+    background: #eef2ff;
+    border: 1px solid #c7d2fe;
+    border-radius: 4px 12px 12px 12px;
+  }
+  .tv-history-item-recipient {
+    justify-content: flex-end;
+  }
+  .tv-history-item-recipient .tv-history-bubble {
+    background: #d1fae5;
+    border: 1px solid #a7f3d0;
+    border-radius: 12px 4px 12px 12px;
+  }
+  .tv-history-item-neutral {
+    justify-content: center;
+  }
+  .tv-history-item-neutral .tv-history-bubble {
+    background: #f4f3f0;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    text-align: center;
+    font-size: 11.5px;
+    color: var(--ink-2);
+    padding: 5px 10px;
+  }
+  .tv-history-status { font-weight: 600; color: var(--ink); }
+  .tv-history-time   { color: var(--ink-3); font-size: 11px; }
+  .tv-history-who    { color: var(--ink-2); font-style: italic; font-size: 11px; }
+  .tv-history-comment{ color: var(--ink-2); margin-top: 2px; white-space: pre-wrap; }
 
   /* ── Participants ── */
   .tv-participants {
@@ -1162,11 +1194,11 @@ const TaskDrawer = React.memo(({
                 <div className="tv-history-list">
                   {history.map((item, i) => (
                     <div key={i} className={`tv-history-item tv-history-item-${resolveHistorySide(item)}`}>
-                      <span className="tv-history-dot" />
-                      <span className="tv-history-status">{HISTORY_LABELS[item.status_code] || item.status_code}</span>
-                      <span className="tv-history-time">{fmt(item.changed_at)}</span>
-                      {item.changed_by_name && <span className="tv-history-who">{item.changed_by_name}</span>}
-                      {item.comment && <span className="tv-history-comment">— {item.comment}</span>}
+                      <div className="tv-history-bubble">
+                        <span className="tv-history-status">{HISTORY_LABELS[item.status_code] || item.status_code}</span>
+                        <span className="tv-history-time">{fmt(item.changed_at)}{item.changed_by_name ? ` · ${item.changed_by_name}` : ''}</span>
+                        {item.comment && <span className="tv-history-comment">{item.comment}</span>}
+                      </div>
                     </div>
                   ))}
                 </div>
