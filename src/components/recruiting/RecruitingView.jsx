@@ -899,6 +899,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
 
         const response = await fetch(`${apiBaseUrl}/api/recruiting/resumes?${query.toString()}`, {
           method: "GET",
+          credentials: "include",
           headers: buildApiHeaders(),
         });
 
@@ -1032,6 +1033,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
     try {
       const response = await fetch(`${apiBaseUrl}/api/recruiting/run`, {
         method: "POST",
+        credentials: "include",
         headers: buildApiHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
           async: true,
@@ -1130,6 +1132,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
       try {
         const response = await fetch(`${apiBaseUrl}/api/recruiting/run/status`, {
           method: "GET",
+          credentials: "include",
           headers: buildApiHeaders(),
         });
         const payload = await response.json().catch(() => ({}));
