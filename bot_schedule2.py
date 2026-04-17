@@ -138,8 +138,8 @@ LMS_DEFAULT_PASS_THRESHOLD = float(os.getenv('LMS_DEFAULT_PASS_THRESHOLD', '80')
 LMS_DEFAULT_ATTEMPT_LIMIT = int(os.getenv('LMS_DEFAULT_ATTEMPT_LIMIT', '3'))
 LMS_CERTIFICATE_STORAGE = (os.getenv('LMS_CERTIFICATE_STORAGE') or 'db').strip().lower()
 LMS_CERTIFICATE_TEMPLATE_VERSION = (
-    (os.getenv('LMS_CERTIFICATE_TEMPLATE_VERSION') or 'bold_split_v4_raster_hq_logo_bg_v17_2026_04_17').strip()
-    or 'bold_split_v4_raster_hq_logo_bg_v17_2026_04_17'
+    (os.getenv('LMS_CERTIFICATE_TEMPLATE_VERSION') or 'bold_split_v4_raster_hq_logo_bg_v19_2026_04_17').strip()
+    or 'bold_split_v4_raster_hq_logo_bg_v19_2026_04_17'
 )
 try:
     LMS_CERTIFICATE_RASTER_SCALE = int(str(os.getenv('LMS_CERTIFICATE_RASTER_SCALE', '4')).strip() or '4')
@@ -7998,6 +7998,14 @@ def handle_tasks():
             tag_filter = (request.args.get('tag') or '').strip().lower() or None
             only_my_raw = (request.args.get('only_my') or '').strip().lower()
             only_my = only_my_raw in {'1', 'true', 'yes', 'y', 'on'}
+            person_scope = (request.args.get('person_scope') or '').strip().lower() or None
+            person_id_raw = request.args.get('person_id')
+            person_id = None
+            if person_id_raw is not None and str(person_id_raw).strip() != '':
+                try:
+                    person_id = int(person_id_raw)
+                except Exception:
+                    return jsonify({"error": "Invalid person_id param"}), 400
 
             raw_limit = request.args.get('limit')
             raw_offset = request.args.get('offset')
@@ -8029,7 +8037,9 @@ def handle_tasks():
                     tag=tag_filter,
                     limit=limit,
                     offset=offset,
-                    only_my=only_my
+                    only_my=only_my,
+                    person_id=person_id,
+                    person_scope=person_scope
                 )
             except ValueError as e:
                 error_code = str(e)
@@ -8041,9 +8051,32 @@ def handle_tasks():
                     return jsonify({"error": "Invalid limit value"}), 400
                 if error_code == 'INVALID_TASK_OFFSET':
                     return jsonify({"error": "Invalid offset value"}), 400
+                if error_code == 'INVALID_TASK_PERSON_ID_FILTER':
+                    return jsonify({"error": "Invalid person_id filter"}), 400
+                if error_code == 'INVALID_TASK_PERSON_SCOPE_FILTER':
+                    return jsonify({"error": "Invalid person_scope filter"}), 400
                 raise
 
             tasks = payload.get("tasks") or []
+            for task in tasks:
+                assignee = task.get("assignee")
+                if isinstance(assignee, dict):
+                    assignee["avatar_url"] = _build_avatar_signed_url(
+                        assignee.get("avatar_bucket"),
+                        assignee.get("avatar_blob_path")
+                    )
+                    assignee.pop("avatar_bucket", None)
+                    assignee.pop("avatar_blob_path", None)
+
+                creator = task.get("creator")
+                if isinstance(creator, dict):
+                    creator["avatar_url"] = _build_avatar_signed_url(
+                        creator.get("avatar_bucket"),
+                        creator.get("avatar_blob_path")
+                    )
+                    creator.pop("avatar_bucket", None)
+                    creator.pop("avatar_blob_path", None)
+
             total_all = int(payload.get("total_all", len(tasks)) or 0)
             total_filtered = int(payload.get("total_filtered", len(tasks)) or 0)
             returned = len(tasks)
@@ -8067,7 +8100,9 @@ def handle_tasks():
                 "filters": {
                     "status": status_filter,
                     "tag": tag_filter,
-                    "only_my": only_my
+                    "only_my": only_my,
+                    "person_id": person_id,
+                    "person_scope": person_scope
                 }
             }), 200
 
@@ -15825,7 +15860,7 @@ body {{
 .v4 .rp-desc strong {{ color:var(--k); font-weight:600; }}
 .v4 .course-tag {{ background:var(--y); color:var(--k); font-weight:700; font-size:12.5px; padding:2px 9px; display:inline-block; }}
 
-.v4 .rp-bottom {{ display:flex; justify-content:space-between; align-items:flex-end; padding-top:24px; border-top:1px solid var(--g2); }}
+.v4 .rp-bottom {{ display:flex; justify-content:space-between; align-items:flex-end; padding-top:24px; border-top:none; }}
 .v4 .sig-group {{ display:flex; gap:44px; }}
 .v4 .sig-sign-wrap {{ height:34px; margin-bottom:4px; display:flex; align-items:flex-end; justify-content:center; }}
 .v4 .sig-sign-img {{ max-width:120px; max-height:34px; width:auto; height:auto; display:block; }}
@@ -16393,7 +16428,6 @@ def _lms_build_bold_split_certificate_pdf(certificate_number, learner_name, cour
             cursor_x += token_width
 
     bottom_divider_y = rp_bottom - S(95)
-    draw.line((rp_left, bottom_divider_y, rp_right, bottom_divider_y), fill=col_g2, width=max(1, S(1)))
     sig_top = bottom_divider_y + S(24)
 
     sig_name_font = _lms_certificate_font(S(11), bold=True)

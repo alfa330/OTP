@@ -16635,7 +16635,9 @@ class Database:
             tag=None,
             limit=None,
             offset=0,
-            only_my=False
+            only_my=False,
+            person_id=None,
+            person_scope=None
     ):
         requester_id = int(requester_id)
         role = normalize_role_value(requester_role)
@@ -16643,11 +16645,21 @@ class Database:
         status_norm = (status or '').strip().lower() or None
         tag_norm = (tag or '').strip().lower() or None
         only_my_flag = bool(only_my)
+        person_scope_norm = (person_scope or '').strip().lower() or None
+
+        if person_id is None or str(person_id).strip() == '':
+            person_id_norm = None
+        else:
+            person_id_norm = int(person_id)
+            if person_id_norm <= 0:
+                raise ValueError("INVALID_TASK_PERSON_ID_FILTER")
 
         if status_norm and status_norm not in {'assigned', 'in_progress', 'completed', 'accepted', 'returned'}:
             raise ValueError("INVALID_TASK_STATUS_FILTER")
         if tag_norm and tag_norm not in {'task', 'problem', 'suggestion'}:
             raise ValueError("INVALID_TASK_TAG_FILTER")
+        if person_scope_norm and person_scope_norm not in {'incoming', 'outgoing', 'any'}:
+            raise ValueError("INVALID_TASK_PERSON_SCOPE_FILTER")
 
         if limit is None or str(limit).strip() == '':
             limit_norm = None
@@ -16709,6 +16721,21 @@ class Database:
             filtered_conditions.append("t.tag = %s")
             filtered_params.append(tag_norm)
 
+        if person_id_norm is not None:
+            if person_scope_norm == 'incoming':
+                filtered_conditions.append("t.assigned_to = %s")
+                filtered_params.append(requester_id)
+                filtered_conditions.append("t.created_by = %s")
+                filtered_params.append(person_id_norm)
+            elif person_scope_norm == 'outgoing':
+                filtered_conditions.append("t.created_by = %s")
+                filtered_params.append(requester_id)
+                filtered_conditions.append("t.assigned_to = %s")
+                filtered_params.append(person_id_norm)
+            else:
+                filtered_conditions.append("(t.created_by = %s OR t.assigned_to = %s)")
+                filtered_params.extend([person_id_norm, person_id_norm])
+
         base_where_sql = f"WHERE {' AND '.join(base_conditions)}" if base_conditions else ""
         filtered_where_sql = f"WHERE {' AND '.join(filtered_conditions)}" if filtered_conditions else ""
 
@@ -16747,7 +16774,9 @@ class Database:
                     t.id, t.subject, t.description, t.tag, t.status, t.created_at, t.updated_at,
                     t.completion_summary, t.completed_at, t.completed_by, completed_user.name,
                     assignee.id, assignee.name, assignee.role, assignee.supervisor_id,
-                    creator.id, creator.name, creator.role
+                    assignee.avatar_bucket, assignee.avatar_blob_path,
+                    creator.id, creator.name, creator.role,
+                    creator.avatar_bucket, creator.avatar_blob_path
                 FROM tasks t
                 LEFT JOIN users assignee ON assignee.id = t.assigned_to
                 LEFT JOIN users creator ON creator.id = t.created_by
@@ -16840,13 +16869,17 @@ class Database:
                     "id": row[11],
                     "name": row[12],
                     "role": row[13],
-                    "supervisor_id": row[14]
+                    "supervisor_id": row[14],
+                    "avatar_bucket": row[15],
+                    "avatar_blob_path": row[16]
                 } if row[11] else None,
                 "creator": {
-                    "id": row[15],
-                    "name": row[16],
-                    "role": row[17]
-                } if row[15] else None,
+                    "id": row[17],
+                    "name": row[18],
+                    "role": row[19],
+                    "avatar_bucket": row[20],
+                    "avatar_blob_path": row[21]
+                } if row[17] else None,
                 "history": history_map.get(task_id, []),
                 "attachments": initial_attachments,
                 "completion_attachments": result_attachments
