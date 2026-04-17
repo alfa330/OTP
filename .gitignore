@@ -4,8 +4,3 @@ dist/
 src/_extracted_script.jsx
 tools_find_tdz.js
 tools_find_tdz.cjs
-
-# Local Codex skill install artifacts
-/.agents/skills/ui-ux-pro-max/
-/.tmp/
-/AGENTS.md
