@@ -217,6 +217,7 @@ styleTag.textContent = `
   .tv-task-date-separator {
     display: flex;
     align-items: center;
+    justify-content: flex-start;
     gap: 8px;
     margin: 9px 2px 5px;
     color: var(--ink-3);
@@ -225,7 +226,9 @@ styleTag.textContent = `
     letter-spacing: .04em;
     text-transform: uppercase;
   }
-  .tv-task-date-separator::before,
+  .tv-task-date-separator::before {
+    content: none;
+  }
   .tv-task-date-separator::after {
     content: '';
     flex: 1;
@@ -268,6 +271,13 @@ styleTag.textContent = `
     color: var(--ink-2);
     flex-shrink: 0;
     text-transform: uppercase;
+  }
+  .tv-avatar-media {
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    object-fit: cover;
+    display: block;
   }
   .tv-task-row-date { font-size: 11.5px; color: var(--ink-3); }
   .tv-task-count {
@@ -768,11 +778,22 @@ const groupTasksByPerson = (list, getPerson) => {
     const person = getPerson(task) || {};
     const idNum = Number(person?.id || 0);
     const name = (person?.name || '-').trim() || '-';
+    const avatarUrl = (person?.avatar_url || '').trim();
     const key = idNum > 0 ? `id:${idNum}` : `name:${name}`;
     if (!groups.has(key)) {
-      groups.set(key, { key, name, done: 0, active: 0, notAccepted: 0, tasks: [] });
+      groups.set(key, {
+        key,
+        personId: idNum > 0 ? idNum : null,
+        name,
+        avatarUrl,
+        done: 0,
+        active: 0,
+        notAccepted: 0,
+        tasks: []
+      });
     }
     const group = groups.get(key);
+    if (!group.avatarUrl && avatarUrl) group.avatarUrl = avatarUrl;
     group.tasks.push(task);
     if (DONE_STATUSES.has(task?.status)) group.done += 1;
     else if (NOT_ACCEPTED_STATUSES.has(task?.status)) group.notAccepted += 1;
@@ -817,11 +838,20 @@ const SearchIcon = () => (
   </svg>
 );
 
+const AvatarCircle = ({ className, name, avatarUrl }) => (
+  <span className={className}>
+    {avatarUrl
+      ? <img className="tv-avatar-media" src={avatarUrl} alt={name || 'avatar'} loading="lazy" />
+      : initials(name)}
+  </span>
+);
+
 /* ─── TaskRow — defined outside to avoid remount ─── */
 const TaskRow = React.memo(({ task, onClick }) => {
   const sm = STATUS_META[task.status] || { label: task.status, badge: 'tv-badge-gray', dot: '#ccc' };
   const tm = TAG_META[task.tag]       || { label: task.tag || '—', badge: 'tv-badge-gray' };
   const assigneeName = task?.assignee?.name || '—';
+  const assigneeAvatarUrl = task?.assignee?.avatar_url || '';
   return (
     <div className="tv-task-row" onClick={() => onClick(task)}>
       <span className="tv-task-row-indicator" style={{ background: sm.dot }} />
@@ -830,7 +860,7 @@ const TaskRow = React.memo(({ task, onClick }) => {
         <span className={`tv-badge ${tm.badge}`}>{tm.label}</span>
         <span className={`tv-badge ${sm.badge}`}>{sm.label}</span>
         <span className="tv-task-row-assignee-chip">
-          <span className="tv-avatar-xs">{initials(assigneeName)}</span>
+          <AvatarCircle className="tv-avatar-xs" name={assigneeName} avatarUrl={assigneeAvatarUrl} />
           {assigneeName}
         </span>
         <span className="tv-task-row-date">{fmt(task.created_at)}</span>
@@ -880,14 +910,22 @@ const TaskDrawer = React.memo(({
           {/* Participants */}
           <div className="tv-participants">
             <div className="tv-participant">
-              <div className="tv-participant-avatar">{initials(task?.assignee?.name)}</div>
+              <AvatarCircle
+                className="tv-participant-avatar"
+                name={task?.assignee?.name || '—'}
+                avatarUrl={task?.assignee?.avatar_url || ''}
+              />
               <div className="tv-participant-info">
                 <div className="tv-participant-role">Исполнитель</div>
                 <div className="tv-participant-name">{task?.assignee?.name || '—'}</div>
               </div>
             </div>
             <div className="tv-participant">
-              <div className="tv-participant-avatar">{initials(task?.creator?.name)}</div>
+              <AvatarCircle
+                className="tv-participant-avatar"
+                name={task?.creator?.name || '—'}
+                avatarUrl={task?.creator?.avatar_url || ''}
+              />
               <div className="tv-participant-info">
                 <div className="tv-participant-role">Постановщик</div>
                 <div className="tv-participant-name">{task?.creator?.name || '—'}</div>
@@ -1031,6 +1069,10 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
   const [allTasksPage,        setAllTasksPage]        = useState(1);
   const [allTasksTotal,       setAllTasksTotal]       = useState(0);
   const [filteredTasksTotal,  setFilteredTasksTotal]  = useState(0);
+  const [personTasks,         setPersonTasks]         = useState([]);
+  const [personTasksPage,     setPersonTasksPage]     = useState(1);
+  const [personTasksTotal,    setPersonTasksTotal]    = useState(0);
+  const [isPersonTasksLoading, setIsPersonTasksLoading] = useState(false);
 
   const [createOpen,        setCreateOpen]        = useState(false);
   const [drawerTask,        setDrawerTask]        = useState(null);
@@ -1049,6 +1091,7 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
   const statusFileInputRef     = useRef(null);
   const searchRef              = useRef(null);
   const pagedRequestIdRef      = useRef(0);
+  const personTasksRequestIdRef = useRef(0);
   const [form, setForm] = useState({ subject: '', description: '', tag: 'task', assignedTo: '' });
 
   const showToastRef = useRef(showToast);
@@ -1131,10 +1174,6 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     filterTag
   ]);
 
-  const refreshTasksData = useCallback(async () => {
-    await Promise.all([fetchTasks(), fetchPagedTasks()]);
-  }, [fetchTasks, fetchPagedTasks]);
-
   useEffect(() => {
     if (!user || !canAccessTasks) return;
     fetchRecipients();
@@ -1185,14 +1224,93 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     [outgoingTasks]
   );
 
+  const selectedIncomingGroup = useMemo(
+    () => incomingGroups.find(g => g.key === incomingPersonKey) || null,
+    [incomingGroups, incomingPersonKey]
+  );
+  const selectedOutgoingGroup = useMemo(
+    () => outgoingGroups.find(g => g.key === outgoingPersonKey) || null,
+    [outgoingGroups, outgoingPersonKey]
+  );
+  const activeSelectedGroup = myTasksTab === 'incoming' ? selectedIncomingGroup : selectedOutgoingGroup;
+  const activePersonScope = myTasksTab === 'incoming' ? 'incoming' : 'outgoing';
+  const isPersonDrilldown = !!activeSelectedGroup;
+
+  const fetchPersonTasks = useCallback(async () => {
+    const personId = Number(activeSelectedGroup?.personId || 0);
+    if (!personId) {
+      setPersonTasks([]);
+      setPersonTasksTotal(0);
+      return;
+    }
+
+    const requestId = ++personTasksRequestIdRef.current;
+    setIsPersonTasksLoading(true);
+    try {
+      const res = await axios.get(`${apiBaseUrl}/api/tasks`, {
+        headers: buildHeaders(),
+        params: {
+          limit: TASKS_PAGE_SIZE,
+          offset: (personTasksPage - 1) * TASKS_PAGE_SIZE,
+          person_id: personId,
+          person_scope: activePersonScope
+        }
+      });
+      if (requestId !== personTasksRequestIdRef.current) return;
+
+      const data = res?.data || {};
+      const list = Array.isArray(data?.tasks) ? data.tasks : [];
+      const totalFiltered = Number(data?.totals?.filtered);
+      setPersonTasks(list);
+      setPersonTasksTotal(Number.isFinite(totalFiltered) ? totalFiltered : list.length);
+      setDrawerTask(prev => prev ? (list.find(t => t.id === prev.id) ?? prev) : null);
+    } catch (e) {
+      if (requestId === personTasksRequestIdRef.current) {
+        notify(e?.response?.data?.error || 'Не удалось загрузить задачи сотрудника', 'error');
+      }
+    } finally {
+      if (requestId === personTasksRequestIdRef.current) setIsPersonTasksLoading(false);
+    }
+  }, [
+    activePersonScope,
+    activeSelectedGroup?.personId,
+    apiBaseUrl,
+    buildHeaders,
+    notify,
+    personTasksPage
+  ]);
+
+  const refreshTasksData = useCallback(async () => {
+    const jobs = [fetchTasks(), fetchPagedTasks()];
+    if (isPersonDrilldown) jobs.push(fetchPersonTasks());
+    await Promise.all(jobs);
+  }, [fetchTasks, fetchPagedTasks, fetchPersonTasks, isPersonDrilldown]);
+
   const totalPages = useMemo(
     () => Math.max(1, Math.ceil(filteredTasksTotal / TASKS_PAGE_SIZE)),
     [filteredTasksTotal]
+  );
+  const personTotalPages = useMemo(
+    () => Math.max(1, Math.ceil(personTasksTotal / TASKS_PAGE_SIZE)),
+    [personTasksTotal]
   );
 
   useEffect(() => {
     if (allTasksPage > totalPages) setAllTasksPage(totalPages);
   }, [allTasksPage, totalPages]);
+
+  useEffect(() => {
+    if (personTasksPage > personTotalPages) setPersonTasksPage(personTotalPages);
+  }, [personTasksPage, personTotalPages]);
+
+  useEffect(() => {
+    setPersonTasksPage(1);
+  }, [activeSelectedGroup?.key, myTasksTab]);
+
+  useEffect(() => {
+    if (!user || !canAccessTasks || !isPersonDrilldown) return;
+    fetchPersonTasks();
+  }, [user, canAccessTasks, isPersonDrilldown, fetchPersonTasks]);
 
   // Stats
   const stats = useMemo(() => ({
@@ -1430,15 +1548,42 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     const selected = groups.find(g => g.key === selectedKey) || null;
 
     if (selected) {
+      const canLoadFromServer = Number(selected?.personId || 0) > 0;
+      const selectedTotal = canLoadFromServer
+        ? (personTasksTotal > 0 ? personTasksTotal : selected.tasks.length)
+        : selected.tasks.length;
+      const selectedList = canLoadFromServer ? personTasks : selected.tasks;
+      const selectedLoading = canLoadFromServer ? isPersonTasksLoading : isTasksLoading;
       return (
         <>
           <div className="tv-person-tasks-header">
-            <span className="tv-person-tasks-label">{selected.name} · {selected.tasks.length} задач</span>
+            <span className="tv-person-tasks-label">{selected.name} · {selectedTotal} задач</span>
             <button className="tv-person-tasks-back" type="button" onClick={() => onSelect(null)}>
               <BackIcon /> Назад к списку
             </button>
           </div>
-          {renderTaskList(selected.tasks, 'Нет задач', 'У этого сотрудника пока нет задач.')}
+          {renderTaskList(selectedList, 'Нет задач', 'У этого сотрудника пока нет задач.', selectedLoading)}
+          {canLoadFromServer && !selectedLoading && selectedTotal > TASKS_PAGE_SIZE && (
+            <div className="tv-pagination">
+              <button
+                type="button"
+                className="tv-btn tv-btn-ghost"
+                disabled={personTasksPage <= 1}
+                onClick={() => setPersonTasksPage(v => Math.max(1, v - 1))}
+              >
+                Назад
+              </button>
+              <span className="tv-pagination-info">Страница {personTasksPage} из {personTotalPages}</span>
+              <button
+                type="button"
+                className="tv-btn tv-btn-ghost"
+                disabled={personTasksPage >= personTotalPages}
+                onClick={() => setPersonTasksPage(v => Math.min(personTotalPages, v + 1))}
+              >
+                Далее
+              </button>
+            </div>
+          )}
         </>
       );
     }
@@ -1452,7 +1597,7 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
             className="tv-person-row"
             onClick={() => onSelect(group.key)}
           >
-            <span className="tv-avatar-md">{initials(group.name)}</span>
+            <AvatarCircle className="tv-avatar-md" name={group.name} avatarUrl={group.avatarUrl} />
             <span className="tv-person-info">
               <span className="tv-person-name">{group.name}</span>
               <span className="tv-person-stats">
@@ -1481,7 +1626,7 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
   if (!user || !canAccessTasks) return null;
 
   const hasActiveFilters = Boolean(searchQuery.trim() || filterStatus || filterTag);
-  const isAnyTasksLoading = isTasksLoading || isPagedTasksLoading;
+  const isAnyTasksLoading = isTasksLoading || isPagedTasksLoading || isPersonTasksLoading;
 
   return (
     <div className="tv-root">
@@ -1561,108 +1706,110 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
       </div>
 
       {/* All tasks */}
-      <div className="tv-section">
-        <div className="tv-section-header">
-          <span className="tv-section-title heading">Все задачи</span>
+      {!isPersonDrilldown && (
+        <div className="tv-section">
+          <div className="tv-section-header">
+            <span className="tv-section-title heading">Все задачи</span>
+          </div>
+
+          {/* Toolbar: search + filters */}
+          <div className="tv-toolbar">
+            <div className="tv-search-wrap">
+              <span className="tv-search-icon"><SearchIcon /></span>
+              <input
+                ref={searchRef}
+                className="tv-search-input"
+                placeholder="Поиск по всем задачам (Ctrl+K)"
+                value={searchQuery}
+                onChange={(e) => {
+                  setSearchQuery(e.target.value);
+                  setAllTasksPage(1);
+                }}
+              />
+            </div>
+            <div className="tv-filter-chips">
+              {Object.entries(STATUS_META).map(([key, meta]) => (
+                <button
+                  key={key}
+                  type="button"
+                  className={`tv-chip ${filterStatus === key ? meta.chipCls : ''}`}
+                  onClick={() => {
+                    setFilterStatus(v => v === key ? '' : key);
+                    setAllTasksPage(1);
+                  }}
+                >
+                  {meta.label}
+                </button>
+              ))}
+              {Object.entries(TAG_META).map(([key, meta]) => (
+                <button
+                  key={key}
+                  type="button"
+                  className={`tv-chip ${filterTag === key ? 'is-active' : ''}`}
+                  onClick={() => {
+                    setFilterTag(v => v === key ? '' : key);
+                    setAllTasksPage(1);
+                  }}
+                >
+                  {meta.label}
+                </button>
+              ))}
+              {hasActiveFilters && (
+                <button
+                  type="button"
+                  className="tv-chip"
+                  style={{ color: 'var(--rose)', borderColor: '#fecdd3' }}
+                  onClick={() => {
+                    setSearchQuery('');
+                    setFilterStatus('');
+                    setFilterTag('');
+                    setAllTasksPage(1);
+                  }}
+                >
+                  × Сбросить
+                </button>
+              )}
+            </div>
+          </div>
+
+          {!isPagedTasksLoading && allTasksTotal > 0 && (
+            <div className="tv-results-info">
+              {hasActiveFilters
+                ? `Найдено: ${filteredTasksTotal} из ${allTasksTotal}`
+                : `Всего: ${allTasksTotal}`}
+            </div>
+          )}
+
+          {renderTaskList(
+            pagedTasks,
+            hasActiveFilters ? 'Ничего не найдено' : 'Задач пока нет',
+            hasActiveFilters ? 'Попробуйте изменить фильтры или поисковый запрос.' : 'Создайте первую задачу, нажав кнопку «Новая задача».',
+            isPagedTasksLoading
+          )}
+
+          {!isPagedTasksLoading && filteredTasksTotal > TASKS_PAGE_SIZE && (
+            <div className="tv-pagination">
+              <button
+                type="button"
+                className="tv-btn tv-btn-ghost"
+                disabled={allTasksPage <= 1}
+                onClick={() => setAllTasksPage(v => Math.max(1, v - 1))}
+              >
+                Назад
+              </button>
+              <span className="tv-pagination-info">Страница {allTasksPage} из {totalPages}</span>
+              <button
+                type="button"
+                className="tv-btn tv-btn-ghost"
+                disabled={allTasksPage >= totalPages}
+                onClick={() => setAllTasksPage(v => Math.min(totalPages, v + 1))}
+              >
+                Далее
+              </button>
+            </div>
+          )}
         </div>
-
-        {/* Toolbar: search + filters */}
-        <div className="tv-toolbar">
-          <div className="tv-search-wrap">
-            <span className="tv-search-icon"><SearchIcon /></span>
-            <input
-              ref={searchRef}
-              className="tv-search-input"
-              placeholder="Поиск по всем задачам (Ctrl+K)"
-              value={searchQuery}
-              onChange={(e) => {
-                setSearchQuery(e.target.value);
-                setAllTasksPage(1);
-              }}
-            />
-          </div>
-          <div className="tv-filter-chips">
-            {Object.entries(STATUS_META).map(([key, meta]) => (
-              <button
-                key={key}
-                type="button"
-                className={`tv-chip ${filterStatus === key ? meta.chipCls : ''}`}
-                onClick={() => {
-                  setFilterStatus(v => v === key ? '' : key);
-                  setAllTasksPage(1);
-                }}
-              >
-                {meta.label}
-              </button>
-            ))}
-            {Object.entries(TAG_META).map(([key, meta]) => (
-              <button
-                key={key}
-                type="button"
-                className={`tv-chip ${filterTag === key ? 'is-active' : ''}`}
-                onClick={() => {
-                  setFilterTag(v => v === key ? '' : key);
-                  setAllTasksPage(1);
-                }}
-              >
-                {meta.label}
-              </button>
-            ))}
-            {hasActiveFilters && (
-              <button
-                type="button"
-                className="tv-chip"
-                style={{ color: 'var(--rose)', borderColor: '#fecdd3' }}
-                onClick={() => {
-                  setSearchQuery('');
-                  setFilterStatus('');
-                  setFilterTag('');
-                  setAllTasksPage(1);
-                }}
-              >
-                × Сбросить
-              </button>
-            )}
-          </div>
-        </div>
-
-        {!isPagedTasksLoading && allTasksTotal > 0 && (
-          <div className="tv-results-info">
-            {hasActiveFilters
-              ? `Найдено: ${filteredTasksTotal} из ${allTasksTotal}`
-              : `Всего: ${allTasksTotal}`}
-          </div>
-        )}
-
-        {renderTaskList(
-          pagedTasks,
-          hasActiveFilters ? 'Ничего не найдено' : 'Задач пока нет',
-          hasActiveFilters ? 'Попробуйте изменить фильтры или поисковый запрос.' : 'Создайте первую задачу, нажав кнопку «Новая задача».',
-          isPagedTasksLoading
-        )}
-
-        {!isPagedTasksLoading && filteredTasksTotal > TASKS_PAGE_SIZE && (
-          <div className="tv-pagination">
-            <button
-              type="button"
-              className="tv-btn tv-btn-ghost"
-              disabled={allTasksPage <= 1}
-              onClick={() => setAllTasksPage(v => Math.max(1, v - 1))}
-            >
-              Назад
-            </button>
-            <span className="tv-pagination-info">Страница {allTasksPage} из {totalPages}</span>
-            <button
-              type="button"
-              className="tv-btn tv-btn-ghost"
-              disabled={allTasksPage >= totalPages}
-              onClick={() => setAllTasksPage(v => Math.min(totalPages, v + 1))}
-            >
-              Далее
-            </button>
-          </div>
-        )}
-      </div>
+      )}
 
       {/* Drawer */}
       {drawerTask && (
