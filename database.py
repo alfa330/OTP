@@ -16626,70 +16626,172 @@ class Database:
             "updated_at": updated_at.isoformat() if hasattr(updated_at, 'isoformat') else updated_at
         }
 
-    def get_tasks_for_requester(self, requester_id, requester_role):
+    def get_tasks_for_requester(
+            self,
+            requester_id,
+            requester_role,
+            search=None,
+            status=None,
+            tag=None,
+            limit=None,
+            offset=0,
+            only_my=False
+    ):
         requester_id = int(requester_id)
         role = normalize_role_value(requester_role)
+        search_text = (search or '').strip()
+        status_norm = (status or '').strip().lower() or None
+        tag_norm = (tag or '').strip().lower() or None
+        only_my_flag = bool(only_my)
+
+        if status_norm and status_norm not in {'assigned', 'in_progress', 'completed', 'accepted', 'returned'}:
+            raise ValueError("INVALID_TASK_STATUS_FILTER")
+        if tag_norm and tag_norm not in {'task', 'problem', 'suggestion'}:
+            raise ValueError("INVALID_TASK_TAG_FILTER")
+
+        if limit is None or str(limit).strip() == '':
+            limit_norm = None
+        else:
+            limit_norm = int(limit)
+            if limit_norm <= 0:
+                raise ValueError("INVALID_TASK_LIMIT")
+
+        offset_norm = int(offset or 0)
+        if offset_norm < 0:
+            raise ValueError("INVALID_TASK_OFFSET")
+
+        summary_empty = {
+            "total": 0,
+            "in_progress": 0,
+            "completed": 0,
+            "returned": 0
+        }
+
+        base_conditions = []
+        base_params = []
+        if role_has_min(role, 'admin'):
+            pass
+        elif role == 'sv':
+            base_conditions.append("(t.created_by = %s OR t.assigned_to = %s)")
+            base_params.extend([requester_id, requester_id])
+        else:
+            return {
+                "tasks": [],
+                "total_all": 0,
+                "total_filtered": 0,
+                "summary": summary_empty
+            }
+
+        if only_my_flag:
+            base_conditions.append("(t.created_by = %s OR t.assigned_to = %s)")
+            base_params.extend([requester_id, requester_id])
+
+        filtered_conditions = list(base_conditions)
+        filtered_params = list(base_params)
+
+        if search_text:
+            like_pattern = f"%{search_text}%"
+            filtered_conditions.append("""
+                (
+                    t.subject ILIKE %s
+                    OR COALESCE(t.description, '') ILIKE %s
+                    OR COALESCE(assignee.name, '') ILIKE %s
+                    OR COALESCE(creator.name, '') ILIKE %s
+                )
+            """)
+            filtered_params.extend([like_pattern, like_pattern, like_pattern, like_pattern])
+
+        if status_norm:
+            filtered_conditions.append("t.status = %s")
+            filtered_params.append(status_norm)
+
+        if tag_norm:
+            filtered_conditions.append("t.tag = %s")
+            filtered_params.append(tag_norm)
+
+        base_where_sql = f"WHERE {' AND '.join(base_conditions)}" if base_conditions else ""
+        filtered_where_sql = f"WHERE {' AND '.join(filtered_conditions)}" if filtered_conditions else ""
 
         with self._get_cursor() as cursor:
-            if role_has_min(role, 'admin'):
-                cursor.execute("""
-                    SELECT
-                        t.id, t.subject, t.description, t.tag, t.status, t.created_at, t.updated_at,
-                        t.completion_summary, t.completed_at, t.completed_by, completed_user.name,
-                        assignee.id, assignee.name, assignee.role, assignee.supervisor_id,
-                        creator.id, creator.name, creator.role
-                    FROM tasks t
-                    LEFT JOIN users assignee ON assignee.id = t.assigned_to
-                    LEFT JOIN users creator ON creator.id = t.created_by
-                    LEFT JOIN users completed_user ON completed_user.id = t.completed_by
-                    ORDER BY t.created_at DESC, t.id DESC
-                """)
-            elif role == 'sv':
-                cursor.execute("""
-                    SELECT
-                        t.id, t.subject, t.description, t.tag, t.status, t.created_at, t.updated_at,
-                        t.completion_summary, t.completed_at, t.completed_by, completed_user.name,
-                        assignee.id, assignee.name, assignee.role, assignee.supervisor_id,
-                        creator.id, creator.name, creator.role
-                    FROM tasks t
-                    LEFT JOIN users assignee ON assignee.id = t.assigned_to
-                    LEFT JOIN users creator ON creator.id = t.created_by
-                    LEFT JOIN users completed_user ON completed_user.id = t.completed_by
-                    WHERE
-                        t.created_by = %s
-                        OR t.assigned_to = %s
-                    ORDER BY t.created_at DESC, t.id DESC
-                """, (requester_id, requester_id))
-            else:
-                return []
+            cursor.execute(f"""
+                SELECT
+                    COUNT(*)::INT AS total_count,
+                    COUNT(*) FILTER (WHERE t.status = 'in_progress')::INT AS in_progress_count,
+                    COUNT(*) FILTER (WHERE t.status IN ('completed', 'accepted'))::INT AS completed_count,
+                    COUNT(*) FILTER (WHERE t.status = 'returned')::INT AS returned_count
+                FROM tasks t
+                LEFT JOIN users assignee ON assignee.id = t.assigned_to
+                LEFT JOIN users creator ON creator.id = t.created_by
+                {base_where_sql}
+            """, tuple(base_params))
+            summary_row = cursor.fetchone() or (0, 0, 0, 0)
+            summary = {
+                "total": int(summary_row[0] or 0),
+                "in_progress": int(summary_row[1] or 0),
+                "completed": int(summary_row[2] or 0),
+                "returned": int(summary_row[3] or 0)
+            }
 
+            cursor.execute(f"""
+                SELECT COUNT(*)::INT
+                FROM tasks t
+                LEFT JOIN users assignee ON assignee.id = t.assigned_to
+                LEFT JOIN users creator ON creator.id = t.created_by
+                {filtered_where_sql}
+            """, tuple(filtered_params))
+            total_filtered_row = cursor.fetchone()
+            total_filtered = int(total_filtered_row[0] or 0) if total_filtered_row else 0
+
+            task_query = f"""
+                SELECT
+                    t.id, t.subject, t.description, t.tag, t.status, t.created_at, t.updated_at,
+                    t.completion_summary, t.completed_at, t.completed_by, completed_user.name,
+                    assignee.id, assignee.name, assignee.role, assignee.supervisor_id,
+                    creator.id, creator.name, creator.role
+                FROM tasks t
+                LEFT JOIN users assignee ON assignee.id = t.assigned_to
+                LEFT JOIN users creator ON creator.id = t.created_by
+                LEFT JOIN users completed_user ON completed_user.id = t.completed_by
+                {filtered_where_sql}
+                ORDER BY t.created_at DESC, t.id DESC
+            """
+            task_query_params = list(filtered_params)
+            if limit_norm is not None:
+                task_query += "\n                LIMIT %s"
+                task_query_params.append(limit_norm)
+            if offset_norm > 0:
+                task_query += "\n                OFFSET %s"
+                task_query_params.append(offset_norm)
+
+            cursor.execute(task_query, tuple(task_query_params))
             task_rows = cursor.fetchall()
-            if not task_rows:
-                return []
 
-            task_ids = [row[0] for row in task_rows]
+            history_rows = []
+            attachment_rows = []
+            if task_rows:
+                task_ids = [row[0] for row in task_rows]
 
-            cursor.execute("""
-                SELECT
-                    h.id, h.task_id, h.status_code, h.comment, h.changed_at,
-                    h.changed_by, u.name
-                FROM task_status_history h
-                LEFT JOIN users u ON u.id = h.changed_by
-                WHERE h.task_id = ANY(%s)
-                ORDER BY h.changed_at ASC, h.id ASC
-            """, (task_ids,))
-            history_rows = cursor.fetchall()
+                cursor.execute("""
+                    SELECT
+                        h.id, h.task_id, h.status_code, h.comment, h.changed_at,
+                        h.changed_by, u.name
+                    FROM task_status_history h
+                    LEFT JOIN users u ON u.id = h.changed_by
+                    WHERE h.task_id = ANY(%s)
+                    ORDER BY h.changed_at ASC, h.id ASC
+                """, (task_ids,))
+                history_rows = cursor.fetchall()
 
-            cursor.execute("""
-                SELECT
-                    a.id, a.task_id, a.file_name, a.content_type, a.file_size, a.created_at,
-                    COALESCE(a.storage_type, 'db'), a.gcs_bucket, a.gcs_blob_path,
-                    COALESCE(a.attachment_kind, 'initial')
-                FROM task_attachments a
-                WHERE a.task_id = ANY(%s)
-                ORDER BY a.id ASC
-            """, (task_ids,))
-            attachment_rows = cursor.fetchall()
+                cursor.execute("""
+                    SELECT
+                        a.id, a.task_id, a.file_name, a.content_type, a.file_size, a.created_at,
+                        COALESCE(a.storage_type, 'db'), a.gcs_bucket, a.gcs_blob_path,
+                        COALESCE(a.attachment_kind, 'initial')
+                    FROM task_attachments a
+                    WHERE a.task_id = ANY(%s)
+                    ORDER BY a.id ASC
+                """, (task_ids,))
+                attachment_rows = cursor.fetchall()
 
         history_map = defaultdict(list)
         for row in history_rows:
@@ -16749,7 +16851,13 @@ class Database:
                 "attachments": initial_attachments,
                 "completion_attachments": result_attachments
             })
-        return result
+
+        return {
+            "tasks": result,
+            "total_all": int(summary.get("total", 0)),
+            "total_filtered": int(total_filtered),
+            "summary": summary
+        }
 
     def update_task_status(self, task_id, requester_id, requester_role, action, comment=None, completion_summary=None, completion_attachments=None):
         task_id = int(task_id)

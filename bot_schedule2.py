@@ -138,8 +138,8 @@ LMS_DEFAULT_PASS_THRESHOLD = float(os.getenv('LMS_DEFAULT_PASS_THRESHOLD', '80')
 LMS_DEFAULT_ATTEMPT_LIMIT = int(os.getenv('LMS_DEFAULT_ATTEMPT_LIMIT', '3'))
 LMS_CERTIFICATE_STORAGE = (os.getenv('LMS_CERTIFICATE_STORAGE') or 'db').strip().lower()
 LMS_CERTIFICATE_TEMPLATE_VERSION = (
-    (os.getenv('LMS_CERTIFICATE_TEMPLATE_VERSION') or 'bold_split_v4_raster_hq_logo_bg_v16_2026_04_17').strip()
-    or 'bold_split_v4_raster_hq_logo_bg_v16_2026_04_17'
+    (os.getenv('LMS_CERTIFICATE_TEMPLATE_VERSION') or 'bold_split_v4_raster_hq_logo_bg_v17_2026_04_17').strip()
+    or 'bold_split_v4_raster_hq_logo_bg_v17_2026_04_17'
 )
 try:
     LMS_CERTIFICATE_RASTER_SCALE = int(str(os.getenv('LMS_CERTIFICATE_RASTER_SCALE', '4')).strip() or '4')
@@ -7993,10 +7993,82 @@ def handle_tasks():
         requester_role = requester[3]
 
         if request.method == 'GET':
-            tasks = db.get_tasks_for_requester(requester_id, requester_role)
+            query_text = (request.args.get('q') or request.args.get('search') or '').strip()
+            status_filter = (request.args.get('status') or '').strip().lower() or None
+            tag_filter = (request.args.get('tag') or '').strip().lower() or None
+            only_my_raw = (request.args.get('only_my') or '').strip().lower()
+            only_my = only_my_raw in {'1', 'true', 'yes', 'y', 'on'}
+
+            raw_limit = request.args.get('limit')
+            raw_offset = request.args.get('offset')
+            limit = None
+            offset = 0
+
+            if raw_limit is not None and str(raw_limit).strip() != '':
+                try:
+                    limit = int(raw_limit)
+                except Exception:
+                    return jsonify({"error": "Invalid limit param"}), 400
+                if limit < 1 or limit > 500:
+                    return jsonify({"error": "limit must be in range 1..500"}), 400
+
+            if raw_offset is not None and str(raw_offset).strip() != '':
+                try:
+                    offset = int(raw_offset)
+                except Exception:
+                    return jsonify({"error": "Invalid offset param"}), 400
+                if offset < 0:
+                    return jsonify({"error": "offset must be >= 0"}), 400
+
+            try:
+                payload = db.get_tasks_for_requester(
+                    requester_id=requester_id,
+                    requester_role=requester_role,
+                    search=query_text,
+                    status=status_filter,
+                    tag=tag_filter,
+                    limit=limit,
+                    offset=offset,
+                    only_my=only_my
+                )
+            except ValueError as e:
+                error_code = str(e)
+                if error_code == 'INVALID_TASK_STATUS_FILTER':
+                    return jsonify({"error": "Invalid status filter"}), 400
+                if error_code == 'INVALID_TASK_TAG_FILTER':
+                    return jsonify({"error": "Invalid tag filter"}), 400
+                if error_code == 'INVALID_TASK_LIMIT':
+                    return jsonify({"error": "Invalid limit value"}), 400
+                if error_code == 'INVALID_TASK_OFFSET':
+                    return jsonify({"error": "Invalid offset value"}), 400
+                raise
+
+            tasks = payload.get("tasks") or []
+            total_all = int(payload.get("total_all", len(tasks)) or 0)
+            total_filtered = int(payload.get("total_filtered", len(tasks)) or 0)
+            returned = len(tasks)
+            has_more = (offset + returned) < total_filtered if limit is not None else False
+
             return jsonify({
                 "status": "success",
-                "tasks": tasks
+                "tasks": tasks,
+                "summary": payload.get("summary") or {},
+                "totals": {
+                    "all": total_all,
+                    "filtered": total_filtered
+                },
+                "pagination": {
+                    "limit": limit,
+                    "offset": offset,
+                    "returned": returned,
+                    "has_more": has_more
+                },
+                "query": query_text,
+                "filters": {
+                    "status": status_filter,
+                    "tag": tag_filter,
+                    "only_my": only_my
+                }
             }), 200
 
         subject = (request.form.get('subject') or '').strip()
@@ -15600,6 +15672,19 @@ def _lms_build_bold_split_certificate_html(certificate_number, learner_name, cou
         if full_logo_uri
         else "<div class=\"logo-v4-fallback\">iGroup</div>"
     )
+    trainer_signature_path = _lms_certificate_trainer_signature_path()
+    trainer_signature_uri = ""
+    if trainer_signature_path:
+        try:
+            from pathlib import Path
+            trainer_signature_uri = Path(trainer_signature_path).resolve().as_uri()
+        except Exception:
+            trainer_signature_uri = str(trainer_signature_path)
+    trainer_signature_markup = (
+        f"<img class=\"sig-sign-img\" src=\"{_lms_escape_html(trainer_signature_uri)}\" alt=\"signature\"/>"
+        if trainer_signature_uri
+        else ""
+    )
 
     text_official = "\u0412\u041d\u0423\u0422\u0420\u0415\u041d\u0418\u0418\u0419"
     text_cert_title = "\u0421\u0435\u0440\u0442\u0438&shy;\u0444\u0438\u043a\u0430\u0442"
@@ -15742,6 +15827,8 @@ body {{
 
 .v4 .rp-bottom {{ display:flex; justify-content:space-between; align-items:flex-end; padding-top:24px; border-top:1px solid var(--g2); }}
 .v4 .sig-group {{ display:flex; gap:44px; }}
+.v4 .sig-sign-wrap {{ height:34px; margin-bottom:4px; display:flex; align-items:flex-end; justify-content:center; }}
+.v4 .sig-sign-img {{ max-width:120px; max-height:34px; width:auto; height:auto; display:block; }}
 .v4 .sig-line {{ width:130px; height:1px; background:var(--k); margin-bottom:8px; }}
 .v4 .sig-name {{ font-size:11px; font-weight:600; color:var(--k); margin-bottom:2px; }}
 .v4 .sig-role {{ font-size:8.5px; letter-spacing:2px; text-transform:uppercase; color:var(--g4); }}
@@ -15804,6 +15891,7 @@ body {{
             <div class=\"sig-role\">{sig_role_1}</div>
           </div>
           <div class=\"sig\">
+            <div class=\"sig-sign-wrap\">{trainer_signature_markup}</div>
             <div class=\"sig-line\"></div>
             <div class=\"sig-name\">{sig_name_2}</div>
             <div class=\"sig-role\">{sig_role_2}</div>
@@ -16080,6 +16168,29 @@ def _lms_certificate_full_logo_path():
     return None
 
 
+@lru_cache(maxsize=1)
+def _lms_certificate_trainer_signature_path():
+    custom_signature_path = str(os.getenv("LMS_CERTIFICATE_SIGNER_2_SIGNATURE_PATH") or "").strip()
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = []
+    if custom_signature_path:
+        candidates.append(custom_signature_path)
+    candidates.extend([
+        os.path.join(base_dir, "src", "components", "lms", "Ramazan-Aldiyar-sign.png"),
+        os.path.join(base_dir, "src", "components", "lms", "ramazan-aldiyar-sign.png"),
+        os.path.join(base_dir, "lms", "Ramazan-Aldiyar-sign.png"),
+        os.path.join(os.getcwd(), "src", "components", "lms", "Ramazan-Aldiyar-sign.png"),
+    ])
+
+    for candidate in candidates:
+        try:
+            if candidate and os.path.isfile(candidate):
+                return candidate
+        except Exception:
+            continue
+    return None
+
+
 def _lms_build_bold_split_certificate_pdf(certificate_number, learner_name, course_title, issued_at):
     if Image is None or ImageDraw is None or ImageFont is None:
         return None
@@ -16299,6 +16410,25 @@ def _lms_build_bold_split_certificate_pdf(certificate_number, learner_name, cour
     draw.line((sig1_x, sig_top, sig1_x + sig_line_w, sig_top), fill=col_k, width=max(1, S(1)))
     draw.text((sig1_x, sig_top + S(8)), sig_name_1, font=sig_name_font, fill=col_k)
     draw.text((sig1_x, sig_top + S(24)), sig_role_1.upper(), font=sig_role_font, fill=col_g4)
+
+    trainer_signature_path = _lms_certificate_trainer_signature_path()
+    if trainer_signature_path:
+        try:
+            with Image.open(trainer_signature_path) as trainer_sig_source:
+                trainer_sig_rgba = trainer_sig_source.convert("RGBA")
+                resample = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
+                src_w, src_h = trainer_sig_rgba.size
+                max_sig_w = max(1, sig_line_w - S(8))
+                max_sig_h = S(34)
+                sig_scale = min(max_sig_w / float(max(1, src_w)), max_sig_h / float(max(1, src_h)))
+                dst_sig_w = max(1, int(round(src_w * sig_scale)))
+                dst_sig_h = max(1, int(round(src_h * sig_scale)))
+                trainer_sig_rgba = trainer_sig_rgba.resize((dst_sig_w, dst_sig_h), resample=resample)
+                sig_img_x = sig2_x + int(round((sig_line_w - dst_sig_w) / 2.0))
+                sig_img_y = sig_top - dst_sig_h - S(4)
+                image.alpha_composite(trainer_sig_rgba, (sig_img_x, sig_img_y))
+        except Exception:
+            logging.exception("LMS certificate trainer signature render failed")
 
     draw.line((sig2_x, sig_top, sig2_x + sig_line_w, sig_top), fill=col_k, width=max(1, S(1)))
     draw.text((sig2_x, sig_top + S(8)), sig_name_2, font=sig_name_font, fill=col_k)

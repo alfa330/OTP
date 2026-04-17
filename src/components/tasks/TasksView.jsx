@@ -214,6 +214,25 @@ styleTag.textContent = `
 
   /* ── Task Row ── */
   .tv-task-list { display: flex; flex-direction: column; gap: 3px; }
+  .tv-task-date-separator {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 9px 2px 5px;
+    color: var(--ink-3);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+  }
+  .tv-task-date-separator::before,
+  .tv-task-date-separator::after {
+    content: '';
+    flex: 1;
+    min-width: 14px;
+    height: 1px;
+    background: var(--border);
+  }
   .tv-task-row {
     display: flex; align-items: center; gap: 10px;
     padding: 11px 14px;
@@ -606,6 +625,18 @@ styleTag.textContent = `
     margin-bottom: 8px;
     padding-left: 2px;
   }
+  .tv-pagination {
+    margin-top: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .tv-pagination-info {
+    font-size: 12px;
+    color: var(--ink-2);
+    font-weight: 500;
+  }
 
   /* ── Keyboard hint ── */
   .tv-kbd {
@@ -623,6 +654,7 @@ styleTag.textContent = `
     .tv-drawer { width: 100vw; }
     .tv-info-grid { grid-template-columns: 1fr; }
     .tv-task-row-assignee-chip, .tv-task-row-date { display: none; }
+    .tv-pagination { flex-wrap: wrap; justify-content: center; }
     .tv-person-row { flex-wrap: wrap; }
     .tv-person-stats { white-space: normal; gap: 8px; }
     .tv-participants { flex-direction: column; gap: 10px; }
@@ -670,11 +702,58 @@ const HISTORY_LABELS = {
 };
 
 const ROLE_LABELS = { admin: 'Админ', sv: 'СВ' };
+const TASKS_PAGE_SIZE = 20;
 
 const fmt = (v) => {
   if (!v) return '—';
   const d = new Date(v);
   return isNaN(d) ? String(v) : d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' });
+};
+
+const taskDateKey = (v) => {
+  if (!v) return 'unknown';
+  const d = new Date(v);
+  if (Number.isNaN(d.getTime())) return 'unknown';
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+};
+
+const taskDateLabel = (v) => {
+  if (!v) return 'Без даты';
+  const d = new Date(v);
+  if (Number.isNaN(d.getTime())) return 'Без даты';
+  const now = new Date();
+  const nowDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const itemDay = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const diff = Math.round((nowDay.getTime() - itemDay.getTime()) / 86400000);
+  if (diff === 0) return 'Сегодня';
+  if (diff === 1) return 'Вчера';
+  return d.toLocaleDateString('ru-RU', { day: '2-digit', month: 'long', year: 'numeric' });
+};
+
+const withDateSeparators = (list) => {
+  const safeList = Array.isArray(list) ? list : [];
+  const rows = [];
+  let prevDateKey = '';
+  safeList.forEach((task, idx) => {
+    const curDateKey = taskDateKey(task?.created_at);
+    if (curDateKey !== prevDateKey) {
+      rows.push({
+        type: 'separator',
+        key: `sep:${curDateKey}:${task?.id ?? idx}`,
+        label: taskDateLabel(task?.created_at)
+      });
+      prevDateKey = curDateKey;
+    }
+    rows.push({
+      type: 'task',
+      key: `task:${task?.id ?? idx}`,
+      task
+    });
+  });
+  return rows;
 };
 
 const initials = (name = '') => {
@@ -937,15 +1016,21 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
   const currentUserRole = normalizeRole(user?.role);
   const canAccessTasks = isAdminLikeRole(currentUserRole) || isSupervisorRole(currentUserRole);
   const [tasks,               setTasks]               = useState([]);
+  const [pagedTasks,          setPagedTasks]          = useState([]);
   const [recipients,          setRecipients]          = useState([]);
   const [isTasksLoading,      setIsTasksLoading]      = useState(false);
+  const [isPagedTasksLoading, setIsPagedTasksLoading] = useState(false);
   const [isRecipientsLoading, setIsRecipientsLoading] = useState(false);
   const [isCreateLoading,     setIsCreateLoading]     = useState(false);
   const [actionLoadingKey,    setActionLoadingKey]    = useState('');
   const [selectedFiles,       setSelectedFiles]       = useState([]);
   const [searchQuery,         setSearchQuery]         = useState('');
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('');
   const [filterStatus,        setFilterStatus]        = useState('');
   const [filterTag,           setFilterTag]           = useState('');
+  const [allTasksPage,        setAllTasksPage]        = useState(1);
+  const [allTasksTotal,       setAllTasksTotal]       = useState(0);
+  const [filteredTasksTotal,  setFilteredTasksTotal]  = useState(0);
 
   const [createOpen,        setCreateOpen]        = useState(false);
   const [drawerTask,        setDrawerTask]        = useState(null);
@@ -963,6 +1048,7 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
   const completionFileInputRef = useRef(null);
   const statusFileInputRef     = useRef(null);
   const searchRef              = useRef(null);
+  const pagedRequestIdRef      = useRef(0);
   const [form, setForm] = useState({ subject: '', description: '', tag: 'task', assignedTo: '' });
 
   const showToastRef = useRef(showToast);
@@ -1000,11 +1086,72 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     } finally { setIsTasksLoading(false); }
   }, [apiBaseUrl, buildHeaders, notify]);
 
+  const fetchPagedTasks = useCallback(async () => {
+    const requestId = ++pagedRequestIdRef.current;
+    setIsPagedTasksLoading(true);
+    try {
+      const params = {
+        limit: TASKS_PAGE_SIZE,
+        offset: (allTasksPage - 1) * TASKS_PAGE_SIZE
+      };
+      if (debouncedSearchQuery) params.q = debouncedSearchQuery;
+      if (filterStatus) params.status = filterStatus;
+      if (filterTag) params.tag = filterTag;
+
+      const res = await axios.get(`${apiBaseUrl}/api/tasks`, {
+        headers: buildHeaders(),
+        params
+      });
+      if (requestId !== pagedRequestIdRef.current) return;
+
+      const data = res?.data || {};
+      const list = Array.isArray(data?.tasks) ? data.tasks : [];
+      const totals = data?.totals || {};
+      const totalAll = Number(totals?.all);
+      const totalFiltered = Number(totals?.filtered);
+
+      setPagedTasks(list);
+      setAllTasksTotal(Number.isFinite(totalAll) ? totalAll : list.length);
+      setFilteredTasksTotal(Number.isFinite(totalFiltered) ? totalFiltered : list.length);
+      setDrawerTask(prev => prev ? (list.find(t => t.id === prev.id) ?? prev) : null);
+    } catch (e) {
+      if (requestId === pagedRequestIdRef.current) {
+        notify(e?.response?.data?.error || 'Не удалось загрузить список задач', 'error');
+      }
+    } finally {
+      if (requestId === pagedRequestIdRef.current) setIsPagedTasksLoading(false);
+    }
+  }, [
+    apiBaseUrl,
+    buildHeaders,
+    notify,
+    allTasksPage,
+    debouncedSearchQuery,
+    filterStatus,
+    filterTag
+  ]);
+
+  const refreshTasksData = useCallback(async () => {
+    await Promise.all([fetchTasks(), fetchPagedTasks()]);
+  }, [fetchTasks, fetchPagedTasks]);
+
   useEffect(() => {
     if (!user || !canAccessTasks) return;
     fetchRecipients();
     fetchTasks();
   }, [user, canAccessTasks, fetchRecipients, fetchTasks]);
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setDebouncedSearchQuery(searchQuery.trim());
+    }, 280);
+    return () => clearTimeout(t);
+  }, [searchQuery]);
+
+  useEffect(() => {
+    if (!user || !canAccessTasks) return;
+    fetchPagedTasks();
+  }, [user, canAccessTasks, fetchPagedTasks]);
 
   // Keyboard: Ctrl/Cmd+K → focus search
   useEffect(() => {
@@ -1038,22 +1185,14 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     [outgoingTasks]
   );
 
-  // Filtered all-tasks list
-  const filteredTasks = useMemo(() => {
-    let list = tasks;
-    if (searchQuery.trim()) {
-      const q = searchQuery.trim().toLowerCase();
-      list = list.filter(t =>
-        (t.subject || '').toLowerCase().includes(q) ||
-        (t.description || '').toLowerCase().includes(q) ||
-        (t?.assignee?.name || '').toLowerCase().includes(q) ||
-        (t?.creator?.name || '').toLowerCase().includes(q)
-      );
-    }
-    if (filterStatus) list = list.filter(t => t.status === filterStatus);
-    if (filterTag)    list = list.filter(t => t.tag    === filterTag);
-    return list;
-  }, [tasks, searchQuery, filterStatus, filterTag]);
+  const totalPages = useMemo(
+    () => Math.max(1, Math.ceil(filteredTasksTotal / TASKS_PAGE_SIZE)),
+    [filteredTasksTotal]
+  );
+
+  useEffect(() => {
+    if (allTasksPage > totalPages) setAllTasksPage(totalPages);
+  }, [allTasksPage, totalPages]);
 
   // Stats
   const stats = useMemo(() => ({
@@ -1103,7 +1242,7 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
       setSelectedFiles([]);
       setCreateOpen(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
-      await fetchTasks();
+      await refreshTasksData();
     } catch (e) {
       notify(e?.response?.data?.error || 'Не удалось создать задачу', 'error');
     } finally { setIsCreateLoading(false); }
@@ -1133,13 +1272,13 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
       );
       notify(res?.data?.message || 'Статус обновлён');
       if (res?.data?.warning) notify(res.data.warning, 'error');
-      await fetchTasks();
+      await refreshTasksData();
       return true;
     } catch (e) {
       notify(e?.response?.data?.error || 'Не удалось обновить статус', 'error');
       return false;
     } finally { setActionLoadingKey(''); }
-  }, [apiBaseUrl, buildHeaders, notify, fetchTasks]);
+  }, [apiBaseUrl, buildHeaders, notify, refreshTasksData]);
 
   /* ── Complete modal ── */
   const openCompleteModal = useCallback((task) => {
@@ -1191,11 +1330,11 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
       notify(res?.data?.message || 'Задача выполнена');
       if (res?.data?.warning) notify(res.data.warning, 'error');
       closeCompleteModal();
-      await fetchTasks();
+      await refreshTasksData();
     } catch (e) {
       notify(e?.response?.data?.error || 'Не удалось завершить задачу', 'error');
     } finally { setActionLoadingKey(''); }
-  }, [completeModal, completionSummary, completionFiles, apiBaseUrl, buildHeaders, notify, closeCompleteModal, fetchTasks]);
+  }, [completeModal, completionSummary, completionFiles, apiBaseUrl, buildHeaders, notify, closeCompleteModal, refreshTasksData]);
 
   const submitStatusModal = useCallback(async (e) => {
     e.preventDefault();
@@ -1253,8 +1392,8 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
   const statusModalLoadingKey = `${statusModal.taskId}:${statusModal.action}`;
 
   /* ── Render helpers ── */
-  const renderTaskList = (list, emptyTitle, emptySub) => {
-    if (isTasksLoading) return <SkeletonList />;
+  const renderTaskList = (list, emptyTitle, emptySub, loading = isTasksLoading) => {
+    if (loading) return <SkeletonList />;
     if (!list.length) return (
       <div className="tv-empty">
         <span className="tv-empty-icon">📋</span>
@@ -1262,9 +1401,19 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
         <span className="tv-empty-sub">{emptySub}</span>
       </div>
     );
+    const rows = withDateSeparators(list);
     return (
       <div className="tv-task-list">
-        {list.map(t => <TaskRow key={t.id} task={t} onClick={setDrawerTask} />)}
+        {rows.map((row) => {
+          if (row.type === 'separator') {
+            return (
+              <div key={row.key} className="tv-task-date-separator">
+                <span>{row.label}</span>
+              </div>
+            );
+          }
+          return <TaskRow key={row.key} task={row.task} onClick={setDrawerTask} />;
+        })}
       </div>
     );
   };
@@ -1331,7 +1480,8 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
 
   if (!user || !canAccessTasks) return null;
 
-  const hasActiveFilters = searchQuery || filterStatus || filterTag;
+  const hasActiveFilters = Boolean(searchQuery.trim() || filterStatus || filterTag);
+  const isAnyTasksLoading = isTasksLoading || isPagedTasksLoading;
 
   return (
     <div className="tv-root">
@@ -1339,9 +1489,9 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
       <div className="tv-topbar">
         <h1 className="tv-topbar-title">Задачи</h1>
         <div className="tv-topbar-actions">
-          <button className="tv-btn tv-btn-ghost" onClick={fetchTasks} disabled={isTasksLoading}>
-            <RefreshCw size={13} strokeWidth={2} style={{ transition: 'transform .4s', transform: isTasksLoading ? 'rotate(360deg)' : 'none' }} />
-            {isTasksLoading ? 'Обновляю...' : 'Обновить'}
+          <button className="tv-btn tv-btn-ghost" onClick={refreshTasksData} disabled={isAnyTasksLoading}>
+            <RefreshCw size={13} strokeWidth={2} style={{ transition: 'transform .4s', transform: isAnyTasksLoading ? 'rotate(360deg)' : 'none' }} />
+            {isAnyTasksLoading ? 'Обновляю...' : 'Обновить'}
           </button>
           <button className="tv-btn tv-btn-primary" onClick={() => setCreateOpen(true)}>
             <PlusIcon /> Новая задача
@@ -1423,9 +1573,12 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
             <input
               ref={searchRef}
               className="tv-search-input"
-              placeholder="Поиск по теме, исполнителю... (Ctrl+K)"
+              placeholder="Поиск по всем задачам (Ctrl+K)"
               value={searchQuery}
-              onChange={e => setSearchQuery(e.target.value)}
+              onChange={(e) => {
+                setSearchQuery(e.target.value);
+                setAllTasksPage(1);
+              }}
             />
           </div>
           <div className="tv-filter-chips">
@@ -1434,7 +1587,10 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                 key={key}
                 type="button"
                 className={`tv-chip ${filterStatus === key ? meta.chipCls : ''}`}
-                onClick={() => setFilterStatus(v => v === key ? '' : key)}
+                onClick={() => {
+                  setFilterStatus(v => v === key ? '' : key);
+                  setAllTasksPage(1);
+                }}
               >
                 {meta.label}
               </button>
@@ -1444,7 +1600,10 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                 key={key}
                 type="button"
                 className={`tv-chip ${filterTag === key ? 'is-active' : ''}`}
-                onClick={() => setFilterTag(v => v === key ? '' : key)}
+                onClick={() => {
+                  setFilterTag(v => v === key ? '' : key);
+                  setAllTasksPage(1);
+                }}
               >
                 {meta.label}
               </button>
@@ -1454,7 +1613,12 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                 type="button"
                 className="tv-chip"
                 style={{ color: 'var(--rose)', borderColor: '#fecdd3' }}
-                onClick={() => { setSearchQuery(''); setFilterStatus(''); setFilterTag(''); }}
+                onClick={() => {
+                  setSearchQuery('');
+                  setFilterStatus('');
+                  setFilterTag('');
+                  setAllTasksPage(1);
+                }}
               >
                 × Сбросить
               </button>
@@ -1462,18 +1626,41 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
           </div>
         </div>
 
-        {!isTasksLoading && tasks.length > 0 && (
+        {!isPagedTasksLoading && allTasksTotal > 0 && (
           <div className="tv-results-info">
             {hasActiveFilters
-              ? `Найдено: ${filteredTasks.length} из ${tasks.length}`
-              : `Всего: ${tasks.length}`}
+              ? `Найдено: ${filteredTasksTotal} из ${allTasksTotal}`
+              : `Всего: ${allTasksTotal}`}
           </div>
         )}
 
         {renderTaskList(
-          filteredTasks,
+          pagedTasks,
           hasActiveFilters ? 'Ничего не найдено' : 'Задач пока нет',
-          hasActiveFilters ? 'Попробуйте изменить фильтры или поисковый запрос.' : 'Создайте первую задачу, нажав кнопку «Новая задача».'
+          hasActiveFilters ? 'Попробуйте изменить фильтры или поисковый запрос.' : 'Создайте первую задачу, нажав кнопку «Новая задача».',
+          isPagedTasksLoading
+        )}
+
+        {!isPagedTasksLoading && filteredTasksTotal > TASKS_PAGE_SIZE && (
+          <div className="tv-pagination">
+            <button
+              type="button"
+              className="tv-btn tv-btn-ghost"
+              disabled={allTasksPage <= 1}
+              onClick={() => setAllTasksPage(v => Math.max(1, v - 1))}
+            >
+              Назад
+            </button>
+            <span className="tv-pagination-info">Страница {allTasksPage} из {totalPages}</span>
+            <button
+              type="button"
+              className="tv-btn tv-btn-ghost"
+              disabled={allTasksPage >= totalPages}
+              onClick={() => setAllTasksPage(v => Math.min(totalPages, v + 1))}
+            >
+              Далее
+            </button>
+          </div>
         )}
       </div>
 
