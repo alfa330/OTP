@@ -553,10 +553,10 @@ function getResumePriority(item) {
 }
 
 function getPriorityBadgeClass(label, active = false) {
-  if (active) return "!border-slate-300 !bg-white !text-slate-900";
+  if (active) return "!border-slate-900/30 !bg-white !text-slate-900";
   if (label === "high") return "!border-rose-200 !bg-rose-50 !text-rose-700";
-  if (label === "medium") return "!border-emerald-200 !bg-emerald-50 !text-emerald-700";
-  return "!border-sky-200 !bg-sky-50 !text-sky-700";
+  if (label === "medium") return "!border-amber-200 !bg-amber-50 !text-amber-700";
+  return "!border-slate-200 !bg-slate-100 !text-slate-700";
 }
 
 function formatMoney(num) {
@@ -670,11 +670,11 @@ function InfoTooltip({ text, className = "" }) {
       <button
         type="button"
         aria-label="Показать подсказку"
-        className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-slate-300 bg-white text-[11px] font-semibold leading-none text-slate-500 transition hover:border-blue-300 hover:text-blue-700"
+        className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-slate-300 bg-slate-50 text-[11px] font-semibold leading-none text-slate-600 transition hover:border-slate-400 hover:bg-white hover:text-slate-900"
       >
         i
       </button>
-      <div className="pointer-events-none absolute left-1/2 top-full z-[10000] mt-2 w-72 -translate-x-1/2 rounded-xl border border-slate-200 bg-white/95 p-3 text-xs leading-5 text-slate-600 shadow-lg opacity-0 transition duration-150 group-hover:opacity-100 group-focus-within:opacity-100">
+      <div className="pointer-events-none absolute left-1/2 top-full z-[10000] mt-2 w-80 -translate-x-1/2 rounded-xl border border-slate-200 bg-white p-3 text-xs leading-5 text-slate-600 shadow-xl shadow-slate-900/10 opacity-0 transition duration-150 group-hover:opacity-100 group-focus-within:opacity-100">
         <p className="whitespace-pre-line">{text}</p>
       </div>
     </div>
@@ -683,15 +683,15 @@ function InfoTooltip({ text, className = "" }) {
 
 function StatCard({ title, value, hint, icon: Icon }) {
   return (
-    <Card className="rounded-2xl border-slate-200/70 shadow-sm">
-      <CardContent className="p-5">
+    <Card className="rounded-2xl border border-slate-200 bg-white shadow-sm shadow-slate-900/5">
+      <CardContent className="p-4">
         <div className="flex items-start justify-between gap-4">
-          <div>
-            <p className="text-sm text-slate-500">{title}</p>
-            <div className="mt-2 text-2xl font-semibold text-slate-900">{value}</div>
-            <p className="mt-2 text-xs text-slate-500">{hint}</p>
+          <div className="min-w-0">
+            <p className="text-xs font-medium uppercase tracking-wide text-slate-500">{title}</p>
+            <div className="mt-2 truncate text-2xl font-semibold text-slate-900">{value}</div>
+            <p className="mt-2 text-xs leading-5 text-slate-500">{hint}</p>
           </div>
-          <div className="rounded-2xl bg-gradient-to-br from-blue-500 to-indigo-500 p-3 text-white shadow-sm">
+          <div className="rounded-xl border border-slate-200 bg-slate-50 p-2.5 text-slate-700">
             <Icon className="h-5 w-5" />
           </div>
         </div>
@@ -702,9 +702,9 @@ function StatCard({ title, value, hint, icon: Icon }) {
 
 function EmptyState({ onRefresh, isRefreshing = false }) {
   return (
-    <Card className="rounded-3xl border-dashed border-slate-300 bg-white/80 shadow-sm">
+    <Card className="rounded-3xl border border-dashed border-slate-300 bg-white shadow-sm shadow-slate-900/5">
       <CardContent className="flex flex-col items-center justify-center px-6 py-16 text-center">
-        <div className="rounded-3xl bg-slate-100 p-4">
+        <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
           <Database className="h-8 w-8 text-slate-700" />
         </div>
         <h3 className="mt-5 text-xl font-semibold text-slate-900">Нет данных для отображения</h3>
@@ -712,7 +712,7 @@ function EmptyState({ onRefresh, isRefreshing = false }) {
           Обновите данные из API или запустите парсер, чтобы загрузить резюме и увидеть аналитику.
         </p>
         <div className="mt-8 flex flex-wrap justify-center gap-3">
-          <Button onClick={onRefresh} disabled={isRefreshing} className="rounded-2xl bg-blue-600 px-5 text-white hover:bg-blue-700">
+          <Button onClick={onRefresh} disabled={isRefreshing} className="rounded-2xl bg-slate-900 px-5 text-white hover:bg-slate-800">
             <RefreshCw className={`mr-2 h-4 w-4 ${isRefreshing ? "animate-spin" : ""}`} />
             {isRefreshing ? "Обновление..." : "Обновить из API"}
           </Button>
@@ -733,17 +733,17 @@ const ResumeRow = memo(function ResumeRow({ item, active, onSelect }) {
       type="button"
       onClick={handleClick}
       style={RESUME_ROW_RENDER_OPTIMIZATION_STYLE}
-      className={`w-full rounded-2xl border p-4 text-left transition ${
+      className={`w-full rounded-2xl border p-4 text-left transition-all duration-200 ${
         active
-          ? "border-blue-200 bg-blue-100 text-slate-900 shadow-sm"
-          : "border-slate-200 bg-white hover:-translate-y-0.5 hover:border-blue-300 hover:shadow-sm"
+          ? "border-slate-900/20 bg-slate-100/90 text-slate-900 shadow-sm shadow-slate-900/10"
+          : "border-slate-200 bg-white hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-md hover:shadow-slate-900/5"
       }`}
     >
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <h4 className="truncate text-base font-semibold text-slate-900">{item.title || "Без названия"}</h4>
-            <Badge variant={active ? "secondary" : "outline"} className="rounded-full">
+            <Badge variant={active ? "secondary" : "outline"} className="rounded-full border-slate-300 bg-white text-slate-700">
               {GROUP_LABELS[item.keyword_group] || item.keyword_group || "Группа"}
             </Badge>
             <Badge variant="outline" className={`rounded-full ${getPriorityBadgeClass(item.priorityLabel, active)}`}>
@@ -752,18 +752,19 @@ const ResumeRow = memo(function ResumeRow({ item, active, onSelect }) {
           </div>
 
           <p className={`mt-1 text-sm ${active ? "text-slate-600" : "text-slate-500"}`}>{item.category || "Категория не указана"}</p>
-          <p className={`mt-2 line-clamp-2 text-xs ${active ? "text-slate-600" : "text-slate-500"}`}>{item.priorityReason}</p>
+          <p className={`mt-2 line-clamp-2 text-xs leading-5 ${active ? "text-slate-700" : "text-slate-500"}`}>{item.priorityReason}</p>
 
-          <div className="mt-3 flex flex-wrap gap-3 text-xs text-slate-600">
-            <span className="inline-flex items-center gap-1.5"><MapPin className="h-3.5 w-3.5" /> {item.location || "Локация не указана"}</span>
-            <span className="inline-flex items-center gap-1.5"><Briefcase className="h-3.5 w-3.5" /> {item.experience || "Опыт не указан"}</span>
-            <span className="inline-flex items-center gap-1.5"><Wallet className="h-3.5 w-3.5" /> {salaryNum ? formatMoney(salaryNum) : item.salary || "Зарплата не указана"}</span>
+          <div className="mt-3 grid gap-2 text-xs text-slate-600 sm:grid-cols-3">
+            <span className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5"><MapPin className="h-3.5 w-3.5 text-slate-500" /> {item.location || "Локация не указана"}</span>
+            <span className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5"><Briefcase className="h-3.5 w-3.5 text-slate-500" /> {item.experience || "Опыт не указан"}</span>
+            <span className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5"><Wallet className="h-3.5 w-3.5 text-slate-500" /> {salaryNum ? formatMoney(salaryNum) : item.salary || "Зарплата не указана"}</span>
           </div>
         </div>
 
-        <div className="flex items-center gap-3 text-sm text-slate-500">
+        <div className="flex items-center gap-2 text-xs font-medium text-slate-500">
+          <CalendarDays className="h-3.5 w-3.5" />
           <span>{item.published_at || "Без даты"}</span>
-          <ChevronRight className="h-4 w-4" />
+          <ChevronRight className="h-4 w-4 text-slate-400" />
         </div>
       </div>
     </button>
@@ -1293,6 +1294,29 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
     return { total, avgSalary, freshCount, highPriorityCount, avgRelevance };
   }, [filteredItems]);
 
+  const salaryCoveragePercent = useMemo(() => {
+    if (!stats.total) return 0;
+    const withSalaryCount = filteredItems.filter((item) => Boolean(item.salaryNum)).length;
+    return Math.round((withSalaryCount / stats.total) * 100);
+  }, [filteredItems, stats.total]);
+
+  const highPrioritySharePercent = useMemo(() => {
+    if (!stats.total) return 0;
+    return Math.round((stats.highPriorityCount / stats.total) * 100);
+  }, [stats.highPriorityCount, stats.total]);
+
+  const activeFiltersCount = useMemo(() => {
+    let count = 0;
+    if (deferredSearch.trim()) count += 1;
+    if (groupFilter !== "all") count += 1;
+    if (priorityFilter !== "medium_plus") count += 1;
+    if (sortBy !== "priority_desc") count += 1;
+    if (onlyWithSalary) count += 1;
+    if (onlyFresh) count += 1;
+    if (Number(minSalary || 0) > 0) count += 1;
+    return count;
+  }, [deferredSearch, groupFilter, priorityFilter, sortBy, onlyWithSalary, onlyFresh, minSalary]);
+
   const handleSelectResume = useCallback((id) => {
     setSelectedId(id);
   }, []);
@@ -1404,19 +1428,19 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
   }, [apiStatusMessage, lastRunMeta]);
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-sky-50 via-white to-indigo-50 text-slate-900">
+    <div className="min-h-screen bg-slate-100 text-slate-900">
       <div className="mx-auto max-w-[1700px] px-4 py-6 sm:px-6 lg:px-8 2xl:max-w-[1900px]">
         <motion.div
           initial={{ opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.4 }}
+          transition={{ duration: 0.35 }}
           className="mb-6"
         >
-          <div className="rounded-3xl border border-blue-100/80 bg-white/90 p-6 shadow-sm backdrop-blur">
-            <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
-              <div>
+          <div className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm shadow-slate-900/5">
+            <div className="flex flex-col gap-5 p-5 lg:flex-row lg:items-start lg:justify-between lg:p-6">
+              <div className="space-y-3">
                 <div className="inline-flex items-center gap-2">
-                  <div className="inline-flex items-center gap-2 rounded-full bg-blue-50 px-3 py-1 text-sm font-semibold text-blue-700">
+                  <div className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-100 px-3 py-1 text-sm font-semibold text-slate-700">
                     <User className="h-4 w-4" />
                     Панель анализа резюме Enbek
                   </div>
@@ -1424,13 +1448,28 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                     text="Обновляй данные из API, применяй фильтры по ролям, зарплате и свежести, анализируй карточки кандидатов и выгружай готовую выборку в Excel или CSV."
                   />
                 </div>
+
+                <div className="flex flex-wrap gap-2 text-xs">
+                  <Badge variant="outline" className="rounded-full border-slate-300 bg-white text-slate-700">
+                    <Filter className="mr-1.5 h-3.5 w-3.5" />
+                    Active filters: {activeFiltersCount}
+                  </Badge>
+                  <Badge variant="outline" className="rounded-full border-slate-300 bg-white text-slate-700">
+                    <Sparkles className="mr-1.5 h-3.5 w-3.5" />
+                    High priority: {highPrioritySharePercent}%
+                  </Badge>
+                  <Badge variant="outline" className="rounded-full border-slate-300 bg-white text-slate-700">
+                    <Wallet className="mr-1.5 h-3.5 w-3.5" />
+                    Salary coverage: {salaryCoveragePercent}%
+                  </Badge>
+                </div>
               </div>
 
-              <div className="flex flex-wrap gap-3">
+              <div className="flex flex-wrap gap-2.5">
                 <div className="flex items-center gap-2">
                   <Button
                     variant="outline"
-                    className="rounded-2xl border-blue-200 text-blue-700 hover:bg-blue-50"
+                    className="rounded-2xl border-slate-300 text-slate-700 hover:bg-slate-100"
                     onClick={handleRefreshFromApi}
                     disabled={isLoadingFromApi || isRunningParser}
                   >
@@ -1441,7 +1480,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                 </div>
                 <Button
                   variant="outline"
-                  className="rounded-2xl border-emerald-200 text-emerald-700 hover:bg-emerald-50"
+                  className="rounded-2xl border-slate-300 text-slate-700 hover:bg-slate-100"
                   onClick={() => setIsParserModalOpen(true)}
                 >
                   <RefreshCw className={`mr-2 h-4 w-4 ${isRunningParser ? "animate-spin" : ""}`} />
@@ -1450,30 +1489,55 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                 <Button
                   type="button"
                   variant="outline"
-                  className="rounded-2xl border-violet-200 text-violet-700 hover:bg-violet-50"
+                  className="rounded-2xl border-slate-300 text-slate-700 hover:bg-slate-100"
                   onClick={() => setIsStatsHidden((prev) => !prev)}
                 >
                   <BarChart3 className="mr-2 h-4 w-4" />
                   {isStatsHidden ? "Показать статистику" : "Скрыть статистику"}
                 </Button>
-                <Button className="rounded-2xl bg-indigo-600 text-white hover:bg-indigo-700" onClick={exportFilteredExcel} disabled={!filteredItems.length}>
+                <Button className="rounded-2xl bg-slate-900 text-white hover:bg-slate-800" onClick={exportFilteredExcel} disabled={!filteredItems.length}>
                   <Download className="mr-2 h-4 w-4" />
                   Export Excel
                 </Button>
               </div>
             </div>
+
+            <Separator />
+
+            <div className="grid gap-3 p-4 sm:grid-cols-2 lg:grid-cols-4 lg:p-5">
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                <div className="text-xs text-slate-500">Total resumes</div>
+                <div className="mt-1 text-xl font-semibold text-slate-900">{stats.total}</div>
+              </div>
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                <div className="text-xs text-slate-500">Average relevance</div>
+                <div className="mt-1 text-xl font-semibold text-slate-900">{stats.avgRelevance}</div>
+              </div>
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                <div className="text-xs text-slate-500">Average salary</div>
+                <div className="mt-1 text-xl font-semibold text-slate-900">{formatMoney(stats.avgSalary)}</div>
+              </div>
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                <div className="text-xs text-slate-500">Fresh resumes</div>
+                <div className="mt-1 text-xl font-semibold text-slate-900">{stats.freshCount}</div>
+              </div>
+            </div>
           </div>
         </motion.div>
 
-        <div className="grid gap-6 xl:grid-cols-[360px_minmax(0,1fr)] 2xl:grid-cols-[420px_minmax(0,1fr)]">
-          <div className="flex flex-col gap-6">
-            <Card className="order-2 rounded-3xl border-slate-200/70 shadow-sm">
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2 text-lg">
+        <div className="grid items-start gap-6 xl:grid-cols-[380px_minmax(0,1fr)] 2xl:grid-cols-[430px_minmax(0,1fr)]">
+          <div className="flex flex-col gap-6 xl:sticky xl:top-6 xl:self-start">
+            <Card className="order-2 rounded-3xl border border-slate-200 bg-white shadow-sm shadow-slate-900/5">
+              <CardHeader className="pb-4">
+                <CardTitle className="flex flex-wrap items-center gap-2 text-lg">
                   <SlidersHorizontal className="h-5 w-5" />
                   Фильтры и экспорт
                   <InfoTooltip text="Фильтруйте выдачу и выгружайте результат в Excel или CSV." />
+                  <Badge variant="outline" className="ml-auto rounded-full border-slate-300 text-slate-600">
+                    Active: {activeFiltersCount}
+                  </Badge>
                 </CardTitle>
+                <CardDescription className="text-slate-500">Corporate filtering panel for rapid shortlist creation.</CardDescription>
               </CardHeader>
               <CardContent className="space-y-5">
                 <div className="space-y-2">
@@ -1484,7 +1548,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                       value={search}
                       onChange={(e) => setSearch(e.target.value)}
                       placeholder="Например: продажи, call-центр, Алматы"
-                      className="rounded-2xl pl-10"
+                      className="rounded-2xl border-slate-300 bg-slate-50 pl-10 focus-visible:ring-slate-400"
                     />
                   </div>
                 </div>
@@ -1493,7 +1557,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                   <div className="space-y-2">
                     <Label>Группа</Label>
                     <Select value={groupFilter} onValueChange={setGroupFilter}>
-                      <SelectTrigger className="rounded-2xl">
+                      <SelectTrigger className="rounded-2xl border-slate-300 bg-slate-50">
                         <SelectValue placeholder="Все группы" />
                       </SelectTrigger>
                       <SelectContent>
@@ -1507,7 +1571,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                   <div className="space-y-2">
                     <Label>Приоритет</Label>
                     <Select value={priorityFilter} onValueChange={setPriorityFilter}>
-                      <SelectTrigger className="rounded-2xl">
+                      <SelectTrigger className="rounded-2xl border-slate-300 bg-slate-50">
                         <SelectValue placeholder="Фильтр по приоритету" />
                       </SelectTrigger>
                       <SelectContent>
@@ -1522,7 +1586,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                   <div className="space-y-2">
                     <Label>Сортировка</Label>
                     <Select value={sortBy} onValueChange={setSortBy}>
-                      <SelectTrigger className="rounded-2xl">
+                      <SelectTrigger className="rounded-2xl border-slate-300 bg-slate-50">
                         <SelectValue placeholder="Выбери сортировку" />
                       </SelectTrigger>
                       <SelectContent>
@@ -1546,7 +1610,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                     value={minSalary}
                     onChange={(e) => setMinSalary(e.target.value)}
                     placeholder="Например: 250000"
-                    className="rounded-2xl"
+                    className="rounded-2xl border-slate-300 bg-slate-50 focus-visible:ring-slate-400"
                   />
                 </div>
 
@@ -1556,8 +1620,8 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                     variant={onlyWithSalary ? "default" : "outline"}
                     className={`rounded-2xl ${
                       onlyWithSalary
-                        ? "bg-emerald-600 text-white hover:bg-emerald-700"
-                        : "border-emerald-200 text-emerald-700 hover:bg-emerald-50"
+                        ? "bg-slate-900 text-white hover:bg-slate-800"
+                        : "border-slate-300 text-slate-700 hover:bg-slate-100"
                     }`}
                     onClick={() => setOnlyWithSalary((v) => !v)}
                   >
@@ -1569,8 +1633,8 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                     variant={onlyFresh ? "default" : "outline"}
                     className={`rounded-2xl ${
                       onlyFresh
-                        ? "bg-sky-600 text-white hover:bg-sky-700"
-                        : "border-sky-200 text-sky-700 hover:bg-sky-50"
+                        ? "bg-slate-900 text-white hover:bg-slate-800"
+                        : "border-slate-300 text-slate-700 hover:bg-slate-100"
                     }`}
                     onClick={() => setOnlyFresh((v) => !v)}
                   >
@@ -1580,7 +1644,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                   <Button
                     type="button"
                     variant="ghost"
-                    className="rounded-2xl text-amber-700 hover:bg-amber-50 hover:text-amber-800"
+                    className="rounded-2xl border border-slate-300 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
                     onClick={resetFilters}
                   >
                     <RefreshCw className="mr-2 h-4 w-4" />
@@ -1596,7 +1660,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                     <Button
                       onClick={exportFilteredExcel}
                       disabled={!filteredItems.length}
-                      className="rounded-2xl bg-indigo-600 text-white hover:bg-indigo-700"
+                      className="rounded-2xl bg-slate-900 text-white hover:bg-slate-800"
                     >
                       <Download className="mr-2 h-4 w-4" />
                       Export Excel
@@ -1605,7 +1669,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                       variant="outline"
                       onClick={exportFilteredCsv}
                       disabled={!filteredItems.length}
-                      className="rounded-2xl border-cyan-200 text-cyan-700 hover:bg-cyan-50"
+                      className="rounded-2xl border-slate-300 text-slate-700 hover:bg-slate-100"
                     >
                       <Download className="mr-2 h-4 w-4" />
                       Export CSV
@@ -1620,7 +1684,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
             </Card>
 
             {!isStatsHidden ? (
-              <Card className="order-1 rounded-3xl border-slate-200/70 shadow-sm">
+              <Card className="order-1 rounded-3xl border border-slate-200 bg-white shadow-sm shadow-slate-900/5">
                 <CardHeader>
                   <CardTitle className="flex items-center gap-2 text-lg"><BarChart3 className="h-5 w-5" /> Краткая сводка</CardTitle>
                   <CardDescription>Срез по текущим фильтрам.</CardDescription>
@@ -1644,7 +1708,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                 {!isStatsHidden ? (
                   <>
                     <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr] 2xl:grid-cols-[1fr_1fr]">
-                      <Card className="rounded-3xl border-slate-200/70 shadow-sm">
+                      <Card className="rounded-3xl border border-slate-200 bg-white shadow-sm shadow-slate-900/5">
                         <CardHeader>
                           <CardTitle>Распределение по группам</CardTitle>
                           <CardDescription>Что преобладает в текущей выборке.</CardDescription>
@@ -1661,7 +1725,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                         </CardContent>
                       </Card>
 
-                      <Card className="rounded-3xl border-slate-200/70 shadow-sm">
+                      <Card className="rounded-3xl border border-slate-200 bg-white shadow-sm shadow-slate-900/5">
                         <CardHeader>
                           <CardTitle>Топ районов / локаций</CardTitle>
                           <CardDescription>Сгруппировано по первому блоку в поле location.</CardDescription>
@@ -1681,7 +1745,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                       </Card>
                     </div>
 
-                    <Card className="rounded-3xl border-slate-200/70 shadow-sm">
+                    <Card className="rounded-3xl border border-slate-200 bg-white shadow-sm shadow-slate-900/5">
                       <CardHeader>
                         <CardTitle>Топ поисковых запросов</CardTitle>
                         <CardDescription>Какие формулировки дали больше резюме в текущем наборе.</CardDescription>
@@ -1701,16 +1765,16 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                 ) : null}
 
                 <Tabs defaultValue="list" className="space-y-6">
-                  <TabsList className="grid w-full grid-cols-2 rounded-2xl bg-blue-50 p-1">
+                  <TabsList className="grid w-full grid-cols-2 rounded-2xl border border-slate-200 bg-slate-100 p-1">
                     <TabsTrigger
                       value="list"
-                      className="rounded-2xl text-slate-600 data-[state=active]:bg-white data-[state=active]:text-blue-700 data-[state=active]:shadow-sm"
+                      className="rounded-2xl text-slate-600 data-[state=active]:bg-white data-[state=active]:text-slate-900 data-[state=active]:shadow-sm"
                     >
                       Список резюме
                     </TabsTrigger>
                     <TabsTrigger
                       value="detail"
-                      className="rounded-2xl text-slate-600 data-[state=active]:bg-white data-[state=active]:text-blue-700 data-[state=active]:shadow-sm"
+                      className="rounded-2xl text-slate-600 data-[state=active]:bg-white data-[state=active]:text-slate-900 data-[state=active]:shadow-sm"
                     >
                       Карточка резюме
                     </TabsTrigger>
@@ -1718,7 +1782,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
 
                   <TabsContent value="list" className="mt-0">
                     <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr] 2xl:grid-cols-[1.2fr_0.8fr]">
-                      <Card className="rounded-3xl border-slate-200/70 shadow-sm">
+                      <Card className="rounded-3xl border border-slate-200 bg-white shadow-sm shadow-slate-900/5">
                         <CardHeader>
                           <CardTitle>Найденные резюме</CardTitle>
                           <CardDescription>{filteredItems.length} записей после фильтрации.</CardDescription>
@@ -1739,7 +1803,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                         </CardContent>
                       </Card>
 
-                      <Card className="rounded-3xl border-slate-200/70 shadow-sm">
+                      <Card className="rounded-3xl border border-slate-200 bg-white shadow-sm shadow-slate-900/5">
                         <CardHeader>
                           <CardTitle>Быстрый просмотр</CardTitle>
                           <CardDescription>Выбери строку слева, чтобы увидеть детали.</CardDescription>
@@ -1749,7 +1813,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                             <div className="space-y-5">
                               <div>
                                 <div className="flex flex-wrap items-center gap-2">
-                                  <Badge className="rounded-full bg-indigo-600 text-white hover:bg-indigo-600">{selectedItem.groupLabel}</Badge>
+                                  <Badge className="rounded-full bg-slate-900 text-white hover:bg-slate-900">{selectedItem.groupLabel}</Badge>
                                   <Badge variant="outline" className={`rounded-full ${getPriorityBadgeClass(selectedItem.priorityLabel)}`}>{selectedItem.priorityLabelRu} · {selectedItem.relevanceScore}</Badge>
                                   <Badge variant="outline" className="rounded-full">стр. {selectedItem.page_found || "—"}</Badge>
                                 </div>
@@ -1811,7 +1875,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                   </TabsContent>
 
                   <TabsContent value="detail" className="mt-0">
-                    <Card className="rounded-3xl border-slate-200/70 shadow-sm">
+                    <Card className="rounded-3xl border border-slate-200 bg-white shadow-sm shadow-slate-900/5">
                       <CardHeader>
                         <CardTitle>Детальная карточка</CardTitle>
                         <CardDescription>Удобный формат для просмотра одной записи без лишнего шума.</CardDescription>
@@ -1820,7 +1884,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                         {selectedItem ? (
                           <div className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr] 2xl:grid-cols-[1.35fr_0.65fr]">
                             <div className="space-y-6">
-                              <div className="rounded-3xl bg-blue-700 p-6 text-white shadow-lg">
+                              <div className="rounded-3xl bg-slate-900 p-6 text-white shadow-lg shadow-slate-900/20">
                                 <div className="flex flex-wrap items-center gap-2">
                                   <Badge className="rounded-full border border-white/30 bg-white/20 text-white hover:bg-white/20">{selectedItem.groupLabel}</Badge>
                                   <Badge className="rounded-full border border-white/30 bg-white/20 text-white hover:bg-white/20">{selectedItem.keyword_query || "Без запроса"}</Badge>
@@ -1842,11 +1906,11 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                               </div>
 
                               <div className="grid gap-4 sm:grid-cols-2">
-                                <Card className="rounded-3xl border-slate-200/70">
+                                <Card className="rounded-3xl border border-slate-200 bg-white">
                                   <CardHeader className="pb-3"><CardTitle className="text-base">Позиция в выдаче</CardTitle></CardHeader>
                                   <CardContent className="text-sm text-slate-600">Найдена по запросу <span className="font-medium text-slate-900">{selectedItem.keyword_query || "—"}</span> на странице <span className="font-medium text-slate-900">{selectedItem.page_found || "—"}</span>.</CardContent>
                                 </Card>
-                                <Card className="rounded-3xl border-slate-200/70">
+                                <Card className="rounded-3xl border border-slate-200 bg-white">
                                   <CardHeader className="pb-3"><CardTitle className="text-base">Дата</CardTitle></CardHeader>
                                   <CardContent className="text-sm text-slate-600">{selectedItem.published_at || "Дата не указана"}</CardContent>
                                 </Card>
@@ -1854,21 +1918,21 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                             </div>
 
                             <div className="space-y-4">
-                              <Card className="rounded-3xl border-slate-200/70">
+                              <Card className="rounded-3xl border border-slate-200 bg-white">
                                 <CardHeader>
                                   <CardTitle className="text-base">Быстрые действия</CardTitle>
                                 </CardHeader>
                                 <CardContent className="space-y-3">
                                   <Button
                                     onClick={exportFilteredExcel}
-                                    className="w-full rounded-2xl bg-indigo-600 text-white hover:bg-indigo-700"
+                                    className="w-full rounded-2xl bg-slate-900 text-white hover:bg-slate-800"
                                   >
                                     Экспорт текущей выборки в Excel
                                   </Button>
                                   <Button
                                     variant="outline"
                                     onClick={exportFilteredCsv}
-                                    className="w-full rounded-2xl border-cyan-200 text-cyan-700 hover:bg-cyan-50"
+                                    className="w-full rounded-2xl border-slate-300 text-slate-700 hover:bg-slate-100"
                                   >
                                     Экспорт текущей выборки в CSV
                                   </Button>
@@ -1876,7 +1940,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                                     <Button
                                       asChild
                                       variant="outline"
-                                      className="w-full rounded-2xl border-blue-200 text-blue-700 hover:bg-blue-50"
+                                      className="w-full rounded-2xl border-slate-300 text-slate-700 hover:bg-slate-100"
                                     >
                                       <a href={selectedItem.detail_url} target="_blank" rel="noreferrer">Открыть исходную карточку</a>
                                     </Button>
@@ -1884,7 +1948,7 @@ export default function EnbekResumeDashboard({ user, showToast, apiBaseUrl, with
                                 </CardContent>
                               </Card>
 
-                              <Card className="rounded-3xl border-slate-200/70">
+                              <Card className="rounded-3xl border border-slate-200 bg-white">
                                 <CardHeader>
                                   <CardTitle className="text-base">Что можно улучшить дальше</CardTitle>
                                 </CardHeader>
