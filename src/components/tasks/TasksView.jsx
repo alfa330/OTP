@@ -298,18 +298,6 @@ styleTag.textContent = `
     padding-left: 8px;
   }
   .tv-task-row-meta > * { min-width: 0; }
-  .tv-task-row-meta .tv-badge {
-    background: transparent;
-    border-color: transparent;
-    border-radius: 0;
-    padding: 0;
-    font-size: 11.5px;
-    line-height: 1.2;
-  }
-  .tv-task-row-meta .tv-badge-blue,
-  .tv-task-row-meta .tv-badge-gray {
-    color: var(--ink-2);
-  }
   .tv-task-row-assignee-chip {
     display: inline-flex; align-items: center; gap: 5px;
     font-size: 12px; color: var(--ink-2);
@@ -579,22 +567,14 @@ styleTag.textContent = `
   .tv-close-btn:hover, .tv-icon-btn:hover:not(:disabled) {
     background: var(--border-strong); color: var(--ink); border-color: var(--border-strong);
   }
-  .tv-drawer-header-actions .tv-close-btn,
-  .tv-drawer-header-actions .tv-icon-btn {
-    background: transparent;
-    border-color: transparent;
-  }
-  .tv-drawer-header-actions .tv-close-btn:hover,
-  .tv-drawer-header-actions .tv-icon-btn:hover:not(:disabled) {
-    background: var(--bg);
-    border-color: var(--border);
-  }
   .tv-icon-btn:disabled {
     opacity: .55;
     cursor: not-allowed;
   }
   .tv-icon-btn-danger {
-    color: #be123c;
+    color: var(--rose);
+    border-color: #fecdd3;
+    background: #fff1f2;
   }
   .tv-icon-btn-danger:hover:not(:disabled) {
     background: #ffe4e6;
