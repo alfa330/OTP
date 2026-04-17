@@ -138,8 +138,8 @@ LMS_DEFAULT_PASS_THRESHOLD = float(os.getenv('LMS_DEFAULT_PASS_THRESHOLD', '80')
 LMS_DEFAULT_ATTEMPT_LIMIT = int(os.getenv('LMS_DEFAULT_ATTEMPT_LIMIT', '3'))
 LMS_CERTIFICATE_STORAGE = (os.getenv('LMS_CERTIFICATE_STORAGE') or 'db').strip().lower()
 LMS_CERTIFICATE_TEMPLATE_VERSION = (
-    (os.getenv('LMS_CERTIFICATE_TEMPLATE_VERSION') or 'bold_split_v4_raster_hq_logo_bg_v19_2026_04_17').strip()
-    or 'bold_split_v4_raster_hq_logo_bg_v19_2026_04_17'
+    (os.getenv('LMS_CERTIFICATE_TEMPLATE_VERSION') or 'bold_split_v4_raster_hq_logo_bg_v20_2026_04_17').strip()
+    or 'bold_split_v4_raster_hq_logo_bg_v20_2026_04_17'
 )
 try:
     LMS_CERTIFICATE_RASTER_SCALE = int(str(os.getenv('LMS_CERTIFICATE_RASTER_SCALE', '4')).strip() or '4')
@@ -15707,6 +15707,19 @@ def _lms_build_bold_split_certificate_html(certificate_number, learner_name, cou
         if full_logo_uri
         else "<div class=\"logo-v4-fallback\">iGroup</div>"
     )
+    signer_1_signature_path = _lms_certificate_signer_1_signature_path()
+    signer_1_signature_uri = ""
+    if signer_1_signature_path:
+        try:
+            from pathlib import Path
+            signer_1_signature_uri = Path(signer_1_signature_path).resolve().as_uri()
+        except Exception:
+            signer_1_signature_uri = str(signer_1_signature_path)
+    signer_1_signature_markup = (
+        f"<img class=\"sig-sign-img\" src=\"{_lms_escape_html(signer_1_signature_uri)}\" alt=\"signature\"/>"
+        if signer_1_signature_uri
+        else ""
+    )
     trainer_signature_path = _lms_certificate_trainer_signature_path()
     trainer_signature_uri = ""
     if trainer_signature_path:
@@ -15921,6 +15934,7 @@ body {{
       <div class=\"rp-bottom\">
         <div class=\"sig-group\">
           <div class=\"sig\">
+            <div class=\"sig-sign-wrap\">{signer_1_signature_markup}</div>
             <div class=\"sig-line\"></div>
             <div class=\"sig-name\">{sig_name_1}</div>
             <div class=\"sig-role\">{sig_role_1}</div>
@@ -16226,6 +16240,29 @@ def _lms_certificate_trainer_signature_path():
     return None
 
 
+@lru_cache(maxsize=1)
+def _lms_certificate_signer_1_signature_path():
+    custom_signature_path = str(os.getenv("LMS_CERTIFICATE_SIGNER_1_SIGNATURE_PATH") or "").strip()
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = []
+    if custom_signature_path:
+        candidates.append(custom_signature_path)
+    candidates.extend([
+        os.path.join(base_dir, "src", "components", "lms", "Yusupova-Moldir-sign.png"),
+        os.path.join(base_dir, "src", "components", "lms", "yusupova-moldir-sign.png"),
+        os.path.join(base_dir, "lms", "Yusupova-Moldir-sign.png"),
+        os.path.join(os.getcwd(), "src", "components", "lms", "Yusupova-Moldir-sign.png"),
+    ])
+
+    for candidate in candidates:
+        try:
+            if candidate and os.path.isfile(candidate):
+                return candidate
+        except Exception:
+            continue
+    return None
+
+
 def _lms_build_bold_split_certificate_pdf(certificate_number, learner_name, course_title, issued_at):
     if Image is None or ImageDraw is None or ImageFont is None:
         return None
@@ -16440,6 +16477,25 @@ def _lms_build_bold_split_certificate_pdf(certificate_number, learner_name, cour
     sig_role_1 = str(os.getenv("LMS_CERTIFICATE_SIGNER_1_ROLE") or "РУКОВОДИТЕЛЬ ПРОГРАММ").strip()
     sig_name_2 = str(os.getenv("LMS_CERTIFICATE_SIGNER_2_NAME") or "Рамазан Алдияр").strip()
     sig_role_2 = str(os.getenv("LMS_CERTIFICATE_SIGNER_2_ROLE") or "ТРЕНЕР").strip()
+
+    signer_1_signature_path = _lms_certificate_signer_1_signature_path()
+    if signer_1_signature_path:
+        try:
+            with Image.open(signer_1_signature_path) as signer_1_sig_source:
+                signer_1_sig_rgba = signer_1_sig_source.convert("RGBA")
+                resample = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
+                src_w, src_h = signer_1_sig_rgba.size
+                max_sig_w = max(1, sig_line_w - S(8))
+                max_sig_h = S(34)
+                sig_scale = min(max_sig_w / float(max(1, src_w)), max_sig_h / float(max(1, src_h)))
+                dst_sig_w = max(1, int(round(src_w * sig_scale)))
+                dst_sig_h = max(1, int(round(src_h * sig_scale)))
+                signer_1_sig_rgba = signer_1_sig_rgba.resize((dst_sig_w, dst_sig_h), resample=resample)
+                sig_img_x = sig1_x + int(round((sig_line_w - dst_sig_w) / 2.0))
+                sig_img_y = sig_top - dst_sig_h - S(4)
+                image.alpha_composite(signer_1_sig_rgba, (sig_img_x, sig_img_y))
+        except Exception:
+            logging.exception("LMS certificate signer 1 signature render failed")
 
     draw.line((sig1_x, sig_top, sig1_x + sig_line_w, sig_top), fill=col_k, width=max(1, S(1)))
     draw.text((sig1_x, sig_top + S(8)), sig_name_1, font=sig_name_font, fill=col_k)
