@@ -944,6 +944,7 @@ const TaskRow = React.memo(({ task, onClick }) => {
 const TaskDrawer = React.memo(({
   task, onClose, actionLoadingKey,
   getActionButtons, openCompleteModal, openStatusModal, updateStatus, downloadAttachment,
+  onEditTask, onDeleteTask,
 }) => {
   const sm = STATUS_META[task.status] || { label: task.status, badge: 'tv-badge-gray' };
   const tm = TAG_META[task.tag]       || { label: task.tag || '—', badge: 'tv-badge-gray' };
@@ -1096,6 +1097,8 @@ const TaskDrawer = React.memo(({
                   onClick={() => {
                     if (btn.action === 'completed') { openCompleteModal(task); return; }
                     if (btn.action === 'returned' || btn.action === 'reopened') { openStatusModal(task, btn.action); return; }
+                    if (btn.action === 'edit') { onEditTask(task); return; }
+                    if (btn.action === 'delete') { onDeleteTask(task); return; }
                     updateStatus(task.id, btn.action);
                   }}
                 >
@@ -1145,6 +1148,8 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
   const [isPersonTasksLoading, setIsPersonTasksLoading] = useState(false);
 
   const [createOpen,        setCreateOpen]        = useState(false);
+  const [editModal,         setEditModal]         = useState({ open: false, taskId: null, taskSubject: '' });
+  const [editForm,          setEditForm]          = useState({ subject: '', description: '', tag: 'task', assignedTo: '' });
   const [drawerTask,        setDrawerTask]        = useState(null);
   const [completeModal,     setCompleteModal]     = useState({ open: false, taskId: null, taskSubject: '' });
   const [statusModal,       setStatusModal]       = useState({ open: false, taskId: null, action: '', taskSubject: '' });
@@ -1436,6 +1441,82 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     } finally { setIsCreateLoading(false); }
   };
 
+  /* ── Edit / Delete ── */
+  const openEditModal = useCallback((task) => {
+    if (!task?.id) return;
+    setEditForm({
+      subject: task?.subject || '',
+      description: task?.description || '',
+      tag: task?.tag || 'task',
+      assignedTo: String(task?.assignee?.id || '')
+    });
+    setEditModal({
+      open: true,
+      taskId: task.id,
+      taskSubject: task.subject || ''
+    });
+  }, []);
+
+  const closeEditModal = useCallback(() => {
+    setEditModal({ open: false, taskId: null, taskSubject: '' });
+    setEditForm({ subject: '', description: '', tag: 'task', assignedTo: '' });
+  }, []);
+
+  const submitEditTask = useCallback(async (e) => {
+    e.preventDefault();
+    if (!editModal.taskId) return;
+    if (!editForm.subject.trim()) { notify('Укажите тему задачи', 'error'); return; }
+    if (!editForm.assignedTo) { notify('Выберите исполнителя', 'error'); return; }
+
+    const key = `${editModal.taskId}:edit`;
+    setActionLoadingKey(key);
+    try {
+      const payload = {
+        subject: editForm.subject.trim(),
+        description: editForm.description.trim(),
+        tag: editForm.tag,
+        assigned_to: Number(editForm.assignedTo)
+      };
+      const res = await axios.patch(
+        `${apiBaseUrl}/api/tasks/${editModal.taskId}`,
+        payload,
+        { headers: buildHeaders() }
+      );
+      notify(res?.data?.message || 'Задача обновлена');
+      if (res?.data?.warning) notify(res.data.warning, 'error');
+      closeEditModal();
+      await refreshTasksData();
+    } catch (e) {
+      notify(e?.response?.data?.error || 'Не удалось обновить задачу', 'error');
+    } finally {
+      setActionLoadingKey('');
+    }
+  }, [editModal, editForm, apiBaseUrl, buildHeaders, notify, closeEditModal, refreshTasksData]);
+
+  const deleteTask = useCallback(async (task) => {
+    if (!task?.id) return;
+    const title = (task.subject || `#${task.id}`).trim();
+    const ok = window.confirm(`Удалить задачу "${title}"?\nЭто действие нельзя отменить.`);
+    if (!ok) return;
+
+    const key = `${task.id}:delete`;
+    setActionLoadingKey(key);
+    try {
+      const res = await axios.delete(
+        `${apiBaseUrl}/api/tasks/${task.id}`,
+        { headers: buildHeaders() }
+      );
+      notify(res?.data?.message || 'Задача удалена');
+      if (res?.data?.warning) notify(res.data.warning, 'error');
+      setDrawerTask(prev => (prev?.id === task.id ? null : prev));
+      await refreshTasksData();
+    } catch (e) {
+      notify(e?.response?.data?.error || 'Не удалось удалить задачу', 'error');
+    } finally {
+      setActionLoadingKey('');
+    }
+  }, [apiBaseUrl, buildHeaders, notify, refreshTasksData]);
+
   /* ── Update status ── */
   const updateStatus = useCallback(async (taskId, action, options = {}) => {
     const comment = String(options?.comment || '').trim();
@@ -1557,6 +1638,8 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     const assigneeId = Number(task?.assignee?.id || 0);
     const creatorId  = Number(task?.creator?.id  || 0);
     const isAssignee = assigneeId === currentUserId;
+    const isCreator  = creatorId === currentUserId;
+    const isSuperAdmin = normalizeRole(currentUserRole) === 'super_admin';
     const canReview  = !isAssignee && (isAdminLikeRole(currentUserRole) || creatorId === currentUserId || isSupervisorRole(currentUserRole));
     const s = task?.status;
     const btns = [];
@@ -1570,6 +1653,10 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     }
     if (canReview && s === 'accepted')
       btns.push({ action: 'reopened', label: 'Возобновить', cls: 'tv-btn-ghost' });
+    if (isCreator)
+      btns.push({ action: 'edit', label: 'Редактировать', cls: 'tv-btn-ghost' });
+    if (isSuperAdmin)
+      btns.push({ action: 'delete', label: 'Удалить', cls: 'tv-btn-rose' });
     return btns;
   }, [currentUserId, currentUserRole]);
 
@@ -1577,6 +1664,7 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
   const statusModalTitle = isReturnAction ? 'Возврат на доработку' : 'Возобновление задачи';
   const statusModalCommentLabel = isReturnAction ? 'Комментарий по доработке' : 'Комментарий к возобновлению';
   const statusModalSubmitLabel = isReturnAction ? 'Вернуть на доработку' : 'Возобновить задачу';
+  const editModalLoadingKey = `${editModal.taskId}:edit`;
   const statusModalLoadingKey = `${statusModal.taskId}:${statusModal.action}`;
 
   /* ── Render helpers ── */
@@ -1892,6 +1980,8 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
           openStatusModal={openStatusModal}
           updateStatus={updateStatus}
           downloadAttachment={downloadAttachment}
+          onEditTask={openEditModal}
+          onDeleteTask={deleteTask}
         />
       )}
 
@@ -1959,6 +2049,101 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                 <button type="submit" className="tv-btn tv-btn-primary"
                   disabled={isCreateLoading || isRecipientsLoading}>
                   {isCreateLoading ? 'Создаю...' : 'Поставить задачу'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Modal */}
+      {editModal.open && (
+        <div className="tv-modal-overlay" onClick={closeEditModal}>
+          <div className="tv-modal" onClick={e => e.stopPropagation()}>
+            <div className="tv-modal-header">
+              <h3 className="tv-modal-title">Редактирование задачи</h3>
+              <button className="tv-close-btn" onClick={closeEditModal}><CloseIcon /></button>
+            </div>
+            <form onSubmit={submitEditTask}>
+              <div className="tv-modal-body">
+                {editModal.taskSubject && (
+                  <div style={{
+                    background: '#f8f7f4', border: '1px solid var(--border)',
+                    borderRadius: 'var(--radius-sm)', padding: '10px 14px',
+                    fontSize: 13, color: 'var(--ink-2)', marginBottom: 16,
+                    display: 'flex', gap: 8, alignItems: 'flex-start',
+                  }}>
+                    <span style={{ color: 'var(--ink-3)', marginTop: 1 }}>📌</span>
+                    <span><strong style={{ color: 'var(--ink)' }}>{editModal.taskSubject}</strong></span>
+                  </div>
+                )}
+                <div className="tv-form-grid">
+                  <div className="tv-form-field">
+                    <label>Тема *</label>
+                    <input
+                      className="tv-input"
+                      value={editForm.subject}
+                      maxLength={255}
+                      disabled={!!actionLoadingKey}
+                      autoFocus
+                      onChange={e => setEditForm(p => ({ ...p, subject: e.target.value }))}
+                    />
+                  </div>
+                  <div className="tv-form-field">
+                    <label>Описание</label>
+                    <textarea
+                      className="tv-textarea"
+                      value={editForm.description}
+                      disabled={!!actionLoadingKey}
+                      onChange={e => setEditForm(p => ({ ...p, description: e.target.value }))}
+                    />
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                    <div className="tv-form-field">
+                      <label>Тег</label>
+                      <select
+                        className="tv-select"
+                        value={editForm.tag}
+                        disabled={!!actionLoadingKey}
+                        onChange={e => setEditForm(p => ({ ...p, tag: e.target.value }))}
+                      >
+                        {TAG_OPTIONS.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+                      </select>
+                    </div>
+                    <div className="tv-form-field">
+                      <label>Исполнитель *</label>
+                      <select
+                        className="tv-select"
+                        value={editForm.assignedTo}
+                        disabled={!!actionLoadingKey || isRecipientsLoading}
+                        onChange={e => setEditForm(p => ({ ...p, assignedTo: e.target.value }))}
+                      >
+                        <option value="">{isRecipientsLoading ? 'Загрузка...' : 'Выберите сотрудника'}</option>
+                        {recipients.map(r => (
+                          <option key={r.id} value={r.id}>
+                            {r.name} ({ROLE_LABELS[r.role] || r.role})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="tv-modal-footer">
+                <button
+                  type="button"
+                  className="tv-btn tv-btn-ghost"
+                  disabled={!!actionLoadingKey}
+                  onClick={closeEditModal}
+                >
+                  Отмена
+                </button>
+                <button
+                  type="submit"
+                  className="tv-btn tv-btn-primary"
+                  disabled={!!actionLoadingKey || isRecipientsLoading}
+                >
+                  {actionLoadingKey === editModalLoadingKey ? 'Сохраняю...' : 'Сохранить изменения'}
                 </button>
               </div>
             </form>

@@ -1762,6 +1762,53 @@ def _build_task_status_notification_html(
     return message
 
 
+def _build_task_event_notification_html(event, task_ctx, actor_name, changed_fields=None):
+    event_norm = (event or '').strip().lower()
+    tag_label = TASK_TAG_LABELS.get((task_ctx.get('tag') or 'task').strip().lower(), 'Задача')
+    subject_safe = _escape_telegram_html(task_ctx.get('subject') or f"Задача #{task_ctx.get('id')}", 220)
+    tag_safe = _escape_telegram_html(tag_label, 60)
+    actor_safe = _escape_telegram_html(actor_name or 'Сотрудник', 80)
+
+    header_map = {
+        'edited': '✏️ Задача обновлена',
+        'deleted': '🗑️ Задача удалена'
+    }
+
+    lines = [
+        f"<b>{header_map.get(event_norm, '🔔 Обновление задачи')}</b>",
+        "",
+        f"<b>Тип:</b> {tag_safe}",
+        f"<b>Тема:</b> {subject_safe}",
+        f"<b>Кто изменил:</b> {actor_safe}"
+    ]
+
+    if event_norm == 'edited':
+        labels = {
+            'subject': 'тема',
+            'description': 'описание',
+            'tag': 'тип',
+            'assigned_to': 'исполнитель'
+        }
+        changed_items = []
+        for item in (changed_fields or []):
+            key = str(item or '').strip()
+            if not key:
+                continue
+            changed_items.append(labels.get(key, key))
+        if changed_items:
+            lines.append(f"<b>Изменено:</b> {_escape_telegram_html(', '.join(changed_items), 120)}")
+
+    message = "\n".join(lines)
+    if len(message) > TELEGRAM_MAX_MESSAGE_CHARS:
+        message = message[:TELEGRAM_MAX_MESSAGE_CHARS]
+    return message
+
+
+def _collect_task_assignee_recipients(task_ctx, actor_user_id):
+    recipients = _collect_task_notification_recipients(task_ctx, actor_user_id)
+    return [item for item in recipients if (item.get('kind') or '').strip() == 'assignee']
+
+
 def _send_task_completion_attachments_to_telegram(chat_id, task_subject, attachments):
     warnings = []
     if not chat_id or not attachments:
@@ -2001,6 +2048,36 @@ def _cleanup_task_uploaded_blobs(gcs_bucket, uploaded_blob_paths):
             gcs_bucket.blob(uploaded_path).delete()
         except Exception:
             pass
+
+
+def _delete_task_attachment_blobs_from_gcs(attachments):
+    warnings = []
+    if not attachments:
+        return warnings
+
+    try:
+        gcs_client = get_gcs_client()
+    except Exception as storage_error:
+        return [f"Failed to initialize GCS client: {storage_error}"]
+
+    for attachment in attachments:
+        storage_type = (attachment.get('storage_type') or 'gcs').strip().lower() or 'gcs'
+        if storage_type != 'gcs':
+            continue
+
+        bucket_name = (attachment.get('gcs_bucket') or '').strip()
+        blob_path = (attachment.get('gcs_blob_path') or '').strip()
+        file_name = (attachment.get('file_name') or 'attachment').strip() or 'attachment'
+        if not bucket_name or not blob_path:
+            warnings.append(f"Missing storage metadata for '{file_name}'")
+            continue
+
+        try:
+            gcs_client.bucket(bucket_name).blob(blob_path).delete()
+        except Exception as delete_error:
+            warnings.append(f"Failed to delete '{file_name}' from GCS: {delete_error}")
+
+    return warnings
 
 
 def _upload_task_attachments_to_gcs(files, stage='initial'):
@@ -8189,6 +8266,177 @@ def handle_tasks():
     except Exception as e:
         logging.error(f"Error in handle_tasks: {e}")
         return jsonify({"error": f"Internal server error"}), 500
+
+
+@app.route('/api/tasks/<int:task_id>', methods=['PATCH', 'DELETE', 'OPTIONS'])
+@require_api_key
+def handle_single_task(task_id):
+    try:
+        requester_id, requester, guard_response, guard_status = _task_route_guard()
+        if guard_response is not None:
+            return guard_response, guard_status
+
+        requester_role = requester[3]
+        requester_role_norm = _normalize_user_role(requester_role)
+
+        if request.method == 'PATCH':
+            data = request.get_json() or {}
+            has_subject = 'subject' in data
+            has_description = 'description' in data
+            has_tag = 'tag' in data
+            has_assigned_to = 'assigned_to' in data
+
+            if not any([has_subject, has_description, has_tag, has_assigned_to]):
+                return jsonify({"error": "No fields to update"}), 400
+
+            subject = data.get('subject') if has_subject else None
+            description = data.get('description') if has_description else None
+            tag = data.get('tag') if has_tag else None
+            assigned_to = None
+
+            if has_assigned_to:
+                assigned_to_raw = data.get('assigned_to')
+                try:
+                    assigned_to = int(assigned_to_raw)
+                except Exception:
+                    return jsonify({"error": "assigned_to must be an integer"}), 400
+
+                allowed_recipients = db.get_task_recipients(requester_id, requester_role)
+                allowed_ids = {int(item['id']) for item in allowed_recipients if item.get('id') is not None}
+                if assigned_to not in allowed_ids:
+                    return jsonify({"error": "You cannot assign a task to this user"}), 403
+
+            try:
+                result = db.edit_task(
+                    task_id=task_id,
+                    requester_id=requester_id,
+                    requester_role=requester_role,
+                    subject=subject if has_subject else None,
+                    description=description if has_description else None,
+                    tag=tag if has_tag else None,
+                    assigned_to=assigned_to if has_assigned_to else None
+                )
+            except ValueError as value_error:
+                code = str(value_error)
+                if code == 'TASK_NOT_FOUND':
+                    return jsonify({"error": "Task not found"}), 404
+                if code == 'NOTHING_TO_UPDATE':
+                    return jsonify({"error": "No fields to update"}), 400
+                if code == 'SUBJECT_REQUIRED':
+                    return jsonify({"error": "subject is required"}), 400
+                if code == 'INVALID_TAG':
+                    return jsonify({"error": "Invalid tag"}), 400
+                if code == 'INVALID_ASSIGNED_TO':
+                    return jsonify({"error": "Invalid assigned_to value"}), 400
+                return jsonify({"error": code}), 400
+            except PermissionError as permission_error:
+                code = str(permission_error)
+                if code == 'ONLY_CREATOR_CAN_EDIT':
+                    return jsonify({"error": "Only task creator can edit this task"}), 403
+                if code == 'TASK_FORBIDDEN':
+                    return jsonify({"error": "You do not have access to this task"}), 403
+                return jsonify({"error": code}), 403
+
+            telegram_warnings = []
+            try:
+                if result.get('updated'):
+                    task_ctx = _fetch_task_notification_context(task_id)
+                    if task_ctx:
+                        actor_name = requester[2] if requester and len(requester) > 2 else 'Сотрудник'
+                        recipients = _collect_task_assignee_recipients(task_ctx, requester_id)
+                        for recipient in recipients:
+                            message_html = _build_task_event_notification_html(
+                                event='edited',
+                                task_ctx=task_ctx,
+                                actor_name=actor_name,
+                                changed_fields=result.get('changed_fields') or []
+                            )
+                            response = _send_telegram_text_message(
+                                recipient.get('chat_id'),
+                                message_html,
+                                parse_mode='HTML'
+                            )
+                            if response.status_code != 200:
+                                recipient_name = recipient.get('name') or 'исполнитель'
+                                telegram_warnings.append(
+                                    f"Не удалось отправить уведомление ({recipient_name}): {_get_telegram_error_text(response)}"
+                                )
+            except Exception as notify_error:
+                telegram_warnings.append(f"Ошибка отправки Telegram-уведомления: {notify_error}")
+
+            response_payload = {
+                "status": "success",
+                "message": "Task updated successfully" if result.get('updated') else "No changes applied",
+                "task": result
+            }
+            if telegram_warnings:
+                response_payload["warning"] = _truncate_for_telegram(" | ".join(telegram_warnings), 1000)
+            return jsonify(response_payload), 200
+
+        # DELETE
+        if requester_role_norm != 'super_admin':
+            return jsonify({"error": "Only super_admin can delete tasks"}), 403
+
+        task_ctx_before_delete = _fetch_task_notification_context(task_id)
+
+        try:
+            delete_result = db.delete_task(
+                task_id=task_id,
+                requester_id=requester_id,
+                requester_role=requester_role
+            )
+        except ValueError as value_error:
+            code = str(value_error)
+            if code == 'TASK_NOT_FOUND':
+                return jsonify({"error": "Task not found"}), 404
+            return jsonify({"error": code}), 400
+        except PermissionError as permission_error:
+            code = str(permission_error)
+            if code == 'ONLY_SUPER_ADMIN':
+                return jsonify({"error": "Only super_admin can delete tasks"}), 403
+            if code == 'TASK_FORBIDDEN':
+                return jsonify({"error": "You do not have access to this task"}), 403
+            return jsonify({"error": code}), 403
+
+        warnings = []
+        warnings.extend(_delete_task_attachment_blobs_from_gcs(delete_result.get('attachments') or []))
+
+        try:
+            if task_ctx_before_delete:
+                actor_name = requester[2] if requester and len(requester) > 2 else 'Сотрудник'
+                recipients = _collect_task_assignee_recipients(task_ctx_before_delete, requester_id)
+                for recipient in recipients:
+                    message_html = _build_task_event_notification_html(
+                        event='deleted',
+                        task_ctx=task_ctx_before_delete,
+                        actor_name=actor_name,
+                        changed_fields=[]
+                    )
+                    response = _send_telegram_text_message(
+                        recipient.get('chat_id'),
+                        message_html,
+                        parse_mode='HTML'
+                    )
+                    if response.status_code != 200:
+                        recipient_name = recipient.get('name') or 'исполнитель'
+                        warnings.append(
+                            f"Не удалось отправить уведомление ({recipient_name}): {_get_telegram_error_text(response)}"
+                        )
+        except Exception as notify_error:
+            warnings.append(f"Ошибка отправки Telegram-уведомления: {notify_error}")
+
+        response_payload = {
+            "status": "success",
+            "message": "Task deleted successfully",
+            "task_id": task_id
+        }
+        if warnings:
+            response_payload["warning"] = _truncate_for_telegram(" | ".join(warnings), 1000)
+        return jsonify(response_payload), 200
+
+    except Exception as e:
+        logging.error(f"Error in handle_single_task: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/tasks/<int:task_id>/status', methods=['POST', 'OPTIONS'])
