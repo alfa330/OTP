@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios';
 import { RefreshCw } from 'lucide-react';
 import { normalizeRole, isAdminLikeRole, isSupervisorRole } from '../../utils/roles';
+import FaIcon from '../common/FaIcon';
 
 /* ─── Google Fonts ─── */
 const fontLink = document.createElement('link');
@@ -533,13 +534,36 @@ styleTag.textContent = `
   }
   .tv-drawer-badges { display: flex; flex-wrap: wrap; gap: 5px; }
 
-  .tv-close-btn {
+  .tv-drawer-header-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+  .tv-close-btn, .tv-icon-btn {
     width: 32px; height: 32px; border-radius: 8px; flex-shrink: 0;
     background: var(--bg); border: 1px solid var(--border); cursor: pointer;
     display: flex; align-items: center; justify-content: center;
-    color: var(--ink-2); transition: all .15s; margin-top: 1px;
+    color: var(--ink-2); transition: all .15s;
   }
-  .tv-close-btn:hover { background: var(--border-strong); color: var(--ink); border-color: var(--border-strong); }
+  .tv-close-btn:hover, .tv-icon-btn:hover:not(:disabled) {
+    background: var(--border-strong); color: var(--ink); border-color: var(--border-strong);
+  }
+  .tv-icon-btn:disabled {
+    opacity: .55;
+    cursor: not-allowed;
+  }
+  .tv-icon-btn-danger {
+    color: var(--rose);
+    border-color: #fecdd3;
+    background: #fff1f2;
+  }
+  .tv-icon-btn-danger:hover:not(:disabled) {
+    background: #ffe4e6;
+    border-color: #fecdd3;
+    color: #be123c;
+  }
 
   .tv-drawer-body {
     flex: 1; overflow-y: auto; padding: 20px;
@@ -952,6 +976,9 @@ const TaskDrawer = React.memo(({
   const compAttachments = Array.isArray(task.completion_attachments) ? task.completion_attachments : [];
   const history         = Array.isArray(task.history)                ? task.history                : [];
   const btns            = getActionButtons(task);
+  const editBtn         = btns.find((btn) => btn.action === 'edit');
+  const deleteBtn       = btns.find((btn) => btn.action === 'delete');
+  const footerBtns      = btns.filter((btn) => btn.action !== 'edit' && btn.action !== 'delete');
 
   // ESC key handler
   useEffect(() => {
@@ -972,9 +999,39 @@ const TaskDrawer = React.memo(({
               <span className={`tv-badge ${tm.badge}`}>{tm.label}</span>
             </div>
           </div>
-          <button className="tv-close-btn" onClick={onClose} aria-label="Закрыть (Esc)">
-            <CloseIcon />
-          </button>
+          <div className="tv-drawer-header-actions">
+            {editBtn && (
+              <button
+                type="button"
+                className="tv-icon-btn"
+                title={editBtn.label}
+                aria-label={editBtn.label}
+                disabled={!!actionLoadingKey}
+                onClick={() => onEditTask(task)}
+              >
+                {actionLoadingKey === `${task.id}:edit`
+                  ? <FaIcon className="fa-circle-notch fa-spin" />
+                  : <FaIcon className="fa-pen" />}
+              </button>
+            )}
+            {deleteBtn && (
+              <button
+                type="button"
+                className="tv-icon-btn tv-icon-btn-danger"
+                title={deleteBtn.label}
+                aria-label={deleteBtn.label}
+                disabled={!!actionLoadingKey}
+                onClick={() => onDeleteTask(task)}
+              >
+                {actionLoadingKey === `${task.id}:delete`
+                  ? <FaIcon className="fa-circle-notch fa-spin" />
+                  : <FaIcon className="fa-trash-alt" />}
+              </button>
+            )}
+            <button className="tv-close-btn" type="button" onClick={onClose} aria-label="Закрыть (Esc)">
+              <CloseIcon />
+            </button>
+          </div>
         </div>
 
         <div className="tv-drawer-body">
@@ -1081,12 +1138,12 @@ const TaskDrawer = React.memo(({
           )}
         </div>
 
-        {btns.length > 0 && (
+        {footerBtns.length > 0 && (
           <div className="tv-drawer-footer">
             <span style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--ink-3)' }}>
               <span className="tv-kbd">Esc</span> закрыть
             </span>
-            {btns.map(btn => {
+            {footerBtns.map(btn => {
               const key     = `${task.id}:${btn.action}`;
               const loading = actionLoadingKey === key;
               return (
@@ -1097,8 +1154,6 @@ const TaskDrawer = React.memo(({
                   onClick={() => {
                     if (btn.action === 'completed') { openCompleteModal(task); return; }
                     if (btn.action === 'returned' || btn.action === 'reopened') { openStatusModal(task, btn.action); return; }
-                    if (btn.action === 'edit') { onEditTask(task); return; }
-                    if (btn.action === 'delete') { onDeleteTask(task); return; }
                     updateStatus(task.id, btn.action);
                   }}
                 >
