@@ -290,15 +290,39 @@ styleTag.textContent = `
     font-weight: 700;
   }
   .tv-task-row-meta {
-    display: flex;
+    display: grid;
+    grid-template-columns: 108px 122px 196px 112px 12px;
     align-items: center;
-    gap: 7px;
+    column-gap: 8px;
     flex-shrink: 0;
     padding-left: 8px;
+  }
+  .tv-task-row-meta > * { min-width: 0; }
+  .tv-task-row-meta .tv-badge {
+    background: transparent;
+    border-color: transparent;
+    border-radius: 0;
+    padding: 0;
+    font-size: 11.5px;
+    line-height: 1.2;
+  }
+  .tv-task-row-meta .tv-badge-blue,
+  .tv-task-row-meta .tv-badge-gray {
+    color: var(--ink-2);
   }
   .tv-task-row-assignee-chip {
     display: inline-flex; align-items: center; gap: 5px;
     font-size: 12px; color: var(--ink-2);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tv-task-row-assignee-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .tv-avatar-xs {
     width: 20px; height: 20px; border-radius: 50%;
@@ -316,7 +340,12 @@ styleTag.textContent = `
     object-fit: cover;
     display: block;
   }
-  .tv-task-row-date { font-size: 11.5px; color: var(--ink-3); }
+  .tv-task-row-date {
+    font-size: 11.5px;
+    color: var(--ink-3);
+    white-space: nowrap;
+    text-align: left;
+  }
   .tv-task-count {
     display: inline-flex; align-items: center; justify-content: center;
     min-width: 20px; height: 18px; padding: 0 5px;
@@ -550,14 +579,22 @@ styleTag.textContent = `
   .tv-close-btn:hover, .tv-icon-btn:hover:not(:disabled) {
     background: var(--border-strong); color: var(--ink); border-color: var(--border-strong);
   }
+  .tv-drawer-header-actions .tv-close-btn,
+  .tv-drawer-header-actions .tv-icon-btn {
+    background: transparent;
+    border-color: transparent;
+  }
+  .tv-drawer-header-actions .tv-close-btn:hover,
+  .tv-drawer-header-actions .tv-icon-btn:hover:not(:disabled) {
+    background: var(--bg);
+    border-color: var(--border);
+  }
   .tv-icon-btn:disabled {
     opacity: .55;
     cursor: not-allowed;
   }
   .tv-icon-btn-danger {
-    color: var(--rose);
-    border-color: #fecdd3;
-    background: #fff1f2;
+    color: #be123c;
   }
   .tv-icon-btn-danger:hover:not(:disabled) {
     background: #ffe4e6;
@@ -723,6 +760,7 @@ styleTag.textContent = `
     .tv-stats-strip { grid-template-columns: repeat(2, 1fr); }
     .tv-drawer { width: 100vw; }
     .tv-info-grid { grid-template-columns: 1fr; }
+    .tv-task-row-meta { grid-template-columns: auto auto 12px; column-gap: 6px; padding-left: 6px; }
     .tv-task-row-assignee-chip, .tv-task-row-flow, .tv-task-row-date { display: none; }
     .tv-pagination { flex-wrap: wrap; justify-content: center; }
     .tv-person-row { flex-wrap: wrap; }
@@ -955,7 +993,7 @@ const TaskRow = React.memo(({ task, onClick }) => {
         <span className={`tv-badge ${sm.badge}`}>{sm.label}</span>
         <span className="tv-task-row-assignee-chip">
           <AvatarCircle className="tv-avatar-xs" name={assigneeName} avatarUrl={task?.assignee?.avatar_url || ''} />
-          {assigneeName}
+          <span className="tv-task-row-assignee-name">{assigneeName}</span>
         </span>
         <span className="tv-task-row-date">{fmt(task.created_at)}</span>
         <ChevronRight />
@@ -1204,6 +1242,7 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
 
   const [createOpen,        setCreateOpen]        = useState(false);
   const [editModal,         setEditModal]         = useState({ open: false, taskId: null, taskSubject: '' });
+  const [deleteModal,       setDeleteModal]       = useState({ open: false, taskId: null, taskSubject: '' });
   const [editForm,          setEditForm]          = useState({ subject: '', description: '', tag: 'task', assignedTo: '' });
   const [drawerTask,        setDrawerTask]        = useState(null);
   const [completeModal,     setCompleteModal]     = useState({ open: false, taskId: null, taskSubject: '' });
@@ -1548,29 +1587,42 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     }
   }, [editModal, editForm, apiBaseUrl, buildHeaders, notify, closeEditModal, refreshTasksData]);
 
-  const deleteTask = useCallback(async (task) => {
+  const openDeleteModal = useCallback((task) => {
     if (!task?.id) return;
-    const title = (task.subject || `#${task.id}`).trim();
-    const ok = window.confirm(`Удалить задачу "${title}"?\nЭто действие нельзя отменить.`);
-    if (!ok) return;
+    setDeleteModal({
+      open: true,
+      taskId: task.id,
+      taskSubject: (task.subject || `#${task.id}`).trim(),
+    });
+  }, []);
 
-    const key = `${task.id}:delete`;
+  const closeDeleteModal = useCallback(() => {
+    setDeleteModal({ open: false, taskId: null, taskSubject: '' });
+  }, []);
+
+  const submitDeleteTask = useCallback(async (e) => {
+    if (e?.preventDefault) e.preventDefault();
+    if (!deleteModal.taskId) return;
+
+    const taskId = deleteModal.taskId;
+    const key = `${taskId}:delete`;
     setActionLoadingKey(key);
     try {
       const res = await axios.delete(
-        `${apiBaseUrl}/api/tasks/${task.id}`,
+        `${apiBaseUrl}/api/tasks/${taskId}`,
         { headers: buildHeaders() }
       );
       notify(res?.data?.message || 'Задача удалена');
       if (res?.data?.warning) notify(res.data.warning, 'error');
-      setDrawerTask(prev => (prev?.id === task.id ? null : prev));
+      closeDeleteModal();
+      setDrawerTask(prev => (prev?.id === taskId ? null : prev));
       await refreshTasksData();
     } catch (e) {
       notify(e?.response?.data?.error || 'Не удалось удалить задачу', 'error');
     } finally {
       setActionLoadingKey('');
     }
-  }, [apiBaseUrl, buildHeaders, notify, refreshTasksData]);
+  }, [deleteModal.taskId, apiBaseUrl, buildHeaders, notify, closeDeleteModal, refreshTasksData]);
 
   /* ── Update status ── */
   const updateStatus = useCallback(async (taskId, action, options = {}) => {
@@ -1720,6 +1772,7 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
   const statusModalCommentLabel = isReturnAction ? 'Комментарий по доработке' : 'Комментарий к возобновлению';
   const statusModalSubmitLabel = isReturnAction ? 'Вернуть на доработку' : 'Возобновить задачу';
   const editModalLoadingKey = `${editModal.taskId}:edit`;
+  const deleteModalLoadingKey = `${deleteModal.taskId}:delete`;
   const statusModalLoadingKey = `${statusModal.taskId}:${statusModal.action}`;
 
   /* ── Render helpers ── */
@@ -2036,7 +2089,7 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
           updateStatus={updateStatus}
           downloadAttachment={downloadAttachment}
           onEditTask={openEditModal}
-          onDeleteTask={deleteTask}
+          onDeleteTask={openDeleteModal}
         />
       )}
 
@@ -2199,6 +2252,63 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                   disabled={!!actionLoadingKey || isRecipientsLoading}
                 >
                   {actionLoadingKey === editModalLoadingKey ? 'Сохраняю...' : 'Сохранить изменения'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Confirm Modal */}
+      {deleteModal.open && (
+        <div className="tv-modal-overlay" onClick={closeDeleteModal}>
+          <div className="tv-modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 500 }}>
+            <div className="tv-modal-header">
+              <h3 className="tv-modal-title">Подтверждение удаления</h3>
+              <button className="tv-close-btn" type="button" onClick={closeDeleteModal} disabled={!!actionLoadingKey}>
+                <CloseIcon />
+              </button>
+            </div>
+            <form onSubmit={submitDeleteTask}>
+              <div className="tv-modal-body">
+                <div style={{
+                  background: '#fff1f2',
+                  border: '1px solid #fecdd3',
+                  borderRadius: 'var(--radius-sm)',
+                  padding: '11px 13px',
+                  fontSize: 13,
+                  color: '#9f1239',
+                  marginBottom: 12,
+                }}>
+                  Задача будет удалена без возможности восстановления.
+                </div>
+                <div style={{ fontSize: 13, color: 'var(--ink-2)', lineHeight: 1.55 }}>
+                  Удалить задачу:
+                </div>
+                <div style={{
+                  marginTop: 8,
+                  background: '#f8f7f4',
+                  border: '1px solid var(--border)',
+                  borderRadius: 'var(--radius-sm)',
+                  padding: '10px 14px',
+                  fontSize: 13,
+                  color: 'var(--ink)',
+                  wordBreak: 'break-word'
+                }}>
+                  {deleteModal.taskSubject || `#${deleteModal.taskId}`}
+                </div>
+              </div>
+              <div className="tv-modal-footer">
+                <button
+                  type="button"
+                  className="tv-btn tv-btn-ghost"
+                  disabled={!!actionLoadingKey}
+                  onClick={closeDeleteModal}
+                >
+                  Отмена
+                </button>
+                <button type="submit" className="tv-btn tv-btn-rose" disabled={!!actionLoadingKey}>
+                  {actionLoadingKey === deleteModalLoadingKey ? 'Удаляю...' : 'Удалить задачу'}
                 </button>
               </div>
             </form>
