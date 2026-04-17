@@ -5489,6 +5489,18 @@ class Database:
             if current_role == 'trainer' and field in ('direction_id', 'supervisor_id'):
                 value = None
             old_value = str(old_field_value) if old_field_value is not None else None
+
+            # When an operator is manually returned from dismissal via "Employees",
+            # close active dismissal schedule period at (change_day - 1) to prevent
+            # automatic schedule status sync from rolling status back to fired.
+            if field == 'status':
+                value = str(value or '').strip().lower()
+                if current_role == 'operator' and value not in ('fired', 'dismissal'):
+                    self._interrupt_dismissal_period_by_work_day_tx(
+                        cursor=cursor,
+                        operator_id=user_id,
+                        work_date=datetime.now().date()
+                    )
             
             # Update
             cursor.execute(f"UPDATE users SET {field} = %s WHERE id = %s RETURNING id", (value, user_id))

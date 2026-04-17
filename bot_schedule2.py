@@ -138,8 +138,8 @@ LMS_DEFAULT_PASS_THRESHOLD = float(os.getenv('LMS_DEFAULT_PASS_THRESHOLD', '80')
 LMS_DEFAULT_ATTEMPT_LIMIT = int(os.getenv('LMS_DEFAULT_ATTEMPT_LIMIT', '3'))
 LMS_CERTIFICATE_STORAGE = (os.getenv('LMS_CERTIFICATE_STORAGE') or 'db').strip().lower()
 LMS_CERTIFICATE_TEMPLATE_VERSION = (
-    (os.getenv('LMS_CERTIFICATE_TEMPLATE_VERSION') or 'bold_split_v4_raster_hq_logo_bg_v14_2026_04_16').strip()
-    or 'bold_split_v4_raster_hq_logo_bg_v14_2026_04_16'
+    (os.getenv('LMS_CERTIFICATE_TEMPLATE_VERSION') or 'bold_split_v4_raster_hq_logo_bg_v16_2026_04_17').strip()
+    or 'bold_split_v4_raster_hq_logo_bg_v16_2026_04_17'
 )
 try:
     LMS_CERTIFICATE_RASTER_SCALE = int(str(os.getenv('LMS_CERTIFICATE_RASTER_SCALE', '4')).strip() or '4')
@@ -3456,7 +3456,10 @@ def admin_update_user():
             if target_supervisor_id != requester_id:
                 return jsonify({"error": "Forbidden for this operator"}), 403
 
-        success = db.update_user(user_id, field, value, changed_by=requester_id)  # Pass changed_by
+        try:
+            success = db.update_user(user_id, field, value, changed_by=requester_id)  # Pass changed_by
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
         if not success:
             return jsonify({"error": "Failed to update user"}), 500
 
@@ -15568,19 +15571,19 @@ def _lms_build_bold_split_certificate_html(certificate_number, learner_name, cou
 
     sig_name_1 = _lms_escape_html(
         os.getenv("LMS_CERTIFICATE_SIGNER_1_NAME")
-        or "\u041c\u043e\u043b\u0434\u0430\u0433\u0430\u043b\u0438\u0435\u0432 \u041a\u043e\u0436\u0430\u043d"
+        or "\u041c\u0443\u043b\u0434\u0438\u0440 \u042e\u0441\u0443\u043f\u043e\u0432\u0430"
     )
     sig_role_1 = _lms_escape_html(
         os.getenv("LMS_CERTIFICATE_SIGNER_1_ROLE")
-        or "\u0413\u0435\u043d\u0435\u0440\u0430\u043b\u044c\u043d\u044b\u0439 \u0434\u0438\u0440\u0435\u043a\u0442\u043e\u0440"
+        or "\u0420\u0423\u041a\u041e\u0412\u041e\u0414\u0418\u0422\u0415\u041b\u042c \u041f\u0420\u041e\u0413\u0420\u0410\u041c\u041c"
     )
     sig_name_2 = _lms_escape_html(
         os.getenv("LMS_CERTIFICATE_SIGNER_2_NAME")
-        or "\u0410\u043b\u0438\u0435\u0432\u0430 \u0417\u0430\u0440\u0438\u043d\u0430"
+        or "\u0420\u0430\u043c\u0430\u0437\u0430\u043d \u0410\u043b\u0434\u0438\u044f\u0440"
     )
     sig_role_2 = _lms_escape_html(
         os.getenv("LMS_CERTIFICATE_SIGNER_2_ROLE")
-        or "\u0420\u0443\u043a\u043e\u0432\u043e\u0434\u0438\u0442\u0435\u043b\u044c \u043f\u0440\u043e\u0433\u0440\u0430\u043c\u043c"
+        or "\u0422\u0420\u0415\u041d\u0415\u0420"
     )
 
     issue_date_html = _lms_escape_html(issue_date_ru)
@@ -16288,10 +16291,10 @@ def _lms_build_bold_split_certificate_pdf(certificate_number, learner_name, cour
     sig_gap = S(44)
     sig1_x = rp_left
     sig2_x = rp_left + sig_line_w + sig_gap
-    sig_name_1 = str(os.getenv("LMS_CERTIFICATE_SIGNER_1_NAME") or "Молдагалиев Кожан").strip()
-    sig_role_1 = str(os.getenv("LMS_CERTIFICATE_SIGNER_1_ROLE") or "Генеральный директор").strip()
-    sig_name_2 = str(os.getenv("LMS_CERTIFICATE_SIGNER_2_NAME") or "Алиева Зарина").strip()
-    sig_role_2 = str(os.getenv("LMS_CERTIFICATE_SIGNER_2_ROLE") or "Руководитель программ").strip()
+    sig_name_1 = str(os.getenv("LMS_CERTIFICATE_SIGNER_1_NAME") or "Мулдир Юсупова").strip()
+    sig_role_1 = str(os.getenv("LMS_CERTIFICATE_SIGNER_1_ROLE") or "РУКОВОДИТЕЛЬ ПРОГРАММ").strip()
+    sig_name_2 = str(os.getenv("LMS_CERTIFICATE_SIGNER_2_NAME") or "Рамазан Алдияр").strip()
+    sig_role_2 = str(os.getenv("LMS_CERTIFICATE_SIGNER_2_ROLE") or "ТРЕНЕР").strip()
 
     draw.line((sig1_x, sig_top, sig1_x + sig_line_w, sig_top), fill=col_k, width=max(1, S(1)))
     draw.text((sig1_x, sig_top + S(8)), sig_name_1, font=sig_name_font, fill=col_k)

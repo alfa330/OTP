@@ -2308,7 +2308,6 @@ const App = ({ user, initialSelection }) => {
         return DEFAULT_MAX_EVALS;
     })();
     const totalEvaluatedInMonth = callsByMonth.filter(c=>!c.isDraft&&!c.is_imported).length;
-    const isMaxReached = totalEvaluatedInMonth >= targetEvalCount;
     const progressPercent = targetEvalCount > 0
         ? Math.min((totalEvaluatedInMonth / targetEvalCount) * 100, 100)
         : 100;
@@ -2732,10 +2731,10 @@ const App = ({ user, initialSelection }) => {
                         )}
                         {viewMode === 'normal' && (
                             <button
-                                className={`btn btn-primary btn-sm ${(!selectedOperator||isMaxReached) ? 'disabled' : ''}`}
-                                style={{opacity:(!selectedOperator||isMaxReached)?0.4:1,cursor:(!selectedOperator||isMaxReached)?'not-allowed':'pointer'}}
-                                onClick={() => { if (!selectedOperator||isMaxReached) return; setEvalModalMode('journal'); setEditingEval(null); setShowEvalModal(true); }}
-                                disabled={!selectedOperator||isMaxReached}
+                                className={`btn btn-primary btn-sm ${!selectedOperator ? 'disabled' : ''}`}
+                                style={{opacity:!selectedOperator?0.4:1,cursor:!selectedOperator?'not-allowed':'pointer'}}
+                                onClick={() => { if (!selectedOperator) return; setEvalModalMode('journal'); setEditingEval(null); setShowEvalModal(true); }}
+                                disabled={!selectedOperator}
                             >
                                 <FaIcon className="fas fa-plus" /> Добавить оценку
                             </button>
