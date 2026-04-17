@@ -16626,6 +16626,199 @@ class Database:
             "updated_at": updated_at.isoformat() if hasattr(updated_at, 'isoformat') else updated_at
         }
 
+    def edit_task(
+            self,
+            task_id,
+            requester_id,
+            requester_role,
+            subject=None,
+            description=None,
+            tag=None,
+            assigned_to=None
+    ):
+        task_id = int(task_id)
+        requester_id = int(requester_id)
+        role = normalize_role_value(requester_role)
+
+        has_subject = subject is not None
+        has_description = description is not None
+        has_tag = tag is not None
+        has_assigned_to = assigned_to is not None
+
+        if not any([has_subject, has_description, has_tag, has_assigned_to]):
+            raise ValueError("NOTHING_TO_UPDATE")
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    t.id, t.subject, t.description, t.tag,
+                    t.created_by, t.assigned_to,
+                    assignee.role, assignee.supervisor_id
+                FROM tasks t
+                LEFT JOIN users assignee ON assignee.id = t.assigned_to
+                WHERE t.id = %s
+            """, (task_id,))
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError("TASK_NOT_FOUND")
+
+            current_subject = (row[1] or '').strip()
+            current_description = (row[2] or '').strip() or None
+            current_tag = (row[3] or 'task').strip().lower() or 'task'
+            created_by = row[4]
+            current_assigned_to = row[5]
+            assignee_role = row[6]
+            assignee_supervisor_id = row[7]
+
+            if not self._task_visible_for_requester(role, requester_id, created_by, current_assigned_to, assignee_role, assignee_supervisor_id):
+                raise PermissionError("TASK_FORBIDDEN")
+
+            if created_by is None or int(created_by) != requester_id:
+                raise PermissionError("ONLY_CREATOR_CAN_EDIT")
+
+            if has_assigned_to:
+                try:
+                    assigned_to_new = int(assigned_to)
+                except Exception:
+                    raise ValueError("INVALID_ASSIGNED_TO")
+                if assigned_to_new <= 0:
+                    raise ValueError("INVALID_ASSIGNED_TO")
+            else:
+                assigned_to_new = int(current_assigned_to) if current_assigned_to is not None else None
+
+            subject_new = current_subject if not has_subject else (str(subject or '').strip())
+            if not subject_new:
+                raise ValueError("SUBJECT_REQUIRED")
+
+            if has_description:
+                description_new = (str(description or '').strip() or None)
+            else:
+                description_new = current_description
+
+            if has_tag:
+                tag_new = (str(tag or '').strip().lower() or 'task')
+            else:
+                tag_new = current_tag
+            if tag_new not in ('task', 'problem', 'suggestion'):
+                raise ValueError("INVALID_TAG")
+
+            changed_fields = []
+            if subject_new != current_subject:
+                changed_fields.append("subject")
+            if description_new != current_description:
+                changed_fields.append("description")
+            if tag_new != current_tag:
+                changed_fields.append("tag")
+            if assigned_to_new != current_assigned_to:
+                changed_fields.append("assigned_to")
+
+            if not changed_fields:
+                return {
+                    "task_id": task_id,
+                    "updated": False,
+                    "changed_fields": [],
+                    "updated_at": None,
+                    "subject": current_subject,
+                    "description": current_description,
+                    "tag": current_tag,
+                    "assigned_to": current_assigned_to,
+                    "previous_assigned_to": current_assigned_to
+                }
+
+            cursor.execute("""
+                UPDATE tasks
+                SET
+                    subject = %s,
+                    description = %s,
+                    tag = %s,
+                    assigned_to = %s,
+                    updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                WHERE id = %s
+                RETURNING updated_at
+            """, (subject_new, description_new, tag_new, assigned_to_new, task_id))
+            updated_row = cursor.fetchone()
+            updated_at = updated_row[0] if updated_row else None
+
+            return {
+                "task_id": task_id,
+                "updated": True,
+                "changed_fields": changed_fields,
+                "updated_at": updated_at.isoformat() if hasattr(updated_at, 'isoformat') else updated_at,
+                "subject": subject_new,
+                "description": description_new,
+                "tag": tag_new,
+                "assigned_to": assigned_to_new,
+                "previous_assigned_to": current_assigned_to
+            }
+
+    def delete_task(self, task_id, requester_id, requester_role):
+        task_id = int(task_id)
+        requester_id = int(requester_id)
+        role = normalize_role_value(requester_role)
+
+        if role != 'super_admin':
+            raise PermissionError("ONLY_SUPER_ADMIN")
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    t.id, t.created_by, t.assigned_to,
+                    assignee.role, assignee.supervisor_id
+                FROM tasks t
+                LEFT JOIN users assignee ON assignee.id = t.assigned_to
+                WHERE t.id = %s
+            """, (task_id,))
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError("TASK_NOT_FOUND")
+
+            created_by = row[1]
+            assigned_to = row[2]
+            assignee_role = row[3]
+            assignee_supervisor_id = row[4]
+
+            if not self._task_visible_for_requester(role, requester_id, created_by, assigned_to, assignee_role, assignee_supervisor_id):
+                raise PermissionError("TASK_FORBIDDEN")
+
+            cursor.execute("""
+                SELECT
+                    id, file_name,
+                    COALESCE(storage_type, 'db'),
+                    gcs_bucket, gcs_blob_path,
+                    COALESCE(attachment_kind, 'initial')
+                FROM task_attachments
+                WHERE task_id = %s
+                ORDER BY id ASC
+            """, (task_id,))
+            attachment_rows = cursor.fetchall()
+
+            cursor.execute("""
+                DELETE FROM tasks
+                WHERE id = %s
+                RETURNING id
+            """, (task_id,))
+            deleted_row = cursor.fetchone()
+            if not deleted_row:
+                raise ValueError("TASK_NOT_FOUND")
+
+        attachments = [
+            {
+                "id": row[0],
+                "file_name": row[1],
+                "storage_type": row[2],
+                "gcs_bucket": row[3],
+                "gcs_blob_path": row[4],
+                "attachment_kind": row[5]
+            }
+            for row in attachment_rows
+        ]
+
+        return {
+            "task_id": task_id,
+            "deleted": True,
+            "attachments": attachments
+        }
+
     def get_tasks_for_requester(
             self,
             requester_id,
