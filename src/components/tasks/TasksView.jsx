@@ -626,18 +626,91 @@ styleTag.textContent = `
   }
   .tv-completion-block .tv-block-label { color: var(--indigo); }
 
-  .tv-history-list { display: flex; flex-direction: column; }
-  .tv-history-item {
-    display: flex; align-items: baseline; gap: 8px;
-    padding: 9px 0; border-bottom: 1px solid var(--border);
-    font-size: 12.5px; flex-wrap: wrap;
+  .tv-history-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
   }
-  .tv-history-item:last-child { border-bottom: none; }
-  .tv-history-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--border-strong); flex-shrink: 0; margin-top: 5px; }
-  .tv-history-status { font-weight: 500; color: var(--ink); }
-  .tv-history-time   { color: var(--ink-3); font-size: 11.5px; }
-  .tv-history-who    { color: var(--ink-2); font-style: italic; }
-  .tv-history-comment{ color: var(--ink-2); }
+  .tv-history-item {
+    display: flex;
+    width: 100%;
+  }
+  .tv-history-item-sender { justify-content: flex-start; }
+  .tv-history-item-recipient { justify-content: flex-end; }
+  .tv-history-item-neutral { justify-content: center; }
+  .tv-history-bubble {
+    width: fit-content;
+    max-width: min(88%, 420px);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: #f8f7f4;
+    padding: 8px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .tv-history-item-sender .tv-history-bubble {
+    background: #eef2ff;
+    border-color: #c7d2fe;
+  }
+  .tv-history-item-recipient .tv-history-bubble {
+    background: #ecfdf5;
+    border-color: #a7f3d0;
+  }
+  .tv-history-item-neutral .tv-history-bubble {
+    background: #f8fafc;
+    border-color: #e2e8f0;
+  }
+  .tv-history-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .tv-history-role {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 999px;
+    padding: 1px 7px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: .03em;
+    text-transform: uppercase;
+    border: 1px solid transparent;
+  }
+  .tv-history-role-sender {
+    color: #3730a3;
+    background: #e0e7ff;
+    border-color: #c7d2fe;
+  }
+  .tv-history-role-recipient {
+    color: #065f46;
+    background: #d1fae5;
+    border-color: #a7f3d0;
+  }
+  .tv-history-role-neutral {
+    color: #475569;
+    background: #e2e8f0;
+    border-color: #cbd5e1;
+  }
+  .tv-history-status { font-weight: 600; color: var(--ink); }
+  .tv-history-time {
+    color: var(--ink-3);
+    font-size: 11.5px;
+    margin-left: auto;
+  }
+  .tv-history-who {
+    color: var(--ink-2);
+    font-size: 11.5px;
+    font-weight: 500;
+  }
+  .tv-history-comment {
+    color: var(--ink-2);
+    font-size: 12.5px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
 
   /* ── Participants ── */
   .tv-participants {
@@ -997,6 +1070,8 @@ const TaskDrawer = React.memo(({
   const editBtn         = btns.find((btn) => btn.action === 'edit');
   const deleteBtn       = btns.find((btn) => btn.action === 'delete');
   const footerBtns      = btns.filter((btn) => btn.action !== 'edit' && btn.action !== 'delete');
+  const assigneeId      = Number(task?.assignee?.id || 0);
+  const creatorId       = Number(task?.creator?.id || 0);
 
   // ESC key handler
   useEffect(() => {
@@ -1004,6 +1079,19 @@ const TaskDrawer = React.memo(({
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, [onClose]);
+
+  const resolveHistorySide = useCallback((item) => {
+    const changedById = Number(item?.changed_by || 0);
+    if (changedById > 0) {
+      if (changedById === assigneeId) return 'recipient';
+      if (changedById === creatorId) return 'sender';
+    }
+
+    const statusCode = String(item?.status_code || '').trim();
+    if (statusCode === 'in_progress' || statusCode === 'completed') return 'recipient';
+    if (statusCode === 'assigned' || statusCode === 'accepted' || statusCode === 'returned' || statusCode === 'reopened') return 'sender';
+    return 'neutral';
+  }, [assigneeId, creatorId]);
 
   return (
     <>
@@ -1141,15 +1229,26 @@ const TaskDrawer = React.memo(({
               <div>
                 <p className="tv-block-label">История</p>
                 <div className="tv-history-list">
-                  {history.map((item, i) => (
-                    <div key={i} className="tv-history-item">
-                      <span className="tv-history-dot" />
-                      <span className="tv-history-status">{HISTORY_LABELS[item.status_code] || item.status_code}</span>
-                      <span className="tv-history-time">{fmt(item.changed_at)}</span>
-                      {item.changed_by_name && <span className="tv-history-who">{item.changed_by_name}</span>}
-                      {item.comment && <span className="tv-history-comment">— {item.comment}</span>}
+                  {history.map((item, i) => {
+                    const side = resolveHistorySide(item);
+                    const roleLabel = side === 'recipient'
+                      ? 'Получатель'
+                      : side === 'sender'
+                        ? 'Отправитель'
+                        : 'Система';
+                    return (
+                    <div key={i} className={`tv-history-item tv-history-item-${side}`}>
+                      <div className="tv-history-bubble">
+                        <div className="tv-history-head">
+                          <span className={`tv-history-role tv-history-role-${side}`}>{roleLabel}</span>
+                          <span className="tv-history-status">{HISTORY_LABELS[item.status_code] || item.status_code}</span>
+                          <span className="tv-history-time">{fmt(item.changed_at)}</span>
+                        </div>
+                        {item.changed_by_name && <span className="tv-history-who">{item.changed_by_name}</span>}
+                        {item.comment && <span className="tv-history-comment">{item.comment}</span>}
+                      </div>
                     </div>
-                  ))}
+                  )})}
                 </div>
               </div>
             </>
