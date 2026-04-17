@@ -254,11 +254,47 @@ styleTag.textContent = `
   .tv-task-row-indicator {
     width: 3px; height: 28px; border-radius: 99px; flex-shrink: 0;
   }
+  .tv-task-row-main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
   .tv-task-row-subject {
-    flex: 1; font-size: 13.5px; font-weight: 500; color: var(--ink);
+    font-size: 13.5px; font-weight: 500; color: var(--ink);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
   }
-  .tv-task-row-meta { display: flex; align-items: center; gap: 7px; flex-shrink: 0; }
+  .tv-task-row-flow {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11.5px;
+    color: var(--ink-3);
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .tv-task-row-flow-name {
+    min-width: 0;
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tv-task-row-flow-arrow {
+    flex-shrink: 0;
+    color: var(--ink-2);
+    font-weight: 700;
+  }
+  .tv-task-row-meta {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    flex-shrink: 0;
+    padding-left: 8px;
+  }
   .tv-task-row-assignee-chip {
     display: inline-flex; align-items: center; gap: 5px;
     font-size: 12px; color: var(--ink-2);
@@ -663,7 +699,7 @@ styleTag.textContent = `
     .tv-stats-strip { grid-template-columns: repeat(2, 1fr); }
     .tv-drawer { width: 100vw; }
     .tv-info-grid { grid-template-columns: 1fr; }
-    .tv-task-row-assignee-chip, .tv-task-row-date { display: none; }
+    .tv-task-row-assignee-chip, .tv-task-row-flow, .tv-task-row-date { display: none; }
     .tv-pagination { flex-wrap: wrap; justify-content: center; }
     .tv-person-row { flex-wrap: wrap; }
     .tv-person-stats { white-space: normal; gap: 8px; }
@@ -749,8 +785,12 @@ const taskDateLabel = (v) => {
 
   const diffDays = Math.floor(diffMs / 86400000);
   if (diffDays <= 0) return 'Сегодня';
-  if (diffDays < 30) {
+  if (diffDays < 7) {
     return `${diffDays} ${pluralRu(diffDays, 'день', 'дня', 'дней')} назад`;
+  }
+  if (diffDays < 30) {
+    const weeks = Math.max(1, Math.floor(diffDays / 7));
+    return `${weeks} ${pluralRu(weeks, 'неделю', 'недели', 'недель')} назад`;
   }
 
   const rawMonths =
@@ -873,20 +913,27 @@ const AvatarCircle = ({ className, name, avatarUrl }) => (
 const TaskRow = React.memo(({ task, onClick }) => {
   const sm = STATUS_META[task.status] || { label: task.status, badge: 'tv-badge-gray', dot: '#ccc' };
   const tm = TAG_META[task.tag]       || { label: task.tag || '—', badge: 'tv-badge-gray' };
+  const creatorName = task?.creator?.name || '—';
   const assigneeName = task?.assignee?.name || '—';
-  const assigneeAvatarUrl = task?.assignee?.avatar_url || '';
   return (
     <div className="tv-task-row" onClick={() => onClick(task)}>
       <span className="tv-task-row-indicator" style={{ background: sm.dot }} />
-      <span className="tv-task-row-subject">{task.subject || 'Без темы'}</span>
+      <span className="tv-task-row-main">
+        <span className="tv-task-row-subject">{task.subject || 'Без темы'}</span>
+        <span className="tv-task-row-flow">
+          <span className="tv-task-row-flow-name">{creatorName}</span>
+          <span className="tv-task-row-flow-arrow">→</span>
+          <span className="tv-task-row-flow-name">{assigneeName}</span>
+        </span>
+      </span>
       <span className="tv-task-row-meta">
         <span className={`tv-badge ${tm.badge}`}>{tm.label}</span>
         <span className={`tv-badge ${sm.badge}`}>{sm.label}</span>
         <span className="tv-task-row-assignee-chip">
-          <AvatarCircle className="tv-avatar-xs" name={assigneeName} avatarUrl={assigneeAvatarUrl} />
+          <AvatarCircle className="tv-avatar-xs" name={assigneeName} avatarUrl={task?.assignee?.avatar_url || ''} />
           {assigneeName}
         </span>
-        <span className="tv-task-row-date">{taskDateLabel(task.created_at)}</span>
+        <span className="tv-task-row-date">{fmt(task.created_at)}</span>
         <ChevronRight />
       </span>
     </div>
