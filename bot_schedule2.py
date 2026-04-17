@@ -138,8 +138,8 @@ LMS_DEFAULT_PASS_THRESHOLD = float(os.getenv('LMS_DEFAULT_PASS_THRESHOLD', '80')
 LMS_DEFAULT_ATTEMPT_LIMIT = int(os.getenv('LMS_DEFAULT_ATTEMPT_LIMIT', '3'))
 LMS_CERTIFICATE_STORAGE = (os.getenv('LMS_CERTIFICATE_STORAGE') or 'db').strip().lower()
 LMS_CERTIFICATE_TEMPLATE_VERSION = (
-    (os.getenv('LMS_CERTIFICATE_TEMPLATE_VERSION') or 'bold_split_v4_raster_hq_logo_bg_v20_2026_04_17').strip()
-    or 'bold_split_v4_raster_hq_logo_bg_v20_2026_04_17'
+    (os.getenv('LMS_CERTIFICATE_TEMPLATE_VERSION') or 'bold_split_v4_raster_hq_logo_bg_v21_2026_04_17').strip()
+    or 'bold_split_v4_raster_hq_logo_bg_v21_2026_04_17'
 )
 try:
     LMS_CERTIFICATE_RASTER_SCALE = int(str(os.getenv('LMS_CERTIFICATE_RASTER_SCALE', '4')).strip() or '4')
@@ -15716,7 +15716,7 @@ def _lms_build_bold_split_certificate_html(certificate_number, learner_name, cou
         except Exception:
             signer_1_signature_uri = str(signer_1_signature_path)
     signer_1_signature_markup = (
-        f"<img class=\"sig-sign-img\" src=\"{_lms_escape_html(signer_1_signature_uri)}\" alt=\"signature\"/>"
+        f"<img class=\"sig-sign-img sig-sign-img-s1\" src=\"{_lms_escape_html(signer_1_signature_uri)}\" alt=\"signature\"/>"
         if signer_1_signature_uri
         else ""
     )
@@ -15877,6 +15877,7 @@ body {{
 .v4 .sig-group {{ display:flex; gap:44px; }}
 .v4 .sig-sign-wrap {{ height:34px; margin-bottom:4px; display:flex; align-items:flex-end; justify-content:center; }}
 .v4 .sig-sign-img {{ max-width:120px; max-height:34px; width:auto; height:auto; display:block; }}
+.v4 .sig-sign-img.s1 {{ max-width:138px; max-height:42px; filter: grayscale(100%) contrast(180%); }}
 .v4 .sig-line {{ width:130px; height:1px; background:var(--k); margin-bottom:8px; }}
 .v4 .sig-name {{ font-size:11px; font-weight:600; color:var(--k); margin-bottom:2px; }}
 .v4 .sig-role {{ font-size:8.5px; letter-spacing:2px; text-transform:uppercase; color:var(--g4); }}
@@ -16485,12 +16486,15 @@ def _lms_build_bold_split_certificate_pdf(certificate_number, learner_name, cour
                 signer_1_sig_rgba = signer_1_sig_source.convert("RGBA")
                 resample = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
                 src_w, src_h = signer_1_sig_rgba.size
-                max_sig_w = max(1, sig_line_w - S(8))
-                max_sig_h = S(34)
+                max_sig_w = max(1, sig_line_w + S(10))
+                max_sig_h = S(44)
                 sig_scale = min(max_sig_w / float(max(1, src_w)), max_sig_h / float(max(1, src_h)))
                 dst_sig_w = max(1, int(round(src_w * sig_scale)))
                 dst_sig_h = max(1, int(round(src_h * sig_scale)))
                 signer_1_sig_rgba = signer_1_sig_rgba.resize((dst_sig_w, dst_sig_h), resample=resample)
+                signer_1_sig_alpha = signer_1_sig_rgba.split()[3]
+                signer_1_sig_rgba = Image.new("RGBA", (dst_sig_w, dst_sig_h), (0, 0, 0, 0))
+                signer_1_sig_rgba.putalpha(signer_1_sig_alpha)
                 sig_img_x = sig1_x + int(round((sig_line_w - dst_sig_w) / 2.0))
                 sig_img_y = sig_top - dst_sig_h - S(4)
                 image.alpha_composite(signer_1_sig_rgba, (sig_img_x, sig_img_y))
