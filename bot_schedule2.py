@@ -11234,8 +11234,8 @@ def export_technical_issues_excel():
             return jsonify({"error": "User not found"}), 404
 
         requester_role = _normalize_management_role(requester[3])
-        if not _is_admin_role(requester_role):
-            return jsonify({"error": "Only admin can export technical issues"}), 403
+        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role)):
+            return jsonify({"error": "Only admin and sv can export technical issues"}), 403
 
         issue_date = (request.args.get('date') or '').strip() or None
         date_from = (request.args.get('date_from') or '').strip() or None
