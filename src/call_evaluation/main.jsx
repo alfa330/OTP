@@ -328,6 +328,7 @@ const isRecoverableAuthError = (body = null) => {
         code === 'INVALID_TOKEN' ||
         code === 'INVALID_TOKEN_TYPE' ||
         code === 'MISSING_TOKEN' ||
+        code === 'REFRESH_TOKEN_MISMATCH' ||
         code === 'SESSION_EXPIRED' ||
         code === 'SESSION_NOT_FOUND' ||
         code === 'SESSION_REVOKED' ||

@@ -1023,6 +1023,8 @@ class Database:
                     session_id UUID PRIMARY KEY,
                     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                     refresh_token_hash TEXT NOT NULL,
+                    previous_refresh_token_hash TEXT,
+                    previous_refresh_valid_until TIMESTAMP,
                     user_agent TEXT,
                     ip_address VARCHAR(64),
                     created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
@@ -1040,6 +1042,14 @@ class Database:
             cursor.execute("""
                 ALTER TABLE user_sessions
                 ADD COLUMN IF NOT EXISTS sensitive_data_unlocked_at TIMESTAMP;
+            """)
+            cursor.execute("""
+                ALTER TABLE user_sessions
+                ADD COLUMN IF NOT EXISTS previous_refresh_token_hash TEXT;
+            """)
+            cursor.execute("""
+                ALTER TABLE user_sessions
+                ADD COLUMN IF NOT EXISTS previous_refresh_valid_until TIMESTAMP;
             """)
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id
@@ -4731,6 +4741,8 @@ class Database:
                         session_id::text,
                         user_id,
                         refresh_token_hash,
+                        previous_refresh_token_hash,
+                        previous_refresh_valid_until,
                         user_agent,
                         ip_address,
                         created_at,
@@ -4748,6 +4760,8 @@ class Database:
                         session_id::text,
                         user_id,
                         refresh_token_hash,
+                        previous_refresh_token_hash,
+                        previous_refresh_valid_until,
                         user_agent,
                         ip_address,
                         created_at,
@@ -4767,28 +4781,49 @@ class Database:
                 "session_id": row[0],
                 "user_id": row[1],
                 "refresh_token_hash": row[2],
-                "user_agent": row[3],
-                "ip_address": row[4],
-                "created_at": row[5],
-                "last_seen_at": row[6],
-                "expires_at": row[7],
-                "revoked_at": row[8],
-                "sensitive_data_unlocked": bool(row[9]),
-                "sensitive_data_unlocked_at": row[10]
+                "previous_refresh_token_hash": row[3],
+                "previous_refresh_valid_until": row[4],
+                "user_agent": row[5],
+                "ip_address": row[6],
+                "created_at": row[7],
+                "last_seen_at": row[8],
+                "expires_at": row[9],
+                "revoked_at": row[10],
+                "sensitive_data_unlocked": bool(row[11]),
+                "sensitive_data_unlocked_at": row[12]
             }
 
-    def rotate_user_session_token(self, session_id, user_id, refresh_token_hash, expires_at):
+    def rotate_user_session_token(
+        self,
+        session_id,
+        user_id,
+        refresh_token_hash,
+        expires_at,
+        previous_refresh_valid_until=None
+    ):
         with self._get_cursor() as cursor:
             cursor.execute("""
                 UPDATE user_sessions
-                SET refresh_token_hash = %s,
+                SET previous_refresh_token_hash = CASE
+                        WHEN %s IS NULL THEN NULL
+                        ELSE refresh_token_hash
+                    END,
+                    previous_refresh_valid_until = %s,
+                    refresh_token_hash = %s,
                     expires_at = %s,
                     last_seen_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                 WHERE session_id = %s
                   AND user_id = %s
                   AND revoked_at IS NULL
                 RETURNING session_id
-            """, (refresh_token_hash, expires_at, session_id, user_id))
+            """, (
+                previous_refresh_valid_until,
+                previous_refresh_valid_until,
+                refresh_token_hash,
+                expires_at,
+                session_id,
+                user_id
+            ))
             return cursor.fetchone() is not None
 
     def touch_user_session(self, session_id, user_id=None, ip_address=None, user_agent=None):
