@@ -316,6 +316,8 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         telegram_nick: base.telegram_nick ?? "",
         study_place: base.study_place ?? "",
         study_course: base.study_course ?? "",
+        study_completed: !!base.study_completed,
+        study_completion_year: base.study_completion_year ?? "",
         card_number: base.card_number ?? "",
         close_contact_1_relation: base.close_contact_1_relation ?? "",
         close_contact_1_full_name: base.close_contact_1_full_name ?? "",
@@ -347,6 +349,8 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         defaults.telegram_nick = String(defaults.telegram_nick ?? '').trim();
         defaults.study_place = String(defaults.study_place ?? '').trim();
         defaults.study_course = String(defaults.study_course ?? '').trim();
+        defaults.study_completed = !!defaults.study_completed;
+        defaults.study_completion_year = String(defaults.study_completion_year ?? '').trim();
         defaults.card_number = String(defaults.card_number ?? '').trim();
         defaults.close_contact_1_relation = String(defaults.close_contact_1_relation ?? '').trim();
         defaults.close_contact_1_full_name = String(defaults.close_contact_1_full_name ?? '').trim();
@@ -569,6 +573,8 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         telegram_nick: "",
         study_place: "",
         study_course: "",
+        study_completed: false,
+        study_completion_year: "",
         card_number: "",
         close_contact_1_relation: "",
         close_contact_1_full_name: "",
@@ -662,6 +668,20 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         setModalError("Если сотрудник был на обучении во фронт офисе, укажите дату.");
         return;
         }
+        const studyCompletionYearRaw = String(editedUser?.study_completion_year || '').trim();
+        let studyCompletionYear = null;
+        if (studyCompletionYearRaw) {
+            if (!/^\d{4}$/.test(studyCompletionYearRaw)) {
+                setModalError("Год завершения учебы должен состоять из 4 цифр.");
+                return;
+            }
+            const parsedStudyCompletionYear = Number(studyCompletionYearRaw);
+            if (!Number.isInteger(parsedStudyCompletionYear) || parsedStudyCompletionYear < 1900 || parsedStudyCompletionYear > 2100) {
+                setModalError("Год завершения учебы должен быть в диапазоне 1900-2100.");
+                return;
+            }
+            studyCompletionYear = parsedStudyCompletionYear;
+        }
 
         if (usesScheduleStatusPeriodForm(editedUser?.status) && editedUser?.use_schedule_status_period) {
         const startDate = String(editedUser?.status_period_start_date || "").trim();
@@ -703,6 +723,8 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
             telegram_nick: String(editedUser?.telegram_nick || '').trim(),
             study_place: String(editedUser?.study_place || '').trim(),
             study_course: String(editedUser?.study_course || '').trim(),
+            study_completed: !!editedUser?.study_completed,
+            study_completion_year: studyCompletionYear,
             card_number: String(editedUser?.card_number || '').trim(),
             close_contact_1_relation: String(editedUser?.close_contact_1_relation || '').trim(),
             close_contact_1_full_name: String(editedUser?.close_contact_1_full_name || '').trim(),
@@ -1009,6 +1031,33 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         type="text"
                         value={editedUser?.study_course || ""}
                         onChange={(e) => setEditedUser({ ...editedUser, study_course: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        disabled={isLoading || !!createdCredentials}
+                        />
+                    </div>
+
+                    <div>
+                        <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
+                        <input
+                            type="checkbox"
+                            checked={!!editedUser?.study_completed}
+                            onChange={(e) => setEditedUser({ ...editedUser, study_completed: e.target.checked })}
+                            className="rounded border-gray-300"
+                            disabled={isLoading || !!createdCredentials}
+                        />
+                        <span>Завершил учебу</span>
+                        </label>
+                    </div>
+
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Год завершения/план</label>
+                        <input
+                        type="number"
+                        min="1900"
+                        max="2100"
+                        step="1"
+                        value={editedUser?.study_completion_year ?? ""}
+                        onChange={(e) => setEditedUser({ ...editedUser, study_completion_year: e.target.value })}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                         disabled={isLoading || !!createdCredentials}
                         />
@@ -1579,6 +1628,33 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             type="text"
                             value={editedUser?.study_course || ""}
                             onChange={(e) => setEditedUser({ ...editedUser, study_course: e.target.value })}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            disabled={isLoading}
+                            />
+                        </div>
+
+                        <div>
+                            <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
+                            <input
+                                type="checkbox"
+                                checked={!!editedUser?.study_completed}
+                                onChange={(e) => setEditedUser({ ...editedUser, study_completed: e.target.checked })}
+                                className="rounded border-gray-300"
+                                disabled={isLoading}
+                            />
+                            <span>Завершил учебу</span>
+                            </label>
+                        </div>
+
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Год завершения/план</label>
+                            <input
+                            type="number"
+                            min="1900"
+                            max="2100"
+                            step="1"
+                            value={editedUser?.study_completion_year ?? ""}
+                            onChange={(e) => setEditedUser({ ...editedUser, study_completion_year: e.target.value })}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                             disabled={isLoading}
                             />

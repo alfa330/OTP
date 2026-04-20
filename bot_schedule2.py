@@ -3323,7 +3323,9 @@ def get_admin_users():
                         COALESCE(u.internship_in_company, FALSE) as internship_in_company,
                         COALESCE(u.front_office_training, FALSE) as front_office_training,
                         u.front_office_training_date,
-                        u.taxipro_id
+                        u.taxipro_id,
+                        COALESCE(u.study_completed, FALSE) as study_completed,
+                        u.study_completion_year
                     FROM users u
                     LEFT JOIN directions d ON u.direction_id = d.id
                     LEFT JOIN users s ON u.supervisor_id = s.id
@@ -3403,7 +3405,9 @@ def get_admin_users():
                         "internship_in_company": bool(row[40]) if row[40] is not None else False,
                         "front_office_training": bool(row[41]) if row[41] is not None else False,
                         "front_office_training_date": row[42].strftime('%Y-%m-%d') if row[42] else None,
-                        "taxipro_id": row[43] or ""
+                        "taxipro_id": row[43] or "",
+                        "study_completed": bool(row[44]) if row[44] is not None else False,
+                        "study_completion_year": int(row[45]) if row[45] is not None else None
                     })
         return jsonify({"status": "success", "users": users}), 200
     except Exception as e:
@@ -3463,6 +3467,16 @@ def admin_update_user():
                     return jsonify({"error": "Invalid date format. Use YYYY-MM-DD"}), 400
             else:
                 value = None  # Allow clearing the date
+        elif field == 'study_completion_year':
+            if value in [None, '']:
+                value = None
+            else:
+                try:
+                    value = int(value)
+                except (TypeError, ValueError):
+                    return jsonify({"error": "Invalid study_completion_year value"}), 400
+                if value < 1900 or value > 2100:
+                    return jsonify({"error": "study_completion_year must be between 1900 and 2100"}), 400
         elif field == 'gender':
             if value in [None, '']:
                 value = None
@@ -3500,7 +3514,7 @@ def admin_update_user():
             value = value or None
             if value not in [None, 'gph', 'of']:
                 return jsonify({"error": "Invalid employment_type value"}), 400
-        elif field in ['has_proxy', 'has_driver_license', 'internship_in_company', 'front_office_training']:
+        elif field in ['has_proxy', 'has_driver_license', 'internship_in_company', 'front_office_training', 'study_completed']:
             if isinstance(value, bool):
                 pass
             elif isinstance(value, (int, float)):
@@ -6833,6 +6847,16 @@ def add_user():
         company_name = str(data.get('company_name') or '').strip() or None
         study_place = str(data.get('study_place') or '').strip() or None
         study_course = str(data.get('study_course') or '').strip() or None
+        study_completion_year_raw = data.get('study_completion_year')
+        if study_completion_year_raw in [None, '']:
+            study_completion_year = None
+        else:
+            try:
+                study_completion_year = int(study_completion_year_raw)
+            except (TypeError, ValueError):
+                return jsonify({"error": "Invalid study_completion_year value"}), 400
+            if study_completion_year < 1900 or study_completion_year > 2100:
+                return jsonify({"error": "study_completion_year must be between 1900 and 2100"}), 400
         close_contact_1_relation = str(data.get('close_contact_1_relation') or '').strip() or None
         close_contact_1_full_name = str(data.get('close_contact_1_full_name') or '').strip() or None
         close_contact_1_phone = str(data.get('close_contact_1_phone') or '').strip() or None
@@ -6899,6 +6923,24 @@ def add_user():
         employment_type = str(data.get('employment_type') or '').strip().lower() or None
         if employment_type not in [None, 'gph', 'of']:
             return jsonify({"error": "Invalid employment_type value"}), 400
+
+        study_completed_raw = data.get('study_completed')
+        if isinstance(study_completed_raw, bool):
+            study_completed = study_completed_raw
+        elif isinstance(study_completed_raw, (int, float)):
+            study_completed = bool(study_completed_raw)
+        elif isinstance(study_completed_raw, str):
+            study_completed_value = study_completed_raw.strip().lower()
+            if study_completed_value in ['1', 'true', 'yes', 'y', 'on']:
+                study_completed = True
+            elif study_completed_value in ['0', 'false', 'no', 'n', 'off', '']:
+                study_completed = False
+            else:
+                return jsonify({"error": "Invalid study_completed value"}), 400
+        elif study_completed_raw is None:
+            study_completed = False
+        else:
+            return jsonify({"error": "Invalid study_completed value"}), 400
 
         has_proxy_raw = data.get('has_proxy')
         if isinstance(has_proxy_raw, bool):
@@ -6979,6 +7021,8 @@ def add_user():
             sip_number=sip_number,
             study_place=study_place,
             study_course=study_course,
+            study_completed=study_completed,
+            study_completion_year=study_completion_year,
             close_contact_1_relation=close_contact_1_relation,
             close_contact_1_full_name=close_contact_1_full_name,
             close_contact_1_phone=close_contact_1_phone,
