@@ -9,7 +9,7 @@ import {
   PlayCircle, AlignLeft, Layers, ChevronLeft, Eye,
   BookMarked, Zap, ToggleLeft, ToggleRight, LayoutGrid, List, Percent,
   UserCheck, RefreshCw, ClipboardList, PlusCircle, LogOut, ChevronUp,
-  Save, Image, Link2, FileCheck, Volume2, Maximize, AlertTriangle, Rocket,
+  Save, Image, Link2, FileCheck, Volume2, Maximize, AlertTriangle, Rocket, Archive,
   XCircle, CheckSquare, Square, Type, ToggleRight as RadioIcon
 } from "lucide-react";
 import "react-quill/dist/quill.snow.css";
@@ -1086,6 +1086,14 @@ const normalizeLmsRole = (value) => {
   return role;
 };
 
+const isPublishedLmsCourse = (courseLike) => String(courseLike?.status || "").trim().toLowerCase() === "published";
+
+const isPublishedLmsCourseVersion = (versionLike) => String(versionLike?.status || "").trim().toLowerCase() === "published";
+
+const isAssignableLmsCourse = (courseLike) => (
+  isPublishedLmsCourse(courseLike) && isPublishedLmsCourseVersion(courseLike?.current_version)
+);
+
 const mapAssignmentStatusToUi = (assignmentStatus, deadlineStatus) => {
   const status = String(assignmentStatus || "").trim().toLowerCase();
   const deadline = String(deadlineStatus || "").trim().toLowerCase();
@@ -1582,7 +1590,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
   const role = normalizeLmsRole(user?.role);
   const canUseLearnerApi = role === "operator" || role === "trainee";
   const canUseManagerApi = role === "sv" || role === "trainer" || role === "admin" || role === "super_admin";
-  const isEditorRole = role === "trainer";
+  const isEditorRole = role === "trainer" || role === "admin" || role === "super_admin";
   const canDeleteCourses = role === "sv" || role === "admin" || role === "super_admin";
   const canGoCatalog = canUseLearnerApi;
   const apiRoot = String(apiBaseUrl || "").trim().replace(/\/+$/, "");
@@ -1849,6 +1857,39 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
       return false;
     }
   }, [canUseManagerApi, canDeleteCourses, lmsRequest, emitToast, loadAdminData]);
+
+  const handleArchiveAdminCourse = useCallback(async (courseLike) => {
+    if (!canUseManagerApi) {
+      emitToast("Недостаточно прав для архивирования курса", "error");
+      return false;
+    }
+    if (typeof lmsRequest !== "function") {
+      emitToast("LMS API не подключен", "error");
+      return false;
+    }
+
+    const courseId = Number(courseLike?.id || courseLike || 0);
+    if (!courseId) {
+      emitToast("Некорректный курс", "error");
+      return false;
+    }
+
+    try {
+      await lmsRequest("/api/lms/admin/courses", {
+        method: "PATCH",
+        body: {
+          course_id: courseId,
+          status: "archived",
+        },
+      });
+      emitToast("Курс архивирован и скрыт из LMS сотрудников", "success");
+      await loadAdminData();
+      return true;
+    } catch (error) {
+      emitToast(`Не удалось архивировать курс: ${String(error?.message || "ошибка")}`, "error");
+      return false;
+    }
+  }, [canUseManagerApi, lmsRequest, emitToast, loadAdminData]);
 
   const handleAssignAdminCourseToEmployee = useCallback(async ({ courseId, userId, dueDate, employeeName, courseTitle }) => {
     if (!canUseManagerApi) {
@@ -2336,6 +2377,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
             onOpenBuilder={openBuilder}
             onOpenCourse={openCourse}
             onDeleteCourse={handleDeleteAdminCourse}
+            onArchiveCourse={handleArchiveAdminCourse}
             onAssignCourseToEmployee={handleAssignAdminCourseToEmployee}
             canDeleteCourses={canDeleteCourses}
             busyCourseId={busyCourseId}
@@ -2840,6 +2882,11 @@ function CourseCard({ course, onClick, busy = false, actions = null, managerMode
         <div className="flex items-start justify-between gap-2 mb-2">
           <span className="text-[10px] font-semibold text-indigo-600 uppercase tracking-wider">{course.category}</span>
           {!managerMode && <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${st.bg} ${st.text}`}>{st.label}</span>}
+          {managerMode && course?.editorDraftLabel && (
+            <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700">
+              {course.editorDraftLabel}
+            </span>
+          )}
         </div>
         <h3 className="text-sm font-semibold text-slate-900 leading-snug mb-3 group-hover:text-indigo-700 transition-colors line-clamp-2">{course.title}</h3>
         <div className="flex items-center gap-3 text-xs text-slate-500 mb-4">
@@ -2902,6 +2949,11 @@ function CourseListItem({ course, onClick, busy = false, actions = null, manager
         <div className="flex items-center gap-2 mb-1">
           <span className="text-[10px] font-semibold text-indigo-600 uppercase tracking-wider">{course.category}</span>
           {isMandatory && <span className="text-[10px] font-semibold text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full">Обязательный</span>}
+          {managerMode && course?.editorDraftLabel && (
+            <span className="text-[10px] font-semibold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full">
+              {course.editorDraftLabel}
+            </span>
+          )}
         </div>
         <h3 className="text-sm font-semibold text-slate-900 group-hover:text-indigo-700 transition-colors truncate">{course.title}</h3>
         <div className="flex items-center gap-3 text-xs text-slate-500 mt-1">
@@ -6037,6 +6089,7 @@ function CourseBuilder({
 
   const safeLearners = Array.isArray(learners) ? learners : [];
   const safeAdminCourses = Array.isArray(adminCourses) ? adminCourses : [];
+  const assignableAdminCourses = safeAdminCourses.filter(isAssignableLmsCourse);
   const isEditingExistingCourse = Number(editingCourseId || 0) > 0;
   const isViewingHistoricalVersion = Number(historyViewVersionId || 0) > 0;
   const pendingVersionId = Number(savedVersionId || 0) || null;
@@ -6080,7 +6133,13 @@ function CourseBuilder({
     }
   };
 
-  const effectiveAssignmentCourseId = Number(assignmentCourseId || createdCourseId || safeAdminCourses?.[0]?.id || 0) || null;
+  const requestedAssignmentCourseId = Number(assignmentCourseId || createdCourseId || 0) || null;
+  const hasRequestedAssignableCourse = assignableAdminCourses.some(
+    (courseItem) => Number(courseItem?.id || 0) === requestedAssignmentCourseId
+  );
+  const effectiveAssignmentCourseId = hasRequestedAssignableCourse
+    ? requestedAssignmentCourseId
+    : (Number(assignableAdminCourses?.[0]?.id || 0) || null);
 
   const handleAssignSelected = async () => {
     if (!canUseManagerApi) {
@@ -6088,7 +6147,7 @@ function CourseBuilder({
       return;
     }
     if (!effectiveAssignmentCourseId) {
-      emitToast?.("Сначала сохраните курс или выберите курс из списка", "error");
+      emitToast?.("Назначение доступно только для опубликованных курсов", "error");
       return;
     }
     if (!selectedLearnerIds.length) {
@@ -7566,10 +7625,15 @@ function CourseBuilder({
                   <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Курс для назначения</label>
                   <select value={effectiveAssignmentCourseId || ""} onChange={(e) => setAssignmentCourseId(Number(e.target.value) || null)} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 focus:outline-none focus:border-indigo-400 transition-all">
                     <option value="">Выберите курс</option>
-                    {safeAdminCourses.map((courseItem) => (
+                    {assignableAdminCourses.map((courseItem) => (
                       <option key={courseItem.id} value={courseItem.id}>{courseItem.title}</option>
                     ))}
                   </select>
+                  {assignableAdminCourses.length === 0 && (
+                    <p className="text-[11px] text-slate-400 mt-1">
+                      Назначение доступно только для опубликованных курсов.
+                    </p>
+                  )}
                 </div>
                 <div><label className="text-xs font-semibold text-slate-600 mb-1.5 block">Дедлайн для группы</label><input type="date" value={assignmentDueAt} onChange={(e) => setAssignmentDueAt(e.target.value)} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 focus:outline-none focus:border-indigo-400 transition-all" /></div>
                 {[{ label: "Уведомить сотрудников", sub: "Email при назначении" }, { label: "Напоминания о дедлайне", sub: "За 7 и 3 дня до" }].map(item => (
@@ -7601,12 +7665,14 @@ function AdminView({
   onOpenBuilder,
   onOpenCourse,
   onDeleteCourse,
+  onArchiveCourse,
   onAssignCourseToEmployee,
   canDeleteCourses = true,
   busyCourseId = null,
   isEditorMode = false,
 }) {
   const [deletingCourseId, setDeletingCourseId] = useState(null);
+  const [archivingCourseId, setArchivingCourseId] = useState(null);
   const [employeeSearch, setEmployeeSearch] = useState("");
   const [employeeAssignedCourseSearch, setEmployeeAssignedCourseSearch] = useState("");
   const [employeeDeptFilter, setEmployeeDeptFilter] = useState("all");
@@ -7637,6 +7703,7 @@ function AdminView({
   const safeProgressRows = Array.isArray(progressRows) ? progressRows : [];
   const safeAttempts = Array.isArray(attempts) ? attempts : [];
   const safeAdminCourses = Array.isArray(adminCourses) ? adminCourses : [];
+  const assignableAdminCourses = safeAdminCourses.filter(isAssignableLmsCourse);
   const isAdminLoading = loading && safeAdminCourses.length === 0 && safeProgressRows.length === 0 && safeAttempts.length === 0;
   const extractCourseSkills = (courseLike) => {
     const directSkills = Array.isArray(courseLike?.skills)
@@ -7793,6 +7860,9 @@ function AdminView({
       nearestDeadlineAtMs: null,
     };
     const progressPercent = stat.total > 0 ? Math.round(stat.progressSum / stat.total) : 0;
+    const publishStatus = String(item?.status || "").trim().toLowerCase();
+    const latestVersionStatus = String(item?.latest_version_status || "").trim().toLowerCase();
+    const isDraftOfPublished = publishStatus === "published" && latestVersionStatus === "draft";
     // Длительность автоматически из количества уроков
     const adminDuration = stat.lessons > 0 ? `${stat.lessons} уроков` : "—";
     return {
@@ -7809,10 +7879,14 @@ function AdminView({
       attemptsUsed: 0,
       rating: 0,
       status: resolveAdminCourseAggregateStatus(stat),
-      publishStatus: String(item?.status || "").trim().toLowerCase(),
+      publishStatus,
+      latestVersionStatus,
+      latestVersionId: Number(item?.latest_version_id || 0) || null,
+      latestVersionNumber: Number(item?.latest_version_number || 0) || null,
       hasDraftVersion: Boolean(item?.has_draft_version),
       latestDraftVersionId: Number(item?.latest_draft_version_id || 0) || null,
       latestDraftVersionNumber: Number(item?.latest_draft_version_number || 0) || null,
+      editorDraftLabel: isDraftOfPublished ? "Черновик выпущенного" : (latestVersionStatus === "draft" ? "Черновик" : ""),
       progress: progressPercent,
       deadline: stat.nearestDeadlineAt || null,
     };
@@ -7908,6 +7982,9 @@ function AdminView({
       const stat = analyticsCourseStats.get(Number(item?.id || 0)) || {};
       const runtimeStat = courseStatMap.get(Number(item?.id || 0)) || {};
       const lessons = Math.max(0, Number(stat?.lessons || 0));
+      const publishStatus = String(item?.status || "").trim().toLowerCase();
+      const latestVersionStatus = String(item?.latest_version_status || "").trim().toLowerCase();
+      const isDraftOfPublished = publishStatus === "published" && latestVersionStatus === "draft";
       return {
         id: Number(item?.id || index + 1),
         title: item?.title || `Курс #${item?.id || index + 1}`,
@@ -7922,10 +7999,14 @@ function AdminView({
         attemptsUsed: 0,
         rating: 0,
         status: String(stat?.status || "not_started"),
-        publishStatus: String(item?.status || "").trim().toLowerCase(),
+        publishStatus,
+        latestVersionStatus,
+        latestVersionId: Number(item?.latest_version_id || 0) || null,
+        latestVersionNumber: Number(item?.latest_version_number || 0) || null,
         hasDraftVersion: Boolean(item?.has_draft_version),
         latestDraftVersionId: Number(item?.latest_draft_version_id || 0) || null,
         latestDraftVersionNumber: Number(item?.latest_draft_version_number || 0) || null,
+        editorDraftLabel: isDraftOfPublished ? "Черновик выпущенного" : (latestVersionStatus === "draft" ? "Черновик" : ""),
         progress: Math.max(0, Math.min(100, Number(stat?.progress || 0))),
         deadline: runtimeStat?.nearestDeadlineAt || null,
       };
@@ -7952,11 +8033,11 @@ function AdminView({
   const normalizedCourseSearch = courseSearch.trim().toLowerCase();
   const editorPublishedCoursesCount = courseRows.filter((courseItem) => {
     const publishStatus = String(courseItem?.publishStatus || "").toLowerCase();
-    return publishStatus === "published" || publishStatus === "archived";
+    return publishStatus === "published";
   }).length;
   const editorDraftCoursesCount = courseRows.filter((courseItem) => {
-    const publishStatus = String(courseItem?.publishStatus || "").toLowerCase();
-    return publishStatus === "draft" || Boolean(courseItem?.hasDraftVersion);
+    const latestVersionStatus = String(courseItem?.latestVersionStatus || "").toLowerCase();
+    return latestVersionStatus === "draft";
   }).length;
   const filteredCourseRows = courseRows.filter((courseItem) => {
     if (!courseItem) return false;
@@ -7972,8 +8053,9 @@ function AdminView({
       return false;
     }
     if (isEditorMode) {
-      const isDraftScopeItem = publishStatus === "draft" || Boolean(courseItem?.hasDraftVersion);
-      const isPublishedScopeItem = publishStatus === "published" || publishStatus === "archived";
+      const latestVersionStatus = String(courseItem?.latestVersionStatus || "").toLowerCase();
+      const isDraftScopeItem = latestVersionStatus === "draft";
+      const isPublishedScopeItem = publishStatus === "published";
       if (editorCourseScope === "drafts") return isDraftScopeItem;
       return isPublishedScopeItem;
     }
@@ -8246,9 +8328,29 @@ function AdminView({
     }
   };
 
+  const handleArchiveCourse = async (courseItem) => {
+    const courseId = Number(courseItem?.id || 0);
+    if (!courseId || typeof onArchiveCourse !== "function") return;
+    const publishStatus = String(courseItem?.publishStatus || "").toLowerCase();
+    if (publishStatus === "archived") return;
+
+    const title = String(courseItem?.title || `Курс #${courseId}`).trim();
+    const isConfirmed = window.confirm(`Архивировать курс «${title}»?\n\nКурс пропадёт из LMS у сотрудников.`);
+    if (!isConfirmed) return;
+
+    setArchivingCourseId(courseId);
+    try {
+      await onArchiveCourse(courseItem);
+    } finally {
+      setArchivingCourseId((prev) => (prev === courseId ? null : prev));
+    }
+  };
+
   const resolveBuilderOpenOptions = (courseItem) => {
     if (!isEditorMode || editorCourseScope !== "drafts") return {};
-    const draftVersionId = Number(courseItem?.latestDraftVersionId || 0) || null;
+    const latestVersionStatus = String(courseItem?.latestVersionStatus || "").toLowerCase();
+    if (latestVersionStatus !== "draft") return {};
+    const draftVersionId = Number(courseItem?.latestVersionId || courseItem?.latestDraftVersionId || 0) || null;
     return draftVersionId ? { draftVersionId } : {};
   };
 
@@ -8798,12 +8900,12 @@ function AdminView({
                     </button>
                   </div>
                   <div className="p-6 overflow-y-auto custom-scrollbar bg-slate-50/50 flex-1 space-y-3 relative z-0">
-                    {safeAdminCourses.length === 0 && (
+                    {assignableAdminCourses.length === 0 && (
                       <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-xs text-slate-500 text-center">
-                        Нет доступных курсов
+                        Нет опубликованных курсов для назначения
                       </div>
                     )}
-                    {safeAdminCourses.map((courseItem) => {
+                    {assignableAdminCourses.map((courseItem) => {
                       const courseId = Number(courseItem?.id || 0);
                       const assignmentRow = selectedEmployeeAssignmentsByCourse.get(courseId) || null;
                       const assignmentStatus = assignmentRow ? (statusConfig[mapAdminProgressRowToUiStatus(assignmentRow)] || statusConfig.not_started) : null;
@@ -8965,6 +9067,20 @@ function AdminView({
                               >
                                 <Edit size={14} />
                               </button>
+                              {typeof onArchiveCourse === "function" && (
+                                <button
+                                  onClick={() => { void handleArchiveCourse(courseItem); }}
+                                  disabled={archivingCourseId === courseItem.id || String(courseItem?.publishStatus || "").toLowerCase() === "archived"}
+                                  title={
+                                    String(courseItem?.publishStatus || "").toLowerCase() === "archived"
+                                      ? "Курс уже в архиве"
+                                      : (archivingCourseId === courseItem.id ? "Архивируем..." : "Архивировать курс")
+                                  }
+                                  className="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-white/80 text-slate-500 hover:text-amber-700 hover:bg-amber-50 border border-slate-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                  <Archive size={14} />
+                                </button>
+                              )}
                               {canDeleteCourses && (
                                 <button
                                   onClick={() => { void handleDeleteCourse(courseItem); }}
@@ -8998,6 +9114,20 @@ function AdminView({
                               >
                                 <Edit size={15} />
                               </button>
+                              {typeof onArchiveCourse === "function" && (
+                                <button
+                                  onClick={() => { void handleArchiveCourse(courseItem); }}
+                                  disabled={archivingCourseId === courseItem.id || String(courseItem?.publishStatus || "").toLowerCase() === "archived"}
+                                  title={
+                                    String(courseItem?.publishStatus || "").toLowerCase() === "archived"
+                                      ? "Курс уже в архиве"
+                                      : (archivingCourseId === courseItem.id ? "Архивируем..." : "Архивировать курс")
+                                  }
+                                  className="p-2 text-slate-400 hover:text-amber-700 hover:bg-amber-50 rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                  <Archive size={15} />
+                                </button>
+                              )}
                               {canDeleteCourses && (
                                 <button
                                   onClick={() => { void handleDeleteCourse(courseItem); }}

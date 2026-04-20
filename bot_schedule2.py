@@ -17415,9 +17415,13 @@ def _lms_get_lesson_context_tx(cursor, user_id, lesson_id):
         FROM lms_lessons l
         JOIN lms_modules m ON m.id = l.module_id
         JOIN lms_course_versions cv ON cv.id = m.course_version_id
+           AND cv.status = 'published'
         JOIN lms_course_assignments a
             ON a.course_version_id = cv.id
            AND a.user_id = %s
+        JOIN lms_courses c
+            ON c.id = a.course_id
+           AND c.status = 'published'
         LEFT JOIN LATERAL (
             SELECT metadata
             FROM lms_lesson_materials lm
@@ -18534,6 +18538,7 @@ def lms_home():
                 JOIN lms_courses c ON c.id = a.course_id
                 LEFT JOIN lms_course_versions cv ON cv.id = a.course_version_id
                 WHERE a.user_id = %s
+                  AND c.status = 'published'
                 ORDER BY COALESCE(a.due_at, a.created_at) ASC, a.id DESC
             """, (requester_id,))
             assignment_rows = cursor.fetchall()
@@ -18724,6 +18729,7 @@ def lms_courses():
                 FROM lms_course_assignments a
                 JOIN lms_courses c ON c.id = a.course_id
                 WHERE a.user_id = %s
+                  AND c.status = 'published'
                 ORDER BY c.title ASC
             """, (requester_id,))
             rows = cursor.fetchall()
@@ -18762,10 +18768,12 @@ def lms_course_detail(course_id):
     try:
         with db._get_cursor() as cursor:
             cursor.execute("""
-                SELECT id, course_version_id, status, due_at, started_at, completed_at
-                FROM lms_course_assignments
-                WHERE user_id = %s
-                  AND course_id = %s
+                SELECT a.id, a.course_version_id, a.status, a.due_at, a.started_at, a.completed_at
+                FROM lms_course_assignments a
+                JOIN lms_courses c ON c.id = a.course_id
+                WHERE a.user_id = %s
+                  AND a.course_id = %s
+                  AND c.status = 'published'
                 LIMIT 1
             """, (requester_id, course_id))
             assignment = cursor.fetchone()
@@ -18852,13 +18860,16 @@ def lms_start_course(course_id):
         now = _lms_now()
         with db._get_cursor() as cursor:
             cursor.execute("""
-                UPDATE lms_course_assignments
-                SET status = CASE WHEN status = 'assigned' THEN 'in_progress' ELSE status END,
-                    started_at = COALESCE(started_at, %s),
+                UPDATE lms_course_assignments a
+                SET status = CASE WHEN a.status = 'assigned' THEN 'in_progress' ELSE a.status END,
+                    started_at = COALESCE(a.started_at, %s),
                     updated_at = %s
-                WHERE user_id = %s
-                  AND course_id = %s
-                RETURNING id, status, started_at, due_at
+                FROM lms_courses c
+                WHERE a.user_id = %s
+                  AND a.course_id = %s
+                  AND c.id = a.course_id
+                  AND c.status = 'published'
+                RETURNING a.id, a.status, a.started_at, a.due_at
             """, (now, now, requester_id, course_id))
             updated = cursor.fetchone()
             if not updated:
@@ -19331,6 +19342,8 @@ def lms_test_start(test_id):
                    AND a.user_id = %s
                 WHERE t.id = %s
                   AND t.status <> 'archived'
+                  AND cv.status = 'published'
+                  AND c.status = 'published'
                 LIMIT 1
             """, (
                 LMS_DEFAULT_PASS_THRESHOLD,
@@ -20057,22 +20070,23 @@ def lms_admin_courses():
                         c.current_version_id,
                         cv.version_number, cv.status, cv.pass_threshold, cv.attempt_limit,
                         cv.anti_cheat_settings,
-                        draft_cv.id,
-                        draft_cv.version_number,
-                        draft_cv.created_at
+                        latest_cv.id,
+                        latest_cv.version_number,
+                        latest_cv.status,
+                        latest_cv.created_at
                     FROM lms_courses c
                     LEFT JOIN lms_course_versions cv ON cv.id = c.current_version_id
                     LEFT JOIN LATERAL (
                         SELECT
-                            cvd.id,
-                            cvd.version_number,
-                            cvd.created_at
-                        FROM lms_course_versions cvd
-                        WHERE cvd.course_id = c.id
-                          AND cvd.status = 'draft'
-                        ORDER BY cvd.version_number DESC, cvd.id DESC
+                            cvl.id,
+                            cvl.version_number,
+                            cvl.status,
+                            cvl.created_at
+                        FROM lms_course_versions cvl
+                        WHERE cvl.course_id = c.id
+                        ORDER BY cvl.version_number DESC, cvl.id DESC
                         LIMIT 1
-                    ) draft_cv ON TRUE
+                    ) latest_cv ON TRUE
                     ORDER BY c.updated_at DESC, c.id DESC
                 """)
                 rows = cursor.fetchall()
@@ -20080,9 +20094,11 @@ def lms_admin_courses():
                 for row in rows:
                     version_settings = _lms_parse_json(row[13], {})
                     cover_payload = _lms_resolve_cover_payload(version_settings)
-                    latest_draft_version_id = int(row[14]) if row[14] is not None else None
-                    latest_draft_version_number = int(row[15]) if row[15] is not None else None
-                    latest_draft_created_at = row[16].isoformat() if row[16] else None
+                    latest_version_id = int(row[14]) if row[14] is not None else None
+                    latest_version_number = int(row[15]) if row[15] is not None else None
+                    latest_version_status = str(row[16] or '').strip().lower() or None
+                    latest_version_created_at = row[17].isoformat() if row[17] else None
+                    latest_is_draft = latest_version_status == 'draft' and latest_version_id is not None
                     courses.append({
                         "id": int(row[0]),
                         "slug": row[1],
@@ -20104,10 +20120,14 @@ def lms_admin_courses():
                             "pass_threshold": float(row[11]) if row[11] is not None else None,
                             "attempt_limit": int(row[12]) if row[12] is not None else None
                         } if row[8] is not None else None,
-                        "has_draft_version": latest_draft_version_id is not None,
-                        "latest_draft_version_id": latest_draft_version_id,
-                        "latest_draft_version_number": latest_draft_version_number,
-                        "latest_draft_created_at": latest_draft_created_at
+                        "latest_version_id": latest_version_id,
+                        "latest_version_number": latest_version_number,
+                        "latest_version_status": latest_version_status,
+                        "latest_version_created_at": latest_version_created_at,
+                        "has_draft_version": latest_is_draft,
+                        "latest_draft_version_id": latest_version_id if latest_is_draft else None,
+                        "latest_draft_version_number": latest_version_number if latest_is_draft else None,
+                        "latest_draft_created_at": latest_version_created_at if latest_is_draft else None
                     })
                 return jsonify({"status": "success", "courses": courses}), 200
 
@@ -20693,7 +20713,7 @@ def lms_admin_assign_course(course_id):
     try:
         with db._get_cursor() as cursor:
             cursor.execute("""
-                SELECT id, current_version_id
+                SELECT id, current_version_id, status
                 FROM lms_courses
                 WHERE id = %s
                 LIMIT 1
@@ -20702,6 +20722,9 @@ def lms_admin_assign_course(course_id):
             if not course_row:
                 return jsonify({"error": "Course not found"}), 404
             current_version_id = int(course_row[1]) if course_row[1] is not None else None
+            course_status = str(course_row[2] or '').strip().lower()
+            if course_status != 'published':
+                return jsonify({"error": "Only published courses can be assigned"}), 400
 
             if version_id is None:
                 version_id = current_version_id
@@ -20729,8 +20752,8 @@ def lms_admin_assign_course(course_id):
             if not version_row:
                 return jsonify({"error": "course_version_id does not belong to course"}), 400
             version_status = str(version_row[1] or '').strip().lower()
-            if version_status == 'archived':
-                return jsonify({"error": "Archived course version cannot be assigned"}), 400
+            if version_status != 'published':
+                return jsonify({"error": "Only published course version can be assigned"}), 400
             if current_version_id is not None and int(version_id) != int(current_version_id):
                 return jsonify({"error": "Only current course version can be assigned. Use history to review old versions."}), 400
 
