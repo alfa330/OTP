@@ -973,7 +973,7 @@ const statusConfig = {
   test_failed: { label: "Тест не пройден", bg: "bg-red-50", text: "text-red-700", border: "border-red-200", dot: "bg-red-500" },
 };
 
-const lessonIcons = { video: Video, text: FileText, quiz: HelpCircle };
+const lessonIcons = { video: Video, text: FileText, quiz: HelpCircle, combo: Zap };
 
 const formatDeadline = (date) => {
   if (!date) return null;
@@ -1169,6 +1169,7 @@ const formatDurationLabel = (seconds) => {
 
 const inferLessonType = (lessonLike) => {
   const explicit = String(lessonLike?.lesson_type || lessonLike?.type || "").trim().toLowerCase();
+  if (explicit === "combo") return "combo";
   if (explicit === "quiz") return "quiz";
   if (explicit === "text") return "text";
   if (explicit === "video") return "video";
@@ -1401,11 +1402,6 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
       const rightHasPos = Number.isFinite(rightPos) && rightPos > 0;
       if (leftHasPos && rightHasPos && leftPos !== rightPos) return leftPos - rightPos;
       if (leftHasPos !== rightHasPos) return leftHasPos ? -1 : 1;
-      if (leftHasPos && rightHasPos && leftPos === rightPos) {
-        const leftTypeRank = String(left?.type || "").toLowerCase() === "quiz" ? 2 : 1;
-        const rightTypeRank = String(right?.type || "").toLowerCase() === "quiz" ? 2 : 1;
-        if (leftTypeRank !== rightTypeRank) return leftTypeRank - rightTypeRank;
-      }
       const leftId = Number(left?.id || 0);
       const rightId = Number(right?.id || 0);
       if (Number.isFinite(leftId) && Number.isFinite(rightId) && leftId !== rightId) return leftId - rightId;
@@ -1430,7 +1426,10 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
         let status = "not_started";
         if (String(progressRow?.status || "").toLowerCase() === "completed" || completionRatio >= 99) status = "completed";
         else if (String(progressRow?.status || "").toLowerCase() === "in_progress" || completionRatio > 0) status = "in_progress";
-        const lessonType = inferLessonType(lessonItem);
+        const lessonMaterials = (Array.isArray(lessonItem?.materials) ? lessonItem.materials : [])
+          .slice()
+          .sort((left, right) => Number(left?.position || 0) - Number(right?.position || 0));
+        const lessonType = inferLessonType({ ...lessonItem, materials: lessonMaterials });
         const duration = formatDurationLabel(Number(lessonItem?.duration_seconds || 0));
 
         lessons.push({
@@ -1447,7 +1446,7 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
           completionRatio,
           allowFastForward: Boolean(lessonItem?.allow_fast_forward),
           completionThreshold: Number(lessonItem?.completion_threshold || 0),
-          materials: Array.isArray(lessonItem?.materials) ? lessonItem.materials : [],
+          materials: lessonMaterials,
           moduleId,
           _position: Number(lessonItem?.position || lessonIndex + 1),
         });
@@ -1466,6 +1465,72 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
         .sort((a, b) => Number(a?.position || 0) - Number(b?.position || 0));
       moduleTests.forEach((test) => {
         const mappedTest = mapTestLesson(test);
+        const testMetadata = test?.metadata && typeof test.metadata === "object" ? test.metadata : {};
+        const sourceLessonType = String(testMetadata?.source_lesson_type || "").trim().toLowerCase();
+        const sourceLessonPosition = Number(
+          testMetadata?.source_lesson_position
+          ?? test?.source_lesson_position
+          ?? 0
+        );
+        if (sourceLessonType === "combo_lesson" && sourceLessonPosition > 0) {
+          const comboLesson = lessons.find((lessonItem) => Number(lessonItem?._position || lessonItem?.position || 0) === sourceLessonPosition);
+          if (comboLesson) {
+            const comboTextPosition = Number(
+              testMetadata?.combo_text_position
+              ?? test?.combo_text_position
+              ?? comboLesson?.comboTextPosition
+              ?? 1
+            );
+            const contentStatus = String(comboLesson?.status || "not_started").trim().toLowerCase();
+            const mappedTestStatus = String(mappedTest?.status || "not_started").trim().toLowerCase();
+            let mergedStatus = mappedTestStatus;
+            if (mappedTestStatus === "completed") mergedStatus = "completed";
+            else if (contentStatus === "completed") mergedStatus = "in_progress";
+            else if (mappedTestStatus === "not_started") mergedStatus = contentStatus || "not_started";
+
+            const baseDurationSeconds = Math.max(0, Number(comboLesson?.durationSeconds || 0));
+            const testDurationSeconds = Math.max(0, Number(mappedTest?.durationSeconds || 0));
+            const mergedDurationSeconds = baseDurationSeconds + testDurationSeconds;
+
+            comboLesson.type = "combo";
+            comboLesson.status = mergedStatus;
+            comboLesson.requiresTest = true;
+            comboLesson.apiTestId = Number(mappedTest?.apiTestId || 0) || comboLesson?.apiTestId;
+            comboLesson.maxAttempts = Math.max(1, Number(mappedTest?.maxAttempts || comboLesson?.maxAttempts || 3));
+            comboLesson.attemptsUsed = Math.max(0, Number(mappedTest?.attemptsUsed || comboLesson?.attemptsUsed || 0));
+            comboLesson.passingScore = Math.max(1, Math.min(100, Number(mappedTest?.passingScore || comboLesson?.passingScore || 80)));
+            comboLesson.questionCount = Math.max(0, Number(mappedTest?.questionCount || comboLesson?.questionCount || 0));
+            comboLesson.questionTypes = Array.isArray(mappedTest?.questionTypes) ? mappedTest.questionTypes : [];
+            comboLesson.questionTypeBreakdown = mappedTest?.questionTypeBreakdown && typeof mappedTest.questionTypeBreakdown === "object"
+              ? mappedTest.questionTypeBreakdown
+              : {};
+            comboLesson.quizQuestions = Array.isArray(mappedTest?.quizQuestions) ? mappedTest.quizQuestions : [];
+            comboLesson.timeLimitMinutes = mappedTest?.timeLimitMinutes || null;
+            comboLesson.timeLimitSeconds = mappedTest?.timeLimitSeconds || null;
+            comboLesson.quizQuestionsPerTest = Math.max(1, Number(test?.question_count || mappedTest?.questionCount || comboLesson?.quizQuestionsPerTest || 1));
+            comboLesson.quizTimeLimitMinutes = mappedTest?.timeLimitMinutes || "";
+            comboLesson.quizPassingScore = Math.max(
+              1,
+              Math.min(100, Number(test?.pass_threshold || comboLesson?.quizPassingScore || mappedTest?.passingScore || coursePayload?.course_version?.pass_threshold || 80))
+            );
+            comboLesson.quizAttemptLimit = Math.max(
+              1,
+              Number(test?.attempt_limit || comboLesson?.quizAttemptLimit || mappedTest?.maxAttempts || coursePayload?.course_version?.attempt_limit || 3)
+            );
+            comboLesson.quizRandomOrder = test?.random_order !== false;
+            comboLesson.quizShowExplanations = true;
+            comboLesson.comboTextPosition = Number.isFinite(comboTextPosition) && comboTextPosition > 0
+              ? comboTextPosition
+              : Number(comboLesson?.comboTextPosition || 1);
+            comboLesson.durationSeconds = mergedDurationSeconds;
+            comboLesson.duration = formatDurationLabel(mergedDurationSeconds);
+
+            durationSeconds += testDurationSeconds;
+            progressItemsTotal += 1;
+            if (mappedTest.status === "completed") progressItemsCompleted += 1;
+            return;
+          }
+        }
         lessons.push(mappedTest);
         // Добавляем длительность теста в общее время курса
         durationSeconds += Math.max(0, Number(mappedTest.durationSeconds || 0));
@@ -3366,6 +3431,7 @@ function LessonView({
 }) {
   const isQuiz = lesson.type === "quiz";
   const isTextLesson = lesson.type === "text";
+  const isComboLesson = lesson.type === "combo";
   const lessonAttemptLimit = Math.max(0, Number(lesson?.maxAttempts ?? course?.maxAttempts ?? 0));
   const lessonAttemptsUsed = Math.max(0, Number(lesson?.attemptsUsed ?? course?.attemptsUsed ?? 0));
   const lessonAttemptsLeft = Math.max(0, lessonAttemptLimit - lessonAttemptsUsed);
@@ -3446,7 +3512,7 @@ function LessonView({
             <p className="text-sm font-semibold text-slate-900">{lesson.title}</p>
           </div>
           <div className="flex items-center gap-3">
-            {!isManagerMode && lesson.type === "quiz" && lessonAttemptLimit > 0 && (
+            {!isManagerMode && (lesson.type === "quiz" || lesson.type === "combo") && Number(lesson?.apiTestId || 0) > 0 && lessonAttemptLimit > 0 && (
               <div className="flex items-center gap-1.5 text-xs text-slate-500 bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-lg">
                 <RefreshCw size={12} />
                 <span>Попыток: <strong className={lessonAttemptsLeft <= 1 ? "text-red-600" : "text-slate-700"}>{lessonAttemptsLeft}</strong> / {lessonAttemptLimit}</span>
@@ -3481,6 +3547,21 @@ function LessonView({
                 course={course}
               />
             )
+          ) : isComboLesson ? (
+            <ComboLesson
+              lesson={lesson}
+              course={course}
+              quizView={quizView}
+              setQuizView={setQuizView}
+              quizAnswers={quizAnswers}
+              setQuizAnswers={setQuizAnswers}
+              apiMode={apiMode}
+              lmsRequest={lmsRequest}
+              onCompleteLesson={onCompleteLesson}
+              onQuizFinished={onQuizFinished}
+              emitToast={emitToast}
+              isManagerMode={isManagerMode}
+            />
           ) : isTextLesson ? (
             <TextLesson
               lesson={lesson}
@@ -3596,6 +3677,256 @@ function TextLesson({ lesson, onCompleteLesson, isManagerMode = false }) {
 }
 
 // ─── VIDEO LESSON ─────────────────────────────────────────────────────────────
+
+function ComboLesson({
+  lesson,
+  course,
+  quizView,
+  setQuizView,
+  quizAnswers,
+  setQuizAnswers,
+  apiMode,
+  lmsRequest,
+  onCompleteLesson,
+  onQuizFinished,
+  emitToast,
+  isManagerMode = false,
+}) {
+  const [textRead, setTextRead] = useState(false);
+  const [watchedVideos, setWatchedVideos] = useState({});
+  const [quizOpened, setQuizOpened] = useState(false);
+  const [preparingQuiz, setPreparingQuiz] = useState(false);
+  const [lessonCompleted, setLessonCompleted] = useState(String(lesson?.status || "").toLowerCase() === "completed");
+
+  const materials = useMemo(() => (
+    (Array.isArray(lesson?.materials) ? lesson.materials : [])
+      .slice()
+      .sort((left, right) => Number(left?.position || 0) - Number(right?.position || 0))
+  ), [lesson?.materials]);
+  const textMaterial = useMemo(
+    () => materials.find((item) => String(item?.material_type || item?.type || "").toLowerCase() === "text" && item?.content_text),
+    [materials]
+  );
+  const textContent = normalizeRichTextValue(textMaterial?.content_text || lesson?.description || "");
+  const hasTextContent = Boolean(String(textContent || "").trim());
+  const videoMaterials = useMemo(
+    () => materials.filter((item) => {
+      const materialType = String(item?.material_type || item?.type || "").toLowerCase();
+      const videoUrl = String(item?.url || item?.signed_url || item?.content_url || "").trim();
+      return materialType === "video" && Boolean(videoUrl);
+    }),
+    [materials]
+  );
+  const extraMaterials = useMemo(
+    () => materials.filter((item) => {
+      const materialType = String(item?.material_type || item?.type || "").toLowerCase();
+      if (materialType === "text" || materialType === "video") return false;
+      return Boolean(item?.url || item?.signed_url || item?.content_url);
+    }),
+    [materials]
+  );
+  const comboTextPosition = Math.min(
+    Math.max(1, videoMaterials.length + 1),
+    Math.max(1, Number(lesson?.comboTextPosition || 1))
+  );
+  const orderedBlocks = useMemo(() => {
+    const blocks = videoMaterials.map((videoItem, index) => ({ kind: "video", index, material: videoItem }));
+    if (hasTextContent) {
+      const insertIndex = Math.min(blocks.length, Math.max(0, comboTextPosition - 1));
+      blocks.splice(insertIndex, 0, { kind: "text" });
+    }
+    return blocks;
+  }, [videoMaterials, hasTextContent, comboTextPosition]);
+
+  useEffect(() => {
+    const completed = String(lesson?.status || "").toLowerCase() === "completed";
+    setLessonCompleted(completed);
+    setTextRead(completed || !hasTextContent || isManagerMode);
+    setWatchedVideos(
+      videoMaterials.reduce((acc, _, index) => {
+        acc[index] = completed || isManagerMode;
+        return acc;
+      }, {})
+    );
+    setQuizOpened(isManagerMode);
+  }, [lesson?.id, lesson?.status, hasTextContent, videoMaterials, isManagerMode]);
+
+  const allVideosWatched = videoMaterials.length === 0 || videoMaterials.every((_, index) => watchedVideos[index]);
+  const isContentCompleted = isManagerMode || lessonCompleted || ((!hasTextContent || textRead) && allVideosWatched);
+
+  const handleVideoEnded = (index) => {
+    setWatchedVideos((prev) => ({ ...prev, [index]: true }));
+  };
+
+  const handleOpenQuiz = async () => {
+    if (!isContentCompleted || preparingQuiz) return;
+    if (!isManagerMode && !lessonCompleted && typeof onCompleteLesson === "function") {
+      setPreparingQuiz(true);
+      try {
+        const ok = await onCompleteLesson(lesson);
+        if (ok) setLessonCompleted(true);
+      } finally {
+        setPreparingQuiz(false);
+      }
+    }
+    setQuizOpened(true);
+    setQuizView?.("intro");
+  };
+
+  const handleComboQuizFinished = async (payload) => {
+    if (typeof onQuizFinished === "function") {
+      await onQuizFinished(payload);
+    }
+  };
+
+  const lessonAttemptLimit = Math.max(0, Number(lesson?.maxAttempts ?? course?.maxAttempts ?? 0));
+  const lessonAttemptsUsed = Math.max(0, Number(lesson?.attemptsUsed ?? course?.attemptsUsed ?? 0));
+  const lessonAttemptsLeft = Math.max(0, lessonAttemptLimit - lessonAttemptsUsed);
+
+  return (
+    <div className="space-y-6">
+      <div className="bg-white rounded-2xl border border-slate-200 p-6">
+        <h3 className="text-sm font-semibold text-slate-900 mb-3">Комбо-материалы</h3>
+        <div className="space-y-4">
+          {orderedBlocks.length === 0 && (
+            <div className="text-xs text-slate-400">Контент комбо-урока пока не добавлен</div>
+          )}
+          {orderedBlocks.map((block, blockIndex) => {
+            if (block.kind === "text") {
+              return (
+                <div key={`combo-text-${blockIndex}`} className="rounded-xl border border-slate-200 p-4">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">Текст</p>
+                  <RichTextContent
+                    value={textContent}
+                    className="text-sm text-slate-700 leading-relaxed"
+                    emptyState={<div className="text-xs text-slate-400">Текст урока не заполнен</div>}
+                  />
+                  {!isManagerMode && hasTextContent && (
+                    <label className="inline-flex items-center gap-2 mt-3 text-xs text-slate-600 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={textRead}
+                        onChange={(event) => setTextRead(event.target.checked)}
+                        className="accent-indigo-600 w-4 h-4"
+                      />
+                      Отметить как прочитано
+                    </label>
+                  )}
+                </div>
+              );
+            }
+            const videoMaterial = block.material;
+            const videoUrl = String(videoMaterial?.url || videoMaterial?.signed_url || videoMaterial?.content_url || "").trim();
+            const videoDone = Boolean(watchedVideos[block.index]);
+            return (
+              <div key={`combo-video-${block.index}`} className="rounded-xl border border-slate-200 p-4">
+                <div className="flex items-center justify-between gap-2 mb-2">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Видео {block.index + 1}
+                  </p>
+                  {videoDone && <span className="text-[10px] bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded-full font-semibold">Просмотрено</span>}
+                </div>
+                <video
+                  key={videoUrl || `combo-video-${block.index}`}
+                  src={videoUrl}
+                  controls
+                  preload="metadata"
+                  className="w-full max-h-[420px] bg-black rounded-lg"
+                  onEnded={() => handleVideoEnded(block.index)}
+                />
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {extraMaterials.length > 0 && (
+        <div className="bg-white rounded-2xl border border-slate-200 p-5">
+          <h3 className="text-sm font-semibold text-slate-900 mb-3">Дополнительные материалы</h3>
+          <div className="space-y-2">
+            {extraMaterials.map((material, idx) => {
+              const name = String(material?.title || `Материал ${idx + 1}`);
+              const metaName = String(material?.metadata?.uploaded_file_name || "");
+              const label = metaName || name;
+              const fileUrl = String(material?.url || material?.signed_url || material?.content_url || "").trim();
+              return (
+                <a
+                  key={`${material?.id || idx}-${label}`}
+                  href={fileUrl || "#"}
+                  rel="noopener noreferrer"
+                  download={label}
+                  className="lms-file-link"
+                >
+                  <span className="lms-file-icon" aria-hidden="true" />
+                  <span className="lms-file-content">
+                    <span className="lms-file-title">{label}</span>
+                    <span className="lms-file-subtitle">Нажмите, чтобы скачать</span>
+                  </span>
+                  <span className="lms-file-download">Скачать</span>
+                </a>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {Number(lesson?.apiTestId || 0) > 0 && (
+        <div className="bg-white rounded-2xl border border-slate-200 p-5">
+          {isManagerMode ? (
+            <ManagerQuizPreviewSection lesson={lesson} course={course} />
+          ) : !quizOpened ? (
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                <span className={`px-2 py-1 rounded-full font-semibold ${textRead || !hasTextContent ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-600"}`}>
+                  {hasTextContent ? (textRead ? "Текст прочитан" : "Текст не прочитан") : "Текст не требуется"}
+                </span>
+                <span className={`px-2 py-1 rounded-full font-semibold ${allVideosWatched ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-600"}`}>
+                  Видео: {videoMaterials.filter((_, index) => watchedVideos[index]).length}/{videoMaterials.length}
+                </span>
+                {lessonAttemptLimit > 0 && (
+                  <span className="px-2 py-1 rounded-full font-semibold bg-slate-100 text-slate-600">
+                    Попыток: {lessonAttemptsLeft}/{lessonAttemptLimit}
+                  </span>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={handleOpenQuiz}
+                disabled={!isContentCompleted || preparingQuiz}
+                className="inline-flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-semibold px-4 py-2.5 rounded-xl transition-colors"
+              >
+                {preparingQuiz ? <RefreshCw size={14} className="animate-spin" /> : <Play size={14} />}
+                {preparingQuiz ? "Подготовка..." : "Начать тест"}
+              </button>
+            </div>
+          ) : (
+            apiMode ? (
+              <ApiQuizSection
+                quizView={quizView}
+                setQuizView={setQuizView}
+                answers={quizAnswers}
+                setAnswers={setQuizAnswers}
+                course={course}
+                lesson={lesson}
+                lmsRequest={lmsRequest}
+                onFinished={handleComboQuizFinished}
+                emitToast={emitToast}
+              />
+            ) : (
+              <QuizSection
+                quizView={quizView}
+                setQuizView={setQuizView}
+                answers={quizAnswers}
+                setAnswers={setQuizAnswers}
+                course={course}
+              />
+            )
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest, onCompleteLesson, emitToast, isManagerMode = false }) {
   const [playing, setPlaying] = useState(false);
@@ -4209,7 +4540,7 @@ function ApiQuizSection({ quizView, setQuizView, answers, setAnswers, course, le
       });
       if (auto) setAutoFinished(true);
       setQuizView("result");
-      if (typeof onFinished === "function") await onFinished();
+      if (typeof onFinished === "function") await onFinished({ result: finish, auto, attemptId: Number(attempt?.id || 0) || null });
     } catch (error) {
       emitToast?.(`Не удалось завершить тест: ${String(error?.message || "ошибка")}`, "error");
     } finally {
@@ -5067,6 +5398,7 @@ function CourseBuilder({
     durationSeconds: "",
     completionThreshold: 95,
     contentText: "",
+    comboTextPosition: 1,
     materials: [],
     quizQuestionsPerTest: 5,
     quizTimeLimitMinutes: "",
@@ -5343,9 +5675,21 @@ function CourseBuilder({
         .slice()
         .sort((a, b) => Number(a?.position || 0) - Number(b?.position || 0));
       const mappedLessons = lessonsPayload.map((lessonItem, lessonIndex) => {
-        const lessonMaterials = Array.isArray(lessonItem?.materials) ? lessonItem.materials : [];
+        const lessonMaterials = (Array.isArray(lessonItem?.materials) ? lessonItem.materials : [])
+          .slice()
+          .sort((left, right) => Number(left?.position || 0) - Number(right?.position || 0));
         const videoMaterial = lessonMaterials.find((material) => String(material?.material_type || material?.type || "").toLowerCase() === "video");
         const textMaterial = lessonMaterials.find((material) => String(material?.material_type || material?.type || "").toLowerCase() === "text");
+        const lessonVideoDurationSeconds = lessonMaterials
+          .filter((material) => String(material?.material_type || material?.type || "").toLowerCase() === "video")
+          .reduce((sum, material) => sum + Math.max(0, Number(material?.metadata?.duration_seconds || 0)), 0);
+        const orderedContentMaterials = lessonMaterials.filter((material) => {
+          const materialType = String(material?.material_type || material?.type || "").toLowerCase();
+          return materialType === "text" || materialType === "video";
+        });
+        const textPositionInContent = orderedContentMaterials.findIndex(
+          (material) => String(material?.material_type || material?.type || "").toLowerCase() === "text"
+        ) + 1;
         const lessonType = inferLessonType({ ...lessonItem, materials: lessonMaterials });
         return buildLesson({
           id: Number(lessonItem?.id || `${moduleIndex + 1}${lessonIndex + 1}${Date.now()}`),
@@ -5353,9 +5697,14 @@ function CourseBuilder({
           type: lessonType,
           position: Number(lessonItem?.position || lessonIndex + 1),
           description: normalizeRichTextValue(lessonItem?.description || ""),
-          durationSeconds: Number(lessonItem?.duration_seconds || videoMaterial?.metadata?.duration_seconds || 0) || "",
+          durationSeconds: Number(
+            lessonItem?.duration_seconds
+            || (lessonType === "combo" ? lessonVideoDurationSeconds : videoMaterial?.metadata?.duration_seconds)
+            || 0
+          ) || "",
           completionThreshold: Number(lessonItem?.completion_threshold || 95) || 95,
           contentText: normalizeRichTextValue(textMaterial?.content_text || ""),
+          comboTextPosition: textPositionInContent > 0 ? textPositionInContent : 1,
           materials: lessonMaterials.map((material) => ({
             ...material,
             title: String(material?.title || "").trim() || "Материал",
@@ -5399,6 +5748,38 @@ function CourseBuilder({
       const targetModule = moduleById.get(Number(test?.module_id || 0)) || mappedModules[mappedModules.length - 1];
       if (!targetModule) return;
       const timeLimitMinutes = Number(test?.time_limit_minutes || 0);
+      const testMetadata = test?.metadata && typeof test.metadata === "object" ? test.metadata : {};
+      const sourceLessonType = String(testMetadata?.source_lesson_type || "").trim().toLowerCase();
+      const sourceLessonPosition = Number(
+        testMetadata?.source_lesson_position
+          ?? test?.source_lesson_position
+          ?? 0
+      );
+      if (sourceLessonType === "combo_lesson" && sourceLessonPosition > 0) {
+        const comboLesson = (Array.isArray(targetModule?.lessons) ? targetModule.lessons : []).find(
+          (lessonItem) => Number(lessonItem?.position || 0) === sourceLessonPosition
+        );
+        if (comboLesson) {
+          const comboTextPosition = Number(
+            testMetadata?.combo_text_position
+            ?? test?.combo_text_position
+            ?? comboLesson?.comboTextPosition
+            ?? 1
+          );
+          comboLesson.type = "combo";
+          comboLesson.quizQuestionsPerTest = Math.max(1, Number(test?.question_count || mappedQuizQuestions.length || comboLesson?.quizQuestionsPerTest || 1));
+          comboLesson.quizTimeLimitMinutes = timeLimitMinutes > 0 ? timeLimitMinutes : "";
+          comboLesson.quizPassingScore = Math.max(1, Math.min(100, Number(test?.pass_threshold || coursePayload?.course_version?.pass_threshold || 80)));
+          comboLesson.quizAttemptLimit = Math.max(1, Number(test?.attempt_limit || coursePayload?.course_version?.attempt_limit || 3));
+          comboLesson.quizRandomOrder = test?.random_order !== false;
+          comboLesson.quizShowExplanations = true;
+          comboLesson.comboTextPosition = Number.isFinite(comboTextPosition) && comboTextPosition > 0
+            ? comboTextPosition
+            : Number(comboLesson?.comboTextPosition || 1);
+          comboLesson.quizQuestions = mappedQuizQuestions.length > 0 ? mappedQuizQuestions : [createQuestionTemplate("single")];
+          return;
+        }
+      }
       targetModule.lessons.push(buildLesson({
         id: Date.now() + Math.floor(Math.random() * 1000) + testIndex,
         title: String(test?.title || "").trim() || `Тест ${testIndex + 1}`,
@@ -5428,9 +5809,6 @@ function CourseBuilder({
           const rightHasPos = Number.isFinite(rightPos) && rightPos > 0;
           if (leftHasPos && rightHasPos && leftPos !== rightPos) return leftPos - rightPos;
           if (leftHasPos !== rightHasPos) return leftHasPos ? -1 : 1;
-          const leftTypeRank = String(left?.type || "").toLowerCase() === "quiz" ? 2 : 1;
-          const rightTypeRank = String(right?.type || "").toLowerCase() === "quiz" ? 2 : 1;
-          if (leftTypeRank !== rightTypeRank) return leftTypeRank - rightTypeRank;
           return Number(left?.id || 0) - Number(right?.id || 0);
         });
     });
@@ -5806,15 +6184,54 @@ function CourseBuilder({
     if (!file || !selectedLessonModel) return;
     setLessonUploading(true);
     try {
-      const replaceBucket = String(selectedLessonVideoMaterial?.bucket || "").trim();
-      const replaceBlobPath = String(selectedLessonVideoMaterial?.blob_path || "").trim();
+      const isComboLesson = String(selectedLessonModel?.type || "").trim().toLowerCase() === "combo";
+      const replaceBucket = isComboLesson ? "" : String(selectedLessonVideoMaterial?.bucket || "").trim();
+      const replaceBlobPath = isComboLesson ? "" : String(selectedLessonVideoMaterial?.blob_path || "").trim();
       const detectedDuration = await readVideoDurationSeconds(file);
       const nextDurationSeconds = detectedDuration != null
         ? Math.max(1, Math.round(detectedDuration))
         : Math.max(1, Number(selectedLessonModel?.durationSeconds || 0) || 15 * 60);
-      const uploaded = await uploadSingleMaterial(file, "video", { replaceBucket, replaceBlobPath });
+      const uploaded = await uploadSingleMaterial(
+        file,
+        "video",
+        isComboLesson ? {} : { replaceBucket, replaceBlobPath }
+      );
       updateLessonById(selectedLessonModel.id, (prev) => {
-        const base = Array.isArray(prev?.materials) ? prev.materials.filter((item) => String(item?.material_type || item?.type || "").toLowerCase() !== "video") : [];
+        const previousMaterials = Array.isArray(prev?.materials) ? prev.materials : [];
+        const uploadedVideoMaterial = {
+          title: file.name || "Видео",
+          type: "video",
+          material_type: "video",
+          content_url: uploaded.signed_url || "",
+          signed_url: uploaded.signed_url || "",
+          mime_type: uploaded.content_type || file.type || "video/mp4",
+          bucket: uploaded.bucket || "",
+          blob_path: uploaded.blob_path || "",
+          metadata: {
+            uploaded_file_name: uploaded.file_name || file.name || "video",
+            duration_seconds: nextDurationSeconds,
+          },
+        };
+        if (isComboLesson) {
+          const updatedMaterials = [...previousMaterials, uploadedVideoMaterial];
+          const totalVideoDuration = updatedMaterials
+            .filter((item) => String(item?.material_type || item?.type || "").toLowerCase() === "video")
+            .reduce((sum, item) => sum + Math.max(0, Number(item?.metadata?.duration_seconds || 0)), 0);
+          return {
+            ...prev,
+            type: "combo",
+            durationSeconds: totalVideoDuration > 0 ? totalVideoDuration : (prev?.durationSeconds || nextDurationSeconds),
+            materials: updatedMaterials,
+          };
+        }
+        const nextBaseMaterials = previousMaterials.filter((item) => String(item?.material_type || item?.type || "").toLowerCase() !== "video");
+        return {
+          ...prev,
+          type: "video",
+          durationSeconds: nextDurationSeconds,
+          materials: [...nextBaseMaterials, uploadedVideoMaterial],
+        };
+        const base = previousMaterials.filter((item) => String(item?.material_type || item?.type || "").toLowerCase() !== "video");
         return {
           ...prev,
           type: "video",
@@ -5904,10 +6321,47 @@ function CourseBuilder({
 
   const handleRemoveLessonMaterial = (materialIndex) => {
     if (!selectedLessonModel) return;
-    updateLessonById(selectedLessonModel.id, (prev) => ({
-      ...prev,
-      materials: (Array.isArray(prev?.materials) ? prev.materials : []).filter((_, idx) => idx !== materialIndex),
-    }));
+    updateLessonById(selectedLessonModel.id, (prev) => {
+      const previousMaterials = Array.isArray(prev?.materials) ? prev.materials : [];
+      const nextMaterials = previousMaterials.filter((_, idx) => idx !== materialIndex);
+      if (String(prev?.type || "").toLowerCase() === "combo") {
+        const totalVideoDuration = nextMaterials
+          .filter((item) => String(item?.material_type || item?.type || "").toLowerCase() === "video")
+          .reduce((sum, item) => sum + Math.max(0, Number(item?.metadata?.duration_seconds || 0)), 0);
+        return {
+          ...prev,
+          durationSeconds: totalVideoDuration > 0 ? totalVideoDuration : "",
+          materials: nextMaterials,
+        };
+      }
+      return {
+        ...prev,
+        materials: nextMaterials,
+      };
+    });
+  };
+
+  const moveComboVideoMaterial = (videoIndex, direction) => {
+    if (!selectedLessonModel) return;
+    const fromIndex = Number(videoIndex);
+    const offset = Number(direction);
+    if (!Number.isFinite(fromIndex) || !Number.isFinite(offset)) return;
+    updateLessonById(selectedLessonModel.id, (prev) => {
+      const previousMaterials = Array.isArray(prev?.materials) ? prev.materials : [];
+      const videoMaterials = previousMaterials.filter((item) => String(item?.material_type || item?.type || "").toLowerCase() === "video");
+      if (videoMaterials.length <= 1) return prev;
+      const targetIndex = fromIndex + offset;
+      if (fromIndex < 0 || fromIndex >= videoMaterials.length) return prev;
+      if (targetIndex < 0 || targetIndex >= videoMaterials.length) return prev;
+      const reorderedVideos = videoMaterials.slice();
+      const [movedVideo] = reorderedVideos.splice(fromIndex, 1);
+      reorderedVideos.splice(targetIndex, 0, movedVideo);
+      const nonVideoMaterials = previousMaterials.filter((item) => String(item?.material_type || item?.type || "").toLowerCase() !== "video");
+      return {
+        ...prev,
+        materials: [...reorderedVideos, ...nonVideoMaterials],
+      };
+    });
   };
 
   const mapQuestionsToPayload = useCallback((questionBank = []) => (
@@ -5981,9 +6435,16 @@ function CourseBuilder({
             const lessonTitle = String(lessonItem?.title || "").trim();
             if (!lessonTitle) return null;
             const rawType = String(lessonItem?.type || "video").toLowerCase();
-            const lessonType = rawType === "text" ? "text" : rawType === "quiz" ? "quiz" : "video";
+            const lessonType = rawType === "text"
+              ? "text"
+              : rawType === "quiz"
+                ? "quiz"
+                : rawType === "combo"
+                  ? "combo"
+                  : "video";
             const description = normalizeRichTextValue(lessonItem?.description || "");
             const contentText = normalizeRichTextValue(lessonItem?.contentText || "");
+            const materialLessonType = lessonType === "combo" ? "text" : lessonType;
 
             if (lessonType === "quiz") {
               const quizQuestions = mapQuestionsToPayload(lessonItem?.quizQuestions);
@@ -6022,7 +6483,9 @@ function CourseBuilder({
               return null;
             }
 
-            const rawMaterials = Array.isArray(lessonItem?.materials) ? lessonItem.materials : [];
+            const rawMaterials = (Array.isArray(lessonItem?.materials) ? lessonItem.materials : [])
+              .slice()
+              .sort((left, right) => Number(left?.position || 0) - Number(right?.position || 0));
             let mappedMaterials = rawMaterials
               .map((materialItem, materialIndex) => {
                 const materialType = String(materialItem?.material_type || materialItem?.type || "file").toLowerCase();
@@ -6046,7 +6509,7 @@ function CourseBuilder({
               })
               .filter(Boolean);
 
-            if (lessonType === "text" && contentText) {
+            if (materialLessonType === "text" && lessonType !== "combo" && contentText) {
               mappedMaterials = mappedMaterials.filter((item) => item.material_type !== "text");
               mappedMaterials.unshift({
                 title: "Текстовый материал",
@@ -6061,7 +6524,7 @@ function CourseBuilder({
               });
             }
 
-            if (lessonType === "video") {
+            if (materialLessonType === "video") {
               mappedMaterials = mappedMaterials.filter((item) => item.material_type !== "text");
               if (contentText) {
                 mappedMaterials.unshift({
@@ -6078,10 +6541,71 @@ function CourseBuilder({
               }
             }
 
+            if (lessonType === "combo") {
+              const comboTextPositionRaw = Number(lessonItem?.comboTextPosition || 1);
+              const comboTextPosition = Math.max(1, comboTextPositionRaw);
+              const comboVideos = mappedMaterials.filter((item) => item.material_type === "video");
+              const comboExtras = mappedMaterials.filter((item) => item.material_type !== "video" && item.material_type !== "text");
+              let orderedContent = comboVideos.slice();
+              if (contentText) {
+                const textInsertIndex = Math.min(orderedContent.length, Math.max(0, comboTextPosition - 1));
+                orderedContent.splice(textInsertIndex, 0, {
+                  title: "Текстовый материал",
+                  material_type: "text",
+                  content_url: null,
+                  content_text: contentText,
+                  mime_type: "text/html",
+                  bucket: null,
+                  blob_path: null,
+                  metadata: {},
+                });
+              }
+              mappedMaterials = [...orderedContent, ...comboExtras]
+                .map((item, idx) => ({ ...item, position: idx + 1 }));
+            }
+
+            if (lessonType === "combo") {
+              const quizQuestions = mapQuestionsToPayload(lessonItem?.quizQuestions);
+              if (quizQuestions.length > 0) {
+                const maxQuizQuestions = Math.max(1, quizQuestions.length);
+                const quizQuestionsPerTest = Math.max(1, Math.min(maxQuizQuestions, Number(lessonItem?.quizQuestionsPerTest || maxQuizQuestions)));
+                const defaultQuizMinutes = Math.max(1, Math.ceil(quizQuestionsPerTest * 1.5));
+                const quizTimeLimitMinutes = Math.max(1, Number(lessonItem?.quizTimeLimitMinutes || defaultQuizMinutes));
+                const quizPassingScore = Math.max(1, Math.min(100, Number(lessonItem?.quizPassingScore || settings.passingScore || 80)));
+                const lessonAttemptRaw = Number(lessonItem?.quizAttemptLimit || attemptLimit);
+                const quizAttemptLimit = Number.isFinite(lessonAttemptRaw) ? Math.max(1, lessonAttemptRaw) : attemptLimit;
+                moduleTestsPayload.push({
+                  title: `${lessonTitle} (тест)`,
+                  description: description || "Тест комбо-урока",
+                  pass_threshold: quizPassingScore,
+                  attempt_limit: quizAttemptLimit,
+                  is_final: false,
+                  module_position: moduleIndex + 1,
+                  position: lessonIndex + 1,
+                  time_limit_minutes: quizTimeLimitMinutes,
+                  question_count: quizQuestionsPerTest,
+                  random_order: lessonItem?.quizRandomOrder !== false,
+                  show_explanations: lessonItem?.quizShowExplanations !== false,
+                  metadata: {
+                    source_lesson_type: "combo_lesson",
+                    source_lesson_position: lessonIndex + 1,
+                    source_lesson_title: lessonTitle,
+                    combo_text_position: Math.max(1, Number(lessonItem?.comboTextPosition || 1)),
+                    questions_per_test: quizQuestionsPerTest,
+                    random_order: lessonItem?.quizRandomOrder !== false,
+                    show_explanations: lessonItem?.quizShowExplanations !== false,
+                  },
+                  questions: quizQuestions,
+                });
+              } else {
+                invalidQuizLessons.push(lessonTitle);
+              }
+            }
+
             return {
               title: lessonTitle,
               description,
-              lesson_type: lessonType,
+              lesson_type: materialLessonType,
               position: lessonIndex + 1,
               duration_seconds: Number(lessonItem?.durationSeconds) || 0,
               allow_fast_forward: false,
@@ -6101,7 +6625,7 @@ function CourseBuilder({
       .filter((moduleItem) => moduleItem.title);
 
     if (invalidQuizLessons.length > 0) {
-      emitToast?.(`Добавьте вопросы в тестовые уроки: ${invalidQuizLessons.slice(0, 3).join(", ")}`, "error");
+      emitToast?.(`Добавьте вопросы в тестовые/комбо-уроки: ${invalidQuizLessons.slice(0, 3).join(", ")}`, "error");
       return;
     }
 
@@ -6344,21 +6868,39 @@ function CourseBuilder({
   };
 
   const selectedLessonMaterials = Array.isArray(selectedLessonModel?.materials) ? selectedLessonModel.materials : [];
-  const selectedLessonVideoMaterial = selectedLessonMaterials.find((item) => String(item?.material_type || item?.type || "").toLowerCase() === "video");
+  const selectedLessonVideoMaterials = selectedLessonMaterials
+    .map((item, originalIndex) => ({ ...item, _originalIndex: originalIndex }))
+    .filter((item) => String(item?.material_type || item?.type || "").toLowerCase() === "video");
+  const selectedLessonVideoMaterial = selectedLessonVideoMaterials[0] || null;
   const selectedLessonVideoUrl = String(
     selectedLessonVideoMaterial?.url || selectedLessonVideoMaterial?.signed_url || selectedLessonVideoMaterial?.content_url || ""
   ).trim();
   const selectedLessonVideoName = selectedLessonVideoMaterial?.metadata?.uploaded_file_name || selectedLessonVideoMaterial?.title || "Видео";
-  const selectedLessonVideoDurationSeconds = Math.max(
-    0,
-    Number(selectedLessonVideoMaterial?.metadata?.duration_seconds || selectedLessonModel?.durationSeconds || 0)
-  );
+  const selectedLessonVideoDurationSeconds = String(selectedLessonModel?.type || "").toLowerCase() === "combo"
+    ? Math.max(
+      0,
+      selectedLessonVideoMaterials.reduce(
+        (sum, item) => sum + Math.max(0, Number(item?.metadata?.duration_seconds || 0)),
+        0
+      ) || Number(selectedLessonModel?.durationSeconds || 0)
+    )
+    : Math.max(
+      0,
+      Number(selectedLessonVideoMaterial?.metadata?.duration_seconds || selectedLessonModel?.durationSeconds || 0)
+    );
   const selectedLessonQuizQuestions = Array.isArray(selectedLessonModel?.quizQuestions) ? selectedLessonModel.quizQuestions : [];
+  const selectedLessonComboVideoMaterials = selectedLessonVideoMaterials.map((item, videoIndex) => ({ ...item, _videoIndex: videoIndex }));
+  const selectedLessonComboTextPositionMax = Math.max(1, selectedLessonComboVideoMaterials.length + 1);
+  const selectedLessonComboTextPosition = Math.min(
+    selectedLessonComboTextPositionMax,
+    Math.max(1, Number(selectedLessonModel?.comboTextPosition || 1))
+  );
   const selectedLessonExtraMaterials = selectedLessonMaterials
     .map((item, originalIndex) => ({ ...item, _originalIndex: originalIndex }))
     .filter((item) => {
       const materialType = String(item?.material_type || item?.type || "").toLowerCase();
       if (selectedLessonModel?.type === "text") return materialType !== "text";
+      if (selectedLessonModel?.type === "combo") return materialType !== "text" && materialType !== "video";
       if (selectedLessonModel?.type === "video") return materialType !== "video" && materialType !== "text";
       if (selectedLessonModel?.type === "quiz") return false;
       return materialType !== "video";
@@ -6401,6 +6943,24 @@ function CourseBuilder({
           quizShowExplanations: prev?.quizShowExplanations !== false,
           quizQuestions: currentQuestions.length > 0 ? currentQuestions : [createQuestionTemplate("single")],
           materials: [],
+        };
+      }
+      if (normalizedType === "combo") {
+        const currentQuestions = Array.isArray(prev?.quizQuestions) ? prev.quizQuestions : [];
+        return {
+          ...prev,
+          type: "combo",
+          completionThreshold: Number(prev?.completionThreshold || 100) || 100,
+          durationSeconds: prev?.durationSeconds || "",
+          quizQuestionsPerTest: prev?.quizQuestionsPerTest || 5,
+          quizTimeLimitMinutes: prev?.quizTimeLimitMinutes || "",
+          quizPassingScore: prev?.quizPassingScore || settings.passingScore || 80,
+          quizAttemptLimit: prev?.quizAttemptLimit || fallbackAttemptLimit,
+          quizRandomOrder: prev?.quizRandomOrder !== false,
+          quizShowExplanations: prev?.quizShowExplanations !== false,
+          comboTextPosition: Math.max(1, Number(prev?.comboTextPosition || 1)),
+          quizQuestions: currentQuestions.length > 0 ? currentQuestions : [createQuestionTemplate("single")],
+          materials: Array.isArray(prev?.materials) ? prev.materials : [],
         };
       }
       if (normalizedType === "text") {
@@ -6583,7 +7143,7 @@ function CourseBuilder({
                 )}
               </div>
 
-              {lessonType === "text" && (
+              {(lessonType === "text" || lessonType === "combo") && (
                 <div className="bg-white rounded-2xl border border-slate-200 p-4">
                   <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">Материал урока</p>
                   {renderOperatorRichField(
@@ -6628,7 +7188,7 @@ function CourseBuilder({
                 </>
               )}
 
-              {lessonType === "quiz" && (
+              {(lessonType === "quiz" || lessonType === "combo") && (
                 <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-3">
                   <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Параметры теста</p>
                   <div className="grid grid-cols-2 gap-2">
@@ -6778,7 +7338,7 @@ function CourseBuilder({
                 </div>
               )}
 
-              {(lessonType === "video" || lessonType === "text") && (
+              {(lessonType === "video" || lessonType === "text" || lessonType === "combo") && (
                 <div className="bg-white rounded-2xl border border-slate-200 p-4">
                   <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">Дополнительные материалы</p>
                   <div className="space-y-2">
@@ -7200,6 +7760,12 @@ function CourseBuilder({
                             {types.map(t => (
                               <button key={t.id} onClick={() => applyLessonType(l.id, t.id)} className={`text-[10px] px-2 py-1 rounded-lg font-semibold transition-colors ${l.type === t.id ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-500 hover:bg-slate-200"}`}>{t.label}</button>
                             ))}
+                            <button
+                              onClick={() => applyLessonType(l.id, "combo")}
+                              className={`text-[10px] px-2 py-1 rounded-lg font-semibold transition-colors ${l.type === "combo" ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-500 hover:bg-slate-200"}`}
+                            >
+                              Комбо
+                            </button>
                             <button onClick={() => deleteLesson(mod.id, l.id)} className="p-1.5 text-slate-300 hover:text-red-500 rounded-lg hover:bg-red-50 transition-colors ml-1"><Trash2 size={13} /></button>
                           </div>
                         </div>
@@ -7255,8 +7821,163 @@ function CourseBuilder({
                         minHeight={120}
                       />
                     </div>
-                    {selectedLessonModel.type === "quiz" ? (
+                    {(selectedLessonModel.type === "quiz" || selectedLessonModel.type === "combo") ? (
                       <div className="space-y-4">
+                        {selectedLessonModel.type === "combo" && (
+                          <div className="space-y-4">
+                            <div className="grid grid-cols-2 gap-3">
+                              <div>
+                                <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Р”Р»РёС‚РµР»СЊРЅРѕСЃС‚СЊ (СЃРµРє)</label>
+                                <input
+                                  type="number"
+                                  min={0}
+                                  value={selectedLessonModel.durationSeconds !== undefined ? selectedLessonModel.durationSeconds : ""}
+                                  onChange={(e) => updateLessonById(selectedLessonModel.id, { durationSeconds: e.target.value === "" ? "" : Math.max(0, Number(e.target.value)) })}
+                                  className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 focus:outline-none focus:border-indigo-400 transition-all"
+                                />
+                              </div>
+                              <div>
+                                <label className="text-xs font-semibold text-slate-600 mb-1.5 block">РџРѕСЂРѕРі Р·Р°РІРµСЂС€РµРЅРёСЏ (%)</label>
+                                <input
+                                  type="number"
+                                  min={1}
+                                  max={100}
+                                  value={selectedLessonModel.completionThreshold || ""}
+                                  onChange={(e) => updateLessonById(selectedLessonModel.id, { completionThreshold: e.target.value === "" ? "" : Math.max(1, Math.min(100, Number(e.target.value))) })}
+                                  className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 focus:outline-none focus:border-indigo-400 transition-all"
+                                />
+                              </div>
+                            </div>
+                            <div>
+                              <label className="text-xs font-semibold text-slate-600 mb-1.5 block">РўРµРєСЃС‚ РєРѕРјР±Рѕ-СѓСЂРѕРєР°</label>
+                              <RichTextEditor
+                                key={`lesson-${selectedLessonModel.id}-combo-content`}
+                                value={selectedLessonModel.contentText || ""}
+                                onChange={(next) => updateLessonById(selectedLessonModel.id, { contentText: next })}
+                                onImageUpload={handleRichTextImageUpload}
+                                onFileUpload={handleRichTextFileUpload}
+                                placeholder="Р’РІРµРґРёС‚Рµ С‚РµРєСЃС‚ РєРѕРјР±Рѕ-СѓСЂРѕРєР°..."
+                                minHeight={220}
+                              />
+                            </div>
+                            <div className="grid grid-cols-2 gap-3">
+                              <div>
+                                <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Позиция текста</label>
+                                <input
+                                  type="number"
+                                  min={1}
+                                  max={selectedLessonComboTextPositionMax}
+                                  value={selectedLessonComboTextPosition}
+                                  onChange={(e) => {
+                                    const raw = Number(e.target.value || 1);
+                                    const clamped = Math.min(selectedLessonComboTextPositionMax, Math.max(1, raw));
+                                    updateLessonById(selectedLessonModel.id, { comboTextPosition: clamped });
+                                  }}
+                                  className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 focus:outline-none focus:border-indigo-400 transition-all"
+                                />
+                                <p className="text-[11px] text-slate-500 mt-1">1..{selectedLessonComboTextPositionMax}</p>
+                              </div>
+                              <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5">
+                                <p className="text-[11px] text-slate-500">Видео в уроке</p>
+                                <p className="text-sm font-semibold text-slate-800 mt-0.5">{selectedLessonComboVideoMaterials.length}</p>
+                                <p className="text-[11px] text-slate-500 mt-1">Тест будет доступен после просмотра всех видео.</p>
+                              </div>
+                            </div>
+                            <div>
+                              <div className="flex items-center justify-between gap-2 mb-2">
+                                <label className="text-xs font-semibold text-slate-600">Видео в комбо</label>
+                                <button
+                                  type="button"
+                                  onClick={() => lessonVideoInputRef.current?.click()}
+                                  disabled={lessonUploading}
+                                  className="px-3 py-2 bg-slate-100 hover:bg-slate-200 rounded-lg text-xs font-semibold text-slate-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center gap-2"
+                                >
+                                  {lessonUploading ? <RefreshCw size={12} className="animate-spin" /> : <Upload size={12} />}
+                                  Добавить видео
+                                </button>
+                              </div>
+                              <div className="space-y-2">
+                                {selectedLessonComboVideoMaterials.length === 0 && (
+                                  <div className="text-xs text-slate-400">Пока не загружено ни одного видео</div>
+                                )}
+                                {selectedLessonComboVideoMaterials.map((videoItem, videoIndex) => (
+                                  <div key={`${videoItem?.title || "video"}-${videoIndex}`} className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2">
+                                    <Video size={13} className="text-indigo-500 flex-shrink-0" />
+                                    <div className="flex-1 min-w-0">
+                                      <div className="text-xs text-slate-700 truncate">{videoItem?.metadata?.uploaded_file_name || videoItem?.title || `Видео ${videoIndex + 1}`}</div>
+                                      <div className="text-[10px] text-slate-400">{formatDurationLabel(Number(videoItem?.metadata?.duration_seconds || 0))}</div>
+                                    </div>
+                                    <div className="flex items-center gap-1">
+                                      <button
+                                        type="button"
+                                        disabled={videoIndex === 0}
+                                        onClick={() => moveComboVideoMaterial(videoIndex, -1)}
+                                        className="p-1 text-slate-400 hover:text-slate-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                                      >
+                                        <ChevronUp size={12} />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        disabled={videoIndex >= selectedLessonComboVideoMaterials.length - 1}
+                                        onClick={() => moveComboVideoMaterial(videoIndex, 1)}
+                                        className="p-1 text-slate-400 hover:text-slate-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                                      >
+                                        <ChevronDown size={12} />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleRemoveLessonMaterial(videoItem._originalIndex)}
+                                        className="p-1 text-slate-400 hover:text-red-500 transition-colors"
+                                      >
+                                        <Trash2 size={12} />
+                                      </button>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                            <div>
+                              <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Р”РѕРїРѕР»РЅРёС‚РµР»СЊРЅС‹Рµ РјР°С‚РµСЂРёР°Р»С‹</label>
+                              <div className="flex gap-2 mb-2">
+                                <button
+                                  type="button"
+                                  onClick={() => lessonMaterialInputRef.current?.click()}
+                                  disabled={lessonUploading}
+                                  className="px-3 py-2 bg-slate-100 hover:bg-slate-200 rounded-lg text-xs font-semibold text-slate-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center gap-2"
+                                >
+                                  {lessonUploading ? <RefreshCw size={12} className="animate-spin" /> : <Upload size={12} />}
+                                  Р¤Р°Р№Р»
+                                </button>
+                                <input
+                                  value={lessonMaterialLink}
+                                  onChange={(e) => setLessonMaterialLink(e.target.value)}
+                                  placeholder="https://..."
+                                  className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-700 placeholder-slate-400 focus:outline-none focus:border-indigo-400 transition-all"
+                                />
+                                <button type="button" onClick={handleAddMaterialLink} className="px-3 py-2 bg-indigo-600 hover:bg-indigo-700 rounded-lg text-xs font-semibold text-white transition-colors inline-flex items-center gap-1">
+                                  <Link2 size={12} /> Р”РѕР±Р°РІРёС‚СЊ
+                                </button>
+                              </div>
+                              <div className="space-y-2">
+                                {selectedLessonExtraMaterials.length === 0 && (
+                                  <div className="text-xs text-slate-400">РџРѕРєР° РЅРёС‡РµРіРѕ РЅРµ РїСЂРёРєСЂРµРїР»РµРЅРѕ</div>
+                                )}
+                                {selectedLessonExtraMaterials.map((material, index) => (
+                                  <div key={`${material?.title || "material"}-${index}`} className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2">
+                                    <FileCheck size={13} className="text-indigo-500 flex-shrink-0" />
+                                    <div className="flex-1 min-w-0">
+                                      <div className="text-xs text-slate-700 truncate">{material?.metadata?.uploaded_file_name || material?.title || `РњР°С‚РµСЂРёР°Р» ${index + 1}`}</div>
+                                      <div className="text-[10px] text-slate-400 uppercase">{String(material?.material_type || material?.type || "file")}</div>
+                                    </div>
+                                    <button type="button" onClick={() => handleRemoveLessonMaterial(material._originalIndex)} className="p-1 text-slate-400 hover:text-red-500 transition-colors"><Trash2 size={12} /></button>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                            <input ref={lessonVideoInputRef} type="file" accept="video/*" onChange={handleLessonVideoUpload} className="hidden" />
+                            <input ref={lessonMaterialInputRef} type="file" multiple onChange={handleLessonMaterialUpload} className="hidden" />
+                          </div>
+                        )}
                         <div className="grid grid-cols-2 gap-3">
                           <div>
                             <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Вопросов в тесте</label>
