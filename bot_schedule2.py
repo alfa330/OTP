@@ -18103,12 +18103,12 @@ def _lms_course_structure_tx(cursor, course_id, course_version_id, include_test_
 
     cursor.execute("""
         SELECT
-            id, module_id, title, description, pass_threshold, attempt_limit,
+            id, module_id, position, source_lesson_id, title, description, pass_threshold, attempt_limit,
             time_limit_minutes, question_count, random_order, is_final, status
         FROM lms_tests
         WHERE course_version_id = %s
           AND status <> 'archived'
-        ORDER BY id ASC
+        ORDER BY module_id ASC NULLS LAST, COALESCE(position, 2147483647) ASC, id ASC
     """, (course_version_id,))
     tests_rows = cursor.fetchall()
 
@@ -18147,29 +18147,48 @@ def _lms_course_structure_tx(cursor, course_id, course_version_id, include_test_
     for row in tests_rows:
         test_id = int(row[0])
         questions = []
+        question_type_breakdown = {}
         if include_test_questions:
             questions = _lms_fetch_test_questions_tx(cursor, test_id, include_correct=include_correct_answers)
             question_bank_count = len(questions)
+            for question in questions:
+                q_type = str(question.get("type") or "").strip().lower() or "single"
+                question_type_breakdown[q_type] = int(question_type_breakdown.get(q_type, 0)) + 1
         else:
-            cursor.execute("SELECT COUNT(*) FROM lms_questions WHERE test_id = %s", (test_id,))
-            question_bank_count = int(cursor.fetchone()[0] or 0)
-        configured_question_count = _lms_to_int(row[7], 0)
+            cursor.execute("""
+                SELECT question_type, COUNT(*)
+                FROM lms_questions
+                WHERE test_id = %s
+                GROUP BY question_type
+            """, (test_id,))
+            question_rows = cursor.fetchall()
+            question_bank_count = 0
+            for q_row in question_rows:
+                q_type = str(q_row[0] or "").strip().lower() or "single"
+                q_count = int(q_row[1] or 0)
+                question_bank_count += q_count
+                question_type_breakdown[q_type] = q_count
+        configured_question_count = _lms_to_int(row[9], 0)
         effective_question_count = question_bank_count
         if configured_question_count > 0:
             effective_question_count = min(question_bank_count, configured_question_count)
         test_payload = {
             "id": test_id,
             "module_id": int(row[1]) if row[1] is not None else None,
-            "title": row[2],
-            "description": row[3],
-            "pass_threshold": float(row[4] if row[4] is not None else LMS_DEFAULT_PASS_THRESHOLD),
-            "attempt_limit": int(row[5] if row[5] is not None else LMS_DEFAULT_ATTEMPT_LIMIT),
-            "time_limit_minutes": int(row[6]) if row[6] is not None else None,
+            "position": int(row[2]) if row[2] is not None else None,
+            "source_lesson_id": int(row[3]) if row[3] is not None else None,
+            "title": row[4],
+            "description": row[5],
+            "pass_threshold": float(row[6] if row[6] is not None else LMS_DEFAULT_PASS_THRESHOLD),
+            "attempt_limit": int(row[7] if row[7] is not None else LMS_DEFAULT_ATTEMPT_LIMIT),
+            "time_limit_minutes": int(row[8]) if row[8] is not None else None,
             "question_count": effective_question_count,
             "question_bank_count": question_bank_count,
-            "random_order": _lms_parse_bool(row[8], True),
-            "is_final": bool(row[9]),
-            "status": row[10]
+            "question_type_breakdown": question_type_breakdown,
+            "question_types": [q_type for q_type, q_count in question_type_breakdown.items() if int(q_count or 0) > 0],
+            "random_order": _lms_parse_bool(row[10], True),
+            "is_final": bool(row[11]),
+            "status": row[12]
         }
         if include_test_questions:
             test_payload["questions"] = questions
@@ -18272,6 +18291,7 @@ def _lms_insert_course_structure_tx(cursor, requester_id, version_id, modules, t
     created_module_ids = []
     module_by_source_id = {}
     module_by_position = {}
+    lesson_by_source_id = {}
 
     for module_index, module in enumerate(modules, start=1):
         if not isinstance(module, dict):
@@ -18304,6 +18324,7 @@ def _lms_insert_course_structure_tx(cursor, requester_id, version_id, modules, t
             lesson_desc = str(lesson.get('description') or '').strip() or None
             lesson_type = str(lesson.get('lesson_type') or lesson.get('type') or '').strip().lower()
             lesson_materials = lesson.get('materials') if isinstance(lesson.get('materials'), list) else []
+            lesson_position = max(1, _lms_to_int(lesson.get('position'), lesson_index))
             cursor.execute("""
                 INSERT INTO lms_lessons (
                     module_id, title, description, position, duration_seconds,
@@ -18315,13 +18336,16 @@ def _lms_insert_course_structure_tx(cursor, requester_id, version_id, modules, t
                 module_id,
                 lesson_title,
                 lesson_desc,
-                max(1, _lms_to_int(lesson.get('position'), lesson_index)),
+                lesson_position,
                 max(0, _lms_to_int(lesson.get('duration_seconds'), 0)),
                 _lms_parse_bool(lesson.get('allow_fast_forward'), False),
                 min(100.0, max(0.0, _lms_to_float(lesson.get('completion_threshold'), LMS_COMPLETION_THRESHOLD))),
                 now
             ))
             lesson_id = int(cursor.fetchone()[0])
+            source_lesson_id = _lms_to_int(lesson.get('id'), 0)
+            if source_lesson_id > 0:
+                lesson_by_source_id[source_lesson_id] = lesson_id
 
             material_position = 1
             has_text_material = False
@@ -18416,17 +18440,24 @@ def _lms_insert_course_structure_tx(cursor, requester_id, version_id, modules, t
         if raw_random_order in (None, ''):
             raw_random_order = test_metadata.get('random_order')
         test_random_order = _lms_parse_bool(raw_random_order, True)
+        test_position = max(1, _lms_to_int(test.get('position'), test_index))
+        source_lesson_id = None
+        requested_source_lesson_id = _lms_to_int(test.get('source_lesson_id'), 0)
+        if requested_source_lesson_id > 0:
+            source_lesson_id = lesson_by_source_id.get(requested_source_lesson_id)
         cursor.execute("""
             INSERT INTO lms_tests (
-                course_version_id, module_id, title, description, pass_threshold,
+                course_version_id, module_id, position, source_lesson_id, title, description, pass_threshold,
                 attempt_limit, time_limit_minutes, question_count, random_order,
                 is_final, status, created_at
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'draft', %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'draft', %s)
             RETURNING id
         """, (
             version_id,
             test_module_id,
+            test_position,
+            source_lesson_id,
             test_title,
             str(test.get('description') or '').strip() or None,
             min(100.0, max(0.0, _lms_to_float(test.get('pass_threshold'), pass_threshold))),
@@ -19333,7 +19364,10 @@ def lms_test_start(test_id):
                     COALESCE(t.attempt_limit, cv.attempt_limit, c.default_attempt_limit, %s),
                     t.time_limit_minutes,
                     t.question_count,
-                    COALESCE(t.random_order, TRUE)
+                    COALESCE(t.random_order, TRUE),
+                    t.module_id,
+                    t.position,
+                    t.source_lesson_id
                 FROM lms_tests t
                 JOIN lms_course_versions cv ON cv.id = t.course_version_id
                 JOIN lms_courses c ON c.id = cv.course_id
@@ -19359,23 +19393,72 @@ def lms_test_start(test_id):
             course_version_id = int(row[2])
             pass_threshold = float(row[6] or LMS_DEFAULT_PASS_THRESHOLD)
             attempt_limit = int(row[7] or LMS_DEFAULT_ATTEMPT_LIMIT)
+            test_module_id = int(row[11]) if row[11] is not None else None
+            test_position = _lms_to_int(row[12], 0)
+            source_lesson_id = _lms_to_int(row[13], 0)
 
-            cursor.execute("""
-                SELECT COUNT(*)
-                FROM lms_lessons l
-                JOIN lms_modules m ON m.id = l.module_id
-                WHERE m.course_version_id = %s
-            """, (course_version_id,))
-            total_lessons = int(cursor.fetchone()[0] or 0)
+            total_lessons = 0
+            completed_lessons = 0
+            if source_lesson_id > 0:
+                total_lessons = 1
+                cursor.execute("""
+                    SELECT COUNT(*)
+                    FROM lms_lesson_progress
+                    WHERE assignment_id = %s
+                      AND user_id = %s
+                      AND lesson_id = %s
+                      AND status = 'completed'
+                """, (assignment_id, requester_id, source_lesson_id))
+                completed_lessons = int(cursor.fetchone()[0] or 0)
+            elif test_module_id is not None and test_position > 0:
+                cursor.execute("""
+                    SELECT COUNT(*)
+                    FROM lms_lessons l
+                    JOIN lms_modules m ON m.id = l.module_id
+                    JOIN lms_modules tm ON tm.id = %s
+                    WHERE m.course_version_id = %s
+                      AND (
+                        m.position < tm.position
+                        OR (m.position = tm.position AND l.position < %s)
+                      )
+                """, (test_module_id, course_version_id, test_position))
+                total_lessons = int(cursor.fetchone()[0] or 0)
 
-            cursor.execute("""
-                SELECT COUNT(*)
-                FROM lms_lesson_progress
-                WHERE assignment_id = %s
-                  AND user_id = %s
-                  AND status = 'completed'
-            """, (assignment_id, requester_id))
-            completed_lessons = int(cursor.fetchone()[0] or 0)
+                if total_lessons > 0:
+                    cursor.execute("""
+                        SELECT COUNT(*)
+                        FROM lms_lesson_progress lp
+                        JOIN lms_lessons l ON l.id = lp.lesson_id
+                        JOIN lms_modules m ON m.id = l.module_id
+                        JOIN lms_modules tm ON tm.id = %s
+                        WHERE lp.assignment_id = %s
+                          AND lp.user_id = %s
+                          AND lp.status = 'completed'
+                          AND m.course_version_id = %s
+                          AND (
+                            m.position < tm.position
+                            OR (m.position = tm.position AND l.position < %s)
+                          )
+                    """, (test_module_id, assignment_id, requester_id, course_version_id, test_position))
+                    completed_lessons = int(cursor.fetchone()[0] or 0)
+            else:
+                cursor.execute("""
+                    SELECT COUNT(*)
+                    FROM lms_lessons l
+                    JOIN lms_modules m ON m.id = l.module_id
+                    WHERE m.course_version_id = %s
+                """, (course_version_id,))
+                total_lessons = int(cursor.fetchone()[0] or 0)
+
+                if total_lessons > 0:
+                    cursor.execute("""
+                        SELECT COUNT(*)
+                        FROM lms_lesson_progress
+                        WHERE assignment_id = %s
+                          AND user_id = %s
+                          AND status = 'completed'
+                    """, (assignment_id, requester_id))
+                    completed_lessons = int(cursor.fetchone()[0] or 0)
 
             if total_lessons > 0 and completed_lessons < total_lessons:
                 return jsonify({

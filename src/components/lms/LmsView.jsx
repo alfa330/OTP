@@ -9,7 +9,7 @@ import {
   PlayCircle, AlignLeft, Layers, ChevronLeft, Eye,
   BookMarked, Zap, ToggleLeft, ToggleRight, LayoutGrid, List, Percent,
   UserCheck, RefreshCw, ClipboardList, PlusCircle, LogOut, ChevronUp,
-  Save, Image, Link2, FileCheck, Volume2, Maximize, AlertTriangle, Rocket, Archive,
+  Save, Image, Link2, FileCheck, Volume2, Maximize, AlertTriangle, Rocket, Archive, RotateCcw,
   XCircle, CheckSquare, Square, Type, ToggleRight as RadioIcon
 } from "lucide-react";
 import "react-quill/dist/quill.snow.css";
@@ -1340,14 +1340,13 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
     is_required: assignment?.is_required,
   });
 
-  let progressionLocked = false;
   let regularLessonsTotal = 0;
   let regularLessonsCompleted = 0;
   let progressItemsTotal = 0;
   let progressItemsCompleted = 0;
   let durationSeconds = 0;
 
-  const mapTestLesson = (test, isLockedByFlow = false) => {
+  const mapTestLesson = (test) => {
     const testState = testProgress?.[test.id] || testProgress?.[String(test.id)] || {};
     const attemptsUsed = Math.max(0, Number(testState?.attempts_used || 0));
     const attemptLimit = Math.max(1, Number(test?.attempt_limit || coursePayload?.course_version?.attempt_limit || coursePayload?.default_attempt_limit || 3));
@@ -1374,17 +1373,45 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
       timeLimitMinutes: timeLimitSeconds > 0 ? Math.max(1, Math.round(timeLimitSeconds / 60)) : null,
       timeLimitSeconds: timeLimitSeconds > 0 ? timeLimitSeconds : null,
       status: testStatus,
-      locked: isLockedByFlow && testStatus !== "completed",
+      locked: false,
       requiresTest: true,
       maxAttempts: attemptLimit,
       attemptsUsed,
       isFinal: Boolean(test?.is_final),
       passingScore: Number(test?.pass_threshold || coursePayload?.course_version?.pass_threshold || coursePayload?.default_pass_threshold || 80),
       questionCount: Math.max(0, Number(test?.question_count || 0)),
+      questionTypes: Array.isArray(test?.question_types)
+        ? test.question_types.map((item) => String(item || "").trim().toLowerCase()).filter(Boolean)
+        : [],
+      questionTypeBreakdown: test?.question_type_breakdown && typeof test.question_type_breakdown === "object"
+        ? test.question_type_breakdown
+        : {},
       moduleId: test?.module_id == null ? null : Number(test.module_id),
-      _position: Number(test?.position || test?.id || 0),
+      _position: Number(test?.position || 0),
       quizQuestions: previewQuestions,
     };
+  };
+
+  const sortByConfiguredPosition = (items) => {
+    const safeItems = Array.isArray(items) ? items.slice() : [];
+    safeItems.sort((left, right) => {
+      const leftPos = Number(left?._position || 0);
+      const rightPos = Number(right?._position || 0);
+      const leftHasPos = Number.isFinite(leftPos) && leftPos > 0;
+      const rightHasPos = Number.isFinite(rightPos) && rightPos > 0;
+      if (leftHasPos && rightHasPos && leftPos !== rightPos) return leftPos - rightPos;
+      if (leftHasPos !== rightHasPos) return leftHasPos ? -1 : 1;
+      if (leftHasPos && rightHasPos && leftPos === rightPos) {
+        const leftTypeRank = String(left?.type || "").toLowerCase() === "quiz" ? 2 : 1;
+        const rightTypeRank = String(right?.type || "").toLowerCase() === "quiz" ? 2 : 1;
+        if (leftTypeRank !== rightTypeRank) return leftTypeRank - rightTypeRank;
+      }
+      const leftId = Number(left?.id || 0);
+      const rightId = Number(right?.id || 0);
+      if (Number.isFinite(leftId) && Number.isFinite(rightId) && leftId !== rightId) return leftId - rightId;
+      return 0;
+    });
+    return safeItems;
   };
 
   const modulesData = modulesRaw
@@ -1403,7 +1430,6 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
         let status = "not_started";
         if (String(progressRow?.status || "").toLowerCase() === "completed" || completionRatio >= 99) status = "completed";
         else if (String(progressRow?.status || "").toLowerCase() === "in_progress" || completionRatio > 0) status = "in_progress";
-        const isLocked = progressionLocked && status !== "completed";
         const lessonType = inferLessonType(lessonItem);
         const duration = formatDurationLabel(Number(lessonItem?.duration_seconds || 0));
 
@@ -1413,10 +1439,11 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
           title: String(lessonItem?.title || `Урок ${lessonIndex + 1}`),
           description: String(lessonItem?.description || ""),
           type: lessonType,
+          position: Number(lessonItem?.position || lessonIndex + 1),
           duration,
           durationSeconds: Number(lessonItem?.duration_seconds || 0),
           status,
-          locked: isLocked,
+          locked: false,
           completionRatio,
           allowFastForward: Boolean(lessonItem?.allow_fast_forward),
           completionThreshold: Number(lessonItem?.completion_threshold || 0),
@@ -1432,28 +1459,27 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
           regularLessonsCompleted += 1;
           progressItemsCompleted += 1;
         }
-        if (status !== "completed") progressionLocked = true;
       });
 
-      const moduleTests = (testsByModule.get(String(moduleId)) || []).slice();
+      const moduleTests = (testsByModule.get(String(moduleId)) || [])
+        .slice()
+        .sort((a, b) => Number(a?.position || 0) - Number(b?.position || 0));
       moduleTests.forEach((test) => {
-        const moduleHasIncompleteLesson = lessons.some((item) => item.type !== "quiz" && item.status !== "completed");
-        const mappedTest = mapTestLesson(test, progressionLocked || moduleHasIncompleteLesson);
+        const mappedTest = mapTestLesson(test);
         lessons.push(mappedTest);
         // Добавляем длительность теста в общее время курса
         durationSeconds += Math.max(0, Number(mappedTest.durationSeconds || 0));
         progressItemsTotal += 1;
         if (mappedTest.status === "completed") progressItemsCompleted += 1;
-        if (mappedTest.status !== "completed") progressionLocked = true;
       });
 
-      lessons.sort((a, b) => Number(a?._position || 0) - Number(b?._position || 0));
+      const sortedLessons = sortByConfiguredPosition(lessons);
 
       return {
         id: moduleId,
         title: String(moduleItem?.title || `Модуль ${moduleIndex + 1}`),
         description: String(moduleItem?.description || ""),
-        lessons,
+        lessons: sortedLessons,
       };
     });
 
@@ -1469,13 +1495,30 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
     }
     const targetModule = modulesData[modulesData.length - 1];
     unboundTests.forEach((test) => {
-      const mappedTest = mapTestLesson(test, progressionLocked);
+      const mappedTest = mapTestLesson(test);
       targetModule.lessons.push(mappedTest);
       // Добавляем длительность финального теста к общему времени
       durationSeconds += Math.max(0, Number(mappedTest.durationSeconds || 0));
       progressItemsTotal += 1;
       if (mappedTest.status === "completed") progressItemsCompleted += 1;
-      if (mappedTest.status !== "completed") progressionLocked = true;
+    });
+    targetModule.lessons = sortByConfiguredPosition(targetModule.lessons);
+  }
+
+  if (hasAssignmentContext) {
+    let shouldLockNext = false;
+    modulesData.forEach((moduleItem) => {
+      const normalizedLessons = (Array.isArray(moduleItem?.lessons) ? moduleItem.lessons : []).map((lessonItem) => {
+        const lessonStatus = String(lessonItem?.status || "").trim().toLowerCase();
+        const isCompleted = lessonStatus === "completed";
+        const locked = shouldLockNext && !isCompleted;
+        if (!isCompleted) shouldLockNext = true;
+        return {
+          ...lessonItem,
+          locked,
+        };
+      });
+      moduleItem.lessons = normalizedLessons;
     });
   }
 
@@ -1887,6 +1930,39 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
       return true;
     } catch (error) {
       emitToast(`Не удалось архивировать курс: ${String(error?.message || "ошибка")}`, "error");
+      return false;
+    }
+  }, [canUseManagerApi, lmsRequest, emitToast, loadAdminData]);
+
+  const handleRestoreAdminCourse = useCallback(async (courseLike) => {
+    if (!canUseManagerApi) {
+      emitToast("Недостаточно прав для восстановления курса", "error");
+      return false;
+    }
+    if (typeof lmsRequest !== "function") {
+      emitToast("LMS API не подключен", "error");
+      return false;
+    }
+
+    const courseId = Number(courseLike?.id || courseLike || 0);
+    if (!courseId) {
+      emitToast("Некорректный курс", "error");
+      return false;
+    }
+
+    try {
+      await lmsRequest("/api/lms/admin/courses", {
+        method: "PATCH",
+        body: {
+          course_id: courseId,
+          status: "published",
+        },
+      });
+      emitToast("Курс восстановлен из архива", "success");
+      await loadAdminData();
+      return true;
+    } catch (error) {
+      emitToast(`Не удалось восстановить курс: ${String(error?.message || "ошибка")}`, "error");
       return false;
     }
   }, [canUseManagerApi, lmsRequest, emitToast, loadAdminData]);
@@ -2378,6 +2454,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
             onOpenCourse={openCourse}
             onDeleteCourse={handleDeleteAdminCourse}
             onArchiveCourse={handleArchiveAdminCourse}
+            onRestoreCourse={handleRestoreAdminCourse}
             onAssignCourseToEmployee={handleAssignAdminCourseToEmployee}
             canDeleteCourses={canDeleteCourses}
             busyCourseId={busyCourseId}
@@ -4183,12 +4260,77 @@ function ApiQuizSection({ quizView, setQuizView, answers, setAnswers, course, le
     return String(answerValue || "(не введён)");
   };
 
+  const formatQuestionTypeLabel = (rawType) => {
+    const normalized = String(rawType || "").trim().toLowerCase();
+    if (normalized === "multiple") return "Несколько ответов";
+    if (normalized === "text") return "Текстовый ответ";
+    if (normalized === "bool" || normalized === "true_false") return "Верно/Неверно";
+    if (normalized === "matching") return "Сопоставление";
+    return "Один ответ";
+  };
+
+  const introQuestionCount = Math.max(
+    0,
+    Number(
+      attempt?.configured_question_count
+      ?? attempt?.question_count
+      ?? lesson?.questionCount
+      ?? 0
+    )
+  );
+  const introTimeLimitSeconds = Math.max(60, Number(resolveQuizTimeLimitSeconds(attempt || null)));
+  const introTimeLimitMinutes = Math.max(1, Math.ceil(introTimeLimitSeconds / 60));
+  const introQuestionTypeItems = (() => {
+    const breakdown = lesson?.questionTypeBreakdown && typeof lesson.questionTypeBreakdown === "object"
+      ? lesson.questionTypeBreakdown
+      : null;
+    if (breakdown && Object.keys(breakdown).length > 0) {
+      return Object.entries(breakdown)
+        .map(([typeId, count]) => ({
+          typeId: String(typeId || "").trim().toLowerCase(),
+          count: Math.max(0, Number(count || 0)),
+        }))
+        .filter((item) => item.typeId && item.count > 0);
+    }
+    const lessonTypes = Array.isArray(lesson?.questionTypes)
+      ? lesson.questionTypes.map((item) => String(item || "").trim().toLowerCase()).filter(Boolean)
+      : [];
+    return lessonTypes.map((typeId) => ({ typeId, count: null }));
+  })();
+  const introQuestionTypesLabel = introQuestionTypeItems.length > 0
+    ? introQuestionTypeItems
+      .map((item) => (
+        item.count != null
+          ? `${formatQuestionTypeLabel(item.typeId)} (${item.count})`
+          : formatQuestionTypeLabel(item.typeId)
+      ))
+      .join(", ")
+    : "Определяются автоматически";
+
   if (quizView === "intro") {
     return (
       <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center max-w-2xl mx-auto">
         <div className="w-16 h-16 bg-violet-100 rounded-2xl flex items-center justify-center mx-auto mb-5"><HelpCircle size={28} className="text-violet-600" /></div>
         <h2 className="text-xl font-bold text-slate-900 mb-2">{lesson?.title || "Тест"}</h2>
         <p className="text-sm text-slate-500 mb-6">Тест будет загружен из LMS API</p>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-left mb-5">
+          <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+            <p className="text-[10px] uppercase tracking-wide text-slate-400">Вопросов</p>
+            <p className="text-sm font-semibold text-slate-800 mt-0.5">{introQuestionCount || "—"}</p>
+          </div>
+          <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+            <p className="text-[10px] uppercase tracking-wide text-slate-400">Лимит времени</p>
+            <p className="text-sm font-semibold text-slate-800 mt-0.5">{introTimeLimitMinutes} мин</p>
+          </div>
+          <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+            <p className="text-[10px] uppercase tracking-wide text-slate-400">Проходной балл</p>
+            <p className="text-sm font-semibold text-slate-800 mt-0.5">{Math.round(passThreshold)}%</p>
+          </div>
+        </div>
+        <div className="text-left rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 mb-6">
+          <p className="text-[10px] uppercase tracking-wide text-slate-400">Типы вопросов</p>
+          <p className="text-xs font-medium text-slate-700 mt-1">{introQuestionTypesLabel}</p>
+        </div>
         <div className={`flex items-center justify-center gap-2 text-sm mb-6 p-3 rounded-xl ${attemptsLeft <= 1 ? "bg-red-50 text-red-700" : "bg-slate-50 text-slate-600"}`}>
           <RefreshCw size={14} />
           <span>Доступно попыток: <strong>{attemptsLeft}</strong> из {lesson?.maxAttempts ?? course?.maxAttempts ?? 3}</span>
@@ -5209,6 +5351,7 @@ function CourseBuilder({
           id: Number(lessonItem?.id || `${moduleIndex + 1}${lessonIndex + 1}${Date.now()}`),
           title: String(lessonItem?.title || "").trim() || `Урок ${lessonIndex + 1}`,
           type: lessonType,
+          position: Number(lessonItem?.position || lessonIndex + 1),
           description: normalizeRichTextValue(lessonItem?.description || ""),
           durationSeconds: Number(lessonItem?.duration_seconds || videoMaterial?.metadata?.duration_seconds || 0) || "",
           completionThreshold: Number(lessonItem?.completion_threshold || 95) || 95,
@@ -5260,6 +5403,7 @@ function CourseBuilder({
         id: Date.now() + Math.floor(Math.random() * 1000) + testIndex,
         title: String(test?.title || "").trim() || `Тест ${testIndex + 1}`,
         type: "quiz",
+        position: Number(test?.position || testIndex + 1),
         description: normalizeRichTextValue(test?.description || ""),
         durationSeconds: timeLimitMinutes > 0 ? timeLimitMinutes * 60 : "",
         completionThreshold: 100,
@@ -5272,6 +5416,23 @@ function CourseBuilder({
         quizQuestions: mappedQuizQuestions.length > 0 ? mappedQuizQuestions : [createQuestionTemplate("single")],
         materials: [],
       }));
+    });
+
+    mappedModules.forEach((moduleItem) => {
+      moduleItem.lessons = (Array.isArray(moduleItem?.lessons) ? moduleItem.lessons : [])
+        .slice()
+        .sort((left, right) => {
+          const leftPos = Number(left?.position || 0);
+          const rightPos = Number(right?.position || 0);
+          const leftHasPos = Number.isFinite(leftPos) && leftPos > 0;
+          const rightHasPos = Number.isFinite(rightPos) && rightPos > 0;
+          if (leftHasPos && rightHasPos && leftPos !== rightPos) return leftPos - rightPos;
+          if (leftHasPos !== rightHasPos) return leftHasPos ? -1 : 1;
+          const leftTypeRank = String(left?.type || "").toLowerCase() === "quiz" ? 2 : 1;
+          const rightTypeRank = String(right?.type || "").toLowerCase() === "quiz" ? 2 : 1;
+          if (leftTypeRank !== rightTypeRank) return leftTypeRank - rightTypeRank;
+          return Number(left?.id || 0) - Number(right?.id || 0);
+        });
     });
 
     const primaryFinalTest = finalTests[0] || null;
@@ -7666,6 +7827,7 @@ function AdminView({
   onOpenCourse,
   onDeleteCourse,
   onArchiveCourse,
+  onRestoreCourse,
   onAssignCourseToEmployee,
   canDeleteCourses = true,
   busyCourseId = null,
@@ -7673,6 +7835,7 @@ function AdminView({
 }) {
   const [deletingCourseId, setDeletingCourseId] = useState(null);
   const [archivingCourseId, setArchivingCourseId] = useState(null);
+  const [restoringCourseId, setRestoringCourseId] = useState(null);
   const [employeeSearch, setEmployeeSearch] = useState("");
   const [employeeAssignedCourseSearch, setEmployeeAssignedCourseSearch] = useState("");
   const [employeeDeptFilter, setEmployeeDeptFilter] = useState("all");
@@ -8039,6 +8202,10 @@ function AdminView({
     const latestVersionStatus = String(courseItem?.latestVersionStatus || "").toLowerCase();
     return latestVersionStatus === "draft";
   }).length;
+  const editorArchivedCoursesCount = courseRows.filter((courseItem) => {
+    const publishStatus = String(courseItem?.publishStatus || "").toLowerCase();
+    return publishStatus === "archived";
+  }).length;
   const filteredCourseRows = courseRows.filter((courseItem) => {
     if (!courseItem) return false;
     const title = String(courseItem?.title || "").toLowerCase();
@@ -8055,10 +8222,14 @@ function AdminView({
     if (isEditorMode) {
       const latestVersionStatus = String(courseItem?.latestVersionStatus || "").toLowerCase();
       const isDraftScopeItem = latestVersionStatus === "draft";
+      const isArchivedScopeItem = publishStatus === "archived";
       const isPublishedScopeItem = publishStatus === "published";
       if (editorCourseScope === "drafts") return isDraftScopeItem;
+      if (editorCourseScope === "archived") return isArchivedScopeItem;
       return isPublishedScopeItem;
     }
+    if (courseFilter === "archived") return publishStatus === "archived";
+    if (publishStatus === "archived") return false;
     if (courseFilter === "completed") return isCompleted;
     if (courseFilter === "active") return !isCompleted && progressStatus !== "not_started";
     if (courseFilter === "overdue") return progressStatus === "overdue";
@@ -8343,6 +8514,24 @@ function AdminView({
       await onArchiveCourse(courseItem);
     } finally {
       setArchivingCourseId((prev) => (prev === courseId ? null : prev));
+    }
+  };
+
+  const handleRestoreCourse = async (courseItem) => {
+    const courseId = Number(courseItem?.id || 0);
+    if (!courseId || typeof onRestoreCourse !== "function") return;
+    const publishStatus = String(courseItem?.publishStatus || "").toLowerCase();
+    if (publishStatus !== "archived") return;
+
+    const title = String(courseItem?.title || `Курс #${courseId}`).trim();
+    const isConfirmed = window.confirm(`Вернуть курс «${title}» из архива?\n\nКурс снова появится в LMS у сотрудников.`);
+    if (!isConfirmed) return;
+
+    setRestoringCourseId(courseId);
+    try {
+      await onRestoreCourse(courseItem);
+    } finally {
+      setRestoringCourseId((prev) => (prev === courseId ? null : prev));
     }
   };
 
@@ -8962,6 +9151,7 @@ function AdminView({
                 {[
                   { id: "courses", label: "Курсы", count: editorPublishedCoursesCount },
                   { id: "drafts", label: "Черновики", count: editorDraftCoursesCount },
+                  { id: "archived", label: "Архив", count: editorArchivedCoursesCount },
                 ].map((scopeItem) => (
                   <button
                     key={scopeItem.id}
@@ -8980,6 +9170,7 @@ function AdminView({
                   { id: "completed", label: "Завершены" },
                   { id: "overdue", label: "Просрочены" },
                   { id: "not_started", label: "Не начаты" },
+                  { id: "archived", label: "Архив" },
                 ].map((filterItem) => (
                   <button
                     key={filterItem.id}
@@ -9067,20 +9258,27 @@ function AdminView({
                               >
                                 <Edit size={14} />
                               </button>
-                              {typeof onArchiveCourse === "function" && (
-                                <button
-                                  onClick={() => { void handleArchiveCourse(courseItem); }}
-                                  disabled={archivingCourseId === courseItem.id || String(courseItem?.publishStatus || "").toLowerCase() === "archived"}
-                                  title={
-                                    String(courseItem?.publishStatus || "").toLowerCase() === "archived"
-                                      ? "Курс уже в архиве"
-                                      : (archivingCourseId === courseItem.id ? "Архивируем..." : "Архивировать курс")
-                                  }
-                                  className="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-white/80 text-slate-500 hover:text-amber-700 hover:bg-amber-50 border border-slate-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                                >
-                                  <Archive size={14} />
-                                </button>
-                              )}
+                              {String(courseItem?.publishStatus || "").toLowerCase() === "archived"
+                                ? (typeof onRestoreCourse === "function" && (
+                                  <button
+                                    onClick={() => { void handleRestoreCourse(courseItem); }}
+                                    disabled={restoringCourseId === courseItem.id}
+                                    title={restoringCourseId === courseItem.id ? "Восстанавливаем..." : "Восстановить курс из архива"}
+                                    className="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-white/80 text-slate-500 hover:text-emerald-700 hover:bg-emerald-50 border border-slate-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                  >
+                                    <RotateCcw size={14} />
+                                  </button>
+                                ))
+                                : (typeof onArchiveCourse === "function" && (
+                                  <button
+                                    onClick={() => { void handleArchiveCourse(courseItem); }}
+                                    disabled={archivingCourseId === courseItem.id}
+                                    title={archivingCourseId === courseItem.id ? "Архивируем..." : "Архивировать курс"}
+                                    className="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-white/80 text-slate-500 hover:text-amber-700 hover:bg-amber-50 border border-slate-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                  >
+                                    <Archive size={14} />
+                                  </button>
+                                ))}
                               {canDeleteCourses && (
                                 <button
                                   onClick={() => { void handleDeleteCourse(courseItem); }}
@@ -9114,20 +9312,27 @@ function AdminView({
                               >
                                 <Edit size={15} />
                               </button>
-                              {typeof onArchiveCourse === "function" && (
-                                <button
-                                  onClick={() => { void handleArchiveCourse(courseItem); }}
-                                  disabled={archivingCourseId === courseItem.id || String(courseItem?.publishStatus || "").toLowerCase() === "archived"}
-                                  title={
-                                    String(courseItem?.publishStatus || "").toLowerCase() === "archived"
-                                      ? "Курс уже в архиве"
-                                      : (archivingCourseId === courseItem.id ? "Архивируем..." : "Архивировать курс")
-                                  }
-                                  className="p-2 text-slate-400 hover:text-amber-700 hover:bg-amber-50 rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                                >
-                                  <Archive size={15} />
-                                </button>
-                              )}
+                              {String(courseItem?.publishStatus || "").toLowerCase() === "archived"
+                                ? (typeof onRestoreCourse === "function" && (
+                                  <button
+                                    onClick={() => { void handleRestoreCourse(courseItem); }}
+                                    disabled={restoringCourseId === courseItem.id}
+                                    title={restoringCourseId === courseItem.id ? "Восстанавливаем..." : "Восстановить курс из архива"}
+                                    className="p-2 text-slate-400 hover:text-emerald-700 hover:bg-emerald-50 rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                  >
+                                    <RotateCcw size={15} />
+                                  </button>
+                                ))
+                                : (typeof onArchiveCourse === "function" && (
+                                  <button
+                                    onClick={() => { void handleArchiveCourse(courseItem); }}
+                                    disabled={archivingCourseId === courseItem.id}
+                                    title={archivingCourseId === courseItem.id ? "Архивируем..." : "Архивировать курс"}
+                                    className="p-2 text-slate-400 hover:text-amber-700 hover:bg-amber-50 rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                  >
+                                    <Archive size={15} />
+                                  </button>
+                                ))}
                               {canDeleteCourses && (
                                 <button
                                   onClick={() => { void handleDeleteCourse(courseItem); }}
