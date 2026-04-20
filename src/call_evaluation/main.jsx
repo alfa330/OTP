@@ -737,7 +737,7 @@ const FeedbackModal = ({
     const [skipTraining, setSkipTraining] = useState(false);
     const [isSubmitting, setIsSubmitting] = useState(false);
     const scoreValue = Number(call?.totalScore ?? call?._rawEvaluation?.score);
-    const canSkipTraining = Number.isFinite(scoreValue) && scoreValue <= 90;
+    const canSkipTraining = Number.isFinite(scoreValue) && scoreValue >= 90;
 
     useEffect(() => {
         if (!isOpen) return;
