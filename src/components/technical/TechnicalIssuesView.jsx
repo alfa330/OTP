@@ -1394,6 +1394,7 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
     // filter state
     const [filterDraft, setFilterDraft]       = useState(initialFilters);
     const [appliedFilters, setAppliedFilters] = useState(initialFilters);
+    const [activeTab, setActiveTab]           = useState('journal');
 
     const hasPending = useMemo(() => !areFiltersEqual(filterDraft, appliedFilters), [filterDraft, appliedFilters]);
 
@@ -1731,84 +1732,134 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
                     </div>
                 </div>
 
-                {/* ── Table card ── */}
-                <div className="mb-10 rounded-xl border-2 border-blue-200 bg-white shadow-lg overflow-hidden">
-                    <div className="px-5 py-3 border-b border-blue-100 bg-blue-50 flex items-center justify-between">
-                        <div className="text-sm font-bold uppercase tracking-wide text-blue-900 flex items-center gap-2">
-                            <FaIcon className="fas fa-table" style={{ width: '0.9em', height: '0.9em' }} />
-                            Журнал тех причин
-                        </div>
-                        <div className="text-xs text-blue-600 font-semibold">Записей: {total}</div>
+                <div className="rounded-xl border border-blue-200 bg-white p-1 shadow-sm">
+                    <div className="grid grid-cols-1 gap-1 sm:grid-cols-3">
+                        {[
+                            { key: 'journal', label: 'Журнал' },
+                            { key: 'workplace', label: 'Аналитика РМ' },
+                            { key: 'reasons', label: 'Аналитика тех причин' },
+                        ].map((tab) => (
+                            <button
+                                key={tab.key}
+                                type="button"
+                                onClick={() => setActiveTab(tab.key)}
+                                className={`rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${
+                                    activeTab === tab.key
+                                        ? 'bg-blue-600 text-white shadow'
+                                        : 'bg-blue-50 text-blue-800 hover:bg-blue-100'
+                                }`}
+                            >
+                                {tab.label}
+                            </button>
+                        ))}
                     </div>
-
-                    {loading ? (
-                        <div className="flex items-center gap-2 p-6 text-sm text-gray-500">
-                            <FaIcon className="fas fa-spinner fa-spin text-blue-500" style={{ width: '1em', height: '1em' }} />
-                            Загрузка...
-                        </div>
-                    ) : rows.length === 0 ? (
-                        <div className="p-10 text-center text-sm text-gray-400">Записей не найдено</div>
-                    ) : (
-                        <div className="overflow-x-auto" style={{ maxHeight: '65vh', overflowY: 'auto' }}>
-                            <table className="min-w-full border-collapse">
-                                <colgroup>
-                                    <col style={{ width: 90 }} />
-                                    <col style={{ width: 100 }} />
-                                    <col style={{ width: 160 }} />
-                                    <col style={{ width: 100 }} />
-                                    <col style={{ minWidth: 200 }} />
-                                    <col style={{ minWidth: 140 }} />
-                                    <col style={{ minWidth: 120 }} />
-                                    <col style={{ width: 120 }} />
-                                    <col style={{ width: 110 }} />
-                                    {canDelete && <col style={{ width: 50 }} />}
-                                </colgroup>
-                                <thead style={{ position: 'sticky', top: 0, zIndex: 5 }}>
-                                    <tr className="bg-blue-700 text-white">
-                                        {[
-                                            'Дата', 'Время', 'Оператор', 'РМ', 'Причина',
-                                            'Комментарий', 'Направления', 'Добавил', 'Зафиксировано',
-                                        ].map((th) => (
-                                            <th key={th} className="px-3 py-3 text-left text-[11px] font-bold uppercase tracking-wider whitespace-nowrap">
-                                                {th}
-                                            </th>
-                                        ))}
-                                        {canDelete && (
-                                            <th className="px-3 py-3 text-right text-[11px] font-bold uppercase tracking-wider"></th>
-                                        )}
-                                    </tr>
-                                </thead>
-                                <tbody className="divide-y divide-gray-100">
-                                    {rows.map((item, idx) => {
-                                        const itemId = Number(item?.id);
-                                        const key = Number.isFinite(itemId) && itemId > 0
-                                            ? `ti-${itemId}`
-                                            : `ti-fb-${idx}-${item?.date || ''}-${item?.operator_name || ''}`;
-                                        return (
-                                            <TechnicalIssueRow
-                                                key={key}
-                                                item={item}
-                                                canDelete={canDelete}
-                                                isDeleting={deletingId === item?.id}
-                                                onDelete={handleDeleteIssue}
-                                                isEven={idx % 2 === 0}
-                                            />
-                                        );
-                                    })}
-                                </tbody>
-                            </table>
-                        </div>
-                    )}
                 </div>
-            </div>
 
-                {/* ── Analytics panels ── */}
-                {!loading && rows.length > 0 && (
-                    <div className="mb-10 grid grid-cols-1 xl:grid-cols-2 gap-4 items-start">
-                        <WorkplaceAnalyticsPanel rows={rows} />
-                        <AnalyticsPanel rows={rows} />
+                {activeTab === 'journal' && (
+                    <div className="mb-10 rounded-xl border-2 border-blue-200 bg-white shadow-lg overflow-hidden">
+                        <div className="px-5 py-3 border-b border-blue-100 bg-blue-50 flex items-center justify-between">
+                            <div className="text-sm font-bold uppercase tracking-wide text-blue-900 flex items-center gap-2">
+                                <FaIcon className="fas fa-table" style={{ width: '0.9em', height: '0.9em' }} />
+                                Журнал тех причин
+                            </div>
+                            <div className="text-xs text-blue-600 font-semibold">Записей: {total}</div>
+                        </div>
+
+                        {loading ? (
+                            <div className="flex items-center gap-2 p-6 text-sm text-gray-500">
+                                <FaIcon className="fas fa-spinner fa-spin text-blue-500" style={{ width: '1em', height: '1em' }} />
+                                Загрузка...
+                            </div>
+                        ) : rows.length === 0 ? (
+                            <div className="p-10 text-center text-sm text-gray-400">Записей не найдено</div>
+                        ) : (
+                            <div className="overflow-x-auto" style={{ maxHeight: '65vh', overflowY: 'auto' }}>
+                                <table className="min-w-full border-collapse">
+                                    <colgroup>
+                                        <col style={{ width: 90 }} />
+                                        <col style={{ width: 100 }} />
+                                        <col style={{ width: 160 }} />
+                                        <col style={{ width: 100 }} />
+                                        <col style={{ minWidth: 200 }} />
+                                        <col style={{ minWidth: 140 }} />
+                                        <col style={{ minWidth: 120 }} />
+                                        <col style={{ width: 120 }} />
+                                        <col style={{ width: 110 }} />
+                                        {canDelete && <col style={{ width: 50 }} />}
+                                    </colgroup>
+                                    <thead style={{ position: 'sticky', top: 0, zIndex: 5 }}>
+                                        <tr className="bg-blue-700 text-white">
+                                            {[
+                                                'Дата', 'Время', 'Оператор', 'РМ', 'Причина',
+                                                'Комментарий', 'Направления', 'Добавил', 'Зафиксировано',
+                                            ].map((th) => (
+                                                <th key={th} className="px-3 py-3 text-left text-[11px] font-bold uppercase tracking-wider whitespace-nowrap">
+                                                    {th}
+                                                </th>
+                                            ))}
+                                            {canDelete && (
+                                                <th className="px-3 py-3 text-right text-[11px] font-bold uppercase tracking-wider"></th>
+                                            )}
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-gray-100">
+                                        {rows.map((item, idx) => {
+                                            const itemId = Number(item?.id);
+                                            const key = Number.isFinite(itemId) && itemId > 0
+                                                ? `ti-${itemId}`
+                                                : `ti-fb-${idx}-${item?.date || ''}-${item?.operator_name || ''}`;
+                                            return (
+                                                <TechnicalIssueRow
+                                                    key={key}
+                                                    item={item}
+                                                    canDelete={canDelete}
+                                                    isDeleting={deletingId === item?.id}
+                                                    onDelete={handleDeleteIssue}
+                                                    isEven={idx % 2 === 0}
+                                                />
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
                     </div>
                 )}
+
+                {activeTab === 'workplace' && (
+                    <div className="mb-10">
+                        {loading ? (
+                            <div className="rounded-xl border border-blue-200 bg-white p-6 text-sm text-gray-500 flex items-center gap-2">
+                                <FaIcon className="fas fa-spinner fa-spin text-blue-500" style={{ width: '1em', height: '1em' }} />
+                                Загрузка...
+                            </div>
+                        ) : rows.length > 0 ? (
+                            <WorkplaceAnalyticsPanel rows={rows} />
+                        ) : (
+                            <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-8 text-center text-sm text-slate-500">
+                                Для аналитики РМ нет данных.
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                {activeTab === 'reasons' && (
+                    <div className="mb-10">
+                        {loading ? (
+                            <div className="rounded-xl border border-blue-200 bg-white p-6 text-sm text-gray-500 flex items-center gap-2">
+                                <FaIcon className="fas fa-spinner fa-spin text-blue-500" style={{ width: '1em', height: '1em' }} />
+                                Загрузка...
+                            </div>
+                        ) : rows.length > 0 ? (
+                            <AnalyticsPanel rows={rows} />
+                        ) : (
+                            <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-8 text-center text-sm text-slate-500">
+                                Для аналитики по тех причинам нет данных.
+                            </div>
+                        )}
+                    </div>
+                )}
+            </div>
         </>
     );
 };

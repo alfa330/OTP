@@ -545,6 +545,8 @@ class Database:
                     ADD COLUMN IF NOT EXISTS sip_number VARCHAR(64),
                     ADD COLUMN IF NOT EXISTS study_place VARCHAR(255),
                     ADD COLUMN IF NOT EXISTS study_course VARCHAR(100),
+                    ADD COLUMN IF NOT EXISTS study_completed BOOLEAN NOT NULL DEFAULT FALSE,
+                    ADD COLUMN IF NOT EXISTS study_completion_year INTEGER,
                     ADD COLUMN IF NOT EXISTS close_contact_1_relation VARCHAR(100),
                     ADD COLUMN IF NOT EXISTS close_contact_1_full_name VARCHAR(255),
                     ADD COLUMN IF NOT EXISTS close_contact_1_phone VARCHAR(50),
@@ -2086,6 +2088,8 @@ class Database:
         sip_number=None,
         study_place=None,
         study_course=None,
+        study_completed=None,
+        study_completion_year=None,
         close_contact_1_relation=None,
         close_contact_1_full_name=None,
         close_contact_1_phone=None,
@@ -2123,6 +2127,7 @@ class Database:
         sip_number = str(sip_number).strip() if sip_number is not None else ""
         study_place = str(study_place).strip() if study_place is not None else ""
         study_course = str(study_course).strip() if study_course is not None else ""
+        study_completion_year_raw = str(study_completion_year).strip() if study_completion_year is not None else ""
         close_contact_1_relation = str(close_contact_1_relation).strip() if close_contact_1_relation is not None else ""
         close_contact_1_full_name = str(close_contact_1_full_name).strip() if close_contact_1_full_name is not None else ""
         close_contact_1_phone = str(close_contact_1_phone).strip() if close_contact_1_phone is not None else ""
@@ -2142,6 +2147,14 @@ class Database:
         sip_number = sip_number or None
         study_place = study_place or None
         study_course = study_course or None
+        if study_completion_year_raw:
+            if not study_completion_year_raw.isdigit():
+                raise ValueError("Invalid study_completion_year")
+            study_completion_year = int(study_completion_year_raw)
+            if study_completion_year < 1900 or study_completion_year > 2100:
+                raise ValueError("Invalid study_completion_year")
+        else:
+            study_completion_year = None
         close_contact_1_relation = close_contact_1_relation or None
         close_contact_1_full_name = close_contact_1_full_name or None
         close_contact_1_phone = close_contact_1_phone or None
@@ -2156,6 +2169,7 @@ class Database:
         if not has_proxy_value:
             proxy_card_number = None
         has_driver_license_value = None if has_driver_license is None else bool(has_driver_license)
+        study_completed_value = None if study_completed is None else bool(study_completed)
         internship_in_company_value = None if internship_in_company is None else bool(internship_in_company)
         front_office_training_value = None if front_office_training is None else bool(front_office_training)
         if not front_office_training_value:
@@ -2182,12 +2196,12 @@ class Database:
                         telegram_id, name, role, direction_id, rate, hire_date, supervisor_id,
                         login, password_hash, hours_table_url, gender, birth_date, phone, email,
                         instagram, telegram_nick, company_name, employment_type, has_proxy, proxy_card_number, has_driver_license, sip_number,
-                        study_place, study_course,
+                        study_place, study_course, study_completed, study_completion_year,
                         close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
                         close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
                         card_number, internship_in_company, front_office_training, front_office_training_date, taxipro_id
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                 """, (
                     telegram_id, name, role, direction_id, rate, hire_date, supervisor_id,
@@ -2198,6 +2212,8 @@ class Database:
                     (has_driver_license_value if has_driver_license_value is not None else False),
                     sip_number,
                     study_place, study_course,
+                    (study_completed_value if study_completed_value is not None else False),
+                    study_completion_year,
                     close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
                     close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
                     card_number,
@@ -2231,6 +2247,8 @@ class Database:
                             sip_number = COALESCE(%s, sip_number),
                             study_place = COALESCE(%s, study_place),
                             study_course = COALESCE(%s, study_course),
+                            study_completed = COALESCE(%s, study_completed),
+                            study_completion_year = COALESCE(%s, study_completion_year),
                             close_contact_1_relation = COALESCE(%s, close_contact_1_relation),
                             close_contact_1_full_name = COALESCE(%s, close_contact_1_full_name),
                             close_contact_1_phone = COALESCE(%s, close_contact_1_phone),
@@ -2247,7 +2265,7 @@ class Database:
                     """, (
                         direction_id, supervisor_id, hours_table_url, gender, birth_date,
                         phone, email, instagram, telegram_nick, company_name, employment_type, has_proxy_value, proxy_card_number, has_driver_license_value, sip_number,
-                        study_place, study_course,
+                        study_place, study_course, study_completed_value, study_completion_year,
                         close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
                         close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
                         card_number, internship_in_company_value, front_office_training_value, front_office_training_date, taxipro_id,
@@ -2285,6 +2303,8 @@ class Database:
                             sip_number = COALESCE(%s, sip_number),
                             study_place = COALESCE(%s, study_place),
                             study_course = COALESCE(%s, study_course),
+                            study_completed = COALESCE(%s, study_completed),
+                            study_completion_year = COALESCE(%s, study_completion_year),
                             close_contact_1_relation = COALESCE(%s, close_contact_1_relation),
                             close_contact_1_full_name = COALESCE(%s, close_contact_1_full_name),
                             close_contact_1_phone = COALESCE(%s, close_contact_1_phone),
@@ -2302,7 +2322,7 @@ class Database:
                         name, role, direction_id, hire_date, supervisor_id, login, password_hash, hours_table_url,
                         gender, birth_date, phone, email, instagram, telegram_nick, company_name, employment_type,
                         has_proxy_value, proxy_card_number, has_driver_license_value, sip_number,
-                        study_place, study_course,
+                        study_place, study_course, study_completed_value, study_completion_year,
                         close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
                         close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
                         card_number, internship_in_company_value, front_office_training_value, front_office_training_date, taxipro_id,
@@ -5536,6 +5556,8 @@ class Database:
             'sip_number',
             'study_place',
             'study_course',
+            'study_completed',
+            'study_completion_year',
             'close_contact_1_relation',
             'close_contact_1_full_name',
             'close_contact_1_phone',

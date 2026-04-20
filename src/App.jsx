@@ -468,7 +468,53 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
     />
 );
 
+const persistRotatedBearerTokens = ({ accessToken, refreshToken, transportHint = null } = {}) => {
+    const normalizedTransportHint = normalizeClientAuthTransport(transportHint);
+    const shouldPersistBearer =
+        normalizedTransportHint === 'bearer' ||
+        shouldForceBearerAuthTransport() ||
+        getPreferredAuthTransport() === 'bearer';
+
+    if (!shouldPersistBearer) {
+        return false;
+    }
+
+    const nextAccessToken = String(accessToken || '').trim();
+    const nextRefreshToken = String(refreshToken || '').trim();
+    if (!nextAccessToken && !nextRefreshToken) {
+        return false;
+    }
+
+    return persistBearerAuthTokens({
+        access_token: nextAccessToken || getStoredAuthToken(ACCESS_TOKEN_STORAGE_KEY),
+        refresh_token: nextRefreshToken || getStoredAuthToken(REFRESH_TOKEN_STORAGE_KEY)
+    });
+};
+
 if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
+    if (!window.__otpFetchAuthInterceptorInstalled && typeof window.fetch === 'function') {
+        window.__otpFetchAuthInterceptorInstalled = true;
+        const nativeFetch = window.fetch.bind(window);
+        window.fetch = (...args) => nativeFetch(...args).then((response) => {
+            try {
+                persistRotatedBearerTokens({
+                    accessToken:
+                        response?.headers?.get?.('x-new-access-token') ||
+                        response?.headers?.get?.('X-New-Access-Token'),
+                    refreshToken:
+                        response?.headers?.get?.('x-new-refresh-token') ||
+                        response?.headers?.get?.('X-New-Refresh-Token'),
+                    transportHint:
+                        response?.headers?.get?.('x-auth-transport') ||
+                        response?.headers?.get?.('X-Auth-Transport')
+                });
+            } catch (error) {
+                // Ignore token sync failures and keep original response semantics.
+            }
+            return response;
+        });
+    }
+
     axios.defaults.withCredentials = true;
 
             if (!window.__otpAxiosAuthRequestInterceptorInstalled) {
@@ -491,19 +537,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 axios.interceptors.response.use(
                     (response) => {
                         const data = response?.data || {};
-                        if (shouldUseLegacyMobileBearerStorage()) {
-                            // First priority: headers (for silent rotation in standard requests)
-                            // Second priority: JSON body (for direct backend login/refresh responses)
-                            const newAccessToken = response?.headers?.['x-new-access-token'] || data.access_token;
-                            const newRefreshToken = response?.headers?.['x-new-refresh-token'] || data.refresh_token;
-
-                            if (newAccessToken || newRefreshToken) {
-                                persistBearerAuthTokens({
-                                    access_token: newAccessToken || getStoredAuthToken(ACCESS_TOKEN_STORAGE_KEY),
-                                    refresh_token: newRefreshToken || getStoredAuthToken(REFRESH_TOKEN_STORAGE_KEY)
-                                });
-                            }
-                        }
+                        persistRotatedBearerTokens({
+                            accessToken: response?.headers?.['x-new-access-token'] || data.access_token,
+                            refreshToken: response?.headers?.['x-new-refresh-token'] || data.refresh_token,
+                            transportHint: response?.headers?.['x-auth-transport'] || data.auth_transport
+                        });
                         return response;
                     },
                     async (error) => {
@@ -24895,6 +24933,43 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     </span>
                 );
             };
+            const normalizeEmployeeStudyCompletionYear = (value) => {
+                if (value === null || typeof value === 'undefined') return null;
+                const normalized = String(value).trim();
+                if (!/^\d{4}$/.test(normalized)) return null;
+                const parsed = Number(normalized);
+                if (!Number.isInteger(parsed) || parsed < 1900 || parsed > 2100) return null;
+                return parsed;
+            };
+            const renderEmployeeStudyStatusBadge = (employee) => {
+                const isCompleted = isEmployeeTruthy(employee?.study_completed);
+                const completionYear = normalizeEmployeeStudyCompletionYear(employee?.study_completion_year);
+                const label = isCompleted
+                    ? `Завершил${completionYear ? ` · ${completionYear}` : ''}`
+                    : `Не завершил${completionYear ? ` · ${completionYear}` : ''}`;
+                const className = isCompleted
+                    ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                    : 'border-amber-200 bg-amber-50 text-amber-700';
+                return (
+                    <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium ${className}`}>
+                        {label}
+                    </span>
+                );
+            };
+            const renderEmployeeStudyCell = (employee) => {
+                const studyPlace = String(employee?.study_place || '').trim();
+                const studyCourse = String(employee?.study_course || '').trim();
+                const completionYear = normalizeEmployeeStudyCompletionYear(employee?.study_completion_year);
+                const isCompleted = isEmployeeTruthy(employee?.study_completed);
+                const hasStudyData = Boolean(studyPlace || studyCourse || completionYear !== null || isCompleted);
+                if (!hasStudyData) return '-';
+                return (
+                    <div className="flex flex-col gap-1">
+                        <span>{studyPlace || '-'}</span>
+                        {renderEmployeeStudyStatusBadge(employee)}
+                    </div>
+                );
+            };
 
             const normalizeKzPhoneDigits = (phoneValue) => {
                 const raw = String(phoneValue || '').trim();
@@ -25015,7 +25090,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         {
                             key: 'study_place',
                             label: 'Место учебы',
-                            render: (employee) => employee?.study_place || '-'
+                            render: (employee) => renderEmployeeStudyCell(employee)
                         },
                         {
                             key: 'study_course',
@@ -27983,6 +28058,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const normalized = String(value ?? '').trim().toLowerCase();
                     return ['1', 'true', 'yes', 'y', 'on'].includes(normalized);
                 };
+                const normalizeStudyCompletionYearForApi = (value) => {
+                    const normalized = String(value ?? '').trim();
+                    if (!normalized) return null;
+                    if (!/^\d{4}$/.test(normalized)) return null;
+                    const parsed = Number(normalized);
+                    if (!Number.isInteger(parsed) || parsed < 1900 || parsed > 2100) return null;
+                    return parsed;
+                };
                 const isSupervisorRateChangeDayInAlmaty = () => {
                     try {
                         const dayValue = new Intl.DateTimeFormat('en-US', {
@@ -28100,6 +28183,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             telegram_nick: normalizeTextForApi(editedUser.telegram_nick),
                             study_place: normalizeTextForApi(editedUser.study_place),
                             study_course: normalizeTextForApi(editedUser.study_course),
+                            study_completed: normalizeBoolForApi(editedUser.study_completed),
+                            study_completion_year: normalizeStudyCompletionYearForApi(editedUser.study_completion_year),
                             card_number: normalizeTextForApi(editedUser.card_number),
                             close_contact_1_relation: normalizeTextForApi(editedUser.close_contact_1_relation),
                             close_contact_1_full_name: normalizeTextForApi(editedUser.close_contact_1_full_name),
@@ -28380,6 +28465,28 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             user_id: editedUser.id,
                             field: 'study_course',
                             value: nextStudyCourse
+                        }, {
+                            headers: { 'X-User-Id': user.id }
+                        });
+                    }
+                    const nextStudyCompleted = normalizeBoolForApi(editedUser?.study_completed);
+                    const prevStudyCompleted = normalizeBoolForApi(userToEdit?.study_completed);
+                    if (nextStudyCompleted !== prevStudyCompleted) {
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'study_completed',
+                            value: nextStudyCompleted
+                        }, {
+                            headers: { 'X-User-Id': user.id }
+                        });
+                    }
+                    const nextStudyCompletionYear = normalizeStudyCompletionYearForApi(editedUser?.study_completion_year);
+                    const prevStudyCompletionYear = normalizeStudyCompletionYearForApi(userToEdit?.study_completion_year);
+                    if (nextStudyCompletionYear !== prevStudyCompletionYear) {
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'study_completion_year',
+                            value: nextStudyCompletionYear
                         }, {
                             headers: { 'X-User-Id': user.id }
                         });

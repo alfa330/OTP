@@ -734,7 +734,10 @@ const FeedbackModal = ({
     const [feedbackDate, setFeedbackDate] = useState('');
     const [startTime, setStartTime] = useState('');
     const [endTime, setEndTime] = useState('');
+    const [skipTraining, setSkipTraining] = useState(false);
     const [isSubmitting, setIsSubmitting] = useState(false);
+    const scoreValue = Number(call?.totalScore ?? call?._rawEvaluation?.score);
+    const canSkipTraining = Number.isFinite(scoreValue) && scoreValue <= 90;
 
     useEffect(() => {
         if (!isOpen) return;
@@ -747,24 +750,45 @@ const FeedbackModal = ({
         setFeedbackDate(toDateInputValue(currentFeedback?.date) || defaultDate);
         setStartTime(toTimeInputValue(currentFeedback?.start_time));
         setEndTime(toTimeInputValue(currentFeedback?.end_time));
-    }, [isOpen, call]);
+        const existingTrainingId = Number(currentFeedback?.training_id || 0);
+        setSkipTraining(Boolean(canSkipTraining && currentFeedback?.id && existingTrainingId <= 0));
+    }, [isOpen, call, canSkipTraining]);
 
     if (!isOpen || !call) return null;
 
     const hasExistingFeedback = !!call?.feedback?.id;
+    const requiresTrainingFields = !(canSkipTraining && skipTraining);
     const isDisabled =
         isSubmitting ||
         !feedbackComment.trim() ||
-        !deliveryComment.trim() ||
-        !feedbackDate ||
-        !startTime ||
-        !endTime;
+        (
+            requiresTrainingFields && (
+                !deliveryComment.trim() ||
+                !feedbackDate ||
+                !startTime ||
+                !endTime
+            )
+        );
 
     const submit = async () => {
         if (isDisabled) return;
-        if (endTime <= startTime) {
+        if (requiresTrainingFields && endTime <= startTime) {
             emitCallEvaluationToast('Время окончания должно быть позже времени начала', 'error');
             return;
+        }
+
+        const payload = {
+            feedback_comment: feedbackComment.trim(),
+            delivery_comment: deliveryComment.trim(),
+            date: feedbackDate,
+            start_time: startTime,
+            end_time: endTime
+        };
+        if (!requiresTrainingFields) {
+            payload.delivery_comment = payload.delivery_comment || 'Тренинг не требуется.';
+            payload.date = payload.date || new Date().toISOString().slice(0, 10);
+            payload.start_time = payload.start_time || '00:00';
+            payload.end_time = payload.end_time || '00:01';
         }
 
         setIsSubmitting(true);
@@ -775,20 +799,36 @@ const FeedbackModal = ({
                     'Content-Type': 'application/json',
                     'X-User-Id': userId
                 },
-                body: JSON.stringify({
-                    feedback_comment: feedbackComment.trim(),
-                    delivery_comment: deliveryComment.trim(),
-                    date: feedbackDate,
-                    start_time: startTime,
-                    end_time: endTime
-                })
+                body: JSON.stringify(payload)
             });
             const d = await r.json();
             if (!r.ok || d.status !== 'success') {
                 throw new Error(d?.error || 'Не удалось сохранить обратную связь');
             }
 
-            emitCallEvaluationToast(hasExistingFeedback ? 'Обратная связь обновлена' : 'Обратная связь добавлена', 'success');
+            if (!requiresTrainingFields) {
+                const trainingId = Number(d?.feedback?.training_id || call?.feedback?.training_id || 0);
+                if (trainingId > 0) {
+                    const removeTrainingResponse = await authFetch(`${API_BASE_URL}/api/trainings/${trainingId}`, {
+                        method: 'DELETE',
+                        headers: {
+                            'X-User-Id': userId
+                        }
+                    });
+                    const removeTrainingPayload = await readJsonSafe(removeTrainingResponse);
+                    if (!removeTrainingResponse.ok || (removeTrainingPayload?.status && removeTrainingPayload.status !== 'success')) {
+                        throw new Error(removeTrainingPayload?.error || 'ОС сохранена, но удалить тренинг не удалось');
+                    }
+                }
+                if (d?.feedback) d.feedback.training_id = null;
+            }
+
+            emitCallEvaluationToast(
+                !requiresTrainingFields
+                    ? (hasExistingFeedback ? 'Обратная связь обновлена без тренинга' : 'Обратная связь сохранена без тренинга')
+                    : (hasExistingFeedback ? 'Обратная связь обновлена' : 'Обратная связь добавлена'),
+                'success'
+            );
             if (typeof onSaved === 'function') onSaved(d.feedback || null);
             onClose?.();
         } catch (e) {
@@ -819,49 +859,67 @@ const FeedbackModal = ({
                             onChange={e => setFeedbackComment(e.target.value)}
                         />
                     </div>
-                    <div className="field">
-                        <label className="label">Как проведена обратная связь</label>
-                        <textarea
-                            className="textarea"
-                            rows={3}
-                            placeholder="Например: индивидуальный разбор, прослушивание звонка, чек-лист ошибок"
-                            value={deliveryComment}
-                            onChange={e => setDeliveryComment(e.target.value)}
-                        />
-                    </div>
-                    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10}}>
-                        <div className="field" style={{marginBottom: 0}}>
-                            <label className="label">Дата</label>
+                    {canSkipTraining && (
+                        <label style={{display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'var(--text)', marginBottom: 4}}>
                             <input
-                                className="input"
-                                type="date"
-                                value={feedbackDate}
-                                onChange={e => setFeedbackDate(e.target.value)}
+                                type="checkbox"
+                                checked={!!skipTraining}
+                                onChange={e => setSkipTraining(!!e.target.checked)}
                             />
+                            Не добавлять тренинг
+                        </label>
+                    )}
+                    {requiresTrainingFields ? (
+                        <>
+                            <div className="field">
+                                <label className="label">Как проведена обратная связь</label>
+                                <textarea
+                                    className="textarea"
+                                    rows={3}
+                                    placeholder="Например: индивидуальный разбор, прослушивание звонка, чек-лист ошибок"
+                                    value={deliveryComment}
+                                    onChange={e => setDeliveryComment(e.target.value)}
+                                />
+                            </div>
+                            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10}}>
+                                <div className="field" style={{marginBottom: 0}}>
+                                    <label className="label">Дата</label>
+                                    <input
+                                        className="input"
+                                        type="date"
+                                        value={feedbackDate}
+                                        onChange={e => setFeedbackDate(e.target.value)}
+                                    />
+                                </div>
+                                <div className="field" style={{marginBottom: 0}}>
+                                    <label className="label">Начало</label>
+                                    <input
+                                        className="input"
+                                        type="time"
+                                        value={startTime}
+                                        onChange={e => setStartTime(e.target.value)}
+                                    />
+                                </div>
+                                <div className="field" style={{marginBottom: 0}}>
+                                    <label className="label">Окончание</label>
+                                    <input
+                                        className="input"
+                                        type="time"
+                                        value={endTime}
+                                        onChange={e => setEndTime(e.target.value)}
+                                    />
+                                </div>
+                            </div>
+                            <div style={{marginTop: 10, fontSize: 12, color:'var(--text-2)'}}>
+                                При сохранении будет автоматически создан/обновлен тренинг с причиной
+                                <strong style={{color:'var(--text)'}}> «Тренинг по качеству. Разбор ошибок»</strong>.
+                            </div>
+                        </>
+                    ) : (
+                        <div style={{marginTop: 10, fontSize: 12, color:'var(--text-2)'}}>
+                            При сохранении будет добавлен только комментарий ОС, тренинг создан не будет.
                         </div>
-                        <div className="field" style={{marginBottom: 0}}>
-                            <label className="label">Начало</label>
-                            <input
-                                className="input"
-                                type="time"
-                                value={startTime}
-                                onChange={e => setStartTime(e.target.value)}
-                            />
-                        </div>
-                        <div className="field" style={{marginBottom: 0}}>
-                            <label className="label">Окончание</label>
-                            <input
-                                className="input"
-                                type="time"
-                                value={endTime}
-                                onChange={e => setEndTime(e.target.value)}
-                            />
-                        </div>
-                    </div>
-                    <div style={{marginTop: 10, fontSize: 12, color:'var(--text-2)'}}>
-                        При сохранении будет автоматически создан/обновлен тренинг с причиной
-                        <strong style={{color:'var(--text)'}}> «Тренинг по качеству. Разбор ошибок»</strong>.
-                    </div>
+                    )}
                 </div>
                 <div className="modal-footer">
                     <button className="btn btn-secondary" onClick={onClose}>Отмена</button>
