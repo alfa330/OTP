@@ -4524,6 +4524,60 @@ def get_sv_list():
         logging.error(f"Error fetching SV list: {e}", exc_info=True)
         return jsonify({"error": "Failed to fetch supervisors"}), 500
 
+@app.route('/api/admin/call_feedback_report_setting', methods=['GET', 'POST'])
+@require_api_key
+def admin_call_feedback_report_setting():
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        requester_role = _normalize_user_role(requester[3])
+        if not _is_admin_role(requester_role):
+            return jsonify({"error": "Only admins can manage this setting"}), 403
+
+        if request.method == 'GET':
+            enabled = db.get_admin_feedback_telegram_report_setting(requester_id)
+            if enabled is None:
+                return jsonify({"error": "Admin user not found"}), 404
+            return jsonify({
+                "status": "success",
+                "enabled": bool(enabled),
+                "telegram_connected": bool(requester[1])
+            }), 200
+
+        data = request.get_json(silent=True) or {}
+        raw_enabled = data.get('enabled')
+        if isinstance(raw_enabled, bool):
+            enabled = raw_enabled
+        elif isinstance(raw_enabled, (int, float)):
+            enabled = bool(raw_enabled)
+        elif isinstance(raw_enabled, str):
+            norm = raw_enabled.strip().lower()
+            if norm in ('1', 'true', 'yes', 'on'):
+                enabled = True
+            elif norm in ('0', 'false', 'no', 'off', ''):
+                enabled = False
+            else:
+                return jsonify({"error": "Invalid enabled value"}), 400
+        else:
+            return jsonify({"error": "enabled is required"}), 400
+
+        updated = db.set_admin_feedback_telegram_report_setting(requester_id, enabled)
+        if updated is None:
+            return jsonify({"error": "Admin user not found"}), 404
+
+        return jsonify({
+            "status": "success",
+            "enabled": bool(updated),
+            "telegram_connected": bool(requester[1])
+        }), 200
+
+    except Exception:
+        logging.exception("Error in /api/admin/call_feedback_report_setting")
+        return jsonify({"error": "Internal server error"}), 500
+
 @app.route('/api/call_evaluations', methods=['GET'])
 @require_api_key
 def get_call_evaluations():
@@ -6506,6 +6560,34 @@ def operators_summary():
                     return jsonify({"error": "Invalid supervisor_id"}), 400
 
         operators = db.get_operators_summary_for_month(month=month, supervisor_id=supervisor_id)
+        operator_ids_for_feedback = []
+        for item in (operators or []):
+            try:
+                operator_ids_for_feedback.append(int(item.get('id')))
+            except Exception:
+                continue
+
+        feedback_stats_by_operator = {}
+        if operator_ids_for_feedback:
+            try:
+                feedback_stats_by_operator = db.get_feedback_sla_operator_stats_for_month(
+                    month=month,
+                    operator_ids=operator_ids_for_feedback
+                ) or {}
+            except Exception:
+                logging.exception("Failed to load feedback SLA stats for operators summary")
+                feedback_stats_by_operator = {}
+
+        for item in (operators or []):
+            try:
+                op_id = int(item.get('id'))
+            except Exception:
+                op_id = None
+            stats = feedback_stats_by_operator.get(op_id, {}) if op_id is not None else {}
+            item['feedback_stats'] = stats
+            item['feedback_count'] = int(stats.get('feedback_count') or 0)
+            item['feedback_overdue_count'] = int(stats.get('overdue_count') or 0)
+            item['feedback_pending_count'] = int(stats.get('pending_count') or 0)
 
         return jsonify({"status": "success", "month": month, "operators": operators}), 200
 
@@ -7334,6 +7416,15 @@ def get_sv_data():
         except Exception:
             operator_targets = {}
 
+        try:
+            feedback_stats_by_operator = db.get_feedback_sla_operator_stats_for_month(
+                month=month,
+                operator_ids=metric_ids
+            ) if metric_ids else {}
+        except Exception:
+            logging.exception("Failed to load feedback SLA stats for /api/sv/data")
+            feedback_stats_by_operator = {}
+
         seen_response_ids = set()
         for op in operators:
             # flexible unpacking: support dict or sequence rows
@@ -7394,6 +7485,7 @@ def get_sv_data():
                 operator_id_int = None
             metrics = operator_metrics.get(operator_id_int, {}) if operator_id_int is not None else {}
             evaluation_target = operator_targets.get(operator_id_int) if operator_id_int is not None else None
+            feedback_stats = feedback_stats_by_operator.get(operator_id_int, {}) if operator_id_int is not None else {}
             eval_count = int(metrics.get("call_count") or 0)
             avg_score = metrics.get("avg_score")
             if operator_id_int is not None:
@@ -7418,6 +7510,10 @@ def get_sv_data():
                 "call_count": eval_count,
                 "avg_score": avg_score,
                 "evaluation_target": evaluation_target,
+                "feedback_stats": feedback_stats,
+                "feedback_count": int(feedback_stats.get("feedback_count") or 0),
+                "feedback_overdue_count": int(feedback_stats.get("overdue_count") or 0),
+                "feedback_pending_count": int(feedback_stats.get("pending_count") or 0),
                 "scores_table_url": scores_table_url,
                 "status": status,
                 "rate": rate_val,
@@ -7441,6 +7537,7 @@ def get_sv_data():
 
             sv_metrics = operator_metrics.get(supervisor_id_int, {})
             sv_evaluation_target = operator_targets.get(supervisor_id_int)
+            sv_feedback_stats = feedback_stats_by_operator.get(supervisor_id_int, {})
             sv_call_count = int(sv_metrics.get("call_count") or 0)
             if sv_call_count <= 0:
                 continue
@@ -7473,6 +7570,10 @@ def get_sv_data():
                 "call_count": sv_call_count,
                 "avg_score": sv_metrics.get("avg_score"),
                 "evaluation_target": sv_evaluation_target,
+                "feedback_stats": sv_feedback_stats,
+                "feedback_count": int(sv_feedback_stats.get("feedback_count") or 0),
+                "feedback_overdue_count": int(sv_feedback_stats.get("overdue_count") or 0),
+                "feedback_pending_count": int(sv_feedback_stats.get("pending_count") or 0),
                 "scores_table_url": sv_scores_table_url,
                 "status": sv_status,
                 "rate": sv_rate_val,
@@ -19955,9 +20056,23 @@ def lms_admin_courses():
                         c.default_pass_threshold, c.default_attempt_limit,
                         c.current_version_id,
                         cv.version_number, cv.status, cv.pass_threshold, cv.attempt_limit,
-                        cv.anti_cheat_settings
+                        cv.anti_cheat_settings,
+                        draft_cv.id,
+                        draft_cv.version_number,
+                        draft_cv.created_at
                     FROM lms_courses c
                     LEFT JOIN lms_course_versions cv ON cv.id = c.current_version_id
+                    LEFT JOIN LATERAL (
+                        SELECT
+                            cvd.id,
+                            cvd.version_number,
+                            cvd.created_at
+                        FROM lms_course_versions cvd
+                        WHERE cvd.course_id = c.id
+                          AND cvd.status = 'draft'
+                        ORDER BY cvd.version_number DESC, cvd.id DESC
+                        LIMIT 1
+                    ) draft_cv ON TRUE
                     ORDER BY c.updated_at DESC, c.id DESC
                 """)
                 rows = cursor.fetchall()
@@ -19965,6 +20080,9 @@ def lms_admin_courses():
                 for row in rows:
                     version_settings = _lms_parse_json(row[13], {})
                     cover_payload = _lms_resolve_cover_payload(version_settings)
+                    latest_draft_version_id = int(row[14]) if row[14] is not None else None
+                    latest_draft_version_number = int(row[15]) if row[15] is not None else None
+                    latest_draft_created_at = row[16].isoformat() if row[16] else None
                     courses.append({
                         "id": int(row[0]),
                         "slug": row[1],
@@ -19980,11 +20098,16 @@ def lms_admin_courses():
                         "default_attempt_limit": int(row[7] if row[7] is not None else LMS_DEFAULT_ATTEMPT_LIMIT),
                         "current_version_id": int(row[8]) if row[8] is not None else None,
                         "current_version": {
+                            "id": int(row[8]),
                             "version_number": int(row[9]) if row[9] is not None else None,
                             "status": row[10],
                             "pass_threshold": float(row[11]) if row[11] is not None else None,
                             "attempt_limit": int(row[12]) if row[12] is not None else None
-                        } if row[8] is not None else None
+                        } if row[8] is not None else None,
+                        "has_draft_version": latest_draft_version_id is not None,
+                        "latest_draft_version_id": latest_draft_version_id,
+                        "latest_draft_version_number": latest_draft_version_number,
+                        "latest_draft_created_at": latest_draft_created_at
                     })
                 return jsonify({"status": "success", "courses": courses}), 200
 
@@ -21470,9 +21593,257 @@ def sync_generate_weekly_report():
         except:
             pass
 
+
+def sync_send_weekly_call_feedback_report():
+    try:
+        try:
+            now_dt = datetime.now(ZoneInfo('Asia/Almaty'))
+        except Exception:
+            now_dt = datetime.now()
+
+        month = now_dt.strftime('%Y-%m')
+        report_data = db.get_feedback_sla_report_for_month(month=month, reference_date=now_dt.date()) or {}
+        overview = report_data.get('overview') or {}
+        supervisors = report_data.get('supervisors') or []
+        recipients = db.get_admins_with_feedback_telegram_reports_enabled() or []
+
+        if not recipients:
+            logging.info("Weekly call feedback report skipped: no opted-in admins")
+            return True
+
+        generated_label = now_dt.strftime('%d.%m.%Y %H:%M')
+        overview_lines = [
+            f"Еженедельный отчет по ОС ({month})",
+            f"Сформирован: {generated_label}",
+            "",
+            f"Оценок в месяце: {int(overview.get('total_evaluated') or 0)}",
+            f"Предоставлено ОС: {int(overview.get('feedback_provided') or 0)}",
+            f"В срок: {int(overview.get('feedback_on_time') or 0)}",
+            f"Просрочено: {int(overview.get('overdue_total') or 0)}",
+            f"Просрочено без ОС: {int(overview.get('pending_overdue') or 0)}",
+        ]
+        overview_text = "\n".join(overview_lines)
+        overview_lines = [
+            f"Еженедельный отчет по ОС ({month})",
+            f"Сформирован: {generated_label}",
+            "",
+            f"Оценок в месяце: {int(overview.get('total_evaluated') or 0)}",
+            f"Предоставлено ОС: {int(overview.get('feedback_provided') or 0)}",
+            f"В срок: {int(overview.get('feedback_on_time') or 0)}",
+            f"Просрочено: {int(overview.get('overdue_total') or 0)}",
+            f"Просрочено без ОС: {int(overview.get('pending_overdue') or 0)}",
+        ]
+        overview_text = "\n".join(overview_lines)
+
+        overview_lines = [
+            f"Weekly feedback SLA report ({month})",
+            f"Generated: {generated_label}",
+            "",
+            f"Evaluations in month: {int(overview.get('total_evaluated') or 0)}",
+            f"Feedback provided: {int(overview.get('feedback_provided') or 0)}",
+            f"On time: {int(overview.get('feedback_on_time') or 0)}",
+            f"Overdue total: {int(overview.get('overdue_total') or 0)}",
+            f"Overdue without feedback: {int(overview.get('pending_overdue') or 0)}",
+        ]
+        overview_text = "\n".join(overview_lines)
+
+        def _score_text(value):
+            try:
+                return f"{float(value):.1f}"
+            except Exception:
+                return "—"
+
+        def _supervisor_report_text(supervisor_bucket, max_on_time=8, max_overdue=12):
+            supervisor_name = str(supervisor_bucket.get('supervisor_name') or 'Без супервайзера')
+            provided = int(supervisor_bucket.get('feedback_provided') or 0)
+            on_time = int(supervisor_bucket.get('feedback_on_time') or 0)
+            overdue = int(supervisor_bucket.get('overdue_total') or 0)
+            pending_overdue = int(supervisor_bucket.get('pending_overdue') or 0)
+            on_time_items = supervisor_bucket.get('on_time_items') or []
+            overdue_items = supervisor_bucket.get('overdue_items') or []
+
+            lines = [
+                f"СВ: {supervisor_name}",
+                f"ОС: {provided} | В срок: {on_time} | Просрочено: {overdue}",
+                f"Просрочено без ОС: {pending_overdue}"
+            ]
+
+            if on_time_items:
+                lines.append("")
+                lines.append("В срок:")
+                for item in on_time_items[:max_on_time]:
+                    lines.append(
+                        f"- #{item.get('call_id')} | {item.get('operator_name') or 'Оператор'} | "
+                        f"балл {_score_text(item.get('score'))} | дедлайн {item.get('due_date') or '—'} | "
+                        f"ОС {item.get('feedback_date') or '—'}"
+                    )
+                extra = len(on_time_items) - max_on_time
+                if extra > 0:
+                    lines.append(f"... и еще {extra} в срок")
+
+            if overdue_items:
+                lines.append("")
+                lines.append("Просрочено:")
+                for item in overdue_items[:max_overdue]:
+                    critical_mark = " [крит]" if item.get('has_critical_error') else ""
+                    feedback_label = item.get('feedback_date') or "нет ОС"
+                    lines.append(
+                        f"- #{item.get('call_id')} | {item.get('operator_name') or 'Оператор'}{critical_mark} | "
+                        f"балл {_score_text(item.get('score'))} | дедлайн {item.get('due_date') or '—'} | "
+                        f"ОС {feedback_label} | +{int(item.get('overdue_days') or 0)}д"
+                    )
+                extra = len(overdue_items) - max_overdue
+                if extra > 0:
+                    lines.append(f"... и еще {extra} просроченных")
+
+            return "\n".join(lines)
+
+        def _score_text(value):
+            try:
+                return f"{float(value):.1f}"
+            except Exception:
+                return "—"
+
+        def _supervisor_report_text(supervisor_bucket, max_on_time=8, max_overdue=12):
+            supervisor_name = str(supervisor_bucket.get('supervisor_name') or 'Без супервайзера')
+            provided = int(supervisor_bucket.get('feedback_provided') or 0)
+            on_time = int(supervisor_bucket.get('feedback_on_time') or 0)
+            overdue = int(supervisor_bucket.get('overdue_total') or 0)
+            pending_overdue = int(supervisor_bucket.get('pending_overdue') or 0)
+            on_time_items = supervisor_bucket.get('on_time_items') or []
+            overdue_items = supervisor_bucket.get('overdue_items') or []
+
+            lines = [
+                f"СВ: {supervisor_name}",
+                f"ОС: {provided} | В срок: {on_time} | Просрочено: {overdue}",
+                f"Просрочено без ОС: {pending_overdue}"
+            ]
+
+            if on_time_items:
+                lines.append("")
+                lines.append("В срок:")
+                for item in on_time_items[:max_on_time]:
+                    lines.append(
+                        f"- #{item.get('call_id')} | {item.get('operator_name') or 'Оператор'} | "
+                        f"балл {_score_text(item.get('score'))} | дедлайн {item.get('due_date') or '—'} | "
+                        f"ОС {item.get('feedback_date') or '—'}"
+                    )
+                extra = len(on_time_items) - max_on_time
+                if extra > 0:
+                    lines.append(f"... и еще {extra} в срок")
+
+            if overdue_items:
+                lines.append("")
+                lines.append("Просрочено:")
+                for item in overdue_items[:max_overdue]:
+                    critical_mark = " [крит]" if item.get('has_critical_error') else ""
+                    feedback_label = item.get('feedback_date') or "нет ОС"
+                    lines.append(
+                        f"- #{item.get('call_id')} | {item.get('operator_name') or 'Оператор'}{critical_mark} | "
+                        f"балл {_score_text(item.get('score'))} | дедлайн {item.get('due_date') or '—'} | "
+                        f"ОС {feedback_label} | +{int(item.get('overdue_days') or 0)}д"
+                    )
+                extra = len(overdue_items) - max_overdue
+                if extra > 0:
+                    lines.append(f"... и еще {extra} просроченных")
+
+            return "\n".join(lines)
+
+        def _score_text(value):
+            try:
+                return f"{float(value):.1f}"
+            except Exception:
+                return "-"
+
+        def _supervisor_report_text(supervisor_bucket, max_on_time=8, max_overdue=12):
+            supervisor_name = str(supervisor_bucket.get('supervisor_name') or 'No Supervisor')
+            provided = int(supervisor_bucket.get('feedback_provided') or 0)
+            on_time = int(supervisor_bucket.get('feedback_on_time') or 0)
+            overdue = int(supervisor_bucket.get('overdue_total') or 0)
+            pending_overdue = int(supervisor_bucket.get('pending_overdue') or 0)
+            on_time_items = supervisor_bucket.get('on_time_items') or []
+            overdue_items = supervisor_bucket.get('overdue_items') or []
+
+            lines = [
+                f"SV: {supervisor_name}",
+                f"Feedback: {provided} | On time: {on_time} | Overdue: {overdue}",
+                f"Overdue without feedback: {pending_overdue}"
+            ]
+
+            if on_time_items:
+                lines.append("")
+                lines.append("On time:")
+                for item in on_time_items[:max_on_time]:
+                    lines.append(
+                        f"- #{item.get('call_id')} | {item.get('operator_name') or 'Operator'} | "
+                        f"score {_score_text(item.get('score'))} | due {item.get('due_date') or '-'} | "
+                        f"feedback {item.get('feedback_date') or '-'}"
+                    )
+                extra = len(on_time_items) - max_on_time
+                if extra > 0:
+                    lines.append(f"... and {extra} more on time")
+
+            if overdue_items:
+                lines.append("")
+                lines.append("Overdue:")
+                for item in overdue_items[:max_overdue]:
+                    critical_mark = " [critical]" if item.get('has_critical_error') else ""
+                    feedback_label = item.get('feedback_date') or "no feedback"
+                    lines.append(
+                        f"- #{item.get('call_id')} | {item.get('operator_name') or 'Operator'}{critical_mark} | "
+                        f"score {_score_text(item.get('score'))} | due {item.get('due_date') or '-'} | "
+                        f"feedback {feedback_label} | +{int(item.get('overdue_days') or 0)}d"
+                    )
+                extra = len(overdue_items) - max_overdue
+                if extra > 0:
+                    lines.append(f"... and {extra} more overdue")
+
+            return "\n".join(lines)
+
+        for recipient in recipients:
+            chat_id = recipient.get('telegram_id')
+            if not chat_id:
+                continue
+
+            try:
+                overview_response = _send_telegram_text_message(chat_id=chat_id, text=overview_text, parse_mode=None)
+                if overview_response.status_code != 200:
+                    logging.warning(
+                        "Weekly call feedback report overview send failed for admin %s: %s",
+                        recipient.get('id'),
+                        _get_telegram_error_text(overview_response)
+                    )
+                    continue
+
+                for supervisor_bucket in supervisors:
+                    supervisor_text = _supervisor_report_text(supervisor_bucket)
+                    supervisor_response = _send_telegram_text_message(
+                        chat_id=chat_id,
+                        text=supervisor_text,
+                        parse_mode=None
+                    )
+                    if supervisor_response.status_code != 200:
+                        logging.warning(
+                            "Weekly call feedback report detail send failed for admin %s: %s",
+                            recipient.get('id'),
+                            _get_telegram_error_text(supervisor_response)
+                        )
+            except Exception:
+                logging.exception("Failed to send weekly call feedback report to admin %s", recipient.get('id'))
+
+        return True
+    except Exception:
+        logging.exception("Critical error in weekly call feedback report job")
+        return False
+
 async def generate_weekly_report():
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(executor_pool, sync_generate_weekly_report)
+
+
+async def send_weekly_call_feedback_report():
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(executor_pool, sync_send_weekly_call_feedback_report)
 
 def sync_schedule_statuses_to_user_statuses_job():
     """Background job: sync users.status with active schedule status periods."""
@@ -21620,6 +21991,14 @@ if __name__ == '__main__':
         generate_weekly_report, 
         CronTrigger(day_of_week='mon', hour=9, minute=0),
         misfire_grace_time=3600
+    )
+    scheduler.add_job(
+        send_weekly_call_feedback_report,
+        CronTrigger(day_of_week='mon', hour=9, minute=5, timezone=ZoneInfo('Asia/Almaty')),
+        id='weekly_call_feedback_report',
+        misfire_grace_time=3600,
+        max_instances=1,
+        coalesce=True
     )
 
     # Запуск авто-заполнения нормы часов: 1-й день каждого месяца в 03:00

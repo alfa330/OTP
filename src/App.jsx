@@ -4461,7 +4461,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     direction_name: op.direction_name,
                     status: op.status,
                     hire_date: op.hire_date || op.hireDate || null,
-                    call_count: op.call_count
+                    call_count: op.call_count,
+                    avg_score: op.avg_score,
+                    feedback_count: op.feedback_count || 0,
+                    feedback_overdue_count: op.feedback_overdue_count || 0,
+                    feedback_pending_count: op.feedback_pending_count || 0
                     }));
 
                     setSvOperators(ops);
@@ -24500,7 +24504,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [opsSortDirection, setOpsSortDirection] = useState('asc'); // 'asc' | 'desc'
             const [usersSortField, setUsersSortField] = useState('name'); // 'name' | 'direction' | 'status' | 'hire_date' | 'rate' | 'supervisor'
             const [usersSortDirection, setUsersSortDirection] = useState('asc'); // 'asc' | 'desc'
-            const [viewScoresSortField, setViewScoresSortField] = useState('name'); // 'name' | 'listened' | 'avg_score' | 'direction'
+            const [viewScoresSortField, setViewScoresSortField] = useState('name'); // 'name' | 'listened' | 'avg_score' | 'feedback' | 'direction'
             const [viewScoresSortDirection, setViewScoresSortDirection] = useState('asc'); // 'asc' | 'desc'
 
             const handleViewScoresSort = (field) => {
@@ -24540,6 +24544,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const sb = parseNumberSafeViewScores(b.avg_score);
                 if (sa === sb) return nameA.localeCompare(nameB, 'ru', { sensitivity: 'base' });
                 return (sa - sb) * dir;
+            }
+
+            if (field === 'feedback') {
+                const faCount = parseNumberSafeViewScores(a.feedback_count);
+                const fbCount = parseNumberSafeViewScores(b.feedback_count);
+                const faOverdue = parseNumberSafeViewScores(a.feedback_overdue_count);
+                const fbOverdue = parseNumberSafeViewScores(b.feedback_overdue_count);
+                const faValue = faCount - faOverdue;
+                const fbValue = fbCount - fbOverdue;
+                if (faValue === fbValue) return nameA.localeCompare(nameB, 'ru', { sensitivity: 'base' });
+                return (faValue - fbValue) * dir;
             }
 
             // default: string compare on field then by name
@@ -32038,23 +32053,29 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <tr>
                                                     <th
                                                         onClick={() => handleViewScoresSort('name')}
-                                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer w-1/4"
+                                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer w-1/5"
                                                     >
                                                         Имя {getViewScoresSortIcon('name')}
                                                     </th>
                                                     <th
                                                         onClick={() => handleViewScoresSort('listened')}
-                                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer w-1/4"
+                                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer w-1/5"
                                                     >
                                                         Оценено / план {getViewScoresSortIcon('listened')}
                                                     </th>
                                                     <th
                                                         onClick={() => handleViewScoresSort('avg_score')}
-                                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer w-1/4"
+                                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer w-1/5"
                                                     >
                                                         Средний балл {getViewScoresSortIcon('avg_score')}
                                                     </th>
-                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase w-1/4">Действия</th>
+                                                    <th
+                                                        onClick={() => handleViewScoresSort('feedback')}
+                                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer w-1/5"
+                                                    >
+                                                        ОС / просрочки {getViewScoresSortIcon('feedback')}
+                                                    </th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase w-1/5">Действия</th>
                                                     </tr>
                                                 </thead>
 
@@ -32063,7 +32084,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <React.Fragment key={dirName}>
                                                         {/* Заголовок группы направления */}
                                                         <tr className="bg-gray-100">
-                                                        <td colSpan={4} className="px-6 py-3 text-sm font-semibold text-gray-700">
+                                                        <td colSpan={5} className="px-6 py-3 text-sm font-semibold text-gray-700">
                                                             {dirName} <span className="ml-2 text-xs text-gray-500">({grouped[dirName].length})</span>
                                                         </td>
                                                         </tr>
@@ -32096,6 +32117,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             <td className="px-6 py-4 whitespace-nowrap">
                                                                 <span className={getScoreColor(op.avg_score)}>
                                                                 {op.avg_score ? Number(op.avg_score).toFixed(2) : '-'}
+                                                                </span>
+                                                            </td>
+                                                            <td className="px-6 py-4 whitespace-nowrap">
+                                                                <span className="font-medium">
+                                                                    {Number(op.feedback_count) || 0}
+                                                                </span>
+                                                                <span className="text-gray-500"> / </span>
+                                                                <span className="font-medium text-red-600">
+                                                                    {Number(op.feedback_overdue_count) || 0}
                                                                 </span>
                                                             </td>
                                                             <td className="px-6 py-4 whitespace-nowrap space-x-2">
@@ -32139,6 +32169,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <td className="px-6 py-3 font-medium">Итого</td>
                                                     <td className="px-6 py-3 font-medium">{totalPlanCalls > 0 ? `${totalCalls} / ${totalPlanCalls}` : totalCalls}</td>
                                                     <td className="px-6 py-3 font-medium">{avgByScored == null ? '-' : avgByScored.toFixed(2)}</td>
+                                                    <td className="px-6 py-3 font-medium">
+                                                        {filteredOperators.reduce((sum, o) => sum + (Number(o.feedback_count) || 0), 0)}
+                                                        <span className="text-gray-500"> / </span>
+                                                        <span className="text-red-600">
+                                                            {filteredOperators.reduce((sum, o) => sum + (Number(o.feedback_overdue_count) || 0), 0)}
+                                                        </span>
+                                                    </td>
                                                     <td className="px-6 py-3" />
                                                     </tr>
                                                 </tfoot>
@@ -33749,6 +33786,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 >
                                                     Средний балл {getOpsSortIcon('avg_score')}
                                                 </th>
+                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ОС / просрочки</th>
                                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Действия</th>
                                                 </tr>
                                             </thead>
@@ -33757,7 +33795,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 {myOperatorsSorted.length > 0 && (
                                                 <React.Fragment>
                                                     <tr className="bg-gray-100">
-                                                    <td colSpan={4} className="px-6 py-3 text-sm font-semibold text-gray-700">
+                                                    <td colSpan={5} className="px-6 py-3 text-sm font-semibold text-gray-700">
                                                         Мои операторы <span className="ml-2 text-xs text-gray-500">({myOperatorsSorted.length})</span>
                                                     </td>
                                                     </tr>
@@ -33792,6 +33830,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         </td>
 
                                                         <td className="px-6 py-4 whitespace-nowrap text-sm">
+                                                            <span className="font-medium">{Number(op.feedback_count) || 0}</span>
+                                                            <span className="text-gray-500"> / </span>
+                                                            <span className="font-medium text-red-600">{Number(op.feedback_overdue_count) || 0}</span>
+                                                        </td>
+                                                        <td className="px-6 py-4 whitespace-nowrap text-sm">
                                                             <div className="flex items-center gap-2">
                                                             <button
                                                                 onClick={(e) => openCallEvaluationSection({
@@ -33817,7 +33860,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <React.Fragment key={dirName}>
                                                     {/* Заголовок группы направления */}
                                                     <tr className="bg-gray-100">
-                                                    <td colSpan={4} className="px-6 py-3 text-sm font-semibold text-gray-700">
+                                                    <td colSpan={5} className="px-6 py-3 text-sm font-semibold text-gray-700">
                                                         {dirName} <span className="ml-2 text-xs text-gray-500">({grouped[dirName].length})</span>
                                                     </td>
                                                     </tr>
@@ -33851,6 +33894,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             </span>
                                                         </td>
 
+                                                        <td className="px-6 py-4 whitespace-nowrap text-sm">
+                                                            <span className="font-medium">{Number(op.feedback_count) || 0}</span>
+                                                            <span className="text-gray-500"> / </span>
+                                                            <span className="font-medium text-red-600">{Number(op.feedback_overdue_count) || 0}</span>
+                                                        </td>
                                                         <td className="px-6 py-4 whitespace-nowrap text-sm">
                                                             <div className="flex items-center gap-2">
                                                             <button
@@ -33891,6 +33939,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <td className="px-6 py-3 text-sm font-medium text-gray-700">Итого</td>
                                                     <td className="px-6 py-3 text-sm font-medium text-gray-900">{totalPlanCalls > 0 ? `${totalCalls} / ${totalPlanCalls}` : totalCalls}</td>
                                                     <td className="px-6 py-3 text-sm font-medium text-gray-900">{overallAvgStr}</td>
+                                                    <td className="px-6 py-3 text-sm font-medium text-gray-900">
+                                                        {filteredOperators.reduce((sum, o) => sum + (Number(o.feedback_count) || 0), 0)}
+                                                        <span className="text-gray-500"> / </span>
+                                                        <span className="text-red-600">{filteredOperators.reduce((sum, o) => sum + (Number(o.feedback_overdue_count) || 0), 0)}</span>
+                                                    </td>
                                                     <td className="px-6 py-3" />
                                                     </tr>
                                                 );
