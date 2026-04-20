@@ -1876,6 +1876,13 @@ const App = ({ user, initialSelection }) => {
     const [openingCalibrationCallId, setOpeningCalibrationCallId] = useState(null);
     const [showVersionsModal, setShowVersionsModal] = useState(false);
     const [versionHistory, setVersionHistory] = useState([]);
+    const [feedbackReportSetting, setFeedbackReportSetting] = useState({
+        loading: false,
+        saving: false,
+        loaded: false,
+        enabled: false,
+        telegramConnected: false
+    });
     const operatorsCacheRef = useRef(new Map());
     const callsCacheRef = useRef(new Map());
     const evaluationTargetCacheRef = useRef(new Map());
@@ -1891,6 +1898,29 @@ const App = ({ user, initialSelection }) => {
             if (isNaN(d)) return ds;
             return new Intl.DateTimeFormat('ru-RU', {day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}).format(d).replace(/\./g,'').replace(',','');
         } catch { return ds; }
+    };
+
+    const fmtDateOnly = (ds) => {
+        if (!ds) return '—';
+        try {
+            const raw = String(ds).trim();
+            const normalized = raw.includes('T') || raw.includes(' ')
+                ? raw.replace(' ', 'T')
+                : `${raw}T00:00:00`;
+            const d = new Date(normalized);
+            if (isNaN(d)) return raw;
+            return new Intl.DateTimeFormat('ru-RU', {day:'2-digit',month:'2-digit',year:'numeric'}).format(d);
+        } catch {
+            return String(ds);
+        }
+    };
+
+    const getFeedbackSlaStatusMeta = (status) => {
+        const normalized = String(status || '').trim().toLowerCase();
+        if (normalized === 'on_time') return { label: 'В срок', color: 'var(--green)' };
+        if (normalized === 'overdue') return { label: 'Просрочено', color: 'var(--red)' };
+        if (normalized === 'pending') return { label: 'Ожидается', color: 'var(--amber)' };
+        return { label: '—', color: 'var(--text-2)' };
     };
 
     const months = Array.from({length:12},(_,i) => {
@@ -1929,8 +1959,82 @@ const App = ({ user, initialSelection }) => {
         sv_request_approved_at: ev.sv_request_approved_at || null,
         commentVisibleToOperator: ev.comment_visible_to_operator !== false,
         feedback: ev.feedback || null,
+        feedbackSla: ev.feedback_sla || ev?.feedback?.sla || null,
         _rawEvaluation: ev
     }), []);
+
+    const loadFeedbackReportSetting = useCallback(async () => {
+        if (!isAdminRole || !userId) return;
+        setFeedbackReportSetting(prev => ({ ...prev, loading: true }));
+        try {
+            const r = await authFetch(`${API_BASE_URL}/api/admin/call_feedback_report_setting`, {
+                method: 'GET',
+                headers: { 'X-User-Id': userId }
+            });
+            const d = await r.json();
+            if (!r.ok || d?.status !== 'success') {
+                throw new Error(d?.error || 'Не удалось получить настройку');
+            }
+            setFeedbackReportSetting(prev => ({
+                ...prev,
+                loading: false,
+                loaded: true,
+                enabled: !!d.enabled,
+                telegramConnected: !!d.telegram_connected
+            }));
+        } catch (e) {
+            setFeedbackReportSetting(prev => ({
+                ...prev,
+                loading: false,
+                loaded: true
+            }));
+            emitCallEvaluationToast(`Ошибка загрузки настройки отчёта: ${e.message}`, 'error');
+        }
+    }, [isAdminRole, userId]);
+
+    const toggleFeedbackReportSetting = useCallback(async (nextEnabled) => {
+        if (!isAdminRole || !userId) return;
+        const previousEnabled = !!feedbackReportSetting.enabled;
+        setFeedbackReportSetting(prev => ({
+            ...prev,
+            enabled: !!nextEnabled,
+            saving: true
+        }));
+        try {
+            const r = await authFetch(`${API_BASE_URL}/api/admin/call_feedback_report_setting`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-User-Id': userId
+                },
+                body: JSON.stringify({ enabled: !!nextEnabled })
+            });
+            const d = await r.json();
+            if (!r.ok || d?.status !== 'success') {
+                throw new Error(d?.error || 'Не удалось сохранить настройку');
+            }
+            setFeedbackReportSetting(prev => ({
+                ...prev,
+                saving: false,
+                loaded: true,
+                enabled: !!d.enabled,
+                telegramConnected: !!d.telegram_connected
+            }));
+            emitCallEvaluationToast(
+                d.enabled
+                    ? 'Еженедельные отчёты по ОС включены'
+                    : 'Еженедельные отчёты по ОС выключены',
+                'success'
+            );
+        } catch (e) {
+            setFeedbackReportSetting(prev => ({
+                ...prev,
+                saving: false,
+                enabled: previousEnabled
+            }));
+            emitCallEvaluationToast(`Ошибка сохранения настройки: ${e.message}`, 'error');
+        }
+    }, [isAdminRole, userId, feedbackReportSetting.enabled]);
 
     // Supervisors
     useEffect(() => {
@@ -1982,6 +2086,21 @@ const App = ({ user, initialSelection }) => {
             setOperatorFromToken(null);
         }
     }, [operators, operatorFromToken]);
+
+    useEffect(() => {
+        if (!isAdminRole || !userId) {
+            setFeedbackReportSetting({
+                loading: false,
+                saving: false,
+                loaded: false,
+                enabled: false,
+                telegramConnected: false
+            });
+            return;
+        }
+        if (activeSection !== 'journal') return;
+        loadFeedbackReportSetting();
+    }, [isAdminRole, userId, activeSection, loadFeedbackReportSetting]);
 
     // Directions
     useEffect(() => {
@@ -2765,6 +2884,30 @@ const App = ({ user, initialSelection }) => {
                                 {months.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
                             </select>
                         </div>
+                        {isAdminRole && activeSection === 'journal' && (
+                            <div className="filter-group" style={{minWidth: 280}}>
+                                <label className="label">Telegram-отчёт по ОС</label>
+                                <label className="comment-visibility-toggle" style={{marginBottom: 0}}>
+                                    <input
+                                        type="checkbox"
+                                        checked={!!feedbackReportSetting.enabled}
+                                        disabled={
+                                            !!feedbackReportSetting.loading ||
+                                            !!feedbackReportSetting.saving ||
+                                            !feedbackReportSetting.telegramConnected
+                                        }
+                                        onChange={(e) => toggleFeedbackReportSetting(e.target.checked)}
+                                    />
+                                    <span>
+                                        {feedbackReportSetting.loading
+                                            ? 'Загрузка...'
+                                            : (feedbackReportSetting.telegramConnected
+                                                ? 'Каждый ПН за текущий месяц'
+                                                : 'Требуется Telegram в профиле')}
+                                    </span>
+                                </label>
+                            </div>
+                        )}
                         {isAdminRole && activeSection === 'journal' && (() => {
                             const lastDay = new Date(parseInt(selectedMonth.slice(0,4)), parseInt(selectedMonth.slice(5,7)), 0).getDate();
                             return <DateRangePicker minDate={`${selectedMonth}-01`} maxDate={`${selectedMonth}-${String(lastDay).padStart(2,'0')}`} setFromDate={setFromDate} setToDate={setToDate} />;
@@ -2931,6 +3074,26 @@ const App = ({ user, initialSelection }) => {
                                                         <div style={{marginBottom:12, fontSize:13, color:'var(--text-2)'}}>
                                                             <strong style={{color:'var(--text)'}}>Общий комментарий:</strong> {call.combinedComment?.trim() || '—'}
                                                         </div>
+                                                        {(() => {
+                                                            const sla = call.feedbackSla || call.feedback?.sla || null;
+                                                            if (!sla) return null;
+                                                            const statusMeta = getFeedbackSlaStatusMeta(sla.status);
+                                                            return (
+                                                                <div style={{marginBottom:12, fontSize:13, color:'var(--text-2)', padding:'10px 12px', border:'1px solid var(--border)', borderRadius:'var(--radius)', background:'var(--surface)'}}>
+                                                                    <div style={{marginBottom:4}}>
+                                                                        <strong style={{color:'var(--text)'}}>SLA по ОС:</strong>{' '}
+                                                                        <span style={{color: statusMeta.color, fontWeight: 600}}>{statusMeta.label}</span>
+                                                                    </div>
+                                                                    <div style={{display:'flex', flexWrap:'wrap', gap:'6px 14px'}}>
+                                                                        <span><strong style={{color:'var(--text)'}}>Дедлайн:</strong> {fmtDateOnly(sla.due_date)}</span>
+                                                                        <span><strong style={{color:'var(--text)'}}>Срок:</strong> {Number(sla.deadline_days) || 0} дн.</span>
+                                                                        <span><strong style={{color:'var(--text)'}}>ОС:</strong> {fmtDateOnly(sla.feedback_date)}</span>
+                                                                        <span><strong style={{color:'var(--text)'}}>Просрочка:</strong> {Number(sla.overdue_days) > 0 ? `+${Number(sla.overdue_days)} дн.` : '—'}</span>
+                                                                        <span><strong style={{color:'var(--text)'}}>Крит. ошибка:</strong> {sla.has_critical_error ? 'Да' : 'Нет'}</span>
+                                                                    </div>
+                                                                </div>
+                                                            );
+                                                        })()}
                                                         {call.feedback && (
                                                             <div style={{marginBottom:12, fontSize:13, color:'var(--text-2)', padding:'10px 12px', border:'1px solid var(--border)', borderRadius:'var(--radius)', background:'var(--surface-2)'}}>
                                                                 <div style={{marginBottom:4}}>

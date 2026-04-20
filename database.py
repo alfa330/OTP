@@ -557,7 +557,8 @@ class Database:
                     ADD COLUMN IF NOT EXISTS internship_in_company BOOLEAN NOT NULL DEFAULT FALSE,
                     ADD COLUMN IF NOT EXISTS front_office_training BOOLEAN NOT NULL DEFAULT FALSE,
                     ADD COLUMN IF NOT EXISTS front_office_training_date DATE,
-                    ADD COLUMN IF NOT EXISTS taxipro_id VARCHAR(128);
+                    ADD COLUMN IF NOT EXISTS taxipro_id VARCHAR(128),
+                    ADD COLUMN IF NOT EXISTS feedback_telegram_report_enabled BOOLEAN NOT NULL DEFAULT FALSE;
             """)
             cursor.execute("""
                 DO $$
@@ -2356,6 +2357,65 @@ class Database:
             if result:
                 return result[0]
             return None
+
+    def get_admin_feedback_telegram_report_setting(self, user_id: int) -> Optional[bool]:
+        try:
+            user_id_int = int(user_id)
+        except (TypeError, ValueError):
+            return None
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT COALESCE(feedback_telegram_report_enabled, FALSE)
+                FROM users
+                WHERE id = %s
+                  AND LOWER(COALESCE(role, '')) IN ('admin', 'super_admin')
+                LIMIT 1
+            """, (user_id_int,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return bool(row[0])
+
+    def set_admin_feedback_telegram_report_setting(self, user_id: int, enabled: bool) -> Optional[bool]:
+        try:
+            user_id_int = int(user_id)
+        except (TypeError, ValueError):
+            return None
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                UPDATE users
+                SET feedback_telegram_report_enabled = %s
+                WHERE id = %s
+                  AND LOWER(COALESCE(role, '')) IN ('admin', 'super_admin')
+                RETURNING COALESCE(feedback_telegram_report_enabled, FALSE)
+            """, (bool(enabled), user_id_int))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return bool(row[0])
+
+    def get_admins_with_feedback_telegram_reports_enabled(self) -> List[Dict[str, Any]]:
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id, name, telegram_id
+                FROM users
+                WHERE LOWER(COALESCE(role, '')) IN ('admin', 'super_admin')
+                  AND telegram_id IS NOT NULL
+                  AND COALESCE(feedback_telegram_report_enabled, FALSE) = TRUE
+                ORDER BY name
+            """)
+            rows = cursor.fetchall()
+
+        result = []
+        for row in rows:
+            result.append({
+                "id": int(row[0]),
+                "name": row[1] or "",
+                "telegram_id": int(row[2]) if row[2] is not None else None
+            })
+        return result
             
     def get_directions(self):
         """Получить все направления из таблицы directions."""
@@ -5292,77 +5352,94 @@ class Database:
             cursor.execute(query, params)
             rows = cursor.fetchall()
 
-            evaluations = [
-                {
-                    "id": row[0],
-                    "month": row[1],
-                    "phone_number": row[2],
-                    "appeal_date": (
-                        row[3].strftime('%Y-%m-%d %H:%M:%S')
-                        if row[3] and hasattr(row[3], "strftime")
-                        else (row[3] if row[3] else None)
-                    ),
-                    "score": float(row[4]) if row[4] is not None else None,
-                    "comment": row[5],
-                    "audio_path": row[6],
-                    "is_draft": bool(row[7]),
-                    "is_correction": bool(row[8]),
-                    "evaluation_date": row[9],
-                    "scores": row[10] if row[10] else [],
-                    "criterion_comments": row[11] if row[11] else [],
-                    "direction": {
-                        "id": row[12],
-                        "name": row[13],
-                        "criteria": row[14] if row[14] else [],
-                        "hasFileUpload": row[15] if row[15] is not None else True,
+            evaluations = []
+            for row in rows:
+                feedback_payload = (
+                    {
+                        "id": row[30],
+                        "feedback_comment": row[31] or "",
+                        "delivery_comment": row[32] or "",
+                        "date": (
+                            row[33].strftime('%Y-%m-%d')
+                            if row[33] and hasattr(row[33], "strftime")
+                            else (row[33] if row[33] else None)
+                        ),
+                        "start_time": (
+                            row[34].strftime('%H:%M')
+                            if row[34] and hasattr(row[34], "strftime")
+                            else (row[34] if row[34] else None)
+                        ),
+                        "end_time": (
+                            row[35].strftime('%H:%M')
+                            if row[35] and hasattr(row[35], "strftime")
+                            else (row[35] if row[35] else None)
+                        ),
+                        "training_id": row[36],
+                        "updated_at": row[37],
+                        "created_by_name": row[38],
+                        "updated_by_name": row[39],
                     }
-                    if row[12]
-                    else None,
-                    "evaluator": row[16] if row[16] else None,
-                    "created_at": row[17],
-                    "sv_request": bool(row[18]),
-                    "sv_request_comment": row[19],
-                    "sv_request_by": row[20],
-                    "sv_request_by_name": row[21],
-                    "sv_request_at": row[22],
-                    "sv_request_approved": bool(row[23]),
-                    "sv_request_approved_by": row[24],
-                    "sv_request_approved_by_name": row[25],
-                    "sv_request_approved_at": row[26],
-                    "duration": float(row[27]) if row[27] is not None else None,
-                    "is_imported": bool(row[28]),
-                    "comment_visible_to_operator": bool(row[29]) if row[29] is not None else True,
-                    "feedback": (
-                        {
-                            "id": row[30],
-                            "feedback_comment": row[31] or "",
-                            "delivery_comment": row[32] or "",
-                            "date": (
-                                row[33].strftime('%Y-%m-%d')
-                                if row[33] and hasattr(row[33], "strftime")
-                                else (row[33] if row[33] else None)
-                            ),
-                            "start_time": (
-                                row[34].strftime('%H:%M')
-                                if row[34] and hasattr(row[34], "strftime")
-                                else (row[34] if row[34] else None)
-                            ),
-                            "end_time": (
-                                row[35].strftime('%H:%M')
-                                if row[35] and hasattr(row[35], "strftime")
-                                else (row[35] if row[35] else None)
-                            ),
-                            "training_id": row[36],
-                            "updated_at": row[37],
-                            "created_by_name": row[38],
-                            "updated_by_name": row[39],
+                    if row[30] is not None
+                    else None
+                )
+
+                feedback_date_source = row[33] if row[33] is not None else None
+                feedback_sla_payload = None
+                if not bool(row[28]) and not bool(row[7]):
+                    feedback_sla_payload = self._build_feedback_sla_payload(
+                        evaluation_date_source=row[17],
+                        score_value=row[4],
+                        scores_payload=row[10] if row[10] else [],
+                        direction_criteria_payload=row[14] if row[14] else [],
+                        feedback_date_source=feedback_date_source
+                    )
+                if feedback_payload is not None:
+                    feedback_payload["sla"] = feedback_sla_payload
+
+                evaluations.append(
+                    {
+                        "id": row[0],
+                        "month": row[1],
+                        "phone_number": row[2],
+                        "appeal_date": (
+                            row[3].strftime('%Y-%m-%d %H:%M:%S')
+                            if row[3] and hasattr(row[3], "strftime")
+                            else (row[3] if row[3] else None)
+                        ),
+                        "score": float(row[4]) if row[4] is not None else None,
+                        "comment": row[5],
+                        "audio_path": row[6],
+                        "is_draft": bool(row[7]),
+                        "is_correction": bool(row[8]),
+                        "evaluation_date": row[9],
+                        "scores": row[10] if row[10] else [],
+                        "criterion_comments": row[11] if row[11] else [],
+                        "direction": {
+                            "id": row[12],
+                            "name": row[13],
+                            "criteria": row[14] if row[14] else [],
+                            "hasFileUpload": row[15] if row[15] is not None else True,
                         }
-                        if row[30] is not None
-                        else None
-                    ),
-                }
-                for row in rows
-            ]
+                        if row[12]
+                        else None,
+                        "evaluator": row[16] if row[16] else None,
+                        "created_at": row[17],
+                        "sv_request": bool(row[18]),
+                        "sv_request_comment": row[19],
+                        "sv_request_by": row[20],
+                        "sv_request_by_name": row[21],
+                        "sv_request_at": row[22],
+                        "sv_request_approved": bool(row[23]),
+                        "sv_request_approved_by": row[24],
+                        "sv_request_approved_by_name": row[25],
+                        "sv_request_approved_at": row[26],
+                        "duration": float(row[27]) if row[27] is not None else None,
+                        "is_imported": bool(row[28]),
+                        "comment_visible_to_operator": bool(row[29]) if row[29] is not None else True,
+                        "feedback": feedback_payload,
+                        "feedback_sla": feedback_sla_payload
+                    }
+                )
 
             if include_target:
                 return {
@@ -5454,6 +5531,408 @@ class Database:
                 "avg_score": round(float(avg_score), 2) if avg_score is not None else None
             }
         return result
+
+    @staticmethod
+    def _normalize_feedback_sla_date(value) -> Optional[date]:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+
+        text = str(value or '').strip()
+        if not text:
+            return None
+
+        for fmt in ('%Y-%m-%d', '%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S'):
+            try:
+                return datetime.strptime(text, fmt).date()
+            except Exception:
+                continue
+        return None
+
+    def _has_call_critical_error(self, scores_payload, direction_criteria_payload) -> bool:
+        if not isinstance(scores_payload, list) or not isinstance(direction_criteria_payload, list):
+            return False
+
+        for idx, criterion in enumerate(direction_criteria_payload):
+            if not isinstance(criterion, dict):
+                continue
+            is_critical = bool(criterion.get('isCritical') or criterion.get('is_critical'))
+            if not is_critical:
+                continue
+
+            raw_score = scores_payload[idx] if idx < len(scores_payload) else None
+            score_norm = str(raw_score or '').strip().lower()
+            if score_norm in ('error', 'incorrect'):
+                return True
+        return False
+
+    def _build_feedback_sla_payload(
+        self,
+        evaluation_date_source,
+        score_value,
+        scores_payload,
+        direction_criteria_payload,
+        feedback_date_source=None,
+        reference_date=None
+    ) -> Optional[Dict[str, Any]]:
+        evaluation_date = self._normalize_feedback_sla_date(evaluation_date_source)
+        if evaluation_date is None:
+            return None
+
+        has_critical_error = self._has_call_critical_error(scores_payload, direction_criteria_payload)
+
+        score_numeric = None
+        try:
+            score_numeric = float(score_value) if score_value is not None else None
+        except Exception:
+            score_numeric = None
+
+        if has_critical_error:
+            deadline_days = 1
+        elif score_numeric is not None and score_numeric > 85:
+            deadline_days = 5
+        else:
+            deadline_days = 3
+
+        due_date = evaluation_date + timedelta(days=deadline_days)
+        feedback_date = self._normalize_feedback_sla_date(feedback_date_source)
+        report_date = self._normalize_feedback_sla_date(reference_date) or datetime.now().date()
+
+        if feedback_date is not None:
+            is_on_time = feedback_date <= due_date
+            status = 'on_time' if is_on_time else 'overdue'
+            overdue_days = max(0, (feedback_date - due_date).days)
+        else:
+            is_on_time = False
+            if report_date > due_date:
+                status = 'overdue'
+                overdue_days = (report_date - due_date).days
+            else:
+                status = 'pending'
+                overdue_days = 0
+
+        return {
+            "deadline_days": int(deadline_days),
+            "evaluation_date": evaluation_date.isoformat(),
+            "due_date": due_date.isoformat(),
+            "feedback_date": feedback_date.isoformat() if feedback_date else None,
+            "status": status,
+            "is_overdue": bool(status == 'overdue'),
+            "is_on_time": bool(status == 'on_time'),
+            "overdue_days": int(overdue_days),
+            "has_critical_error": bool(has_critical_error)
+        }
+
+    def get_feedback_sla_rows_for_month(
+        self,
+        month: str,
+        operator_ids: Optional[List[int]] = None,
+        supervisor_ids: Optional[List[int]] = None,
+        reference_date=None
+    ) -> List[Dict[str, Any]]:
+        if not month:
+            return []
+
+        try:
+            datetime.strptime(str(month), '%Y-%m')
+        except Exception:
+            return []
+
+        def _normalize_ids(values):
+            if values is None:
+                return None
+            normalized = []
+            seen = set()
+            for value in values:
+                try:
+                    parsed = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if parsed in seen:
+                    continue
+                seen.add(parsed)
+                normalized.append(parsed)
+            return normalized
+
+        operator_ids_norm = _normalize_ids(operator_ids)
+        supervisor_ids_norm = _normalize_ids(supervisor_ids)
+
+        if operator_ids is not None and not operator_ids_norm:
+            return []
+        if supervisor_ids is not None and not supervisor_ids_norm:
+            return []
+
+        params: List[Any] = [month, month]
+        where_clauses = [
+            "LOWER(COALESCE(op.role, '')) IN ('operator', 'trainee')"
+        ]
+
+        if operator_ids_norm is not None:
+            where_clauses.append("c.operator_id = ANY(%s)")
+            params.append(operator_ids_norm)
+        if supervisor_ids_norm is not None:
+            where_clauses.append("op.supervisor_id = ANY(%s)")
+            params.append(supervisor_ids_norm)
+
+        where_sql = " AND ".join(where_clauses) if where_clauses else "TRUE"
+
+        query = f"""
+            WITH latest_versions AS (
+                SELECT
+                    operator_id,
+                    phone_number,
+                    month,
+                    appeal_date,
+                    MAX(created_at) AS latest_date
+                FROM calls
+                WHERE month = %s
+                  AND is_draft = FALSE
+                  AND score IS NOT NULL
+                GROUP BY operator_id, phone_number, month, appeal_date
+            ),
+            latest_calls AS (
+                SELECT c.*
+                FROM calls c
+                JOIN latest_versions lv
+                  ON c.operator_id = lv.operator_id
+                 AND c.phone_number = lv.phone_number
+                 AND c.month = lv.month
+                 AND (
+                     (c.appeal_date IS NULL AND lv.appeal_date IS NULL)
+                     OR c.appeal_date = lv.appeal_date
+                 )
+                 AND c.created_at = lv.latest_date
+                WHERE c.month = %s
+                  AND c.is_draft = FALSE
+                  AND c.score IS NOT NULL
+            )
+            SELECT
+                c.id AS call_id,
+                c.operator_id,
+                op.name AS operator_name,
+                op.supervisor_id,
+                sv.name AS supervisor_name,
+                c.score,
+                c.scores,
+                d.criteria AS direction_criteria,
+                c.created_at AS evaluation_created_at,
+                cf.id AS feedback_id,
+                cf.feedback_date,
+                cf.created_at AS feedback_created_at,
+                cf.supervisor_id AS feedback_supervisor_id,
+                cf_sv.name AS feedback_supervisor_name
+            FROM latest_calls c
+            JOIN users op ON op.id = c.operator_id
+            LEFT JOIN users sv ON sv.id = op.supervisor_id
+            LEFT JOIN directions d ON d.id = c.direction_id
+            LEFT JOIN call_feedbacks cf ON cf.call_id = c.id
+            LEFT JOIN users cf_sv ON cf_sv.id = cf.supervisor_id
+            WHERE {where_sql}
+            ORDER BY COALESCE(sv.name, ''), op.name, c.created_at
+        """
+
+        with self._get_cursor() as cursor:
+            cursor.execute(query, tuple(params))
+            rows = cursor.fetchall()
+
+        result: List[Dict[str, Any]] = []
+        for row in rows:
+            evaluation_created_at = row[8]
+            feedback_exists = row[9] is not None
+
+            feedback_date_value = row[10]
+            if feedback_date_value is None and row[11] is not None and hasattr(row[11], 'date'):
+                feedback_date_value = row[11].date()
+
+            sla_payload = self._build_feedback_sla_payload(
+                evaluation_date_source=evaluation_created_at,
+                score_value=row[5],
+                scores_payload=row[6],
+                direction_criteria_payload=row[7],
+                feedback_date_source=feedback_date_value,
+                reference_date=reference_date
+            ) or {}
+
+            try:
+                score_numeric = float(row[5]) if row[5] is not None else None
+            except Exception:
+                score_numeric = None
+
+            result.append({
+                "call_id": int(row[0]),
+                "operator_id": int(row[1]),
+                "operator_name": row[2] or "",
+                "supervisor_id": int(row[3]) if row[3] is not None else None,
+                "supervisor_name": row[4] or "Без супервайзера",
+                "score": score_numeric,
+                "feedback_provided": bool(feedback_exists),
+                "feedback_supervisor_id": int(row[12]) if row[12] is not None else None,
+                "feedback_supervisor_name": row[13] or None,
+                "status": sla_payload.get("status"),
+                "is_overdue": bool(sla_payload.get("is_overdue")),
+                "is_on_time": bool(sla_payload.get("is_on_time")),
+                "overdue_days": int(sla_payload.get("overdue_days") or 0),
+                "deadline_days": int(sla_payload.get("deadline_days") or 0),
+                "evaluation_date": sla_payload.get("evaluation_date"),
+                "due_date": sla_payload.get("due_date"),
+                "feedback_date": sla_payload.get("feedback_date"),
+                "has_critical_error": bool(sla_payload.get("has_critical_error")),
+                "sla": sla_payload
+            })
+
+        return result
+
+    def get_feedback_sla_operator_stats_for_month(
+        self,
+        month: str,
+        operator_ids: Optional[List[int]] = None,
+        supervisor_ids: Optional[List[int]] = None,
+        reference_date=None
+    ) -> Dict[int, Dict[str, Any]]:
+        rows = self.get_feedback_sla_rows_for_month(
+            month=month,
+            operator_ids=operator_ids,
+            supervisor_ids=supervisor_ids,
+            reference_date=reference_date
+        )
+
+        result: Dict[int, Dict[str, Any]] = {}
+        for item in rows:
+            operator_id = int(item.get("operator_id"))
+            bucket = result.setdefault(operator_id, {
+                "operator_id": operator_id,
+                "operator_name": item.get("operator_name") or "",
+                "total_evaluated": 0,
+                "feedback_count": 0,
+                "feedback_on_time_count": 0,
+                "feedback_overdue_count": 0,
+                "pending_count": 0,
+                "pending_overdue_count": 0,
+                "overdue_count": 0
+            })
+
+            bucket["total_evaluated"] += 1
+            status = str(item.get("status") or '').strip().lower()
+            feedback_provided = bool(item.get("feedback_provided"))
+
+            if feedback_provided:
+                bucket["feedback_count"] += 1
+                if status == 'on_time':
+                    bucket["feedback_on_time_count"] += 1
+                elif status == 'overdue':
+                    bucket["feedback_overdue_count"] += 1
+            else:
+                bucket["pending_count"] += 1
+                if status == 'overdue':
+                    bucket["pending_overdue_count"] += 1
+
+            if status == 'overdue':
+                bucket["overdue_count"] += 1
+
+        return result
+
+    def get_feedback_sla_report_for_month(self, month: str, reference_date=None) -> Dict[str, Any]:
+        rows = self.get_feedback_sla_rows_for_month(month=month, reference_date=reference_date)
+
+        overview = {
+            "total_evaluated": 0,
+            "feedback_provided": 0,
+            "feedback_on_time": 0,
+            "feedback_overdue": 0,
+            "pending": 0,
+            "pending_overdue": 0,
+            "overdue_total": 0
+        }
+
+        supervisor_map: Dict[Tuple[int, str], Dict[str, Any]] = {}
+        for item in rows:
+            overview["total_evaluated"] += 1
+            status = str(item.get("status") or '').strip().lower()
+            feedback_provided = bool(item.get("feedback_provided"))
+
+            if feedback_provided:
+                overview["feedback_provided"] += 1
+                if status == 'on_time':
+                    overview["feedback_on_time"] += 1
+                elif status == 'overdue':
+                    overview["feedback_overdue"] += 1
+            else:
+                overview["pending"] += 1
+                if status == 'overdue':
+                    overview["pending_overdue"] += 1
+
+            supervisor_id = item.get("supervisor_id")
+            supervisor_name = item.get("supervisor_name") or "Без супервайзера"
+            key = (int(supervisor_id) if supervisor_id is not None else 0, str(supervisor_name))
+            bucket = supervisor_map.setdefault(key, {
+                "supervisor_id": key[0] if key[0] != 0 else None,
+                "supervisor_name": key[1],
+                "total_evaluated": 0,
+                "feedback_provided": 0,
+                "feedback_on_time": 0,
+                "feedback_overdue": 0,
+                "pending": 0,
+                "pending_overdue": 0,
+                "overdue_total": 0,
+                "on_time_items": [],
+                "overdue_items": []
+            })
+
+            bucket["total_evaluated"] += 1
+            if feedback_provided:
+                bucket["feedback_provided"] += 1
+                if status == 'on_time':
+                    bucket["feedback_on_time"] += 1
+                elif status == 'overdue':
+                    bucket["feedback_overdue"] += 1
+            else:
+                bucket["pending"] += 1
+                if status == 'overdue':
+                    bucket["pending_overdue"] += 1
+
+            call_item = {
+                "call_id": item.get("call_id"),
+                "operator_id": item.get("operator_id"),
+                "operator_name": item.get("operator_name"),
+                "score": item.get("score"),
+                "deadline_days": item.get("deadline_days"),
+                "due_date": item.get("due_date"),
+                "feedback_date": item.get("feedback_date"),
+                "status": status,
+                "overdue_days": item.get("overdue_days"),
+                "has_critical_error": bool(item.get("has_critical_error"))
+            }
+
+            if status == 'on_time' and feedback_provided:
+                bucket["on_time_items"].append(call_item)
+            elif status == 'overdue':
+                bucket["overdue_items"].append(call_item)
+
+        overview["overdue_total"] = int(overview["feedback_overdue"] + overview["pending_overdue"])
+
+        supervisors = list(supervisor_map.values())
+        for bucket in supervisors:
+            bucket["overdue_total"] = int(bucket["feedback_overdue"] + bucket["pending_overdue"])
+            bucket["on_time_items"] = sorted(
+                bucket["on_time_items"],
+                key=lambda item: (item.get("due_date") or "", item.get("operator_name") or "")
+            )
+            bucket["overdue_items"] = sorted(
+                bucket["overdue_items"],
+                key=lambda item: (item.get("due_date") or "", item.get("operator_name") or "")
+            )
+
+        supervisors.sort(key=lambda item: (str(item.get("supervisor_name") or '').lower(), item.get("supervisor_id") or 0))
+
+        return {
+            "month": month,
+            "generated_at": datetime.now().isoformat(),
+            "overview": overview,
+            "supervisors": supervisors
+        }
 
         
     def get_operators_summary_for_month(self, month, supervisor_id=None):
