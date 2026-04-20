@@ -1863,6 +1863,8 @@ class Database:
                     id SERIAL PRIMARY KEY,
                     course_version_id INTEGER NOT NULL REFERENCES lms_course_versions(id) ON DELETE CASCADE,
                     module_id INTEGER REFERENCES lms_modules(id) ON DELETE SET NULL,
+                    position INTEGER CHECK(position IS NULL OR position >= 1),
+                    source_lesson_id INTEGER REFERENCES lms_lessons(id) ON DELETE SET NULL,
                     title VARCHAR(255) NOT NULL,
                     description TEXT,
                     pass_threshold NUMERIC(5,2) NOT NULL DEFAULT 80.00 CHECK(pass_threshold >= 0 AND pass_threshold <= 100),
@@ -2043,6 +2045,10 @@ class Database:
                     ADD COLUMN IF NOT EXISTS question_count INTEGER;
                 ALTER TABLE lms_tests
                     ADD COLUMN IF NOT EXISTS random_order BOOLEAN NOT NULL DEFAULT TRUE;
+                ALTER TABLE lms_tests
+                    ADD COLUMN IF NOT EXISTS position INTEGER;
+                ALTER TABLE lms_tests
+                    ADD COLUMN IF NOT EXISTS source_lesson_id INTEGER;
                 ALTER TABLE lms_test_attempts
                     ADD COLUMN IF NOT EXISTS question_ids JSONB NOT NULL DEFAULT '[]'::jsonb;
 
@@ -2053,6 +2059,8 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_lms_lessons_module_position ON lms_lessons(module_id, position);
                 CREATE INDEX IF NOT EXISTS idx_lms_lesson_materials_lesson_position ON lms_lesson_materials(lesson_id, position);
                 CREATE INDEX IF NOT EXISTS idx_lms_tests_course_version ON lms_tests(course_version_id);
+                CREATE INDEX IF NOT EXISTS idx_lms_tests_module_position ON lms_tests(module_id, position);
+                CREATE INDEX IF NOT EXISTS idx_lms_tests_source_lesson ON lms_tests(source_lesson_id);
                 CREATE INDEX IF NOT EXISTS idx_lms_questions_test_position ON lms_questions(test_id, position);
                 CREATE INDEX IF NOT EXISTS idx_lms_question_options_question_position ON lms_question_options(question_id, position);
                 CREATE INDEX IF NOT EXISTS idx_lms_assignments_user_status ON lms_course_assignments(user_id, status);
