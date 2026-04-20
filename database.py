@@ -7583,7 +7583,24 @@ class Database:
                 return None, None
             
             def _format_date(value):
-                return value.strftime('%Y-%m-%d') if value else 'N/A'
+                if not value:
+                    return 'N/A'
+                if hasattr(value, 'strftime'):
+                    return value.strftime('%Y-%m-%d')
+                if isinstance(value, str):
+                    normalized = value.strip()
+                    if not normalized:
+                        return 'N/A'
+                    for fmt in ('%Y-%m-%d', '%Y-%m-%d %H:%M:%S', '%d-%m-%Y', '%d.%m.%Y'):
+                        try:
+                            return datetime.strptime(normalized, fmt).strftime('%Y-%m-%d')
+                        except ValueError:
+                            continue
+                    try:
+                        return datetime.fromisoformat(normalized).strftime('%Y-%m-%d')
+                    except ValueError:
+                        return normalized
+                return str(value)
 
             def _format_employment(value):
                 normalized = str(value or '').strip().lower()
@@ -7638,11 +7655,11 @@ class Database:
                 (
                     name, login, role, direction, supervisor, status, rate, hire_date,
                     phone, email, instagram, telegram_nick,
-                    study_place, study_course, card_number,
-                    company_name, employment_type, internship_in_company, front_office_training, front_office_training_date, taxipro_id, has_proxy, proxy_card_number, has_driver_license, sip_number,
+                    study_place, study_course, company_name, employment_type,
+                    has_proxy, proxy_card_number, has_driver_license, sip_number,
                     close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
                     close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
-                    sup_id
+                    card_number, internship_in_company, front_office_training, front_office_training_date, taxipro_id, sup_id
                 ) = row
 
                 row_values = [
