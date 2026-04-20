@@ -116,6 +116,7 @@ JWT_SECRET = (os.getenv('JWT_SECRET') or '').strip()
 JWT_ALGORITHM = "HS256"
 JWT_ACCESS_TOKEN_MINUTES = int(os.getenv('JWT_ACCESS_TOKEN_MINUTES', '30'))
 JWT_REFRESH_TOKEN_DAYS = int(os.getenv('JWT_REFRESH_TOKEN_DAYS', '30'))
+JWT_REFRESH_PREVIOUS_TOKEN_GRACE_SECONDS = int(os.getenv('JWT_REFRESH_PREVIOUS_TOKEN_GRACE_SECONDS', '90'))
 JWT_ACCESS_COOKIE_NAME = os.getenv('JWT_ACCESS_COOKIE_NAME', 'otp_access_token')
 JWT_REFRESH_COOKIE_NAME = os.getenv('JWT_REFRESH_COOKIE_NAME', 'otp_refresh_token')
 JWT_REFRESH_HEADER_NAME = os.getenv('JWT_REFRESH_HEADER_NAME', 'X-Refresh-Token')
@@ -226,6 +227,21 @@ def _client_ip():
 def _hash_token(raw_token):
     value = f"{raw_token}:{JWT_TOKEN_PEPPER}"
     return hashlib.sha256(value.encode('utf-8')).hexdigest()
+
+
+def _refresh_token_matches_session(session, refresh_token_hash):
+    current_hash = str(session.get("refresh_token_hash") or '')
+    if current_hash and hmac.compare_digest(current_hash, refresh_token_hash):
+        return True
+
+    previous_hash = str(session.get("previous_refresh_token_hash") or '')
+    if not previous_hash or not hmac.compare_digest(previous_hash, refresh_token_hash):
+        return False
+
+    previous_valid_until = session.get("previous_refresh_valid_until")
+    if previous_valid_until is None:
+        return False
+    return previous_valid_until >= datetime.utcnow()
 
 
 def _normalize_auth_transport(value):
@@ -702,7 +718,7 @@ def _authenticate_access_cookie(optional=True, touch_session=True):
     raise last_error
 
 
-def _authenticate_refresh_cookie(optional=True, rotate_tokens=True):
+def _authenticate_refresh_cookie(optional=True, rotate_tokens=True, rotate_refresh_token=True):
     refresh_tokens = _get_refresh_token_values()
     if not refresh_tokens:
         if optional:
@@ -723,20 +739,37 @@ def _authenticate_refresh_cookie(optional=True, rotate_tokens=True):
                 raise AuthError("SESSION_REVOKED", "Session revoked")
             if session["expires_at"] and session["expires_at"] < datetime.utcnow():
                 raise AuthError("SESSION_EXPIRED", "Session expired")
-            if session["refresh_token_hash"] != _hash_token(refresh_token):
+            refresh_token_hash = _hash_token(refresh_token)
+            if not _refresh_token_matches_session(session, refresh_token_hash):
                 raise AuthError("REFRESH_TOKEN_MISMATCH", "Refresh token mismatch")
 
             user = _validate_user_session_principal(user_id=user_id, session_id=session_id)
 
             if rotate_tokens:
                 new_access_token = _build_access_token(user, session_id)
-                new_refresh_token = _build_refresh_token(user_id, session_id)
-                db.rotate_user_session_token(
-                    session_id=session_id,
-                    user_id=user_id,
-                    refresh_token_hash=_hash_token(new_refresh_token),
-                    expires_at=datetime.utcnow() + timedelta(days=JWT_REFRESH_TOKEN_DAYS)
-                )
+                if rotate_refresh_token:
+                    new_refresh_token = _build_refresh_token(user_id, session_id)
+                    grace_seconds = max(0, int(JWT_REFRESH_PREVIOUS_TOKEN_GRACE_SECONDS))
+                    previous_refresh_valid_until = (
+                        datetime.utcnow() + timedelta(seconds=grace_seconds)
+                        if grace_seconds > 0
+                        else None
+                    )
+                    db.rotate_user_session_token(
+                        session_id=session_id,
+                        user_id=user_id,
+                        refresh_token_hash=_hash_token(new_refresh_token),
+                        expires_at=datetime.utcnow() + timedelta(days=JWT_REFRESH_TOKEN_DAYS),
+                        previous_refresh_valid_until=previous_refresh_valid_until
+                    )
+                else:
+                    new_refresh_token = refresh_token
+                    db.touch_user_session(
+                        session_id=session_id,
+                        user_id=user_id,
+                        ip_address=_client_ip(),
+                        user_agent=request.headers.get('User-Agent')
+                    )
                 g.pending_auth_tokens = (new_access_token, new_refresh_token)
             else:
                 db.touch_user_session(
@@ -2210,7 +2243,7 @@ def require_auth(f):
             request.environ['JWT_AUTH_ERROR_CODE'] = auth_error.code
 
         try:
-            if _authenticate_refresh_cookie(optional=True, rotate_tokens=True):
+            if _authenticate_refresh_cookie(optional=True, rotate_tokens=True, rotate_refresh_token=False):
                 identity_error = _validate_authenticated_identity_header()
                 if identity_error is not None:
                     return identity_error
