@@ -24942,17 +24942,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (!Number.isInteger(parsed) || parsed < 1900 || parsed > 2100) return null;
                 return parsed;
             };
-            const renderEmployeeStudyStatusBadge = (employee) => {
+            const renderEmployeeStudyStatusText = (employee) => {
                 const isCompleted = isEmployeeTruthy(employee?.study_completed);
                 const completionYear = normalizeEmployeeStudyCompletionYear(employee?.study_completion_year);
                 const label = isCompleted
                     ? `Завершил${completionYear ? ` · ${completionYear}` : ''}`
                     : `Не завершил${completionYear ? ` · ${completionYear}` : ''}`;
-                const className = isCompleted
-                    ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
-                    : 'border-amber-200 bg-amber-50 text-amber-700';
+                const className = isCompleted ? 'text-emerald-700' : 'text-amber-700';
                 return (
-                    <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium ${className}`}>
+                    <span className={`text-[11px] font-medium ${className}`}>
                         {label}
                     </span>
                 );
@@ -24967,7 +24965,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return (
                     <div className="flex flex-col gap-1">
                         <span>{studyPlace || '-'}</span>
-                        {renderEmployeeStudyStatusBadge(employee)}
+                        {renderEmployeeStudyStatusText(employee)}
                     </div>
                 );
             };
