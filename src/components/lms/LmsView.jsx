@@ -7558,9 +7558,11 @@ function AdminView({
   const [employeeDeptFilter, setEmployeeDeptFilter] = useState("all");
   const [courseSearch, setCourseSearch] = useState("");
   const [courseFilter, setCourseFilter] = useState("all");
+  const [courseSortBy, setCourseSortBy] = useState("title");
   const [courseGridView, setCourseGridView] = useState(true);
   const [selectedEmployeeId, setSelectedEmployeeId] = useState(null);
   const [selectedEmployeeCourseKey, setSelectedEmployeeCourseKey] = useState(null);
+  const [employeeAssignedCourseSortBy, setEmployeeAssignedCourseSortBy] = useState("deadline_asc");
   const [employeeCourseDeadlines, setEmployeeCourseDeadlines] = useState({});
   const [assigningCourseId, setAssigningCourseId] = useState(null);
   const [isAssignCourseModalOpen, setIsAssignCourseModalOpen] = useState(false);
@@ -7582,6 +7584,30 @@ function AdminView({
       ? courseLike.course_version.skills.map((item) => String(item || "").trim()).filter(Boolean)
       : [];
     return Array.from(new Set([...directSkills, ...versionSkills]));
+  };
+  const compareCourseTitles = (left, right) =>
+    String(left?.title || "").localeCompare(String(right?.title || ""), "ru");
+  const getCourseDeadlineTime = (courseLike) => {
+    const parsed = parseLmsDate(courseLike?.deadline);
+    return parsed ? parsed.getTime() : null;
+  };
+  const compareCoursesByDeadlineAsc = (left, right) => {
+    const leftTime = getCourseDeadlineTime(left);
+    const rightTime = getCourseDeadlineTime(right);
+    if (leftTime == null && rightTime == null) return compareCourseTitles(left, right);
+    if (leftTime == null) return 1;
+    if (rightTime == null) return -1;
+    if (leftTime !== rightTime) return leftTime - rightTime;
+    return compareCourseTitles(left, right);
+  };
+  const compareCoursesByDeadlineDesc = (left, right) => {
+    const leftTime = getCourseDeadlineTime(left);
+    const rightTime = getCourseDeadlineTime(right);
+    if (leftTime == null && rightTime == null) return compareCourseTitles(left, right);
+    if (leftTime == null) return 1;
+    if (rightTime == null) return -1;
+    if (leftTime !== rightTime) return rightTime - leftTime;
+    return compareCourseTitles(left, right);
   };
 
   const attemptAggByUser = new Map();
@@ -7665,6 +7691,8 @@ function AdminView({
       overdue: 0,
       progressSum: 0,
       lessons: 0,
+      nearestDeadlineAt: null,
+      nearestDeadlineAtMs: null,
     };
     prev.total += 1;
     prev.progressSum += progressPercent;
@@ -7674,6 +7702,17 @@ function AdminView({
     else if (uiStatus === "overdue") prev.overdue += 1;
     else prev.notStarted += 1;
     prev.lessons = Math.max(prev.lessons, Number(row?.total_lessons || 0));
+    const dueAt = parseLmsDate(row?.due_at);
+    if (dueAt && !isCompletedLmsStatus(uiStatus)) {
+      const dueAtMs = dueAt.getTime();
+      if (
+        Number.isFinite(dueAtMs) &&
+        (prev.nearestDeadlineAtMs == null || dueAtMs < prev.nearestDeadlineAtMs)
+      ) {
+        prev.nearestDeadlineAtMs = dueAtMs;
+        prev.nearestDeadlineAt = row?.due_at || dueAt.toISOString();
+      }
+    }
     courseStatMap.set(courseId, prev);
   });
 
@@ -7688,6 +7727,8 @@ function AdminView({
       overdue: 0,
       progressSum: 0,
       lessons: 0,
+      nearestDeadlineAt: null,
+      nearestDeadlineAtMs: null,
     };
     const progressPercent = stat.total > 0 ? Math.round(stat.progressSum / stat.total) : 0;
     // Длительность автоматически из количества уроков
@@ -7707,6 +7748,7 @@ function AdminView({
       rating: 0,
       status: resolveAdminCourseAggregateStatus(stat),
       progress: progressPercent,
+      deadline: stat.nearestDeadlineAt || null,
     };
   });
   let failStatsRows = safeAttempts
@@ -7798,6 +7840,7 @@ function AdminView({
     courseRows = safeAdminCourses.map((item, index) => {
       const visual = pickCourseVisual(item?.id || index, item?.category || "");
       const stat = analyticsCourseStats.get(Number(item?.id || 0)) || {};
+      const runtimeStat = courseStatMap.get(Number(item?.id || 0)) || {};
       const lessons = Math.max(0, Number(stat?.lessons || 0));
       return {
         id: Number(item?.id || index + 1),
@@ -7814,6 +7857,7 @@ function AdminView({
         rating: 0,
         status: String(stat?.status || "not_started"),
         progress: Math.max(0, Math.min(100, Number(stat?.progress || 0))),
+        deadline: runtimeStat?.nearestDeadlineAt || null,
       };
     });
 
@@ -7854,8 +7898,13 @@ function AdminView({
     if (courseFilter === "not_started") return status === "not_started";
     return true;
   });
+  const sortedCourseRows = [...filteredCourseRows].sort((left, right) => {
+    if (courseSortBy === "deadline_asc") return compareCoursesByDeadlineAsc(left, right);
+    if (courseSortBy === "deadline_desc") return compareCoursesByDeadlineDesc(left, right);
+    return compareCourseTitles(left, right);
+  });
   const groupedCourseRows = Array.from(
-    filteredCourseRows.reduce((acc, courseItem) => {
+    sortedCourseRows.reduce((acc, courseItem) => {
       const categoryLabel = String(courseItem?.category || "Без категории").trim() || "Без категории";
       const bucket = acc.get(categoryLabel) || [];
       bucket.push(courseItem);
@@ -7866,8 +7915,18 @@ function AdminView({
     .sort((left, right) => String(left[0] || "").localeCompare(String(right[0] || ""), "ru"))
     .map(([category, items]) => ({
       category,
-      items: [...items].sort((left, right) => String(left?.title || "").localeCompare(String(right?.title || ""), "ru")),
+      items: [...items].sort((left, right) => {
+        if (courseSortBy === "deadline_asc") return compareCoursesByDeadlineAsc(left, right);
+        if (courseSortBy === "deadline_desc") return compareCoursesByDeadlineDesc(left, right);
+        return compareCourseTitles(left, right);
+      }),
     }));
+  const visibleGroupedCourseRows = courseSortBy === "title"
+    ? groupedCourseRows
+    : [{
+      category: courseSortBy === "deadline_desc" ? "По дедлайну: дальние" : "По дедлайну: ближайшие",
+      items: sortedCourseRows,
+    }];
 
   const normalizedEmployeeSearch = employeeSearch.trim().toLowerCase();
   const departmentOptions = Array.from(
@@ -8007,12 +8066,12 @@ function AdminView({
         finalTestScore: finalTest?.bestScore ?? null,
         tests,
       };
-    })
-    .sort((a, b) => {
-      const aTime = a.deadline ? new Date(a.deadline).getTime() : Number.MAX_SAFE_INTEGER;
-      const bTime = b.deadline ? new Date(b.deadline).getTime() : Number.MAX_SAFE_INTEGER;
-      return aTime - bTime;
     });
+  const sortedSelectedEmployeeCourseAnalyticsRows = [...selectedEmployeeCourseAnalyticsRows].sort((left, right) => {
+    if (employeeAssignedCourseSortBy === "deadline_desc") return compareCoursesByDeadlineDesc(left, right);
+    if (employeeAssignedCourseSortBy === "title") return compareCourseTitles(left, right);
+    return compareCoursesByDeadlineAsc(left, right);
+  });
 
   useEffect(() => {
     setSelectedEmployeeCourseKey(null);
@@ -8020,13 +8079,13 @@ function AdminView({
 
   useEffect(() => {
     if (!selectedEmployeeCourseKey) return;
-    const exists = selectedEmployeeCourseAnalyticsRows.some((item) => item?.rowKey === selectedEmployeeCourseKey);
+    const exists = sortedSelectedEmployeeCourseAnalyticsRows.some((item) => item?.rowKey === selectedEmployeeCourseKey);
     if (!exists) {
       setSelectedEmployeeCourseKey(null);
     }
-  }, [selectedEmployeeCourseAnalyticsRows, selectedEmployeeCourseKey]);
+  }, [sortedSelectedEmployeeCourseAnalyticsRows, selectedEmployeeCourseKey]);
 
-  const selectedEmployeeCourseItem = selectedEmployeeCourseAnalyticsRows.find(
+  const selectedEmployeeCourseItem = sortedSelectedEmployeeCourseAnalyticsRows.find(
     (item) => item?.rowKey === selectedEmployeeCourseKey
   );
   const selectedEmployeeCourseStatus = selectedEmployeeCourseItem
@@ -8453,13 +8512,22 @@ function AdminView({
                         className="w-full pl-9 pr-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs placeholder-slate-400 focus:outline-none focus:border-indigo-400 transition-all"
                       />
                     </div>
+                    <select
+                      value={employeeAssignedCourseSortBy}
+                      onChange={(event) => setEmployeeAssignedCourseSortBy(event.target.value)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-xs text-slate-600 focus:outline-none focus:border-indigo-400"
+                    >
+                      <option value="deadline_asc">По дедлайну: ближайшие</option>
+                      <option value="deadline_desc">По дедлайну: дальние</option>
+                      <option value="title">По названию</option>
+                    </select>
                   </div>
                   <div className="h-[600px] xl:h-[750px] flex-1 overflow-y-auto p-5 space-y-3 w-full bg-slate-50/50 custom-scrollbar">
                     {(() => {
                       const lowerSearch = employeeAssignedCourseSearch.trim().toLowerCase();
-                      const filteredCourses = selectedEmployeeCourseAnalyticsRows.filter(c => c.title.toLowerCase().includes(lowerSearch));
+                      const filteredCourses = sortedSelectedEmployeeCourseAnalyticsRows.filter(c => c.title.toLowerCase().includes(lowerSearch));
                       
-                      if (selectedEmployeeCourseAnalyticsRows.length === 0) {
+                      if (sortedSelectedEmployeeCourseAnalyticsRows.length === 0) {
                         return (
                           <div className="rounded-xl border border-dashed border-slate-200 bg-white px-4 py-8 text-sm text-slate-500 text-center shadow-sm">
                             По сотруднику пока нет назначенных курсов
@@ -8713,6 +8781,15 @@ function AdminView({
                 </button>
               ))}
             </div>
+            <select
+              value={courseSortBy}
+              onChange={(event) => setCourseSortBy(event.target.value)}
+              className="text-xs bg-white border border-slate-200 rounded-xl px-3 py-2 text-slate-600 focus:outline-none focus:border-indigo-400"
+            >
+              <option value="title">По названию</option>
+              <option value="deadline_asc">По дедлайну: ближайшие</option>
+              <option value="deadline_desc">По дедлайну: дальние</option>
+            </select>
             <div className="flex items-center gap-1 bg-white border border-slate-200 rounded-xl p-1 ml-auto">
               <button onClick={() => setCourseGridView(true)} className={`p-1.5 rounded-lg transition-colors ${courseGridView ? "bg-slate-100 text-slate-800" : "text-slate-400 hover:text-slate-600"}`}><LayoutGrid size={14} /></button>
               <button onClick={() => setCourseGridView(false)} className={`p-1.5 rounded-lg transition-colors ${!courseGridView ? "bg-slate-100 text-slate-800" : "text-slate-400 hover:text-slate-600"}`}><List size={14} /></button>
@@ -8754,7 +8831,7 @@ function AdminView({
             </div>
           ) : (
             <div className="space-y-6">
-              {groupedCourseRows.map((groupItem) => (
+              {visibleGroupedCourseRows.map((groupItem) => (
                 <section key={groupItem.category} className="space-y-3">
                   <div className="flex items-center justify-between gap-3">
                     <h3 className="text-sm font-semibold text-slate-800">{groupItem.category}</h3>
