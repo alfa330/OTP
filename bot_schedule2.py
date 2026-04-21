@@ -19189,6 +19189,115 @@ def lms_start_course(course_id):
         return jsonify({"error": "Internal server error"}), 500
 
 
+@app.route('/api/lms/courses/<int:course_id>/open', methods=['POST'])
+@require_api_key
+def lms_course_open(course_id):
+    """Combined start + detail in a single call.
+    Accepts ?skip_start=1 to skip the start step (for refresh/reload)."""
+    requester_id, _, _, error_response, status_code = _lms_resolve_request('learner')
+    if error_response:
+        return error_response, status_code
+
+    skip_start = request.args.get('skip_start', '') in ('1', 'true')
+
+    try:
+        with db._get_cursor() as cursor:
+            if not skip_start:
+                now = _lms_now()
+                cursor.execute("""
+                    UPDATE lms_course_assignments a
+                    SET status = CASE WHEN a.status = 'assigned' THEN 'in_progress' ELSE a.status END,
+                        started_at = COALESCE(a.started_at, %s),
+                        updated_at = %s
+                    FROM lms_courses c
+                    WHERE a.user_id = %s
+                      AND a.course_id = %s
+                      AND c.id = a.course_id
+                      AND c.status = 'published'
+                """, (now, now, requester_id, course_id))
+
+            cursor.execute("""
+                SELECT a.id, a.course_version_id, a.status, a.due_at, a.started_at, a.completed_at
+                FROM lms_course_assignments a
+                JOIN lms_courses c ON c.id = a.course_id
+                WHERE a.user_id = %s
+                  AND a.course_id = %s
+                  AND c.status = 'published'
+                LIMIT 1
+            """, (requester_id, course_id))
+            assignment = cursor.fetchone()
+            if not assignment:
+                return jsonify({"error": "Course is not assigned to learner"}), 404
+
+            assignment_id = int(assignment[0])
+            course_version_id = int(assignment[1]) if assignment[1] is not None else None
+            if course_version_id is None:
+                cursor.execute("SELECT current_version_id FROM lms_courses WHERE id = %s", (course_id,))
+                row = cursor.fetchone()
+                if not row or row[0] is None:
+                    return jsonify({"error": "Course version is not available"}), 404
+                course_version_id = int(row[0])
+
+            structure = _lms_course_structure_tx(cursor, course_id, course_version_id)
+            if not structure:
+                return jsonify({"error": "Course not found"}), 404
+
+            cursor.execute("""
+                SELECT
+                    lesson_id, status, completion_ratio, max_position_seconds,
+                    confirmed_seconds, active_seconds, completed_at, content_completed_at
+                FROM lms_lesson_progress
+                WHERE assignment_id = %s
+                  AND user_id = %s
+            """, (assignment_id, requester_id))
+            lesson_progress = {}
+            for row in cursor.fetchall():
+                lesson_progress[int(row[0])] = {
+                    "status": row[1],
+                    "completion_ratio": float(row[2] or 0.0),
+                    "max_position_seconds": float(row[3] or 0.0),
+                    "confirmed_seconds": float(row[4] or 0.0),
+                    "active_seconds": int(row[5] or 0),
+                    "completed_at": row[6].isoformat() if row[6] else None,
+                    "content_completed_at": row[7].isoformat() if row[7] else None
+                }
+
+            cursor.execute("""
+                SELECT
+                    test_id,
+                    MAX(score_percent) FILTER (WHERE status = 'finished') AS best_score,
+                    BOOL_OR(COALESCE(passed, FALSE)) FILTER (WHERE status = 'finished') AS passed_any,
+                    COUNT(*) AS attempts_used
+                FROM lms_test_attempts
+                WHERE assignment_id = %s
+                  AND user_id = %s
+                GROUP BY test_id
+            """, (assignment_id, requester_id))
+            attempts = {}
+            for row in cursor.fetchall():
+                attempts[int(row[0])] = {
+                    "best_score": float(row[1]) if row[1] is not None else None,
+                    "passed_any": bool(row[2]) if row[2] is not None else False,
+                    "attempts_used": int(row[3] or 0)
+                }
+
+            structure["assignment"] = {
+                "id": assignment_id,
+                "status": assignment[2],
+                "due_at": assignment[3].isoformat() if assignment[3] else None,
+                "started_at": assignment[4].isoformat() if assignment[4] else None,
+                "completed_at": assignment[5].isoformat() if assignment[5] else None,
+                "deadline_status": _lms_deadline_status(assignment[3], assignment[5]),
+                "lesson_progress": lesson_progress,
+                "tests": attempts
+            }
+
+        return jsonify({"status": "success", "course": structure}), 200
+    except Exception as e:
+        logging.exception("Error in /api/lms/courses/<course_id>/open")
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/lms/lessons/<int:lesson_id>', methods=['GET'])
 @require_api_key
 def lms_lesson_detail(lesson_id):
@@ -21824,6 +21933,339 @@ def lms_admin_attempts():
         return jsonify({"status": "success", "attempts": attempts}), 200
     except Exception as e:
         logging.exception("Error in /api/lms/admin/attempts")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/lms/admin/dashboard', methods=['GET'])
+@require_api_key
+def lms_admin_dashboard():
+    """Combined admin dashboard: courses list + progress rows + attempts + analytics in one call."""
+    requester_id, _, requester_role, error_response, status_code = _lms_resolve_request('manager')
+    if error_response:
+        return error_response, status_code
+
+    attempts_limit = min(max(_lms_to_int(request.args.get('attempts_limit'), default=1000), 1), 2000)
+
+    try:
+        visible_ids = None
+        if requester_role in ('sv', 'trainer'):
+            visible_ids = set(_lms_visible_learner_ids(requester_id, requester_role))
+
+        with db._get_cursor() as cursor:
+            # ── Courses list ──────────────────────────────────────────────
+            cursor.execute("""
+                SELECT
+                    c.id, c.slug, c.title, c.description, c.category, c.status,
+                    c.default_pass_threshold, c.default_attempt_limit,
+                    c.current_version_id,
+                    cv.version_number, cv.status, cv.pass_threshold, cv.attempt_limit,
+                    cv.anti_cheat_settings,
+                    latest_cv.id,
+                    latest_cv.version_number,
+                    latest_cv.status,
+                    latest_cv.created_at
+                FROM lms_courses c
+                LEFT JOIN lms_course_versions cv ON cv.id = c.current_version_id
+                LEFT JOIN LATERAL (
+                    SELECT
+                        cvl.id,
+                        cvl.version_number,
+                        cvl.status,
+                        cvl.created_at
+                    FROM lms_course_versions cvl
+                    WHERE cvl.course_id = c.id
+                    ORDER BY cvl.version_number DESC, cvl.id DESC
+                    LIMIT 1
+                ) latest_cv ON TRUE
+                ORDER BY c.updated_at DESC, c.id DESC
+            """)
+            courses = []
+            for row in cursor.fetchall():
+                version_settings = _lms_parse_json(row[13], {})
+                cover_payload = _lms_resolve_cover_payload(version_settings)
+                latest_version_id = int(row[14]) if row[14] is not None else None
+                latest_version_number = int(row[15]) if row[15] is not None else None
+                latest_version_status = str(row[16] or '').strip().lower() or None
+                latest_version_created_at = row[17].isoformat() if row[17] else None
+                latest_is_draft = latest_version_status == 'draft' and latest_version_id is not None
+                courses.append({
+                    "id": int(row[0]),
+                    "slug": row[1],
+                    "title": row[2],
+                    "description": row[3],
+                    "category": row[4],
+                    "status": row[5],
+                    "cover_url": cover_payload["cover_url"],
+                    "cover_bucket": cover_payload["cover_bucket"],
+                    "cover_blob_path": cover_payload["cover_blob_path"],
+                    "skills": _lms_normalize_skills(version_settings.get("skills")),
+                    "default_pass_threshold": float(row[6] if row[6] is not None else LMS_DEFAULT_PASS_THRESHOLD),
+                    "default_attempt_limit": int(row[7] if row[7] is not None else LMS_DEFAULT_ATTEMPT_LIMIT),
+                    "current_version_id": int(row[8]) if row[8] is not None else None,
+                    "current_version": {
+                        "id": int(row[8]),
+                        "version_number": int(row[9]) if row[9] is not None else None,
+                        "status": row[10],
+                        "pass_threshold": float(row[11]) if row[11] is not None else None,
+                        "attempt_limit": int(row[12]) if row[12] is not None else None
+                    } if row[8] is not None else None,
+                    "latest_version_id": latest_version_id,
+                    "latest_version_number": latest_version_number,
+                    "latest_version_status": latest_version_status,
+                    "latest_version_created_at": latest_version_created_at,
+                    "has_draft_version": latest_is_draft,
+                    "latest_draft_version_id": latest_version_id if latest_is_draft else None,
+                    "latest_draft_version_number": latest_version_number if latest_is_draft else None,
+                    "latest_draft_created_at": latest_version_created_at if latest_is_draft else None
+                })
+
+            # ── Progress rows ─────────────────────────────────────────────
+            progress_params = []
+            progress_where = ["1=1"]
+            if visible_ids is not None:
+                if not visible_ids:
+                    progress_rows = []
+                    attempt_rows_raw = []
+                    fail_rows = []
+                else:
+                    progress_where.append("a.user_id = ANY(%s)")
+                    progress_params.append(list(visible_ids))
+
+            if not (visible_ids is not None and not visible_ids):
+                progress_rows = _lms_admin_assignment_stats_tx(cursor, progress_where, progress_params)
+
+                # ── Attempts ──────────────────────────────────────────────
+                attempt_where = ["1=1"]
+                attempt_params = []
+                if visible_ids is not None:
+                    attempt_where.append("ta.user_id = ANY(%s)")
+                    attempt_params.append(list(visible_ids))
+
+                attempt_params_with_limit = list(attempt_params) + [attempts_limit]
+                cursor.execute(f"""
+                    SELECT
+                        ta.id, ta.assignment_id, ta.test_id, ta.user_id, u.name, u.role,
+                        ta.attempt_no, ta.status, ta.score_percent, ta.passed,
+                        ta.started_at, ta.finished_at, ta.duration_seconds,
+                        t.title, COALESCE(t.is_final, FALSE), a.course_id, c.title
+                    FROM lms_test_attempts ta
+                    JOIN users u ON u.id = ta.user_id
+                    JOIN lms_tests t ON t.id = ta.test_id
+                    JOIN lms_course_assignments a ON a.id = ta.assignment_id
+                    JOIN lms_courses c ON c.id = a.course_id
+                    WHERE {" AND ".join(attempt_where)}
+                    ORDER BY ta.started_at DESC, ta.id DESC
+                    LIMIT %s
+                """, attempt_params_with_limit)
+                attempt_rows_raw = cursor.fetchall()
+
+                # ── Analytics: attempt aggregates ─────────────────────────
+                cursor.execute(f"""
+                    SELECT
+                        ta.user_id,
+                        COUNT(*) AS attempts,
+                        AVG(ta.score_percent) FILTER (WHERE ta.score_percent IS NOT NULL) AS avg_score,
+                        SUM(COALESCE(ta.duration_seconds, 0)) AS total_duration_seconds,
+                        MAX(ta.started_at) AS last_active_at
+                    FROM lms_test_attempts ta
+                    JOIN lms_course_assignments a ON a.id = ta.assignment_id
+                    WHERE {" AND ".join(attempt_where)}
+                    GROUP BY ta.user_id
+                """, attempt_params)
+                analytics_attempt_rows = cursor.fetchall()
+
+                cursor.execute(f"""
+                    SELECT
+                        ta.score_percent,
+                        t.title,
+                        c.title
+                    FROM lms_test_attempts ta
+                    JOIN lms_tests t ON t.id = ta.test_id
+                    JOIN lms_course_assignments a ON a.id = ta.assignment_id
+                    JOIN lms_courses c ON c.id = a.course_id
+                    WHERE {" AND ".join(attempt_where)}
+                      AND ta.score_percent IS NOT NULL
+                    ORDER BY ta.score_percent ASC, ta.started_at DESC, ta.id DESC
+                    LIMIT 4
+                """, attempt_params)
+                fail_rows = cursor.fetchall()
+            else:
+                progress_rows = []
+                attempt_rows_raw = []
+                analytics_attempt_rows = []
+                fail_rows = []
+
+        # ── Build attempts list ───────────────────────────────────────────
+        attempts_list = []
+        for row in attempt_rows_raw:
+            attempts_list.append({
+                "attempt_id": int(row[0]),
+                "assignment_id": int(row[1]),
+                "test_id": int(row[2]),
+                "user_id": int(row[3]),
+                "user_name": row[4],
+                "user_role": row[5],
+                "attempt_no": int(row[6] or 1),
+                "status": row[7],
+                "score_percent": float(row[8]) if row[8] is not None else None,
+                "passed": bool(row[9]) if row[9] is not None else None,
+                "started_at": row[10].isoformat() if row[10] else None,
+                "finished_at": row[11].isoformat() if row[11] else None,
+                "duration_seconds": int(row[12] or 0) if row[12] is not None else None,
+                "test_title": row[13],
+                "is_final": bool(row[14]) if row[14] is not None else False,
+                "course_id": int(row[15]),
+                "course_title": row[16]
+            })
+
+        # ── Build analytics ───────────────────────────────────────────────
+        attempt_agg_by_user = {}
+        for row in (analytics_attempt_rows if 'analytics_attempt_rows' in dir() else []):
+            user_id = int(row[0])
+            attempt_agg_by_user[user_id] = {
+                "attempts": int(row[1] or 0),
+                "avg_score": int(round(float(row[2]))) if row[2] is not None else 0,
+                "test_duration_seconds": int(row[3] or 0),
+                "last_active_at": row[4].isoformat() if row[4] else None
+            }
+
+        employee_map = {}
+        course_map = {}
+        assignment_status_counts = {"completed": 0, "in_progress": 0, "not_started": 0, "overdue": 0}
+        overall_progress_sum = 0.0
+
+        for row in progress_rows:
+            progress_percent = float(row.get("progress_percent") or 0.0)
+            ui_status = _lms_assignment_status_to_ui(row.get("status"), row.get("deadline_status"))
+            overall_progress_sum += progress_percent
+            if ui_status in ("completed", "completed_late"):
+                assignment_status_counts["completed"] += 1
+            elif ui_status == "overdue":
+                assignment_status_counts["overdue"] += 1
+            elif ui_status == "in_progress":
+                assignment_status_counts["in_progress"] += 1
+            else:
+                assignment_status_counts["not_started"] += 1
+
+            user_id = int(row.get("user_id") or 0)
+            if user_id:
+                employee = employee_map.get(user_id) or {
+                    "id": user_id,
+                    "name": row.get("user_name") or f"User #{user_id}",
+                    "dept": row.get("user_role") or "\u2014",
+                    "courses": 0, "completed": 0, "progress_sum": 0.0,
+                    "overdue": 0, "last_started_at": None,
+                }
+                employee["courses"] += 1
+                employee["progress_sum"] += progress_percent
+                if ui_status in ("completed", "completed_late"):
+                    employee["completed"] += 1
+                if ui_status == "overdue":
+                    employee["overdue"] += 1
+                started_at = row.get("started_at")
+                if started_at and (not employee["last_started_at"] or started_at > employee["last_started_at"]):
+                    employee["last_started_at"] = started_at
+                employee_map[user_id] = employee
+
+            course_id = int(row.get("course_id") or 0)
+            if course_id:
+                course_stat = course_map.get(course_id) or {
+                    "course_id": course_id, "progress_sum": 0.0,
+                    "total": 0, "completed": 0, "completed_late": 0,
+                    "in_progress": 0, "not_started": 0, "overdue": 0, "lessons": 0,
+                }
+                course_stat["progress_sum"] += progress_percent
+                course_stat["total"] += 1
+                if ui_status == "completed":
+                    course_stat["completed"] += 1
+                elif ui_status == "completed_late":
+                    course_stat["completed_late"] += 1
+                elif ui_status == "in_progress":
+                    course_stat["in_progress"] += 1
+                elif ui_status == "overdue":
+                    course_stat["overdue"] += 1
+                else:
+                    course_stat["not_started"] += 1
+                course_stat["lessons"] = max(course_stat["lessons"], int(row.get("total_lessons") or 0))
+                course_map[course_id] = course_stat
+
+        employee_rows = []
+        avg_score_sum = 0
+        overdue_count = 0
+        for employee in sorted(employee_map.values(), key=lambda item: (str(item.get("name") or "").lower(), int(item.get("id") or 0))):
+            agg = attempt_agg_by_user.get(int(employee["id"])) or {}
+            avg_score = int(agg.get("avg_score") or 0)
+            avg_score_sum += avg_score
+            overdue_count += int(employee.get("overdue") or 0)
+            employee_rows.append({
+                "id": int(employee["id"]),
+                "name": employee.get("name") or f"User #{employee['id']}",
+                "dept": employee.get("dept") or "\u2014",
+                "courses": int(employee.get("courses") or 0),
+                "completed": int(employee.get("completed") or 0),
+                "progress": int(round((employee["progress_sum"] / employee["courses"]))) if employee.get("courses") else 0,
+                "avg_score": avg_score,
+                "overdue": int(employee.get("overdue") or 0),
+                "attempts": int(agg.get("attempts") or 0),
+                "test_duration_seconds": int(agg.get("test_duration_seconds") or 0),
+                "last_active_at": agg.get("last_active_at") or employee.get("last_started_at"),
+            })
+
+        course_stats = []
+        for course_stat in course_map.values():
+            progress = int(round((course_stat["progress_sum"] / course_stat["total"]))) if course_stat.get("total") else 0
+            course_stats.append({
+                "course_id": int(course_stat["course_id"]),
+                "progress": progress,
+                "status": _lms_admin_course_aggregate_status(course_stat),
+                "lessons": int(course_stat.get("lessons") or 0),
+            })
+
+        course_status_total = max(1, sum(int(v or 0) for v in assignment_status_counts.values()))
+        course_status_rows = []
+        for status_id, label, color in [
+            ("completed", "\u0417\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u044b", "bg-emerald-500"),
+            ("in_progress", "\u0412 \u043f\u0440\u043e\u0446\u0435\u0441\u0441\u0435", "bg-blue-500"),
+            ("not_started", "\u041d\u0435 \u043d\u0430\u0447\u0430\u0442\u044b", "bg-slate-300"),
+            ("overdue", "\u041f\u0440\u043e\u0441\u0440\u043e\u0447\u0435\u043d\u044b", "bg-red-500"),
+        ]:
+            count = int(assignment_status_counts.get(status_id) or 0)
+            course_status_rows.append({
+                "id": status_id, "label": label, "count": count, "color": color,
+                "pct": int(round((count / course_status_total) * 100))
+            })
+
+        fail_stats = []
+        for index, row in enumerate(fail_rows, start=1):
+            fail_stats.append({
+                "question_id": index,
+                "text": row[1] or "\u0422\u0435\u0441\u0442",
+                "fail_rate": max(0, 100 - int(round(float(row[0] or 0)))),
+                "course": row[2] or "\u041a\u0443\u0440\u0441"
+            })
+
+        summary = {
+            "employee_count": len(employee_rows),
+            "overall_progress": int(round(overall_progress_sum / len(progress_rows))) if progress_rows else 0,
+            "avg_score": int(round(avg_score_sum / len(employee_rows))) if employee_rows else 0,
+            "overdue_count": overdue_count
+        }
+
+        return jsonify({
+            "status": "success",
+            "courses": courses,
+            "rows": progress_rows,
+            "attempts": attempts_list,
+            "analytics": {
+                "summary": summary,
+                "employee_rows": employee_rows,
+                "course_stats": course_stats,
+                "course_status_rows": course_status_rows,
+                "fail_stats": fail_stats
+            }
+        }), 200
+    except Exception as e:
+        logging.exception("Error in /api/lms/admin/dashboard")
         return jsonify({"error": "Internal server error"}), 500
 
 

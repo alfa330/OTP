@@ -2158,16 +2158,11 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
         }
 
         {
-          const [coursesRes, analyticsRes, progressRes, attemptsRes] = await Promise.all([
-            lmsRequest("/api/lms/admin/courses"),
-            lmsRequest("/api/lms/admin/analytics"),
-            lmsRequest("/api/lms/admin/progress").catch(() => ({ rows: [] })),
-            lmsRequest("/api/lms/admin/attempts?limit=1000").catch(() => ({ attempts: [] })),
-          ]);
-          const nextCourses = Array.isArray(coursesRes?.courses) ? coursesRes.courses : [];
-          const nextAnalytics = analyticsRes && typeof analyticsRes === "object" ? analyticsRes : null;
-          const nextProgressRows = Array.isArray(progressRes?.rows) ? progressRes.rows : [];
-          const nextAttempts = Array.isArray(attemptsRes?.attempts) ? attemptsRes.attempts : [];
+          const dashboardRes = await lmsRequest("/api/lms/admin/dashboard?attempts_limit=1000");
+          const nextCourses = Array.isArray(dashboardRes?.courses) ? dashboardRes.courses : [];
+          const nextAnalytics = dashboardRes?.analytics && typeof dashboardRes.analytics === "object" ? dashboardRes.analytics : null;
+          const nextProgressRows = Array.isArray(dashboardRes?.rows) ? dashboardRes.rows : [];
+          const nextAttempts = Array.isArray(dashboardRes?.attempts) ? dashboardRes.attempts : [];
           setAdminCourses(nextCourses);
           setAdminAnalytics(nextAnalytics);
           setAdminProgressRows(nextProgressRows);
@@ -2410,14 +2405,8 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
 
       let nextCourse = fallbackCourse;
       if (canUseLearnerApi) {
-        if (!options?.skipStart) {
-          try {
-            await lmsRequest(`/api/lms/courses/${normalizedCourseId}/start`, { method: "POST" });
-          } catch (_) {
-            // already started or not required
-          }
-        }
-        const detail = await lmsRequest(`/api/lms/courses/${normalizedCourseId}`);
+        const openQuery = options?.skipStart ? "?skip_start=1" : "";
+        const detail = await lmsRequest(`/api/lms/courses/${normalizedCourseId}/open${openQuery}`, { method: "POST" });
         if (!detail?.course) {
           throw new Error("РќРµ СѓРґР°Р»РѕСЃСЊ Р·Р°РіСЂСѓР·РёС‚СЊ РєСѓСЂСЃ");
         }
