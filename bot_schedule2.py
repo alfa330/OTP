@@ -17336,6 +17336,54 @@ def _lms_material_row_to_payload(row):
     }
 
 
+def _lms_resolve_lesson_type(raw_lesson_type, materials=None, has_video=None, has_text=None, has_combined_block=None):
+    raw = str(raw_lesson_type or '').strip().lower()
+    explicit = raw if raw in ('video', 'text', 'combined', 'quiz') else ''
+
+    material_items = materials if isinstance(materials, list) else []
+    if has_video is None:
+        has_video = any(
+            str(item.get('material_type') or item.get('type') or '').strip().lower() == 'video'
+            for item in material_items
+            if isinstance(item, dict)
+        )
+    if has_text is None:
+        has_text = any(
+            str(item.get('material_type') or item.get('type') or '').strip().lower() == 'text'
+            for item in material_items
+            if isinstance(item, dict)
+        )
+    if has_combined_block is None:
+        has_combined_block = any(
+            isinstance(item, dict)
+            and isinstance(item.get('metadata'), dict)
+            and str(item.get('metadata', {}).get('combined_block') or '').strip().lower() in ('1', 'true', 't', 'yes', 'y')
+            for item in material_items
+        )
+
+    has_video = bool(has_video)
+    has_text = bool(has_text)
+    combined_by_structure = bool(has_combined_block) and has_video and has_text
+
+    if explicit == 'quiz':
+        return 'quiz'
+    if explicit == 'combined':
+        return 'combined'
+    if combined_by_structure:
+        return 'combined'
+    if explicit == 'text':
+        return 'text'
+    if explicit == 'video':
+        if (not has_video) and has_text:
+            return 'text'
+        return 'video'
+    if has_video:
+        return 'video'
+    if has_text:
+        return 'text'
+    return 'video'
+
+
 def _lms_ensure_progress_and_session_tx(cursor, assignment_id, lesson_id, user_id):
     now = _lms_now()
     cursor.execute("""
@@ -17412,6 +17460,9 @@ def _lms_get_lesson_context_tx(cursor, user_id, lesson_id):
             COALESCE(l.completion_threshold, %s),
             m.title as module_title,
             COALESCE(NULLIF(TRIM(LOWER(l.lesson_type)), ''), 'video') AS lesson_type,
+            COALESCE(ms.has_video, FALSE) AS has_video_material,
+            COALESCE(ms.has_text, FALSE) AS has_text_material,
+            COALESCE(ms.has_combined_block, FALSE) AS has_combined_block,
             vm.metadata as video_metadata
         FROM lms_lessons l
         JOIN lms_modules m ON m.id = l.module_id
@@ -17431,6 +17482,16 @@ def _lms_get_lesson_context_tx(cursor, user_id, lesson_id):
             ORDER BY lm.position ASC, lm.id ASC
             LIMIT 1
         ) vm ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT
+                BOOL_OR(lm.material_type = 'video') AS has_video,
+                BOOL_OR(lm.material_type = 'text') AS has_text,
+                BOOL_OR(
+                    COALESCE(LOWER(lm.metadata->>'combined_block'), '') IN ('1', 'true', 't', 'yes', 'y')
+                ) AS has_combined_block
+            FROM lms_lesson_materials lm
+            WHERE lm.lesson_id = l.id
+        ) ms ON TRUE
         WHERE l.id = %s
         LIMIT 1
     """, (LMS_COMPLETION_THRESHOLD, user_id, lesson_id))
@@ -17441,7 +17502,13 @@ def _lms_get_lesson_context_tx(cursor, user_id, lesson_id):
     assignment_id = int(row[0])
     lesson_id = int(row[5])
     lesson_duration_seconds = max(0.0, _lms_to_float(row[8], 0.0))
-    video_metadata = _lms_parse_json(row[13], {})
+    lesson_type = _lms_resolve_lesson_type(
+        row[12],
+        has_video=bool(row[13]),
+        has_text=bool(row[14]),
+        has_combined_block=bool(row[15]),
+    )
+    video_metadata = _lms_parse_json(row[16], {})
     if isinstance(video_metadata, dict):
         video_duration_seconds = max(0.0, _lms_to_float(video_metadata.get("duration_seconds"), 0.0))
         if video_duration_seconds > 0:
@@ -17460,7 +17527,7 @@ def _lms_get_lesson_context_tx(cursor, user_id, lesson_id):
         "allow_fast_forward": bool(row[9]),
         "completion_threshold": float(row[10] or LMS_COMPLETION_THRESHOLD),
         "module_title": row[11],
-        "lesson_type": str(row[12] or 'video').strip().lower() or 'video',
+        "lesson_type": lesson_type,
         "progress": progress,
         "session": session
     }
@@ -18124,7 +18191,7 @@ def _lms_course_structure_tx(cursor, course_id, course_version_id, include_test_
         lesson_id = int(row[0])
         module_id = int(row[1])
         lesson_materials = material_by_lesson.get(lesson_id, [])
-        lesson_type = str(row[8] or 'video').strip().lower() or 'video'
+        lesson_type = _lms_resolve_lesson_type(row[8], materials=lesson_materials)
         combined_blocks = []
         if lesson_type == 'combined':
             for material in lesson_materials:

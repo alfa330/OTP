@@ -1170,17 +1170,38 @@ const formatDurationLabel = (seconds) => {
 const inferLessonType = (lessonLike) => {
   const explicit = String(lessonLike?.lesson_type || lessonLike?.type || "").trim().toLowerCase();
   if (explicit === "quiz") return "quiz";
-  if (explicit === "text") return "text";
-  if (explicit === "video") return "video";
-  if (explicit === "combined") return "combined";
+
   const materials = Array.isArray(lessonLike?.materials) ? lessonLike.materials : [];
-  const hasVideo = materials.some((m) => String(m?.material_type || "").toLowerCase() === "video");
-  const hasText = materials.some((m) => String(m?.material_type || "").toLowerCase() === "text");
-  if (hasVideo && hasText) return "combined";
-  if (!materials.length) return "text";
+  const hasStructuredBlocks = Array.isArray(lessonLike?.blocks)
+    && lessonLike.blocks.some((blockItem) => {
+      const blockType = String(blockItem?.type || blockItem?.material_type || "").toLowerCase();
+      return blockType === "text" || blockType === "video";
+    });
+  const hasVideo = materials.some((m) => String(m?.material_type || m?.type || "").toLowerCase() === "video");
+  const hasText = materials.some((m) => String(m?.material_type || m?.type || "").toLowerCase() === "text");
+  const hasCombinedFlag = materials.some((m) => {
+    const meta = m?.metadata;
+    if (!meta || typeof meta !== "object") return false;
+    const marker = String(meta?.combined_block ?? "").trim().toLowerCase();
+    return marker === "true" || marker === "1" || marker === "yes" || marker === "y" || marker === "t";
+  });
+  const combinedByStructure = hasStructuredBlocks || (hasCombinedFlag && hasVideo && hasText);
+
+  if (explicit === "combined") return "combined";
+  if (combinedByStructure && hasVideo && hasText) return "combined";
+
+  if (explicit === "text") return "text";
+  if (explicit === "video") {
+    // Legacy safety: some old text lessons were persisted as `video` after migration.
+    if (!hasVideo && hasText) return "text";
+    return "video";
+  }
+
   if (hasVideo) return "video";
-  if (materials.every((m) => TEXT_MATERIAL_TYPES.has(String(m?.material_type || "").toLowerCase()))) return "text";
-  return "video";
+  if (hasText) return "text";
+  if (!materials.length) return "text";
+  if (materials.every((m) => TEXT_MATERIAL_TYPES.has(String(m?.material_type || m?.type || "").toLowerCase()))) return "text";
+  return "text";
 };
 
 const resolveCourseAttemptTests = (tests) => {
@@ -4078,6 +4099,7 @@ function CombinedLesson({
           const videoUrl = String(blockItem?.url || blockItem?.signed_url || blockItem?.content_url || "").trim();
           const blockKey = resolveBlockKey(blockItem, blockIndex);
           const materialId = Number(blockItem?.id || blockItem?.material_id || 0);
+          const transcriptRich = normalizeRichTextValue(blockItem?.content_text || blockItem?.contentText || "");
           const initialProgress = materialId > 0
             ? clampLmsProgress(serverVideoProgressByMaterial?.[String(materialId)] ?? serverVideoProgressByMaterial?.[materialId])
             : 0;
@@ -4107,6 +4129,14 @@ function CombinedLesson({
                   });
                 }}
               />
+              <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-2">Транскрипт</p>
+                <RichTextContent
+                  value={transcriptRich}
+                  className="text-sm text-slate-700 leading-relaxed"
+                  emptyState={<div className="text-xs text-slate-400">Транскрипт видео-блока не заполнен</div>}
+                />
+              </div>
             </div>
           );
         }
@@ -5853,6 +5883,32 @@ function CourseBuilder({
     }));
   }, [updateLessonById]);
 
+  const addCombinedQuizQuestion = useCallback((lessonId, type = "single") => {
+    if (!lessonId) return;
+    updateLessonById(lessonId, (prev) => ({
+      ...prev,
+      combinedQuizQuestions: [...(Array.isArray(prev?.combinedQuizQuestions) ? prev.combinedQuizQuestions : []), createQuestionTemplate(type)],
+    }));
+  }, [updateLessonById, createQuestionTemplate]);
+
+  const updateCombinedQuizQuestionType = useCallback((lessonId, questionId, newType) => {
+    if (!lessonId || !questionId) return;
+    updateLessonById(lessonId, (prev) => ({
+      ...prev,
+      combinedQuizQuestions: (Array.isArray(prev?.combinedQuizQuestions) ? prev.combinedQuizQuestions : []).map((question) => (
+        question.id === questionId
+          ? {
+            ...question,
+            type: newType,
+            options: newType === "bool" ? ["Верно", "Неверно"] : newType === "text" ? [] : question.options.length >= 2 ? question.options : ["", "", "", ""],
+            correct: newType === "multiple" ? [] : 0,
+            correct_text_answers: newType === "text" ? (Array.isArray(question.correct_text_answers) ? question.correct_text_answers : []) : [],
+          }
+          : question
+      )),
+    }));
+  }, [updateLessonById]);
+
   const buildDefaultModules = useCallback(() => ([
     {
       id: 1,
@@ -6713,7 +6769,7 @@ function CourseBuilder({
                     title: String(blockItem?.title || (blockType === "video" ? `Видео блок ${blockIndex + 1}` : `Текстовый блок ${blockIndex + 1}`)).trim(),
                     material_type: blockType,
                     content_url: blockType === "video" ? (blockContentUrl || null) : null,
-                    content_text: blockType === "text" ? (blockContentText || null) : null,
+                    content_text: blockContentText || null,
                     mime_type: String(blockItem?.mime_type || (blockType === "text" ? "text/html" : "video/mp4")).trim() || null,
                     bucket: String(blockItem?.bucket || "").trim() || null,
                     blob_path: String(blockItem?.blob_path || "").trim() || null,
@@ -7161,6 +7217,7 @@ function CourseBuilder({
     Number(selectedLessonVideoMaterial?.metadata?.duration_seconds || selectedLessonModel?.durationSeconds || 0)
   );
   const selectedLessonQuizQuestions = Array.isArray(selectedLessonModel?.quizQuestions) ? selectedLessonModel.quizQuestions : [];
+  const selectedCombinedQuizQuestions = Array.isArray(selectedLessonModel?.combinedQuizQuestions) ? selectedLessonModel.combinedQuizQuestions : [];
   const selectedLessonExtraMaterials = selectedLessonMaterials
     .map((item, originalIndex) => ({ ...item, _originalIndex: originalIndex }))
     .filter((item) => {
@@ -7380,6 +7437,17 @@ function CourseBuilder({
     updateLessonById(selectedLessonModel.id, (prevLesson) => ({
       ...prevLesson,
       quizQuestions: (Array.isArray(prevLesson?.quizQuestions) ? prevLesson.quizQuestions : []).map((question) => {
+        if (question?.id !== questionId) return question;
+        return typeof updater === "function" ? updater(question) : { ...question, ...(updater || {}) };
+      }),
+    }));
+  };
+
+  const updateSelectedCombinedQuizQuestion = (questionId, updater) => {
+    if (!selectedLessonModel?.id || !questionId) return;
+    updateLessonById(selectedLessonModel.id, (prevLesson) => ({
+      ...prevLesson,
+      combinedQuizQuestions: (Array.isArray(prevLesson?.combinedQuizQuestions) ? prevLesson.combinedQuizQuestions : []).map((question) => {
         if (question?.id !== questionId) return question;
         return typeof updater === "function" ? updater(question) : { ...question, ...(updater || {}) };
       }),
@@ -8434,7 +8502,7 @@ function CourseBuilder({
                                 <h4 className="text-sm font-semibold text-slate-900">Блоки комбинированного урока</h4>
                                 <p className="text-xs text-slate-500 mt-0.5">Текст и видео идут в порядке, заданном администратором</p>
                               </div>
-                              <div className="flex items-center gap-2">
+                              <div className="hidden">
                                 <button
                                   type="button"
                                   onClick={() => addCombinedBlock("text")}
@@ -8542,11 +8610,40 @@ function CourseBuilder({
                                             Видео не прикреплено
                                           </div>
                                         )}
+                                        <div>
+                                          <label className="text-[11px] font-semibold text-slate-600 mb-1.5 block">Транскрипт видео-блока</label>
+                                          <RichTextEditor
+                                            key={`combined-${selectedLessonModel.id}-${blockItem.id}-video-transcript`}
+                                            value={blockItem?.contentText || blockItem?.content_text || ""}
+                                            onChange={(nextValue) => updateCombinedBlock(blockItem.id, { contentText: nextValue })}
+                                            onImageUpload={handleRichTextImageUpload}
+                                            onFileUpload={handleRichTextFileUpload}
+                                            placeholder="Введите транскрипт этого видео..."
+                                            minHeight={130}
+                                          />
+                                        </div>
                                       </div>
                                     )}
                                   </div>
                                 );
                               })}
+                            </div>
+
+                            <div className="flex items-center justify-end gap-2">
+                              <button
+                                type="button"
+                                onClick={() => addCombinedBlock("text")}
+                                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-emerald-200 bg-emerald-50 text-emerald-700 text-xs font-semibold hover:bg-emerald-100 transition-colors"
+                              >
+                                <FileText size={12} /> {"\u0422\u0435\u043a\u0441\u0442"}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => addCombinedBlock("video")}
+                                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-blue-200 bg-blue-50 text-blue-700 text-xs font-semibold hover:bg-blue-100 transition-colors"
+                              >
+                                <Video size={12} /> {"\u0412\u0438\u0434\u0435\u043e"}
+                              </button>
                             </div>
 
                             {selectedRemovedCombinedBlocks.length > 0 && (
@@ -8601,7 +8698,7 @@ function CourseBuilder({
                               </div>
 
                               {selectedLessonModel?.combinedHasQuiz && (
-                                <div className="space-y-2">
+                                <div className="space-y-3">
                                   <div className="grid grid-cols-2 gap-2">
                                     <input
                                       type="number"
@@ -8637,6 +8734,26 @@ function CourseBuilder({
                                       placeholder="Попыток"
                                     />
                                   </div>
+                                  <div className="flex items-center gap-5">
+                                    <label className="flex items-center gap-2 cursor-pointer">
+                                      <input
+                                        type="checkbox"
+                                        className="accent-violet-600 w-4 h-4"
+                                        checked={selectedLessonModel?.combinedQuizRandomOrder !== false}
+                                        onChange={(event) => updateLessonById(selectedLessonModel.id, { combinedQuizRandomOrder: event.target.checked })}
+                                      />
+                                      <span className="text-xs text-violet-800">Случайный порядок вопросов</span>
+                                    </label>
+                                    <label className="flex items-center gap-2 cursor-pointer">
+                                      <input
+                                        type="checkbox"
+                                        className="accent-violet-600 w-4 h-4"
+                                        checked={selectedLessonModel?.combinedQuizShowExplanations !== false}
+                                        onChange={(event) => updateLessonById(selectedLessonModel.id, { combinedQuizShowExplanations: event.target.checked })}
+                                      />
+                                      <span className="text-xs text-violet-800">Показывать пояснения</span>
+                                    </label>
+                                  </div>
                                   <div className="flex items-center gap-2">
                                     <button
                                       type="button"
@@ -8658,8 +8775,169 @@ function CourseBuilder({
                                       Очистить вопросы
                                     </button>
                                     <span className="text-[11px] text-violet-700">
-                                      Вопросов: <strong>{Array.isArray(selectedLessonModel?.combinedQuizQuestions) ? selectedLessonModel.combinedQuizQuestions.length : 0}</strong>
+                                      Вопросов: <strong>{selectedCombinedQuizQuestions.length}</strong>
                                     </span>
+                                  </div>
+                                  <div className="flex items-center justify-between pt-1">
+                                    <div>
+                                      <h4 className="text-sm font-semibold text-violet-900">Банк вопросов теста</h4>
+                                      <p className="text-xs text-violet-700 mt-0.5">{selectedCombinedQuizQuestions.length} вопросов</p>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                      {questionTypes.map((t) => (
+                                        <button
+                                          key={`combined-qtype-${t.id}`}
+                                          type="button"
+                                          onClick={() => addCombinedQuizQuestion(selectedLessonModel.id, t.id)}
+                                          className={`flex items-center gap-1.5 text-xs px-3 py-2 rounded-xl border font-medium transition-colors ${t.color} border-current/20 hover:opacity-80`}
+                                        >
+                                          <t.icon size={12} /> {t.label}
+                                        </button>
+                                      ))}
+                                    </div>
+                                  </div>
+                                  <div className="space-y-3">
+                                    {selectedCombinedQuizQuestions.length === 0 && (
+                                      <div className="text-xs text-violet-700/80 border border-dashed border-violet-200 rounded-xl p-3 bg-white/70">
+                                        Добавьте вопросы для теста комбинированного урока
+                                      </div>
+                                    )}
+                                    {selectedCombinedQuizQuestions.map((q, qi) => (
+                                      <div key={`combined-q-${q.id}`} className="bg-white border border-violet-200 rounded-xl p-3">
+                                        <div className="flex items-start gap-3 mb-3">
+                                          <span className="text-[11px] font-bold text-violet-700 bg-violet-100 w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0">{qi + 1}</span>
+                                          <input
+                                            value={q.text}
+                                            onChange={(e) => updateSelectedCombinedQuizQuestion(q.id, { text: e.target.value })}
+                                            placeholder="Текст вопроса..."
+                                            className="flex-1 text-xs font-medium text-slate-900 bg-transparent focus:outline-none border-b border-transparent focus:border-violet-300 transition-all pb-1"
+                                          />
+                                          <div className="flex items-center gap-1">
+                                            {questionTypes.map((t) => (
+                                              <button
+                                                key={`combined-q-${q.id}-type-${t.id}`}
+                                                type="button"
+                                                onClick={() => updateCombinedQuizQuestionType(selectedLessonModel.id, q.id, t.id)}
+                                                title={t.label}
+                                                className={`p-1 rounded-lg border transition-all ${q.type === t.id ? `${t.color} border-current/30` : "text-slate-400 border-slate-200 hover:bg-white"}`}
+                                              >
+                                                <t.icon size={12} />
+                                              </button>
+                                            ))}
+                                            <button
+                                              type="button"
+                                              onClick={() => updateLessonById(selectedLessonModel.id, (prevLesson) => ({
+                                                ...prevLesson,
+                                                combinedQuizQuestions: (Array.isArray(prevLesson?.combinedQuizQuestions) ? prevLesson.combinedQuizQuestions : []).filter((item) => item.id !== q.id),
+                                              }))}
+                                              className="p-1 text-slate-300 hover:text-red-500 rounded-lg hover:bg-red-50 transition-colors"
+                                            >
+                                              <Trash2 size={12} />
+                                            </button>
+                                          </div>
+                                        </div>
+
+                                        {q.type !== "text" && (
+                                          <div className="space-y-1.5 ml-8 mb-2">
+                                            {(Array.isArray(q.options) ? q.options : []).map((opt, oi) => {
+                                              const isCorrect = q.type === "multiple" ? (Array.isArray(q.correct) && q.correct.includes(oi)) : q.correct === oi;
+                                              return (
+                                                <div key={`combined-opt-${q.id}-${oi}`} className="flex items-center gap-2">
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                      if (q.type === "multiple") {
+                                                        const prevCorrect = Array.isArray(q.correct) ? q.correct : [];
+                                                        updateLessonById(selectedLessonModel.id, (prevLesson) => ({
+                                                          ...prevLesson,
+                                                          combinedQuizQuestions: (Array.isArray(prevLesson?.combinedQuizQuestions) ? prevLesson.combinedQuizQuestions : []).map((item) => (
+                                                            item.id === q.id
+                                                              ? { ...item, correct: isCorrect ? prevCorrect.filter((v) => v !== oi) : [...prevCorrect, oi] }
+                                                              : item
+                                                          )),
+                                                        }));
+                                                      } else {
+                                                        updateLessonById(selectedLessonModel.id, (prevLesson) => ({
+                                                          ...prevLesson,
+                                                          combinedQuizQuestions: (Array.isArray(prevLesson?.combinedQuizQuestions) ? prevLesson.combinedQuizQuestions : []).map((item) => (
+                                                            item.id === q.id ? { ...item, correct: oi } : item
+                                                          )),
+                                                        }));
+                                                      }
+                                                    }}
+                                                    className={`flex-shrink-0 ${q.type === "multiple" ? `w-4 h-4 rounded border-2 flex items-center justify-center ${isCorrect ? "border-emerald-500 bg-emerald-500" : "border-slate-300 hover:border-emerald-400"}` : `w-4 h-4 rounded-full border-2 flex items-center justify-center ${isCorrect ? "border-emerald-500 bg-emerald-500" : "border-slate-300 hover:border-emerald-400"}`}`}
+                                                  >
+                                                    {isCorrect && <Check size={9} className="text-white" />}
+                                                  </button>
+                                                  <input
+                                                    value={opt}
+                                                    onChange={(e) => updateLessonById(selectedLessonModel.id, (prevLesson) => ({
+                                                      ...prevLesson,
+                                                      combinedQuizQuestions: (Array.isArray(prevLesson?.combinedQuizQuestions) ? prevLesson.combinedQuizQuestions : []).map((item) => (
+                                                        item.id === q.id
+                                                          ? { ...item, options: item.options.map((optionValue, idx) => idx === oi ? e.target.value : optionValue) }
+                                                          : item
+                                                      )),
+                                                    }))}
+                                                    readOnly={q.type === "bool"}
+                                                    placeholder={`Вариант ${oi + 1}`}
+                                                    className={`flex-1 px-2.5 py-1.5 text-xs rounded-lg border transition-all focus:outline-none ${isCorrect ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-slate-200 bg-white text-slate-700 focus:border-violet-300"} ${q.type === "bool" ? "cursor-default" : ""}`}
+                                                  />
+                                                  {q.type !== "bool" && q.options.length > 2 && (
+                                                    <button
+                                                      type="button"
+                                                      onClick={() => updateLessonById(selectedLessonModel.id, (prevLesson) => ({
+                                                        ...prevLesson,
+                                                        combinedQuizQuestions: (Array.isArray(prevLesson?.combinedQuizQuestions) ? prevLesson.combinedQuizQuestions : []).map((item) => (
+                                                          item.id === q.id ? { ...item, options: item.options.filter((_, idx) => idx !== oi) } : item
+                                                        )),
+                                                      }))}
+                                                      className="p-1 text-slate-300 hover:text-red-400 transition-colors"
+                                                    >
+                                                      <X size={11} />
+                                                    </button>
+                                                  )}
+                                                </div>
+                                              );
+                                            })}
+                                            {q.type !== "bool" && q.options.length < 6 && (
+                                              <button
+                                                type="button"
+                                                onClick={() => updateLessonById(selectedLessonModel.id, (prevLesson) => ({
+                                                  ...prevLesson,
+                                                  combinedQuizQuestions: (Array.isArray(prevLesson?.combinedQuizQuestions) ? prevLesson.combinedQuizQuestions : []).map((item) => (
+                                                    item.id === q.id ? { ...item, options: [...item.options, ""] } : item
+                                                  )),
+                                                }))}
+                                                className="flex items-center gap-1 text-[11px] text-violet-600 hover:text-violet-800 transition-colors"
+                                              >
+                                                <Plus size={11} /> Добавить вариант
+                                              </button>
+                                            )}
+                                          </div>
+                                        )}
+
+                                        {q.type === "text" && (
+                                          <div className="ml-8 mb-2">
+                                            <input
+                                              value={Array.isArray(q.correct_text_answers) ? q.correct_text_answers.join(", ") : ""}
+                                              onChange={(e) => updateSelectedCombinedQuizQuestion(q.id, {
+                                                correct_text_answers: e.target.value.split(",").map((item) => item.trim()).filter(Boolean),
+                                              })}
+                                              placeholder="Ключевые слова через запятую..."
+                                              className="w-full px-2.5 py-2 bg-white border border-slate-200 rounded-lg text-xs text-slate-700 focus:outline-none focus:border-violet-400 transition-all"
+                                            />
+                                          </div>
+                                        )}
+
+                                        <input
+                                          value={q.explanation}
+                                          onChange={(e) => updateSelectedCombinedQuizQuestion(q.id, { explanation: e.target.value })}
+                                          placeholder="Пояснение к правильному ответу..."
+                                          className="w-full ml-8 px-2.5 py-1.5 text-[11px] rounded-lg border border-slate-200 bg-white text-slate-600 focus:outline-none focus:border-violet-400 transition-all"
+                                        />
+                                      </div>
+                                    ))}
                                   </div>
                                 </div>
                               )}
