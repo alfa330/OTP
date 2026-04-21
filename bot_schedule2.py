@@ -18820,121 +18820,132 @@ def lms_home():
     try:
         with db._get_cursor() as cursor:
             cursor.execute("""
+                WITH assignments AS (
+                    SELECT
+                        a.id, a.course_id, a.course_version_id, a.status, a.due_at,
+                        a.started_at, a.completed_at, a.created_at,
+                        c.title, c.description, c.category,
+                        cv.anti_cheat_settings
+                    FROM lms_course_assignments a
+                    JOIN lms_courses c ON c.id = a.course_id
+                    LEFT JOIN lms_course_versions cv ON cv.id = a.course_version_id
+                    WHERE a.user_id = %(uid)s
+                      AND c.status = 'published'
+                ),
+                lesson_stats AS (
+                    SELECT
+                        m.course_version_id,
+                        COUNT(l.id) AS total_lessons,
+                        COALESCE(SUM(l.duration_seconds), 0) AS lessons_duration_seconds
+                    FROM lms_modules m
+                    JOIN lms_lessons l ON l.module_id = m.id
+                    WHERE m.course_version_id IN (
+                        SELECT DISTINCT course_version_id FROM assignments
+                        WHERE course_version_id IS NOT NULL
+                    )
+                    GROUP BY m.course_version_id
+                ),
+                test_stats AS (
+                    SELECT
+                        t.course_version_id,
+                        COUNT(*) AS total_tests,
+                        COUNT(*) FILTER (WHERE COALESCE(t.is_final, FALSE) = FALSE) AS total_intermediate_tests,
+                        COALESCE(SUM(
+                            COALESCE(
+                                NULLIF(to_jsonb(t) ->> 'time_limit_seconds', '')::INTEGER,
+                                t.time_limit_minutes * 60,
+                                0
+                            )
+                        ), 0) AS tests_duration_seconds
+                    FROM lms_tests t
+                    WHERE t.course_version_id IN (
+                        SELECT DISTINCT course_version_id FROM assignments
+                        WHERE course_version_id IS NOT NULL
+                    )
+                      AND t.status <> 'archived'
+                    GROUP BY t.course_version_id
+                ),
+                completed_lessons AS (
+                    SELECT lp.assignment_id, COUNT(*) AS completed_count
+                    FROM lms_lesson_progress lp
+                    WHERE lp.assignment_id IN (SELECT id FROM assignments)
+                      AND lp.user_id = %(uid)s
+                      AND lp.status = 'completed'
+                    GROUP BY lp.assignment_id
+                ),
+                passed_tests AS (
+                    SELECT
+                        ta.assignment_id,
+                        COUNT(DISTINCT ta.test_id) AS completed_tests,
+                        COUNT(DISTINCT ta.test_id) FILTER (
+                            WHERE COALESCE(t.is_final, FALSE) = FALSE
+                        ) AS completed_intermediate_tests
+                    FROM lms_test_attempts ta
+                    JOIN lms_tests t ON t.id = ta.test_id
+                    JOIN assignments ass ON ass.id = ta.assignment_id
+                        AND t.course_version_id = ass.course_version_id
+                    WHERE ta.user_id = %(uid)s
+                      AND ta.status = 'finished'
+                      AND ta.passed = TRUE
+                      AND t.status <> 'archived'
+                    GROUP BY ta.assignment_id
+                ),
+                best_scores AS (
+                    SELECT ta.assignment_id, MAX(ta.score_percent) AS best_score
+                    FROM lms_test_attempts ta
+                    WHERE ta.assignment_id IN (SELECT id FROM assignments)
+                      AND ta.user_id = %(uid)s
+                      AND ta.status = 'finished'
+                    GROUP BY ta.assignment_id
+                ),
+                latest_certs AS (
+                    SELECT DISTINCT ON (cert.assignment_id)
+                        cert.assignment_id, cert.id AS cert_id, cert.status AS cert_status
+                    FROM lms_certificates cert
+                    WHERE cert.assignment_id IN (SELECT id FROM assignments)
+                    ORDER BY cert.assignment_id, cert.id DESC
+                )
                 SELECT
-                    a.id, a.course_id, a.course_version_id, a.status, a.due_at, a.started_at, a.completed_at,
-                    c.title, c.description, c.category,
-                    cv.anti_cheat_settings
-                FROM lms_course_assignments a
-                JOIN lms_courses c ON c.id = a.course_id
-                LEFT JOIN lms_course_versions cv ON cv.id = a.course_version_id
-                WHERE a.user_id = %s
-                  AND c.status = 'published'
-                ORDER BY COALESCE(a.due_at, a.created_at) ASC, a.id DESC
-            """, (requester_id,))
-            assignment_rows = cursor.fetchall()
+                    ass.id, ass.course_id, ass.course_version_id, ass.status,
+                    ass.due_at, ass.started_at, ass.completed_at,
+                    ass.title, ass.description, ass.category, ass.anti_cheat_settings,
+                    COALESCE(ls.total_lessons, 0),
+                    COALESCE(ls.lessons_duration_seconds, 0),
+                    COALESCE(ts.tests_duration_seconds, 0),
+                    COALESCE(cl.completed_count, 0),
+                    COALESCE(ts.total_tests, 0),
+                    COALESCE(pt.completed_tests, 0),
+                    COALESCE(ts.total_intermediate_tests, 0),
+                    COALESCE(pt.completed_intermediate_tests, 0),
+                    bs.best_score,
+                    lc.cert_id, lc.cert_status
+                FROM assignments ass
+                LEFT JOIN lesson_stats ls ON ls.course_version_id = ass.course_version_id
+                LEFT JOIN test_stats ts ON ts.course_version_id = ass.course_version_id
+                LEFT JOIN completed_lessons cl ON cl.assignment_id = ass.id
+                LEFT JOIN passed_tests pt ON pt.assignment_id = ass.id
+                LEFT JOIN best_scores bs ON bs.assignment_id = ass.id
+                LEFT JOIN latest_certs lc ON lc.assignment_id = ass.id
+                ORDER BY COALESCE(ass.due_at, ass.created_at) ASC, ass.id DESC
+            """, {"uid": requester_id})
+            combined_rows = cursor.fetchall()
 
             courses = []
-            for row in assignment_rows:
+            for row in combined_rows:
                 assignment_id = int(row[0])
                 course_version_id = int(row[2]) if row[2] is not None else None
-
-                cursor.execute("""
-                    SELECT
-                        COUNT(*),
-                        COALESCE(SUM(l.duration_seconds), 0)
-                    FROM lms_lessons l
-                    JOIN lms_modules m ON m.id = l.module_id
-                    WHERE m.course_version_id = %s
-                """, (course_version_id,))
-                lessons_row = cursor.fetchone()
-                total_lessons = int(lessons_row[0] or 0)
-                lessons_duration_seconds = int(lessons_row[1] or 0)
-
-                cursor.execute("""
-                    SELECT COALESCE(SUM(
-                        COALESCE(
-                            NULLIF(to_jsonb(t) ->> 'time_limit_seconds', '')::INTEGER,
-                            t.time_limit_minutes * 60,
-                            0
-                        )
-                    ), 0)
-                    FROM lms_tests t
-                    WHERE t.course_version_id = %s
-                      AND t.status <> 'archived'
-                """, (course_version_id,))
-                tests_duration_seconds = int(cursor.fetchone()[0] or 0)
-
+                total_lessons = int(row[11])
+                lessons_duration_seconds = int(row[12])
+                tests_duration_seconds = int(row[13])
                 total_duration_seconds = lessons_duration_seconds + tests_duration_seconds
-
-                cursor.execute("""
-                    SELECT COUNT(*)
-                    FROM lms_lesson_progress
-                    WHERE assignment_id = %s
-                      AND user_id = %s
-                      AND status = 'completed'
-                """, (assignment_id, requester_id))
-                completed_lessons = int(cursor.fetchone()[0] or 0)
-
-                cursor.execute("""
-                    SELECT COUNT(*)
-                    FROM lms_tests
-                    WHERE course_version_id = %s
-                      AND status <> 'archived'
-                """, (course_version_id,))
-                total_tests = int(cursor.fetchone()[0] or 0)
-
-                cursor.execute("""
-                    SELECT COUNT(DISTINCT ta.test_id)
-                    FROM lms_test_attempts ta
-                    JOIN lms_tests t ON t.id = ta.test_id
-                    WHERE ta.assignment_id = %s
-                      AND ta.user_id = %s
-                      AND ta.status = 'finished'
-                      AND ta.passed = TRUE
-                      AND t.course_version_id = %s
-                      AND t.status <> 'archived'
-                """, (assignment_id, requester_id, course_version_id))
-                completed_tests = int(cursor.fetchone()[0] or 0)
-
-                cursor.execute("""
-                    SELECT COUNT(*)
-                    FROM lms_tests
-                    WHERE course_version_id = %s
-                      AND status <> 'archived'
-                      AND COALESCE(is_final, FALSE) = FALSE
-                """, (course_version_id,))
-                total_intermediate_tests = int(cursor.fetchone()[0] or 0)
-
-                cursor.execute("""
-                    SELECT COUNT(DISTINCT ta.test_id)
-                    FROM lms_test_attempts ta
-                    JOIN lms_tests t ON t.id = ta.test_id
-                    WHERE ta.assignment_id = %s
-                      AND ta.user_id = %s
-                      AND ta.status = 'finished'
-                      AND ta.passed = TRUE
-                      AND t.course_version_id = %s
-                      AND COALESCE(t.is_final, FALSE) = FALSE
-                """, (assignment_id, requester_id, course_version_id))
-                completed_intermediate_tests = int(cursor.fetchone()[0] or 0)
-
-                cursor.execute("""
-                    SELECT MAX(score_percent)
-                    FROM lms_test_attempts
-                    WHERE assignment_id = %s
-                      AND user_id = %s
-                      AND status = 'finished'
-                """, (assignment_id, requester_id))
-                best_score_raw = cursor.fetchone()[0]
-
-                cursor.execute("""
-                    SELECT id, status
-                    FROM lms_certificates
-                    WHERE assignment_id = %s
-                    ORDER BY id DESC
-                    LIMIT 1
-                """, (assignment_id,))
-                cert_row = cursor.fetchone()
+                completed_lessons = int(row[14])
+                total_tests = int(row[15])
+                completed_tests = int(row[16])
+                total_intermediate_tests = int(row[17])
+                completed_intermediate_tests = int(row[18])
+                best_score_raw = row[19]
+                cert_id = row[20]
+                cert_status = row[21]
 
                 progress_total_items = total_lessons + total_tests
                 progress_completed_items = completed_lessons + completed_tests
@@ -18975,9 +18986,9 @@ def lms_home():
                     "best_score": float(best_score_raw) if best_score_raw is not None else None,
                     "certificate": (
                         {
-                            "id": int(cert_row[0]),
-                            "status": cert_row[1]
-                        } if cert_row else None
+                            "id": int(cert_id),
+                            "status": cert_status
+                        } if cert_id else None
                     )
                 })
 
