@@ -1,4 +1,5 @@
 import React, { Suspense, lazy, useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { useLocation } from 'react-router-dom';
 import axios from 'axios';
 import _ from 'lodash';
 import Papa from 'papaparse';
@@ -411,11 +412,58 @@ const canAccessLmsSectionForUser = (userLike) => {
 
 const isNewTabNavigationEvent = (event) => Boolean(event?.ctrlKey || event?.metaKey);
 
-const readAppViewFromUrl = () => {
-    if (typeof window === 'undefined') return '';
+const normalizeAppRelativePathname = (pathname = '') => {
+    const rawPathname = String(pathname || '').trim() || '/';
+    if (typeof window === 'undefined') {
+        return rawPathname.startsWith('/') ? rawPathname : `/${rawPathname}`;
+    }
     try {
-        const url = new URL(window.location.href);
-        return String(url.searchParams.get(APP_VIEW_QUERY_PARAM) || '').trim();
+        const appBaseUrl = new URL(APP_BASE_URL, window.location.origin);
+        const basePath = String(appBaseUrl.pathname || '/').replace(/\/+$/, '') || '/';
+        const normalizedPathname = rawPathname.startsWith('/') ? rawPathname : `/${rawPathname}`;
+        if (basePath !== '/' && normalizedPathname.startsWith(basePath)) {
+            const stripped = normalizedPathname.slice(basePath.length) || '/';
+            return stripped.startsWith('/') ? stripped : `/${stripped}`;
+        }
+        return normalizedPathname;
+    } catch (error) {
+        console.warn('Failed to normalize app pathname', error);
+        return rawPathname.startsWith('/') ? rawPathname : `/${rawPathname}`;
+    }
+};
+
+const isLmsAppPath = (pathname = '') => {
+    const normalizedPathname = normalizeAppRelativePathname(pathname);
+    return normalizedPathname === '/lms' || normalizedPathname.startsWith('/lms/');
+};
+
+const resolveAppPathname = (subPath = '') => {
+    if (typeof window === 'undefined') return APP_BASE_URL;
+    try {
+        const appBaseUrl = new URL(APP_BASE_URL, window.location.origin);
+        const basePath = String(appBaseUrl.pathname || '/').replace(/\/+$/, '');
+        const normalizedSubPath = String(subPath || '').trim();
+        if (!normalizedSubPath) {
+            return basePath || '/';
+        }
+        const suffix = normalizedSubPath.startsWith('/') ? normalizedSubPath : `/${normalizedSubPath}`;
+        return `${basePath}${suffix}` || '/';
+    } catch (error) {
+        console.warn('Failed to resolve app pathname', error);
+        return APP_BASE_URL;
+    }
+};
+
+const readAppViewFromUrl = (locationLike = null) => {
+    if (typeof window === 'undefined' && !locationLike) return '';
+    try {
+        const pathname = locationLike?.pathname ?? window.location.pathname;
+        if (isLmsAppPath(pathname)) {
+            return 'lms';
+        }
+        const search = locationLike?.search ?? window.location.search;
+        const searchParams = new URLSearchParams(search || '');
+        return String(searchParams.get(APP_VIEW_QUERY_PARAM) || '').trim();
     } catch (error) {
         console.warn('Failed to read app view from URL', error);
         return '';
@@ -426,8 +474,12 @@ const buildAppViewUrl = (nextView) => {
     if (typeof window === 'undefined') return APP_BASE_URL;
     try {
         const url = new URL(window.location.href);
-        const appBaseUrl = new URL(APP_BASE_URL, window.location.origin);
-        url.pathname = appBaseUrl.pathname;
+        if (nextView === 'lms') {
+            url.pathname = resolveAppPathname('/lms');
+            url.searchParams.delete(APP_VIEW_QUERY_PARAM);
+            return url.toString();
+        }
+        url.pathname = resolveAppPathname('');
         if (nextView) {
             url.searchParams.set(APP_VIEW_QUERY_PARAM, nextView);
         } else {
@@ -444,7 +496,13 @@ const syncAppViewWithUrl = (nextView) => {
     if (typeof window === 'undefined') return;
     try {
         const url = new URL(window.location.href);
-        if (nextView) {
+        if (nextView === 'lms') {
+            url.pathname = resolveAppPathname('/lms');
+            url.searchParams.delete(APP_VIEW_QUERY_PARAM);
+        } else {
+            url.pathname = resolveAppPathname('');
+        }
+        if (nextView && nextView !== 'lms') {
             url.searchParams.set(APP_VIEW_QUERY_PARAM, nextView);
         } else {
             url.searchParams.delete(APP_VIEW_QUERY_PARAM);
@@ -24134,6 +24192,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         // Main App
         const App = () => {
+            const location = useLocation();
+            const requestedViewFromLocation = useMemo(
+                () => readAppViewFromUrl(location),
+                [location.pathname, location.search]
+            );
             const currentMonth = new Date().toISOString().slice(0, 7);
             const getStoredValue = (key, fallback) => {
                 try {
@@ -26508,7 +26571,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             useEffect(() => {
                 if (!user) return;
 
-                const requestedViewFromUrl = readAppViewFromUrl();
+                const requestedViewFromUrl = requestedViewFromLocation;
                 if (user.role === 'trainer') {
                     const trainerAllowedViews = new Set(['surveys', 'manage_operators', 'lms']);
                     if (requestedViewFromUrl && trainerAllowedViews.has(requestedViewFromUrl)) {
@@ -26527,7 +26590,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (isAdminLikeRoleFn(user?.role)) setView('sv_list');
                 else if (isSupervisorRole(user?.role)) setView('operators');
                 else setView('hours');
-            }, [user?.id, user?.role, canAccessLmsSection]);
+            }, [user?.id, user?.role, canAccessLmsSection, requestedViewFromLocation]);
 
             useEffect(() => {
                 if (user?.role === 'trainer' && !['surveys', 'manage_operators', 'lms'].includes(view)) {

@@ -1,15 +1,19 @@
 ﻿import './staleBundleRecovery';
 import React from 'react';
 import ReactDOM from 'react-dom/client';
+import { BrowserRouter } from 'react-router-dom';
 import App, { ErrorBoundary } from './App';
 import './styles.css';
 
 try {
+  const routerBase = import.meta.env.BASE_URL || '/';
   const root = ReactDOM.createRoot(document.getElementById('root'));
   root.render(
-    <ErrorBoundary>
-      <App />
-    </ErrorBoundary>
+    <BrowserRouter basename={routerBase}>
+      <ErrorBoundary>
+        <App />
+      </ErrorBoundary>
+    </BrowserRouter>
   );
 } catch (err) {
   console.error('Root rendering error:', err);
