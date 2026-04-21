@@ -17411,6 +17411,7 @@ def _lms_get_lesson_context_tx(cursor, user_id, lesson_id):
             COALESCE(l.allow_fast_forward, FALSE),
             COALESCE(l.completion_threshold, %s),
             m.title as module_title,
+            COALESCE(NULLIF(TRIM(LOWER(l.lesson_type)), ''), 'video') AS lesson_type,
             vm.metadata as video_metadata
         FROM lms_lessons l
         JOIN lms_modules m ON m.id = l.module_id
@@ -17440,7 +17441,7 @@ def _lms_get_lesson_context_tx(cursor, user_id, lesson_id):
     assignment_id = int(row[0])
     lesson_id = int(row[5])
     lesson_duration_seconds = max(0.0, _lms_to_float(row[8], 0.0))
-    video_metadata = _lms_parse_json(row[12], {})
+    video_metadata = _lms_parse_json(row[13], {})
     if isinstance(video_metadata, dict):
         video_duration_seconds = max(0.0, _lms_to_float(video_metadata.get("duration_seconds"), 0.0))
         if video_duration_seconds > 0:
@@ -17459,6 +17460,7 @@ def _lms_get_lesson_context_tx(cursor, user_id, lesson_id):
         "allow_fast_forward": bool(row[9]),
         "completion_threshold": float(row[10] or LMS_COMPLETION_THRESHOLD),
         "module_title": row[11],
+        "lesson_type": str(row[12] or 'video').strip().lower() or 'video',
         "progress": progress,
         "session": session
     }
@@ -18078,7 +18080,8 @@ def _lms_course_structure_tx(cursor, course_id, course_version_id, include_test_
     cursor.execute("""
         SELECT
             l.id, l.module_id, l.title, l.description, l.position,
-            l.duration_seconds, COALESCE(l.allow_fast_forward, FALSE), COALESCE(l.completion_threshold, %s)
+            l.duration_seconds, COALESCE(l.allow_fast_forward, FALSE), COALESCE(l.completion_threshold, %s),
+            COALESCE(NULLIF(TRIM(LOWER(l.lesson_type)), ''), 'video') AS lesson_type
         FROM lms_lessons l
         JOIN lms_modules m ON m.id = l.module_id
         WHERE m.course_version_id = %s
@@ -18120,6 +18123,28 @@ def _lms_course_structure_tx(cursor, course_id, course_version_id, include_test_
     for row in lessons_rows:
         lesson_id = int(row[0])
         module_id = int(row[1])
+        lesson_materials = material_by_lesson.get(lesson_id, [])
+        lesson_type = str(row[8] or 'video').strip().lower() or 'video'
+        combined_blocks = []
+        if lesson_type == 'combined':
+            for material in lesson_materials:
+                block_type = str(material.get("material_type") or "").strip().lower()
+                if block_type not in ("text", "video"):
+                    continue
+                combined_blocks.append({
+                    "id": int(material.get("id") or 0) or None,
+                    "type": block_type,
+                    "title": material.get("title"),
+                    "content_text": material.get("content_text"),
+                    "content_url": material.get("content_url") or material.get("url"),
+                    "url": material.get("url"),
+                    "signed_url": material.get("signed_url"),
+                    "mime_type": material.get("mime_type"),
+                    "bucket": material.get("bucket"),
+                    "blob_path": material.get("blob_path"),
+                    "metadata": material.get("metadata") if isinstance(material.get("metadata"), dict) else {},
+                    "position": int(material.get("position") or 1),
+                })
         lessons_by_module.setdefault(module_id, []).append({
             "id": lesson_id,
             "module_id": module_id,
@@ -18129,7 +18154,9 @@ def _lms_course_structure_tx(cursor, course_id, course_version_id, include_test_
             "duration_seconds": int(row[5] or 0),
             "allow_fast_forward": bool(row[6]),
             "completion_threshold": float(row[7] or LMS_COMPLETION_THRESHOLD),
-            "materials": material_by_lesson.get(lesson_id, [])
+            "lesson_type": lesson_type,
+            "materials": lesson_materials,
+            "blocks": combined_blocks
         })
 
     modules = []
@@ -18323,19 +18350,79 @@ def _lms_insert_course_structure_tx(cursor, requester_id, version_id, modules, t
                 continue
             lesson_desc = str(lesson.get('description') or '').strip() or None
             lesson_type = str(lesson.get('lesson_type') or lesson.get('type') or '').strip().lower()
+            if lesson_type not in ('video', 'text', 'combined'):
+                lesson_type = 'video'
             lesson_materials = lesson.get('materials') if isinstance(lesson.get('materials'), list) else []
+            lesson_blocks = lesson.get('blocks') if isinstance(lesson.get('blocks'), list) else []
+            if lesson_type == 'combined':
+                combined_materials = []
+                for block_index, block in enumerate(lesson_blocks, start=1):
+                    if not isinstance(block, dict):
+                        continue
+                    block_type = str(block.get('type') or block.get('material_type') or '').strip().lower()
+                    if block_type not in ('text', 'video'):
+                        continue
+                    block_title = str(block.get('title') or '').strip()
+                    if not block_title:
+                        block_title = "Текстовый блок" if block_type == 'text' else f"Видео блок {block_index}"
+                    block_content_text = str(block.get('content_text') or '').strip() or None
+                    block_content_url = str(block.get('content_url') or block.get('signed_url') or block.get('url') or '').strip() or None
+                    block_mime = str(block.get('mime_type') or block.get('content_type') or '').strip() or None
+                    block_bucket = str(block.get('bucket') or block.get('gcs_bucket') or '').strip() or None
+                    block_blob = str(block.get('blob_path') or block.get('gcs_blob_path') or '').strip() or None
+                    block_meta = block.get('metadata') if isinstance(block.get('metadata'), dict) else {}
+                    if not block_content_text and not block_content_url:
+                        continue
+                    combined_materials.append({
+                        "title": block_title,
+                        "material_type": block_type,
+                        "content_text": block_content_text,
+                        "content_url": block_content_url,
+                        "mime_type": block_mime,
+                        "bucket": block_bucket,
+                        "blob_path": block_blob,
+                        "metadata": {**block_meta, "combined_block": True},
+                        "position": max(1, _lms_to_int(block.get('position'), block_index)),
+                    })
+
+                extra_materials = []
+                for material in lesson_materials:
+                    if not isinstance(material, dict):
+                        continue
+                    material_type = str(material.get('material_type') or material.get('type') or '').strip().lower()
+                    if material_type in ('text', 'video'):
+                        continue
+                    extra_materials.append(material)
+
+                if not combined_materials:
+                    fallback_text = str(lesson.get('content_text') or lesson_desc or '').strip()
+                    if fallback_text:
+                        combined_materials.append({
+                            "title": "Текстовый блок",
+                            "material_type": "text",
+                            "content_text": fallback_text,
+                            "content_url": None,
+                            "mime_type": "text/html",
+                            "bucket": None,
+                            "blob_path": None,
+                            "metadata": {"combined_block": True},
+                            "position": 1,
+                        })
+
+                lesson_materials = [*combined_materials, *extra_materials]
             lesson_position = max(1, _lms_to_int(lesson.get('position'), lesson_index))
             cursor.execute("""
                 INSERT INTO lms_lessons (
-                    module_id, title, description, position, duration_seconds,
+                    module_id, title, description, lesson_type, position, duration_seconds,
                     allow_fast_forward, completion_threshold, created_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, (
                 module_id,
                 lesson_title,
                 lesson_desc,
+                lesson_type,
                 lesson_position,
                 max(0, _lms_to_int(lesson.get('duration_seconds'), 0)),
                 _lms_parse_bool(lesson.get('allow_fast_forward'), False),
@@ -18355,7 +18442,7 @@ def _lms_insert_course_structure_tx(cursor, requester_id, version_id, modules, t
                 material_type = str(material.get('material_type') or material.get('type') or 'file').strip().lower()
                 if material_type not in ('video', 'pdf', 'link', 'text', 'file'):
                     material_type = 'file'
-                content_url = str(material.get('content_url') or material.get('url') or '').strip() or None
+                content_url = str(material.get('content_url') or material.get('signed_url') or material.get('url') or '').strip() or None
                 content_text = str(material.get('content_text') or '').strip() or None
                 if material_type == 'text' and content_text:
                     has_text_material = True
@@ -18548,6 +18635,111 @@ def _lms_insert_course_structure_tx(cursor, requester_id, version_id, modules, t
 
     return {
         "module_ids": created_module_ids
+    }
+
+
+def _lms_combined_video_progress_tx(cursor, lesson_id, user_id):
+    cursor.execute("""
+        SELECT id
+        FROM lms_lesson_materials
+        WHERE lesson_id = %s
+          AND material_type = 'video'
+        ORDER BY position ASC, id ASC
+    """, (lesson_id,))
+    material_ids = [int(row[0]) for row in cursor.fetchall() if row and row[0] is not None]
+    if not material_ids:
+        return [], {}
+
+    cursor.execute("""
+        SELECT
+            material_id,
+            MAX(progress_ratio) AS max_ratio
+        FROM (
+            SELECT
+                CASE
+                    WHEN COALESCE(payload->>'material_id', '') ~ '^[0-9]+$'
+                        THEN (payload->>'material_id')::INTEGER
+                    ELSE NULL
+                END AS material_id,
+                CASE
+                    WHEN COALESCE(payload->>'progress_ratio', '') ~ '^[0-9]+(\\.[0-9]+)?$'
+                        THEN (payload->>'progress_ratio')::NUMERIC
+                    ELSE 0
+                END AS progress_ratio
+            FROM lms_learning_events
+            WHERE lesson_id = %s
+              AND user_id = %s
+              AND event_type = 'combined_video_progress'
+        ) ev
+        WHERE material_id = ANY(%s)
+        GROUP BY material_id
+    """, (lesson_id, user_id, material_ids))
+    rows = cursor.fetchall()
+    ratio_by_material = {}
+    for row in rows:
+        material_id = int(row[0])
+        ratio_raw = float(row[1] or 0.0)
+        ratio_by_material[material_id] = min(100.0, max(0.0, ratio_raw))
+    return material_ids, ratio_by_material
+
+
+def _lms_lesson_linked_test_state_tx(cursor, assignment_id, user_id, course_version_id, lesson_id):
+    cursor.execute("""
+        SELECT
+            t.id,
+            t.title,
+            t.description,
+            t.pass_threshold,
+            t.attempt_limit,
+            t.time_limit_minutes,
+            t.question_count,
+            t.random_order,
+            t.is_final,
+            t.status
+        FROM lms_tests t
+        WHERE t.course_version_id = %s
+          AND t.source_lesson_id = %s
+          AND t.status <> 'archived'
+        ORDER BY COALESCE(t.is_final, FALSE) ASC, COALESCE(t.position, 2147483647) ASC, t.id ASC
+        LIMIT 1
+    """, (course_version_id, lesson_id))
+    row = cursor.fetchone()
+    if not row:
+        return None
+
+    test_id = int(row[0])
+    cursor.execute("""
+        SELECT
+            MAX(score_percent) FILTER (WHERE status = 'finished') AS best_score,
+            BOOL_OR(COALESCE(passed, FALSE)) FILTER (WHERE status = 'finished') AS passed_any,
+            COUNT(*) AS attempts_used
+        FROM lms_test_attempts
+        WHERE assignment_id = %s
+          AND user_id = %s
+          AND test_id = %s
+    """, (assignment_id, user_id, test_id))
+    progress_row = cursor.fetchone() or (None, False, 0)
+    attempts_used = int(progress_row[2] or 0)
+    pass_threshold = float(row[3] if row[3] is not None else LMS_DEFAULT_PASS_THRESHOLD)
+    attempt_limit = int(row[4] if row[4] is not None else LMS_DEFAULT_ATTEMPT_LIMIT)
+    passed_any = bool(progress_row[1]) if progress_row[1] is not None else False
+    can_start = not passed_any and attempts_used < attempt_limit
+
+    return {
+        "id": test_id,
+        "title": row[1],
+        "description": row[2],
+        "pass_threshold": pass_threshold,
+        "attempt_limit": attempt_limit,
+        "time_limit_minutes": int(row[5]) if row[5] is not None else None,
+        "question_count": int(row[6]) if row[6] is not None else None,
+        "random_order": _lms_parse_bool(row[7], True),
+        "is_final": bool(row[8]),
+        "status": row[9],
+        "best_score": float(progress_row[0]) if progress_row[0] is not None else None,
+        "passed_any": passed_any,
+        "attempts_used": attempts_used,
+        "can_start": can_start
     }
 
 
@@ -18827,7 +19019,7 @@ def lms_course_detail(course_id):
             cursor.execute("""
                 SELECT
                     lesson_id, status, completion_ratio, max_position_seconds,
-                    confirmed_seconds, active_seconds, completed_at
+                    confirmed_seconds, active_seconds, completed_at, content_completed_at
                 FROM lms_lesson_progress
                 WHERE assignment_id = %s
                   AND user_id = %s
@@ -18841,7 +19033,8 @@ def lms_course_detail(course_id):
                     "max_position_seconds": float(row[3] or 0.0),
                     "confirmed_seconds": float(row[4] or 0.0),
                     "active_seconds": int(row[5] or 0),
-                    "completed_at": row[6].isoformat() if row[6] else None
+                    "completed_at": row[6].isoformat() if row[6] else None,
+                    "content_completed_at": row[7].isoformat() if row[7] else None
                 }
 
             cursor.execute("""
@@ -18953,6 +19146,39 @@ def lms_lesson_detail(lesson_id):
             session = context["session"]
             completion_ratio = float(progress[4] or 0.0)
             required_ratio = max(float(context["completion_threshold"]), float(LMS_COMPLETION_THRESHOLD))
+            lesson_type = str(context.get("lesson_type") or "video").strip().lower() or "video"
+            linked_test = _lms_lesson_linked_test_state_tx(
+                cursor,
+                assignment_id=int(context["assignment_id"]),
+                user_id=int(requester_id),
+                course_version_id=int(context["course_version_id"]),
+                lesson_id=int(lesson_id)
+            )
+            progress_status = str(progress[1] or '').strip().lower()
+            content_completed = progress_status == 'completed'
+            if linked_test:
+                linked_test["content_completed"] = content_completed
+                linked_test["can_start"] = bool(linked_test.get("can_start")) and content_completed
+            combined_video_progress = None
+            if lesson_type == 'combined':
+                material_ids, ratio_by_material = _lms_combined_video_progress_tx(
+                    cursor,
+                    lesson_id=int(lesson_id),
+                    user_id=int(requester_id)
+                )
+                combined_video_progress = [
+                    {
+                        "material_id": material_id,
+                        "progress_ratio": float(ratio_by_material.get(material_id, 0.0))
+                    }
+                    for material_id in material_ids
+                ]
+                if material_ids:
+                    can_complete = all(float(ratio_by_material.get(material_id, 0.0)) >= required_ratio for material_id in material_ids)
+                else:
+                    can_complete = True
+            else:
+                can_complete = completion_ratio >= required_ratio
 
         return jsonify({
             "status": "success",
@@ -18961,6 +19187,7 @@ def lms_lesson_detail(lesson_id):
                 "title": context["lesson_title"],
                 "description": context["lesson_description"],
                 "module_title": context["module_title"],
+                "lesson_type": lesson_type,
                 "duration_seconds": context["duration_seconds"],
                 "allow_fast_forward": context["allow_fast_forward"],
                 "completion_threshold": required_ratio
@@ -18987,14 +19214,16 @@ def lms_lesson_detail(lesson_id):
                 "last_heartbeat_at": progress[6].isoformat() if progress[6] else None,
                 "tab_hidden_count": int(progress[7] or 0),
                 "stale_gap_count": int(progress[8] or 0),
-                "can_complete": completion_ratio >= required_ratio
+                "can_complete": can_complete
             },
             "anti_cheat": {
                 "heartbeat_seconds": LMS_HEARTBEAT_SECONDS,
                 "stale_gap_seconds": LMS_STALE_GAP_SECONDS,
                 "completion_threshold_percent": required_ratio
             },
-            "materials": materials
+            "materials": materials,
+            "linked_test": linked_test,
+            "combined_video_progress": combined_video_progress
         }), 200
     except Exception as e:
         logging.exception("Error in /api/lms/lessons/<lesson_id>")
@@ -19278,6 +19507,7 @@ def lms_lesson_complete(lesson_id):
             current_ratio = float(progress[4] or 0.0)
             last_heartbeat_at = progress[6]
             required_ratio = max(float(context["completion_threshold"]), float(LMS_COMPLETION_THRESHOLD))
+            lesson_type = str(context.get("lesson_type") or "video").strip().lower() or "video"
             cursor.execute("""
                 SELECT EXISTS(
                     SELECT 1
@@ -19288,14 +19518,37 @@ def lms_lesson_complete(lesson_id):
             """, (lesson_id,))
             has_video_material = bool((cursor.fetchone() or [False])[0])
 
-            if has_video_material and current_ratio < required_ratio:
+            if lesson_type == 'combined' and has_video_material:
+                material_ids, ratio_by_material = _lms_combined_video_progress_tx(
+                    cursor,
+                    lesson_id=int(lesson_id),
+                    user_id=int(requester_id)
+                )
+                incomplete_videos = [
+                    {
+                        "material_id": material_id,
+                        "progress_ratio": float(ratio_by_material.get(material_id, 0.0))
+                    }
+                    for material_id in material_ids
+                    if float(ratio_by_material.get(material_id, 0.0)) < required_ratio
+                ]
+                if incomplete_videos:
+                    return jsonify({
+                        "error": "Combined lesson videos are not fully watched",
+                        "required_ratio": required_ratio,
+                        "incomplete_videos": incomplete_videos
+                    }), 409
+
+            enforce_video_watch = has_video_material and lesson_type != 'combined'
+
+            if enforce_video_watch and current_ratio < required_ratio:
                 return jsonify({
                     "error": "Lesson completion threshold is not reached",
                     "required_ratio": required_ratio,
                     "current_ratio": current_ratio
                 }), 409
 
-            if has_video_material and isinstance(last_heartbeat_at, datetime):
+            if enforce_video_watch and isinstance(last_heartbeat_at, datetime):
                 gap = (_lms_now() - last_heartbeat_at).total_seconds()
                 if gap > float(LMS_STALE_GAP_SECONDS):
                     return jsonify({
@@ -19309,11 +19562,12 @@ def lms_lesson_complete(lesson_id):
                 UPDATE lms_lesson_progress
                 SET status = 'completed',
                     completion_ratio = GREATEST(completion_ratio, %s),
+                    content_completed_at = COALESCE(content_completed_at, %s),
                     completed_at = COALESCE(completed_at, %s),
                     updated_at = %s
                 WHERE id = %s
-                RETURNING completed_at, completion_ratio
-            """, (required_ratio, now, now, progress_id))
+                RETURNING completed_at, completion_ratio, content_completed_at
+            """, (required_ratio, now, now, now, progress_id))
             updated = cursor.fetchone()
 
             completion = _lms_try_complete_assignment_tx(
@@ -19336,6 +19590,7 @@ def lms_lesson_complete(lesson_id):
             "lesson_id": lesson_id,
             "completed_at": updated[0].isoformat() if updated and updated[0] else None,
             "completion_ratio": float(updated[1] or required_ratio) if updated else required_ratio,
+            "content_completed_at": updated[2].isoformat() if updated and updated[2] else None,
             "assignment_completion": completion
         }), 200
     except Exception as e:
