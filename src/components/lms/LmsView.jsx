@@ -3322,7 +3322,7 @@ function CourseDetail({
                             </div>
                             <div className="flex-1">
                               <p className={`text-xs font-medium ${lessonLocked ? "text-slate-400" : "text-slate-800 group-hover:text-indigo-700"}`}>{lessonIndex + 1}. {l.title}</p>
-                              {!isManagerMode && <p className="text-[10px] text-slate-400 mt-0.5">{l.type === "video" ? "Видеоурок" : l.type === "text" ? "Текстовый материал" : "Тест"} · {l.duration}</p>}
+                              {!isManagerMode && <p className="text-[10px] text-slate-400 mt-0.5">{l.type === "video" ? "Видеоурок" : l.type === "text" ? "Текстовый материал" : l.type === "combined" ? "Комбо-урок" : "Тест"} · {l.duration}</p>}
                             </div>
                             {!isManagerMode && l.requiresTest && !lessonLocked && <span className="text-[10px] bg-violet-50 text-violet-600 px-1.5 py-0.5 rounded-full font-medium">Тест</span>}
                           </div>
