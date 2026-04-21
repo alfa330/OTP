@@ -4003,6 +4003,7 @@ function CombinedLesson({
   const [completing, setCompleting] = useState(false);
   const [completed, setCompleted] = useState(resolveContentCompletion(lesson));
   const [videoProgressMap, setVideoProgressMap] = useState({});
+  const [isCombinedTestModalOpen, setIsCombinedTestModalOpen] = useState(false);
   const materials = Array.isArray(lesson?.materials) ? lesson.materials : [];
   const linkedTest = lesson?.combinedTest && typeof lesson.combinedTest === "object" ? lesson.combinedTest : null;
   const lessonApiId = Number(lesson?.apiLessonId || 0);
@@ -4068,6 +4069,23 @@ function CombinedLesson({
     const blockKey = resolveBlockKey(blockItem, blockIndex);
     return clampLmsProgress(videoProgressMap?.[blockKey]) >= completionThreshold;
   });
+  const linkedTestStatus = String(linkedTest?.status || "").toLowerCase();
+  const linkedTestPending = Boolean(linkedTest) && linkedTestStatus !== "completed";
+
+  useEffect(() => {
+    setIsCombinedTestModalOpen(false);
+  }, [lesson?.id]);
+
+  useEffect(() => {
+    if (!isCombinedTestModalOpen || typeof window === "undefined") return undefined;
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") {
+        setIsCombinedTestModalOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isCombinedTestModalOpen]);
 
   const handleComplete = async () => {
     if (completed || completing) return;
@@ -4083,6 +4101,17 @@ function CombinedLesson({
     } finally {
       setCompleting(false);
     }
+  };
+
+  const openCombinedTestModal = () => {
+    if (!linkedTest || isManagerMode) return;
+    if (typeof setQuizAnswers === "function") setQuizAnswers({});
+    if (typeof setQuizView === "function") setQuizView("intro");
+    setIsCombinedTestModalOpen(true);
+  };
+
+  const closeCombinedTestModal = () => {
+    setIsCombinedTestModalOpen(false);
   };
 
   return (
@@ -4176,7 +4205,7 @@ function CombinedLesson({
         </div>
       )}
 
-      {completed && (
+      {false && completed && (
         linkedTest && !isManagerMode ? (
           <ApiQuizSection
             quizView={quizView}
@@ -4194,6 +4223,64 @@ function CombinedLesson({
             <CheckCircle size={12} /> Урок завершен
           </div>
         )
+      )}
+      {completed && !isManagerMode && linkedTestPending && (
+        <div className="rounded-2xl border border-indigo-200 bg-indigo-50/60 px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <div>
+            <p className="text-xs font-semibold text-indigo-900">{"\u041c\u0430\u0442\u0435\u0440\u0438\u0430\u043b\u044b \u043a\u043e\u043c\u0431\u043e-\u0443\u0440\u043e\u043a\u0430 \u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u044b"}</p>
+            <p className="text-[11px] text-indigo-700 mt-0.5">{"\u0422\u0435\u0441\u0442 \u043e\u0442\u043a\u0440\u043e\u0435\u0442\u0441\u044f \u0432 \u043e\u0442\u0434\u0435\u043b\u044c\u043d\u043e\u043c \u043e\u043a\u043d\u0435"}</p>
+          </div>
+          <button
+            type="button"
+            onClick={openCombinedTestModal}
+            className="inline-flex items-center justify-center gap-2 px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold transition-colors"
+          >
+            <PlayCircle size={13} /> {"\u041f\u0435\u0440\u0435\u0439\u0442\u0438 \u043a \u0442\u0435\u0441\u0442\u0443"}
+          </button>
+        </div>
+      )}
+      {false && completed && (!linkedTest || isManagerMode || !linkedTestPending) && (
+        <div className="flex items-center gap-1.5 text-xs text-emerald-700 bg-emerald-50 px-3 py-2 rounded-xl font-semibold w-fit">
+          <CheckCircle size={12} /> РЈСЂРѕРє Р·Р°РІРµСЂС€РµРЅ
+        </div>
+      )}
+      {completed && (!linkedTest || isManagerMode || !linkedTestPending) && (
+        <div className="flex items-center gap-1.5 text-xs text-emerald-700 bg-emerald-50 px-3 py-2 rounded-xl font-semibold w-fit">
+          <CheckCircle size={12} /> {"\u0423\u0440\u043e\u043a \u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043d"}
+        </div>
+      )}
+      {isCombinedTestModalOpen && linkedTest && !isManagerMode && (
+        <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-slate-900/55 backdrop-blur-sm" onClick={closeCombinedTestModal}>
+          <div className="w-full max-w-5xl max-h-[92vh] bg-white rounded-2xl border border-slate-200 shadow-xl flex flex-col overflow-hidden" onClick={(event) => event.stopPropagation()}>
+            <div className="px-5 py-3 border-b border-slate-200 bg-slate-50 flex items-center justify-between gap-3">
+              <div>
+                <p className="text-[11px] uppercase tracking-wide text-slate-500">{"\u041a\u043e\u043c\u0431\u043e-\u0443\u0440\u043e\u043a"}</p>
+                <p className="text-sm font-semibold text-slate-900">{linkedTest?.title || "Тест"}</p>
+              </div>
+              <button
+                type="button"
+                onClick={closeCombinedTestModal}
+                className="inline-flex items-center justify-center p-2 rounded-lg text-slate-500 hover:text-slate-700 hover:bg-white border border-slate-200 transition-colors"
+                aria-label={"\u0417\u0430\u043a\u0440\u044b\u0442\u044c"}
+              >
+                <X size={14} />
+              </button>
+            </div>
+            <div className="p-4 sm:p-5 bg-slate-50 overflow-y-auto custom-scrollbar">
+              <ApiQuizSection
+                quizView={quizView}
+                setQuizView={setQuizView}
+                answers={quizAnswers}
+                setAnswers={setQuizAnswers}
+                course={course}
+                lesson={linkedTest}
+                lmsRequest={lmsRequest}
+                onFinished={onQuizFinished}
+                emitToast={emitToast}
+              />
+            </div>
+          </div>
+        </div>
       )}
       {isManagerMode && linkedTest && (
         <div className="rounded-xl border border-violet-200 bg-violet-50 px-4 py-3 text-xs text-violet-700">
