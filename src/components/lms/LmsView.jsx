@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { matchPath, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import ReactQuill from "react-quill";
 import DOMPurify from "dompurify";
 import {
@@ -1774,7 +1775,108 @@ const buildAnswerPayloadForApi = (question, answerValue) => {
 
 // ─── MAIN APP ─────────────────────────────────────────────────────────────────
 
+const LMS_CATALOG_TABS = new Set(["available", "completed", "certificates", "notifications"]);
+const LMS_ADMIN_TABS = new Set(["analytics", "employees", "courses"]);
+
+const normalizeLmsCatalogTab = (value) => {
+  const normalized = String(value || "").trim().toLowerCase();
+  return LMS_CATALOG_TABS.has(normalized) ? normalized : "available";
+};
+
+const normalizeLmsAdminTab = (value) => {
+  const normalized = String(value || "").trim().toLowerCase();
+  return LMS_ADMIN_TABS.has(normalized) ? normalized : "analytics";
+};
+
+const buildLmsCatalogPath = (tab = "available") => {
+  const normalizedTab = normalizeLmsCatalogTab(tab);
+  return normalizedTab === "available" ? "/lms/catalog" : `/lms/catalog?tab=${encodeURIComponent(normalizedTab)}`;
+};
+
+const buildLmsAdminPath = (tab = "analytics") => {
+  const normalizedTab = normalizeLmsAdminTab(tab);
+  return normalizedTab === "analytics" ? "/lms/admin" : `/lms/admin?tab=${encodeURIComponent(normalizedTab)}`;
+};
+
+const buildLmsCoursePath = (courseId) => `/lms/course/${encodeURIComponent(String(courseId || ""))}`;
+
+const buildLmsLessonPath = (courseId, lessonId) =>
+  `${buildLmsCoursePath(courseId)}/lesson/${encodeURIComponent(String(lessonId || ""))}`;
+
+const buildLmsBuilderPath = (courseId = null, options = {}) => {
+  const normalizedCourseId = Number(courseId || 0) || null;
+  const normalizedDraftVersionId = Number(options?.draftVersionId || 0) || null;
+  const path = normalizedCourseId ? `/lms/builder/${normalizedCourseId}` : "/lms/builder";
+  if (!normalizedDraftVersionId) return path;
+  return `${path}?draftVersionId=${encodeURIComponent(String(normalizedDraftVersionId))}`;
+};
+
+const resolveLmsRouteState = (pathname = "") => {
+  const lessonMatch = matchPath("/lms/course/:courseId/lesson/:lessonId", pathname);
+  if (lessonMatch) {
+    const courseId = Number(lessonMatch.params?.courseId || 0) || null;
+    const lessonId = String(lessonMatch.params?.lessonId || "").trim() || null;
+    if (!courseId || !lessonId) return null;
+    return {
+      view: "lesson",
+      courseId,
+      lessonId,
+    };
+  }
+
+  const courseMatch = matchPath("/lms/course/:courseId", pathname);
+  if (courseMatch) {
+    const courseId = Number(courseMatch.params?.courseId || 0) || null;
+    if (!courseId) return null;
+    return {
+      view: "course",
+      courseId,
+      lessonId: null,
+    };
+  }
+
+  const builderMatch = matchPath("/lms/builder/:courseId", pathname);
+  if (builderMatch) {
+    const courseId = Number(builderMatch.params?.courseId || 0) || null;
+    if (!courseId) return null;
+    return {
+      view: "builder",
+      courseId,
+      lessonId: null,
+    };
+  }
+
+  if (pathname === "/lms" || pathname === "/lms/") {
+    return { view: "catalog", courseId: null, lessonId: null };
+  }
+
+  if (matchPath("/lms/catalog", pathname)) {
+    return { view: "catalog", courseId: null, lessonId: null };
+  }
+
+  if (matchPath("/lms/admin", pathname)) {
+    return { view: "admin", courseId: null, lessonId: null };
+  }
+
+  if (matchPath("/lms/builder", pathname)) {
+    return { view: "builder", courseId: null, lessonId: null };
+  }
+
+  return null;
+};
+
+const isModifiedRouteEvent = (event) => Boolean(
+  event?.metaKey
+  || event?.ctrlKey
+  || event?.shiftKey
+  || event?.altKey
+  || event?.button === 1
+);
+
 export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showToast }) {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [searchParams, setSearchParams] = useSearchParams();
   const role = normalizeLmsRole(user?.role);
   const canUseLearnerApi = role === "operator" || role === "trainee";
   const canUseManagerApi = role === "sv" || role === "trainer" || role === "admin" || role === "super_admin";
@@ -1782,16 +1884,21 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
   const canDeleteCourses = role === "sv" || role === "admin" || role === "super_admin";
   const canGoCatalog = canUseLearnerApi;
   const apiRoot = String(apiBaseUrl || "").trim().replace(/\/+$/, "");
-
-  const [view, setView] = useState(canUseLearnerApi ? "catalog" : "admin");
+  const routeState = useMemo(() => resolveLmsRouteState(location.pathname), [location.pathname]);
+  const view = routeState?.view || (canGoCatalog ? "catalog" : "admin");
+  const routeCourseId = routeState?.courseId || null;
+  const routeLessonId = routeState?.lessonId || null;
+  const catalogTab = normalizeLmsCatalogTab(searchParams.get("tab"));
+  const adminTab = normalizeLmsAdminTab(searchParams.get("tab"));
+  const builderInitialCourseId = view === "builder" ? routeCourseId : null;
+  const builderInitialDraftVersionId = view === "builder"
+    ? (Number(searchParams.get("draftVersionId") || 0) || null)
+    : null;
+  const routeBackTo = typeof location.state?.backTo === "string" ? location.state.backTo : "";
   const [selectedCourse, setSelectedCourse] = useState(null);
   const [selectedLesson, setSelectedLesson] = useState(null);
-  const [catalogTab, setCatalogTab] = useState("available");
   const [searchQuery, setSearchQuery] = useState("");
   const isAdmin = canUseManagerApi;
-  const [adminTab, setAdminTab] = useState("analytics");
-  const [builderInitialCourseId, setBuilderInitialCourseId] = useState(null);
-  const [builderInitialDraftVersionId, setBuilderInitialDraftVersionId] = useState(null);
   const [quizView, setQuizView] = useState("intro");
   const [quizAnswers, setQuizAnswers] = useState({});
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -1812,14 +1919,19 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
   const [apiMode, setApiMode] = useState(false);
   const showToastRef = useRef(showToast);
   const withAccessTokenHeaderRef = useRef(withAccessTokenHeader);
+  const routeLoadTokenRef = useRef(0);
   const homeLoadPromiseRef = useRef(null);
-  const adminLoadPromiseRef = useRef(null);
-
-  useEffect(() => {
-    if (!canUseLearnerApi) {
-      setView("admin");
-    }
-  }, [canUseLearnerApi]);
+  const homeLoadedRef = useRef(false);
+  const adminLoadPromisesRef = useRef(new Map());
+  const adminCacheRef = useRef({
+    dashboardLoaded: false,
+    builderLoaded: false,
+    courseAnalytics: new Set(),
+  });
+  const courseCacheRef = useRef(new Map());
+  const courseLoadPromisesRef = useRef(new Map());
+  const lessonCacheRef = useRef(new Map());
+  const lessonLoadPromisesRef = useRef(new Map());
 
   useEffect(() => {
     showToastRef.current = showToast;
@@ -1865,6 +1977,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
       method,
       headers: finalHeaders,
       body,
+      signal: options?.signal,
       credentials: "include",
     });
 
@@ -1879,8 +1992,16 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
     return payload;
   }, [apiRoot]);
 
-  const loadLearnerDashboard = useCallback(async () => {
-    if (!apiRoot || !canUseLearnerApi) return;
+  const loadLearnerDashboard = useCallback(async (options = {}) => {
+    const force = Boolean(options?.force);
+    if (!apiRoot || !canUseLearnerApi) return null;
+    if (!force && homeLoadedRef.current) {
+      return {
+        courses,
+        certificates,
+        notifications,
+      };
+    }
     if (homeLoadPromiseRef.current) {
       return homeLoadPromiseRef.current;
     }
@@ -1936,10 +2057,17 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
       setCourses(mappedCourses.length ? mappedCourses : []);
       setCertificates(mappedCertificates);
       setNotifications(mappedNotifications);
+      homeLoadedRef.current = true;
       setApiMode(true);
+      return {
+        courses: mappedCourses.length ? mappedCourses : [],
+        certificates: mappedCertificates,
+        notifications: mappedNotifications,
+      };
     } catch (error) {
       setHomeError(String(error?.message || "Не удалось загрузить данные LMS"));
       emitToast(`LMS: ${String(error?.message || "ошибка загрузки")}`, "error");
+      homeLoadedRef.current = false;
       setApiMode(false);
       } finally {
         setLoadingHome(false);
@@ -1954,37 +2082,106 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
         homeLoadPromiseRef.current = null;
       }
     }
-  }, [apiRoot, canUseLearnerApi, lmsRequest, user?.name, user?.login, emitToast]);
+  }, [apiRoot, canUseLearnerApi, lmsRequest, user?.name, user?.login, emitToast, courses, certificates, notifications]);
 
-  const loadAdminData = useCallback(async () => {
-    if (!apiRoot || !canUseManagerApi) return;
-    if (adminLoadPromiseRef.current) {
-      return adminLoadPromiseRef.current;
+  const loadAdminData = useCallback(async (options = {}) => {
+    const scope = String(options?.scope || "dashboard").trim().toLowerCase() || "dashboard";
+    const force = Boolean(options?.force);
+    const normalizedCourseId = Number(options?.courseId || 0) || null;
+    if (!apiRoot || !canUseManagerApi) return null;
+
+    const cacheState = adminCacheRef.current;
+    if (!force) {
+      if (scope === "dashboard" && cacheState.dashboardLoaded) {
+        return {
+          adminCourses,
+          analytics: adminAnalytics,
+          progressRows: adminProgressRows,
+          attempts: adminAttempts,
+        };
+      }
+      if (scope === "builder" && cacheState.builderLoaded) {
+        return {
+          adminCourses,
+          learners,
+        };
+      }
+      if (scope === "course" && normalizedCourseId && (cacheState.dashboardLoaded || cacheState.courseAnalytics.has(normalizedCourseId))) {
+        return {
+          progressRows: adminProgressRows,
+          attempts: adminAttempts,
+        };
+      }
+    }
+
+    const loadKey = scope === "course" && normalizedCourseId ? `course:${normalizedCourseId}` : scope;
+    const existingPromise = adminLoadPromisesRef.current.get(loadKey);
+    if (existingPromise) {
+      return existingPromise;
     }
 
     const loadPromise = (async () => {
       setLoadingAdmin(true);
       try {
-        if (view === "builder") {
+        if (scope === "builder") {
           const [coursesRes, learnersRes] = await Promise.all([
             lmsRequest("/api/lms/admin/courses"),
             lmsRequest("/api/lms/admin/learners"),
           ]);
-          setAdminCourses(Array.isArray(coursesRes?.courses) ? coursesRes.courses : []);
-          setLearners(Array.isArray(learnersRes?.learners) ? learnersRes.learners : []);
-        } else {
+          const nextCourses = Array.isArray(coursesRes?.courses) ? coursesRes.courses : [];
+          const nextLearners = Array.isArray(learnersRes?.learners) ? learnersRes.learners : [];
+          setAdminCourses(nextCourses);
+          setLearners(nextLearners);
+          cacheState.builderLoaded = true;
+          setApiMode(true);
+          return {
+            adminCourses: nextCourses,
+            learners: nextLearners,
+          };
+        }
+
+        if (scope === "course" && normalizedCourseId) {
+          const [progressRes, attemptsRes] = await Promise.all([
+            lmsRequest(`/api/lms/admin/progress?course_id=${normalizedCourseId}`).catch(() => ({ rows: [] })),
+            lmsRequest(`/api/lms/admin/attempts?course_id=${normalizedCourseId}&limit=1000`).catch(() => ({ attempts: [] })),
+          ]);
+          const nextProgressRows = Array.isArray(progressRes?.rows) ? progressRes.rows : [];
+          const nextAttempts = Array.isArray(attemptsRes?.attempts) ? attemptsRes.attempts : [];
+          setAdminProgressRows(nextProgressRows);
+          setAdminAttempts(nextAttempts);
+          cacheState.courseAnalytics.add(normalizedCourseId);
+          setApiMode(true);
+          return {
+            progressRows: nextProgressRows,
+            attempts: nextAttempts,
+          };
+        }
+
+        {
           const [coursesRes, analyticsRes, progressRes, attemptsRes] = await Promise.all([
             lmsRequest("/api/lms/admin/courses"),
             lmsRequest("/api/lms/admin/analytics"),
             lmsRequest("/api/lms/admin/progress").catch(() => ({ rows: [] })),
             lmsRequest("/api/lms/admin/attempts?limit=1000").catch(() => ({ attempts: [] })),
           ]);
-          setAdminCourses(Array.isArray(coursesRes?.courses) ? coursesRes.courses : []);
-          setAdminAnalytics(analyticsRes && typeof analyticsRes === "object" ? analyticsRes : null);
-          setAdminProgressRows(Array.isArray(progressRes?.rows) ? progressRes.rows : []);
-          setAdminAttempts(Array.isArray(attemptsRes?.attempts) ? attemptsRes.attempts : []);
+          const nextCourses = Array.isArray(coursesRes?.courses) ? coursesRes.courses : [];
+          const nextAnalytics = analyticsRes && typeof analyticsRes === "object" ? analyticsRes : null;
+          const nextProgressRows = Array.isArray(progressRes?.rows) ? progressRes.rows : [];
+          const nextAttempts = Array.isArray(attemptsRes?.attempts) ? attemptsRes.attempts : [];
+          setAdminCourses(nextCourses);
+          setAdminAnalytics(nextAnalytics);
+          setAdminProgressRows(nextProgressRows);
+          setAdminAttempts(nextAttempts);
+          cacheState.dashboardLoaded = true;
+          cacheState.courseAnalytics = new Set();
+          setApiMode(true);
+          return {
+            adminCourses: nextCourses,
+            analytics: nextAnalytics,
+            progressRows: nextProgressRows,
+            attempts: nextAttempts,
+          };
         }
-        setApiMode(true);
     } catch (error) {
       emitToast(`LMS admin: ${String(error?.message || "ошибка загрузки")}`, "error");
       } finally {
@@ -1992,25 +2189,497 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
       }
     })();
 
-    adminLoadPromiseRef.current = loadPromise;
+    adminLoadPromisesRef.current.set(loadKey, loadPromise);
     try {
       return await loadPromise;
     } finally {
-      if (adminLoadPromiseRef.current === loadPromise) {
-        adminLoadPromiseRef.current = null;
+      if (adminLoadPromisesRef.current.get(loadKey) === loadPromise) {
+        adminLoadPromisesRef.current.delete(loadKey);
       }
     }
-  }, [apiRoot, canUseManagerApi, lmsRequest, emitToast, view]);
+  }, [
+    apiRoot,
+    canUseManagerApi,
+    lmsRequest,
+    emitToast,
+    adminCourses,
+    adminAnalytics,
+    adminProgressRows,
+    adminAttempts,
+    learners,
+  ]);
 
-  useEffect(() => {
-    loadLearnerDashboard();
-  }, [loadLearnerDashboard]);
+  const getCourseCacheKey = useCallback((courseId) => {
+    const normalizedCourseId = Number(courseId || 0) || 0;
+    const scope = canUseLearnerApi ? "learner" : "manager";
+    return `${scope}:${normalizedCourseId}`;
+  }, [canUseLearnerApi]);
 
-  useEffect(() => {
-    if (view === "admin" || view === "builder") {
-      loadAdminData();
+  const getLessonCacheKey = useCallback((courseId, lessonId) => (
+    `${getCourseCacheKey(courseId)}:lesson:${String(lessonId || "").trim()}`
+  ), [getCourseCacheKey]);
+
+  const storeLessonInCache = useCallback((courseId, lessonLike) => {
+    const normalizedCourseId = Number(courseId || 0) || null;
+    const normalizedLessonId = String(lessonLike?.id || "").trim() || null;
+    if (!normalizedCourseId || !normalizedLessonId) return null;
+
+    const cacheKey = getLessonCacheKey(normalizedCourseId, normalizedLessonId);
+    const previousLesson = lessonCacheRef.current.get(cacheKey) || {};
+    const nextLesson = {
+      ...previousLesson,
+      ...lessonLike,
+      id: lessonLike?.id ?? previousLesson?.id ?? normalizedLessonId,
+      __detailLoaded: Boolean(lessonLike?.__detailLoaded || previousLesson?.__detailLoaded),
+    };
+    lessonCacheRef.current.set(cacheKey, nextLesson);
+    return nextLesson;
+  }, [getLessonCacheKey]);
+
+  const mergeLessonIntoCourse = useCallback((courseLike, nextLesson) => {
+    if (!courseLike || !nextLesson) return courseLike;
+    let lessonWasUpdated = false;
+    const nextModules = (Array.isArray(courseLike?.modules_data) ? courseLike.modules_data : []).map((moduleItem) => {
+      const nextLessons = (Array.isArray(moduleItem?.lessons) ? moduleItem.lessons : []).map((lessonItem) => {
+        if (String(lessonItem?.id) !== String(nextLesson?.id)) {
+          return lessonItem;
+        }
+        lessonWasUpdated = true;
+        return { ...lessonItem, ...nextLesson };
+      });
+      return lessonWasUpdated ? { ...moduleItem, lessons: nextLessons } : moduleItem;
+    });
+    if (!lessonWasUpdated) return courseLike;
+    return { ...courseLike, modules_data: nextModules };
+  }, []);
+
+  const storeCourseInCache = useCallback((courseLike) => {
+    const normalizedCourseId = Number(courseLike?.id || 0) || null;
+    if (!normalizedCourseId) return null;
+    const cacheKey = getCourseCacheKey(normalizedCourseId);
+    const previousCourse = courseCacheRef.current.get(cacheKey) || {};
+    const nextCourse = { ...previousCourse, ...courseLike, id: normalizedCourseId };
+    courseCacheRef.current.set(cacheKey, nextCourse);
+    return nextCourse;
+  }, [getCourseCacheKey]);
+
+  const invalidateCourseCache = useCallback((courseId = null) => {
+    const normalizedCourseId = Number(courseId || 0) || null;
+    if (!normalizedCourseId) {
+      courseCacheRef.current.clear();
+      courseLoadPromisesRef.current.clear();
+      lessonCacheRef.current.clear();
+      lessonLoadPromisesRef.current.clear();
+      return;
     }
-  }, [view, loadAdminData]);
+
+    const courseKey = getCourseCacheKey(normalizedCourseId);
+    courseCacheRef.current.delete(courseKey);
+    courseLoadPromisesRef.current.delete(courseKey);
+
+    const lessonKeyPrefix = `${courseKey}:lesson:`;
+    Array.from(lessonCacheRef.current.keys()).forEach((key) => {
+      if (key.startsWith(lessonKeyPrefix)) {
+        lessonCacheRef.current.delete(key);
+      }
+    });
+    Array.from(lessonLoadPromisesRef.current.keys()).forEach((key) => {
+      if (key.startsWith(lessonKeyPrefix)) {
+        lessonLoadPromisesRef.current.delete(key);
+      }
+    });
+  }, [getCourseCacheKey]);
+
+  const invalidateAdminCache = useCallback((options = {}) => {
+    const cacheState = adminCacheRef.current;
+    cacheState.dashboardLoaded = false;
+    cacheState.builderLoaded = false;
+
+    const normalizedCourseId = Number(options?.courseId || 0) || null;
+    if (normalizedCourseId) {
+      cacheState.courseAnalytics.delete(normalizedCourseId);
+      return;
+    }
+
+    cacheState.courseAnalytics = new Set();
+  }, []);
+
+  const hydrateLearnerLessonDetail = useCallback((lesson, detail) => {
+    const lessonPayload = detail?.lesson || {};
+    const progressPayload = detail?.progress || {};
+    const materialsPayload = Array.isArray(detail?.materials) ? detail.materials : (lesson?.materials || []);
+    const linkedTestPayload = detail?.linked_test && typeof detail.linked_test === "object" ? detail.linked_test : null;
+    const combinedVideoProgressPayload = Array.isArray(detail?.combined_video_progress) ? detail.combined_video_progress : [];
+    const mappedCombinedVideoProgress = combinedVideoProgressPayload.reduce((acc, item) => {
+      const materialId = Number(item?.material_id || 0);
+      if (materialId <= 0) return acc;
+      acc[String(materialId)] = clampLmsProgress(item?.progress_ratio);
+      return acc;
+    }, {});
+    const mappedLinkedTest = linkedTestPayload ? {
+      id: `test-${linkedTestPayload.id}`,
+      apiTestId: Number(linkedTestPayload.id || 0),
+      title: String(linkedTestPayload.title || "РўРµСЃС‚"),
+      description: String(linkedTestPayload.description || ""),
+      type: "quiz",
+      duration: Number(linkedTestPayload.time_limit_minutes || 0) > 0
+        ? `${Math.max(1, Number(linkedTestPayload.time_limit_minutes || 0))} РјРёРЅ`
+        : "20 РјРёРЅ",
+      durationSeconds: Number(linkedTestPayload.time_limit_minutes || 0) > 0
+        ? Math.max(1, Number(linkedTestPayload.time_limit_minutes || 0)) * 60
+        : 20 * 60,
+      timeLimitMinutes: Number(linkedTestPayload.time_limit_minutes || 0) || null,
+      status: linkedTestPayload.passed_any ? "completed" : (Number(linkedTestPayload.attempts_used || 0) > 0 ? "in_progress" : "not_started"),
+      locked: !Boolean(linkedTestPayload.content_completed),
+      requiresTest: true,
+      maxAttempts: Math.max(1, Number(linkedTestPayload.attempt_limit || 3)),
+      attemptsUsed: Math.max(0, Number(linkedTestPayload.attempts_used || 0)),
+      isFinal: Boolean(linkedTestPayload.is_final),
+      passingScore: Number(linkedTestPayload.pass_threshold || 80),
+      questionCount: Math.max(0, Number(linkedTestPayload.question_count || 0)),
+      canStart: Boolean(linkedTestPayload.can_start),
+    } : null;
+    const inferredType = inferLessonType({
+      ...lessonPayload,
+      type: lessonPayload?.lesson_type || lesson?.type,
+      materials: materialsPayload,
+    });
+    return {
+      ...lesson,
+      __detailLoaded: true,
+      title: lessonPayload?.title || lesson?.title,
+      description: lessonPayload?.description || lesson?.description,
+      type: inferredType,
+      duration: formatDurationLabel(lessonPayload?.duration_seconds || lesson?.durationSeconds || 0),
+      durationSeconds: Number(lessonPayload?.duration_seconds || lesson?.durationSeconds || 0),
+      materials: materialsPayload,
+      combinedBlocks: inferredType === "combined"
+        ? (
+          Array.isArray(lessonPayload?.blocks) && lessonPayload.blocks.length > 0
+            ? lessonPayload.blocks
+            : materialsPayload
+              .filter((materialItem) => {
+                const materialType = String(materialItem?.material_type || materialItem?.type || "").toLowerCase();
+                return materialType === "text" || materialType === "video";
+              })
+              .map((materialItem, blockIndex) => ({
+                id: Number(materialItem?.id || 0) || `block-${lesson?.apiLessonId || lesson?.id || "x"}-${blockIndex + 1}`,
+                type: String(materialItem?.material_type || materialItem?.type || "text").toLowerCase(),
+                title: String(materialItem?.title || `Р‘Р»РѕРє ${blockIndex + 1}`),
+                content_text: materialItem?.content_text || "",
+                content_url: materialItem?.content_url || materialItem?.url || materialItem?.signed_url || "",
+                url: materialItem?.url || materialItem?.signed_url || materialItem?.content_url || "",
+                signed_url: materialItem?.signed_url || materialItem?.url || materialItem?.content_url || "",
+                metadata: materialItem?.metadata && typeof materialItem.metadata === "object" ? materialItem.metadata : {},
+                position: Number(materialItem?.position || blockIndex + 1),
+              }))
+        )
+        : [],
+      combinedTest: inferredType === "combined" ? mappedLinkedTest : null,
+      combinedHasTest: inferredType === "combined" && Boolean(mappedLinkedTest),
+      combinedVideoProgress: inferredType === "combined" ? mappedCombinedVideoProgress : {},
+      contentCompleted: String(progressPayload?.status || "").toLowerCase() === "completed",
+      completionRatio: Number(progressPayload?.completion_ratio || lesson?.completionRatio || 0),
+      status: String(progressPayload?.status || lesson?.status || "not_started"),
+      apiProgress: progressPayload,
+      apiSession: detail?.session || null,
+      antiCheat: detail?.anti_cheat || null,
+    };
+  }, []);
+
+  const ensureCourseLoaded = useCallback(async (courseId, options = {}) => {
+    const normalizedCourseId = Number(courseId || 0) || null;
+    if (!normalizedCourseId) return null;
+    const cacheKey = getCourseCacheKey(normalizedCourseId);
+    if (!options?.force) {
+      const cachedCourse = courseCacheRef.current.get(cacheKey);
+      if (cachedCourse && Array.isArray(cachedCourse?.modules_data)) {
+        return cachedCourse;
+      }
+    }
+
+    const inFlightPromise = courseLoadPromisesRef.current.get(cacheKey);
+    if (inFlightPromise) {
+      return inFlightPromise;
+    }
+
+    const requestPromise = (async () => {
+      const fallbackCourse = canUseLearnerApi
+        ? (courses.find((item) => Number(item?.id || 0) === normalizedCourseId) || { id: normalizedCourseId })
+        : { id: normalizedCourseId };
+
+      let nextCourse = fallbackCourse;
+      if (canUseLearnerApi) {
+        if (!options?.skipStart) {
+          try {
+            await lmsRequest(`/api/lms/courses/${normalizedCourseId}/start`, { method: "POST" });
+          } catch (_) {
+            // already started or not required
+          }
+        }
+        const detail = await lmsRequest(`/api/lms/courses/${normalizedCourseId}`);
+        if (!detail?.course) {
+          throw new Error("РќРµ СѓРґР°Р»РѕСЃСЊ Р·Р°РіСЂСѓР·РёС‚СЊ РєСѓСЂСЃ");
+        }
+        nextCourse = mapCourseDetailToView(detail.course, fallbackCourse);
+        setCourses((prev) => {
+          const exists = prev.some((item) => Number(item?.id || 0) === normalizedCourseId);
+          return exists
+            ? prev.map((item) => (Number(item?.id || 0) === normalizedCourseId ? { ...item, ...nextCourse } : item))
+            : [...prev, nextCourse];
+        });
+      } else {
+        const detail = await lmsRequest(`/api/lms/admin/courses?course_id=${normalizedCourseId}`);
+        if (!detail?.course) {
+          throw new Error("РќРµ СѓРґР°Р»РѕСЃСЊ Р·Р°РіСЂСѓР·РёС‚СЊ РєСѓСЂСЃ");
+        }
+        nextCourse = mapCourseDetailToView(detail.course, fallbackCourse);
+      }
+
+      return storeCourseInCache(nextCourse);
+    })();
+
+    courseLoadPromisesRef.current.set(cacheKey, requestPromise);
+    try {
+      return await requestPromise;
+    } finally {
+      if (courseLoadPromisesRef.current.get(cacheKey) === requestPromise) {
+        courseLoadPromisesRef.current.delete(cacheKey);
+      }
+    }
+  }, [canUseLearnerApi, courses, getCourseCacheKey, lmsRequest, storeCourseInCache]);
+
+  const ensureLessonLoaded = useCallback(async (courseId, lessonId, options = {}) => {
+    const normalizedCourseId = Number(courseId || 0) || null;
+    const normalizedLessonId = String(lessonId || "").trim();
+    if (!normalizedCourseId || !normalizedLessonId) return null;
+    const cacheKey = getLessonCacheKey(normalizedCourseId, normalizedLessonId);
+    if (!options?.force) {
+      const cachedLesson = lessonCacheRef.current.get(cacheKey);
+      const canReuseCachedLesson = Boolean(
+        cachedLesson
+        && (
+          !canUseLearnerApi
+          || !cachedLesson?.apiLessonId
+          || cachedLesson?.type === "quiz"
+          || cachedLesson?.__detailLoaded
+        )
+      );
+      if (canReuseCachedLesson) return cachedLesson;
+    }
+
+    const inFlightPromise = lessonLoadPromisesRef.current.get(cacheKey);
+    if (inFlightPromise) {
+      return inFlightPromise;
+    }
+
+    const requestPromise = (async () => {
+      const baseCourse = options?.course || courseCacheRef.current.get(getCourseCacheKey(normalizedCourseId));
+      const baseLesson = flattenCourseLessons(baseCourse).find((item) => String(item?.id) === normalizedLessonId) || null;
+      if (!baseLesson) {
+        throw new Error("РЈСЂРѕРє РЅРµ РЅР°Р№РґРµРЅ");
+      }
+
+      if (!canUseLearnerApi || !baseLesson?.apiLessonId || baseLesson?.type === "quiz") {
+        return storeLessonInCache(normalizedCourseId, baseLesson);
+      }
+
+      const detail = await lmsRequest(`/api/lms/lessons/${baseLesson.apiLessonId}`);
+      const nextLesson = hydrateLearnerLessonDetail(baseLesson, detail);
+      storeLessonInCache(normalizedCourseId, nextLesson);
+
+      const cachedCourse = courseCacheRef.current.get(getCourseCacheKey(normalizedCourseId)) || baseCourse;
+      const nextCourse = mergeLessonIntoCourse(cachedCourse, nextLesson);
+      storeCourseInCache(nextCourse);
+      return nextLesson;
+    })();
+
+    lessonLoadPromisesRef.current.set(cacheKey, requestPromise);
+    try {
+      return await requestPromise;
+    } finally {
+      if (lessonLoadPromisesRef.current.get(cacheKey) === requestPromise) {
+        lessonLoadPromisesRef.current.delete(cacheKey);
+      }
+    }
+  }, [
+    canUseLearnerApi,
+    getCourseCacheKey,
+    getLessonCacheKey,
+    hydrateLearnerLessonDetail,
+    storeLessonInCache,
+    lmsRequest,
+    mergeLessonIntoCourse,
+    storeCourseInCache,
+  ]);
+
+  useEffect(() => {
+    if (routeState) return;
+    navigate(canGoCatalog ? "/lms" : "/lms/admin", { replace: true });
+  }, [routeState, canGoCatalog, navigate]);
+
+  useEffect(() => {
+    if (!routeState) return;
+    if (view === "catalog" && !canGoCatalog) {
+      navigate("/lms/admin", { replace: true });
+      return;
+    }
+    if ((view === "admin" || view === "builder") && !canUseManagerApi) {
+      navigate(canGoCatalog ? "/lms" : "/lms/admin", { replace: true });
+    }
+  }, [routeState, view, canGoCatalog, canUseManagerApi, navigate]);
+
+  useEffect(() => {
+    if (view !== "catalog" || location.pathname !== "/lms/catalog") return;
+    const rawTab = String(searchParams.get("tab") || "").trim().toLowerCase();
+    if (!rawTab) return;
+    const normalizedTab = normalizeLmsCatalogTab(rawTab);
+    if (normalizedTab !== rawTab) {
+      navigate(buildLmsCatalogPath(normalizedTab), { replace: true, state: location.state });
+    }
+  }, [view, location.pathname, location.state, navigate, searchParams]);
+
+  useEffect(() => {
+    if (view !== "admin") return;
+    const rawTab = String(searchParams.get("tab") || "").trim().toLowerCase();
+    if (!rawTab) return;
+    const normalizedTab = normalizeLmsAdminTab(rawTab);
+    if (normalizedTab !== rawTab) {
+      navigate(buildLmsAdminPath(normalizedTab), { replace: true, state: location.state });
+    }
+  }, [view, location.state, navigate, searchParams]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadToken = routeLoadTokenRef.current + 1;
+    routeLoadTokenRef.current = loadToken;
+    const isCurrentRoute = () => !cancelled && routeLoadTokenRef.current === loadToken;
+
+    const syncSelectedCourse = (courseLike) => {
+      if (!isCurrentRoute()) return;
+      setSelectedCourse(courseLike || null);
+    };
+
+    const syncSelectedLesson = (lessonLike) => {
+      if (!isCurrentRoute()) return;
+      setSelectedLesson(lessonLike || null);
+    };
+
+    if (view === "catalog") {
+      setBusyCourseId(null);
+      syncSelectedCourse(null);
+      syncSelectedLesson(null);
+      if (canUseLearnerApi) {
+        void loadLearnerDashboard();
+      }
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    if (view === "admin") {
+      setBusyCourseId(null);
+      syncSelectedCourse(null);
+      syncSelectedLesson(null);
+      if (canUseManagerApi) {
+        void loadAdminData({ scope: "dashboard" });
+      }
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    if (view === "builder") {
+      setBusyCourseId(null);
+      syncSelectedCourse(null);
+      syncSelectedLesson(null);
+      if (canUseManagerApi) {
+        void loadAdminData({ scope: "builder" });
+      }
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    if (view === "course" && routeCourseId) {
+      syncSelectedLesson(null);
+      void (async () => {
+        try {
+          const courseLike = await ensureCourseLoaded(routeCourseId);
+          if (!isCurrentRoute()) return;
+          syncSelectedCourse(courseLike);
+          setBusyCourseId(null);
+          if (canUseManagerApi) {
+            void loadAdminData({ scope: "course", courseId: routeCourseId });
+          }
+        } catch (error) {
+          emitToast(`РќРµ СѓРґР°Р»РѕСЃСЊ РѕС‚РєСЂС‹С‚СЊ РєСѓСЂСЃ: ${String(error?.message || "РѕС€РёР±РєР°")}`, "error");
+          if (isCurrentRoute()) {
+            setBusyCourseId(null);
+            navigate(canGoCatalog ? buildLmsCatalogPath(catalogTab) : buildLmsAdminPath(adminTab), { replace: true });
+          }
+        }
+      })();
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    if (view === "lesson" && routeCourseId && routeLessonId) {
+      void (async () => {
+        try {
+          const courseLike = await ensureCourseLoaded(routeCourseId);
+          if (!isCurrentRoute()) return;
+          syncSelectedCourse(courseLike);
+          setBusyCourseId(null);
+          const baseLesson = flattenCourseLessons(courseLike).find((item) => String(item?.id) === String(routeLessonId));
+          if (!baseLesson) {
+            throw new Error("РЈСЂРѕРє РЅРµ РЅР°Р№РґРµРЅ РІ РєСѓСЂСЃРµ");
+          }
+          syncSelectedLesson(baseLesson);
+          setQuizView("intro");
+          setQuizAnswers({});
+          const hydratedLesson = await ensureLessonLoaded(routeCourseId, routeLessonId, { course: courseLike });
+          if (!isCurrentRoute()) return;
+          const cachedCourse = courseCacheRef.current.get(getCourseCacheKey(routeCourseId)) || courseLike;
+          syncSelectedCourse(cachedCourse);
+          syncSelectedLesson(hydratedLesson);
+          if (canUseManagerApi) {
+            void loadAdminData({ scope: "course", courseId: routeCourseId });
+          }
+        } catch (error) {
+          emitToast(`РќРµ СѓРґР°Р»РѕСЃСЊ РѕС‚РєСЂС‹С‚СЊ СѓСЂРѕРє: ${String(error?.message || "РѕС€РёР±РєР°")}`, "error");
+          if (isCurrentRoute()) {
+            navigate(buildLmsCoursePath(routeCourseId), {
+              replace: true,
+              state: { backTo: routeBackTo || (canGoCatalog ? buildLmsCatalogPath(catalogTab) : buildLmsAdminPath(adminTab)) },
+            });
+          }
+        }
+      })();
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    view,
+    routeCourseId,
+    routeLessonId,
+    routeBackTo,
+    canGoCatalog,
+    canUseLearnerApi,
+    canUseManagerApi,
+    catalogTab,
+    adminTab,
+    loadLearnerDashboard,
+    loadAdminData,
+    ensureCourseLoaded,
+    ensureLessonLoaded,
+    emitToast,
+    navigate,
+    getCourseCacheKey,
+  ]);
 
   const handleDeleteAdminCourse = useCallback(async (courseLike) => {
     if (!canUseManagerApi) {
@@ -2034,17 +2703,19 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
 
     try {
       await lmsRequest(`/api/lms/admin/courses/${courseId}`, { method: "DELETE" });
+      invalidateAdminCache({ courseId });
+      invalidateCourseCache(courseId);
       setAdminCourses((prev) => prev.filter((item) => Number(item?.id || 0) !== courseId));
       setAdminProgressRows((prev) => prev.filter((item) => Number(item?.course_id || 0) !== courseId));
       setAdminAttempts((prev) => prev.filter((item) => Number(item?.course_id || 0) !== courseId));
       emitToast("Курс и его файлы в GCS удалены", "success");
-      await loadAdminData();
+      await loadAdminData({ scope: "dashboard", force: true });
       return true;
     } catch (error) {
       emitToast(`Не удалось удалить курс: ${String(error?.message || "ошибка")}`, "error");
       return false;
     }
-  }, [canUseManagerApi, canDeleteCourses, lmsRequest, emitToast, loadAdminData]);
+  }, [canUseManagerApi, canDeleteCourses, lmsRequest, emitToast, invalidateAdminCache, invalidateCourseCache, loadAdminData]);
 
   const handleArchiveAdminCourse = useCallback(async (courseLike) => {
     if (!canUseManagerApi) {
@@ -2070,14 +2741,16 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
           status: "archived",
         },
       });
+      invalidateAdminCache({ courseId });
+      invalidateCourseCache(courseId);
       emitToast("Курс архивирован и скрыт из LMS сотрудников", "success");
-      await loadAdminData();
+      await loadAdminData({ scope: "dashboard", force: true });
       return true;
     } catch (error) {
       emitToast(`Не удалось архивировать курс: ${String(error?.message || "ошибка")}`, "error");
       return false;
     }
-  }, [canUseManagerApi, lmsRequest, emitToast, loadAdminData]);
+  }, [canUseManagerApi, lmsRequest, emitToast, invalidateAdminCache, invalidateCourseCache, loadAdminData]);
 
   const handleRestoreAdminCourse = useCallback(async (courseLike) => {
     if (!canUseManagerApi) {
@@ -2103,14 +2776,16 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
           status: "published",
         },
       });
+      invalidateAdminCache({ courseId });
+      invalidateCourseCache(courseId);
       emitToast("Курс восстановлен из архива", "success");
-      await loadAdminData();
+      await loadAdminData({ scope: "dashboard", force: true });
       return true;
     } catch (error) {
       emitToast(`Не удалось восстановить курс: ${String(error?.message || "ошибка")}`, "error");
       return false;
     }
-  }, [canUseManagerApi, lmsRequest, emitToast, loadAdminData]);
+  }, [canUseManagerApi, lmsRequest, emitToast, invalidateAdminCache, invalidateCourseCache, loadAdminData]);
 
   const handleAssignAdminCourseToEmployee = useCallback(async ({ courseId, userId, dueDate, employeeName, courseTitle }) => {
     if (!canUseManagerApi) {
@@ -2137,16 +2812,18 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
           due_at: dueDate ? `${dueDate} 23:59:59` : null,
         },
       });
+      invalidateAdminCache({ courseId: normalizedCourseId });
+      invalidateCourseCache(normalizedCourseId);
       const employeeLabel = String(employeeName || `#${normalizedUserId}`).trim();
       const courseLabel = String(courseTitle || `#${normalizedCourseId}`).trim();
       emitToast(`Курс «${courseLabel}» назначен сотруднику ${employeeLabel}`, "success");
-      await loadAdminData();
+      await loadAdminData({ scope: "dashboard", force: true });
       return true;
     } catch (error) {
       emitToast(`Не удалось назначить курс: ${String(error?.message || "ошибка")}`, "error");
       return false;
     }
-  }, [canUseManagerApi, lmsRequest, emitToast, loadAdminData]);
+  }, [canUseManagerApi, lmsRequest, emitToast, invalidateAdminCache, invalidateCourseCache, loadAdminData]);
 
   const markNotificationRead = useCallback(async (notificationId) => {
     setNotifications((prev) => prev.map((item) => (item.id === notificationId ? { ...item, read: true } : item)));
@@ -2156,7 +2833,12 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
     } catch (error) {
       emitToast(String(error?.message || "Не удалось отметить уведомление"), "error");
     }
-  }, [apiRoot, canUseLearnerApi, lmsRequest, emitToast]);
+  }, [
+    apiRoot,
+    canUseLearnerApi,
+    lmsRequest,
+    emitToast,
+  ]);
 
   const markAllNotificationsRead = useCallback(async () => {
     if (markingAllNotificationsRead) return;
@@ -2181,7 +2863,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
       const failedCount = results.filter((result) => result.status === "rejected").length;
       if (failedCount > 0) {
         emitToast(`Не удалось отметить ${failedCount} уведомл.`, "error");
-        await loadLearnerDashboard();
+        await loadLearnerDashboard({ force: true });
       }
     } finally {
       setMarkingAllNotificationsRead(false);
@@ -2230,9 +2912,97 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
     }
   }, [apiRoot, canUseLearnerApi, emitToast]);
 
-  const openCourse = useCallback(async (course) => {
+  const openCourse = useCallback((course, event = null) => {
     if (!course?.id) return;
-    setBusyCourseId(course.id);
+    const targetPath = buildLmsCoursePath(course.id);
+    storeCourseInCache(course);
+    setBusyCourseId(Number(course.id));
+
+    if (isModifiedRouteEvent(event)) {
+      window.open(targetPath, "_blank", "noopener,noreferrer");
+      setBusyCourseId(null);
+      return;
+    }
+
+    navigate(targetPath, {
+      state: {
+        backTo: `${location.pathname}${location.search}`,
+      },
+    });
+  }, [location.pathname, location.search, navigate, storeCourseInCache]);
+
+  const refreshSelectedCourse = useCallback(async () => {
+    const targetCourseId = Number(routeCourseId || selectedCourse?.id || 0) || null;
+    if (!targetCourseId) return null;
+
+    invalidateCourseCache(targetCourseId);
+    const refreshedCourse = await ensureCourseLoaded(targetCourseId, { force: true, skipStart: true });
+    if (refreshedCourse) {
+      setSelectedCourse(refreshedCourse);
+      if (routeLessonId) {
+        const refreshedLesson = flattenCourseLessons(refreshedCourse).find((item) => String(item?.id) === String(routeLessonId));
+        if (refreshedLesson) {
+          storeLessonInCache(targetCourseId, refreshedLesson);
+          setSelectedLesson(refreshedLesson);
+        }
+      }
+    }
+
+    return refreshedCourse;
+  }, [
+    ensureCourseLoaded,
+    invalidateCourseCache,
+    routeCourseId,
+    routeLessonId,
+    selectedCourse,
+    storeLessonInCache,
+  ]);
+
+  const openLesson = useCallback((lesson, event = null) => {
+    if (!lesson) return;
+
+    const activeCourseId = Number(routeCourseId || selectedCourse?.id || 0) || null;
+    const normalizedLessonId = String(lesson?.id || "").trim();
+    if (!activeCourseId || !normalizedLessonId) return;
+
+    storeLessonInCache(activeCourseId, lesson);
+    const cachedCourse = courseCacheRef.current.get(getCourseCacheKey(activeCourseId)) || selectedCourse;
+    if (cachedCourse) {
+      storeCourseInCache(mergeLessonIntoCourse(cachedCourse, lesson));
+    }
+
+    const targetPath = buildLmsLessonPath(activeCourseId, normalizedLessonId);
+    const backTo = routeBackTo || buildLmsCoursePath(activeCourseId);
+    if (isModifiedRouteEvent(event)) {
+      window.open(targetPath, "_blank", "noopener,noreferrer");
+      return;
+    }
+
+    navigate(targetPath, {
+      state: { backTo },
+    });
+  }, [
+    getCourseCacheKey,
+    mergeLessonIntoCourse,
+    navigate,
+    routeBackTo,
+    routeCourseId,
+    selectedCourse,
+    storeCourseInCache,
+    storeLessonInCache,
+  ]);
+
+  /*
+  const openCourse = useCallback((course, event = null) => {
+    if (!course?.id) return;
+    const targetPath = buildLmsCoursePath(course.id);
+    storeCourseInCache(course);
+    setBusyCourseId(Number(course.id));
+    if (isModifiedRouteEvent(event)) {
+      window.open(targetPath, "_blank", "noopener,noreferrer");
+      setBusyCourseId(null);
+      return;
+    }
     try {
       let nextCourse = course;
       if (apiRoot && canUseLearnerApi) {
@@ -2259,9 +3029,25 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
     } finally {
       setBusyCourseId(null);
     }
-  }, [apiRoot, canUseLearnerApi, canUseManagerApi, lmsRequest, emitToast]);
+  }, [apiRoot, canUseLearnerApi, canUseManagerApi, lmsRequest, emitToast, location.pathname, location.search, navigate, storeCourseInCache]);
 
   const refreshSelectedCourse = useCallback(async () => {
+    if (true) {
+      const targetCourseId = Number(routeCourseId || selectedCourse?.id || 0) || null;
+      if (!targetCourseId) return null;
+      const refreshedCourse = await ensureCourseLoaded(targetCourseId, { force: true, skipStart: true });
+      if (refreshedCourse) {
+        setSelectedCourse(refreshedCourse);
+        if (routeLessonId) {
+          const refreshedLesson = flattenCourseLessons(refreshedCourse).find((item) => String(item?.id) === String(routeLessonId));
+          if (refreshedLesson) {
+            lessonCacheRef.current.set(getLessonCacheKey(targetCourseId, routeLessonId), refreshedLesson);
+            setSelectedLesson(refreshedLesson);
+          }
+        }
+      }
+      return refreshedCourse;
+    }
     if (!apiRoot || !canUseLearnerApi || !selectedCourse?.id) return null;
     const detail = await lmsRequest(`/api/lms/courses/${selectedCourse.id}`);
     if (detail?.course) {
@@ -2271,10 +3057,30 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
       return mapped;
     }
     return null;
-  }, [apiRoot, canUseLearnerApi, selectedCourse, lmsRequest]);
+  }, [apiRoot, canUseLearnerApi, selectedCourse, lmsRequest, ensureCourseLoaded, routeCourseId, routeLessonId, getLessonCacheKey]);
 
-  const openLesson = useCallback(async (lesson) => {
+  const openLesson = useCallback(async (lesson, event = null) => {
     if (!lesson) return;
+    if (true) {
+      const activeCourseId = Number(routeCourseId || selectedCourse?.id || 0) || null;
+      const normalizedLessonId = String(lesson?.id || "").trim();
+      if (!activeCourseId || !normalizedLessonId) return;
+      lessonCacheRef.current.set(getLessonCacheKey(activeCourseId, normalizedLessonId), lesson);
+      const cachedCourse = courseCacheRef.current.get(getCourseCacheKey(activeCourseId)) || selectedCourse;
+      if (cachedCourse) {
+        storeCourseInCache(mergeLessonIntoCourse(cachedCourse, lesson));
+      }
+      const targetPath = buildLmsLessonPath(activeCourseId, normalizedLessonId);
+      const backTo = routeBackTo || buildLmsCoursePath(activeCourseId);
+      if (isModifiedRouteEvent(event)) {
+        window.open(targetPath, "_blank", "noopener,noreferrer");
+        return;
+      }
+      navigate(targetPath, {
+        state: { backTo },
+      });
+      return;
+    }
     setSelectedLesson(lesson);
     setView("lesson");
     setQuizView("intro");
@@ -2370,6 +3176,8 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
     }
   }, [apiRoot, canUseLearnerApi, lmsRequest, emitToast]);
 
+  */
+
   const handleCompleteLesson = useCallback(async (lesson) => {
     if (!apiRoot || !canUseLearnerApi || !lesson?.apiLessonId) return false;
     try {
@@ -2381,7 +3189,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
           : prev
       ));
       const refreshedCourse = await refreshSelectedCourse();
-      await loadLearnerDashboard();
+      await loadLearnerDashboard({ force: true });
       if (refreshedCourse) {
         const refreshedCurrentLesson = flattenCourseLessons(refreshedCourse).find((item) => String(item?.id) === String(lesson.id));
         if (refreshedCurrentLesson) {
@@ -2398,33 +3206,38 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
   const handleQuizFinished = useCallback(async () => {
     try {
       await refreshSelectedCourse();
-      await loadLearnerDashboard();
+      await loadLearnerDashboard({ force: true });
     } catch (_) {
       // ignore refresh errors here
     }
   }, [refreshSelectedCourse, loadLearnerDashboard]);
 
   const openBuilder = useCallback((courseId = null, options = {}) => {
-    const normalizedCourseId = Number(courseId || 0) || null;
-    const normalizedDraftVersionId = Number(options?.draftVersionId || 0) || null;
-    setBuilderInitialCourseId(normalizedCourseId);
-    setBuilderInitialDraftVersionId(normalizedDraftVersionId);
-    setView("builder");
-  }, []);
+    const targetPath = buildLmsBuilderPath(courseId, options);
+    navigate(targetPath, {
+      state: {
+        backTo: `${location.pathname}${location.search}`,
+      },
+    });
+  }, [location.pathname, location.search, navigate]);
 
-  const goBack = () => {
-    if (view === "lesson") {
-      setView("course");
-      setSelectedLesson(null);
-    } else if (view === "course") {
-      setView(canGoCatalog ? "catalog" : "admin");
-      setSelectedCourse(null);
-    } else if (view === "builder") {
-      setView(canGoCatalog ? "catalog" : "admin");
-    } else if (view === "admin") {
-      setView(canGoCatalog ? "catalog" : "admin");
+  const goBack = useCallback(() => {
+    let fallbackPath = canGoCatalog ? buildLmsCatalogPath(catalogTab) : buildLmsAdminPath(adminTab);
+    if (view === "lesson" && routeCourseId) {
+      fallbackPath = buildLmsCoursePath(routeCourseId);
+    } else if ((view === "builder" || view === "admin") && canUseManagerApi) {
+      fallbackPath = canGoCatalog ? buildLmsCatalogPath(catalogTab) : buildLmsAdminPath(adminTab);
     }
-  };
+    navigate(routeBackTo || fallbackPath);
+  }, [view, routeCourseId, routeBackTo, canGoCatalog, canUseManagerApi, catalogTab, adminTab, navigate]);
+
+  const setCatalogTab = useCallback((nextTab) => {
+    navigate(buildLmsCatalogPath(nextTab));
+  }, [navigate]);
+
+  const setAdminTab = useCallback((nextTab) => {
+    navigate(buildLmsAdminPath(nextTab));
+  }, [navigate]);
 
   const unreadNotificationsCount = useMemo(
     () => (Array.isArray(notifications) ? notifications.filter((item) => !item?.read).length : 0),
@@ -2589,6 +3402,22 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
           </div>
         )}
 
+        {view === "course" && !selectedCourse && (
+          <div className="lms-shell py-10">
+            <div className="rounded-2xl border border-slate-200 bg-white px-6 py-10 text-sm text-slate-500">
+              Загрузка курса...
+            </div>
+          </div>
+        )}
+
+        {view === "lesson" && (!selectedLesson || !selectedCourse) && (
+          <div className="lms-shell py-10">
+            <div className="rounded-2xl border border-slate-200 bg-white px-6 py-10 text-sm text-slate-500">
+              Загрузка урока...
+            </div>
+          </div>
+        )}
+
         {view === "catalog" && (
           <CatalogView
             tab={catalogTab}
@@ -2605,7 +3434,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
             busyCourseId={busyCourseId}
             onNotificationRead={markNotificationRead}
             onCertificateDownload={downloadCertificate}
-            onRefresh={loadLearnerDashboard}
+            onRefresh={() => loadLearnerDashboard({ force: true })}
           />
         )}
         {view === "course" && selectedCourse && (
@@ -2649,7 +3478,11 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
             adminCourses={adminCourses}
             loading={loadingAdmin}
             emitToast={emitToast}
-            onAfterSave={loadAdminData}
+            onAfterSave={() => {
+              invalidateAdminCache();
+              invalidateCourseCache();
+              return loadAdminData({ scope: "builder", force: true });
+            }}
             initialCourseId={builderInitialCourseId}
             initialDraftVersionId={builderInitialDraftVersionId}
           />
@@ -3114,7 +3947,7 @@ function CatalogView({
                   key={c.id}
                   course={c}
                   busy={busyCourseId === c.id}
-                  onClick={() => onOpenCourse(c)}
+                  onClick={(event) => onOpenCourse(c, event)}
                 />
               ))}
             </div>
@@ -3125,7 +3958,7 @@ function CatalogView({
                   key={c.id}
                   course={c}
                   busy={busyCourseId === c.id}
-                  onClick={() => onOpenCourse(c)}
+                  onClick={(event) => onOpenCourse(c, event)}
                 />
               ))}
             </div>
@@ -3150,7 +3983,7 @@ function CourseCard({ course, onClick, busy = false, actions = null, managerMode
     : ((course.status === "completed" || course.status === "completed_late") ? "Просмотр" : course.status === "not_started" ? "Начать" : "Продолжить");
 
   return (
-    <div onClick={() => !busy && onClick?.()} className={`bg-white rounded-2xl border border-slate-200 overflow-hidden transition-all group ${busy ? "opacity-70 cursor-wait" : "cursor-pointer hover:shadow-md hover:border-slate-300"}`}>
+    <div onClick={(event) => !busy && onClick?.(event)} className={`bg-white rounded-2xl border border-slate-200 overflow-hidden transition-all group ${busy ? "opacity-70 cursor-wait" : "cursor-pointer hover:shadow-md hover:border-slate-300"}`}>
       <div className={`h-32 bg-gradient-to-br ${course.color} flex items-center justify-center relative overflow-hidden`}>
         {course.coverUrl ? (
           <img src={course.coverUrl} alt={course.title} className="absolute inset-0 w-full h-full object-cover object-center" />
@@ -3209,7 +4042,7 @@ function CourseCard({ course, onClick, busy = false, actions = null, managerMode
           <div className="ml-auto flex items-center gap-2" onClick={(event) => event.stopPropagation()}>
             {actions}
             <button
-              onClick={() => !busy && onClick?.()}
+              onClick={(event) => !busy && onClick?.(event)}
               className={`text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors ${managerMode ? "bg-indigo-600 text-white hover:bg-indigo-700" : (course.status === "completed" || course.status === "completed_late" ? "bg-emerald-50 text-emerald-700 hover:bg-emerald-100" : "bg-indigo-600 text-white hover:bg-indigo-700")}`}
             >
               {busy ? "Загрузка..." : actionLabel}
@@ -3227,7 +4060,7 @@ function CourseListItem({ course, onClick, busy = false, actions = null, manager
   const isMandatory = resolveCourseMandatoryFlag(course);
   const showProgressBar = managerMode || (course.status !== "completed" && course.status !== "not_started");
   return (
-    <div onClick={() => !busy && onClick?.()} className={`bg-white rounded-2xl border border-slate-200 p-5 flex items-center gap-5 transition-all group ${busy ? "opacity-70 cursor-wait" : "cursor-pointer hover:shadow-sm hover:border-slate-300"}`}>
+    <div onClick={(event) => !busy && onClick?.(event)} className={`bg-white rounded-2xl border border-slate-200 p-5 flex items-center gap-5 transition-all group ${busy ? "opacity-70 cursor-wait" : "cursor-pointer hover:shadow-sm hover:border-slate-300"}`}>
       <div className={`w-14 h-14 rounded-xl bg-gradient-to-br ${course.color} flex items-center justify-center text-2xl flex-shrink-0 overflow-hidden`}>
         {course.coverUrl ? (
           <img src={course.coverUrl} alt={course.title} className="w-full h-full object-cover object-center" />
@@ -3297,9 +4130,9 @@ function CourseDetail({
   const attemptsLeft = Math.max(0, Number(course.maxAttempts || 0) - Number(course.attemptsUsed || 0));
   const hasCourseAnalytics = isManagerMode && courseAnalytics && typeof courseAnalytics === "object";
   const [analyticsSection, setAnalyticsSection] = useState("summary");
-  const handleOpenProgram = useCallback(() => {
+  const handleOpenProgram = useCallback((event) => {
     if (!firstLesson) return;
-    onStartLesson(firstLesson);
+    onStartLesson(firstLesson, event);
   }, [firstLesson, onStartLesson]);
 
   useEffect(() => {
@@ -3358,12 +4191,12 @@ function CourseDetail({
             </div>
           )}
           <button
-            onClick={() => {
+            onClick={(event) => {
               if (isManagerMode) {
-                handleOpenProgram();
+                handleOpenProgram(event);
                 return;
               }
-              if (firstLesson) onStartLesson(firstLesson);
+              if (firstLesson) onStartLesson(firstLesson, event);
             }}
             disabled={!firstLesson}
             className="bg-white text-slate-900 font-semibold px-6 py-3 rounded-xl hover:bg-white/90 transition-colors text-sm shadow-lg disabled:opacity-60 disabled:cursor-not-allowed"
@@ -3407,7 +4240,7 @@ function CourseDetail({
                         const Icon = lessonIcons[l.type];
                         const lessonLocked = isManagerMode ? false : Boolean(l.locked);
                         return (
-                          <div key={l.id} onClick={() => !lessonLocked && onStartLesson(l)} className={`flex items-center gap-3 p-3 rounded-xl transition-all ${lessonLocked ? "opacity-50 cursor-not-allowed" : "cursor-pointer hover:bg-indigo-50 group"}`}>
+                          <div key={l.id} onClick={(event) => !lessonLocked && onStartLesson(l, event)} className={`flex items-center gap-3 p-3 rounded-xl transition-all ${lessonLocked ? "opacity-50 cursor-not-allowed" : "cursor-pointer hover:bg-indigo-50 group"}`}>
                             <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${isManagerMode ? "bg-indigo-50" : (l.status === "completed" ? "bg-emerald-50" : lessonLocked ? "bg-slate-100" : "bg-indigo-50")}`}>
                               {isManagerMode
                                 ? <Icon size={14} className="text-indigo-600" />
@@ -3620,7 +4453,7 @@ function LessonView({
                 const dl = course.deadline ? formatDeadline(course.deadline) : null;
                 const lessonLocked = isManagerMode ? false : Boolean(l.locked);
                 return (
-                  <button key={l.id} onClick={() => !lessonLocked && onSelectLesson(l)} className={`w-full flex items-start gap-3 px-4 py-3 border-b border-slate-50 transition-colors text-left ${isActive ? "bg-indigo-50 border-l-2 border-l-indigo-500" : lessonLocked ? "opacity-50 cursor-not-allowed" : "hover:bg-slate-50"}`}>
+                  <button key={l.id} onClick={(event) => !lessonLocked && onSelectLesson(l, event)} className={`w-full flex items-start gap-3 px-4 py-3 border-b border-slate-50 transition-colors text-left ${isActive ? "bg-indigo-50 border-l-2 border-l-indigo-500" : lessonLocked ? "opacity-50 cursor-not-allowed" : "hover:bg-slate-50"}`}>
                     <div className={`w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5 ${isActive ? "bg-indigo-600" : isManagerMode ? "bg-indigo-50" : l.status === "completed" ? "bg-emerald-50" : lessonLocked ? "bg-slate-100" : "bg-slate-100"}`}>
                       {isActive
                         ? <Play size={11} className="text-white ml-0.5" />
