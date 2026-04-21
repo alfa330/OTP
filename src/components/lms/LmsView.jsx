@@ -1169,13 +1169,16 @@ const formatDurationLabel = (seconds) => {
 
 const inferLessonType = (lessonLike) => {
   const explicit = String(lessonLike?.lesson_type || lessonLike?.type || "").trim().toLowerCase();
+  const materials = Array.isArray(lessonLike?.materials) ? lessonLike.materials : [];
+  const hasVideoMaterial = materials.some((m) => String(m?.material_type || "").toLowerCase() === "video");
+  const hasTextMaterial = materials.some((m) => String(m?.material_type || "").toLowerCase() === "text");
   if (explicit === "combo") return "combo";
   if (explicit === "quiz") return "quiz";
-  if (explicit === "text") return "text";
   if (explicit === "video") return "video";
-  const materials = Array.isArray(lessonLike?.materials) ? lessonLike.materials : [];
+  if (explicit === "text") return hasVideoMaterial && hasTextMaterial ? "combo" : "text";
   if (!materials.length) return "text";
-  if (materials.some((m) => String(m?.material_type || "").toLowerCase() === "video")) return "video";
+  if (hasVideoMaterial && hasTextMaterial) return "combo";
+  if (hasVideoMaterial) return "video";
   if (materials.every((m) => TEXT_MATERIAL_TYPES.has(String(m?.material_type || "").toLowerCase()))) return "text";
   return "video";
 };
@@ -1429,6 +1432,13 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
         const lessonMaterials = (Array.isArray(lessonItem?.materials) ? lessonItem.materials : [])
           .slice()
           .sort((left, right) => Number(left?.position || 0) - Number(right?.position || 0));
+        const orderedContentMaterials = lessonMaterials.filter((material) => {
+          const materialType = String(material?.material_type || material?.type || "").toLowerCase();
+          return materialType === "text" || materialType === "video";
+        });
+        const textPositionInContent = orderedContentMaterials.findIndex(
+          (material) => String(material?.material_type || material?.type || "").toLowerCase() === "text"
+        ) + 1;
         const lessonType = inferLessonType({ ...lessonItem, materials: lessonMaterials });
         const duration = formatDurationLabel(Number(lessonItem?.duration_seconds || 0));
 
@@ -1447,6 +1457,7 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
           allowFastForward: Boolean(lessonItem?.allow_fast_forward),
           completionThreshold: Number(lessonItem?.completion_threshold || 0),
           materials: lessonMaterials,
+          comboTextPosition: textPositionInContent > 0 ? textPositionInContent : 1,
           moduleId,
           _position: Number(lessonItem?.position || lessonIndex + 1),
         });
@@ -6231,29 +6242,6 @@ function CourseBuilder({
           durationSeconds: nextDurationSeconds,
           materials: [...nextBaseMaterials, uploadedVideoMaterial],
         };
-        const base = previousMaterials.filter((item) => String(item?.material_type || item?.type || "").toLowerCase() !== "video");
-        return {
-          ...prev,
-          type: "video",
-          durationSeconds: nextDurationSeconds,
-          materials: [
-            ...base,
-            {
-              title: file.name || "Видео",
-              type: "video",
-              material_type: "video",
-              content_url: uploaded.signed_url || "",
-              signed_url: uploaded.signed_url || "",
-              mime_type: uploaded.content_type || file.type || "video/mp4",
-              bucket: uploaded.bucket || "",
-              blob_path: uploaded.blob_path || "",
-              metadata: {
-                uploaded_file_name: uploaded.file_name || file.name || "video",
-                duration_seconds: nextDurationSeconds,
-              },
-            },
-          ],
-        };
       });
       emitToast?.("Видео прикреплено", "success");
     } catch (error) {
@@ -6597,8 +6585,6 @@ function CourseBuilder({
                   },
                   questions: quizQuestions,
                 });
-              } else {
-                invalidQuizLessons.push(lessonTitle);
               }
             }
 
@@ -6625,7 +6611,7 @@ function CourseBuilder({
       .filter((moduleItem) => moduleItem.title);
 
     if (invalidQuizLessons.length > 0) {
-      emitToast?.(`Добавьте вопросы в тестовые/комбо-уроки: ${invalidQuizLessons.slice(0, 3).join(", ")}`, "error");
+      emitToast?.(`Добавьте вопросы в тестовые уроки: ${invalidQuizLessons.slice(0, 3).join(", ")}`, "error");
       return;
     }
 
@@ -6959,7 +6945,7 @@ function CourseBuilder({
           quizRandomOrder: prev?.quizRandomOrder !== false,
           quizShowExplanations: prev?.quizShowExplanations !== false,
           comboTextPosition: Math.max(1, Number(prev?.comboTextPosition || 1)),
-          quizQuestions: currentQuestions.length > 0 ? currentQuestions : [createQuestionTemplate("single")],
+          quizQuestions: currentQuestions,
           materials: Array.isArray(prev?.materials) ? prev.materials : [],
         };
       }
@@ -7827,7 +7813,7 @@ function CourseBuilder({
                           <div className="space-y-4">
                             <div className="grid grid-cols-2 gap-3">
                               <div>
-                                <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Р”Р»РёС‚РµР»СЊРЅРѕСЃС‚СЊ (СЃРµРє)</label>
+                                <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Длительность (сек)</label>
                                 <input
                                   type="number"
                                   min={0}
@@ -7837,7 +7823,7 @@ function CourseBuilder({
                                 />
                               </div>
                               <div>
-                                <label className="text-xs font-semibold text-slate-600 mb-1.5 block">РџРѕСЂРѕРі Р·Р°РІРµСЂС€РµРЅРёСЏ (%)</label>
+                                <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Порог завершения (%)</label>
                                 <input
                                   type="number"
                                   min={1}
@@ -7849,14 +7835,14 @@ function CourseBuilder({
                               </div>
                             </div>
                             <div>
-                              <label className="text-xs font-semibold text-slate-600 mb-1.5 block">РўРµРєСЃС‚ РєРѕРјР±Рѕ-СѓСЂРѕРєР°</label>
+                              <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Текст комбо-урока</label>
                               <RichTextEditor
                                 key={`lesson-${selectedLessonModel.id}-combo-content`}
                                 value={selectedLessonModel.contentText || ""}
                                 onChange={(next) => updateLessonById(selectedLessonModel.id, { contentText: next })}
                                 onImageUpload={handleRichTextImageUpload}
                                 onFileUpload={handleRichTextFileUpload}
-                                placeholder="Р’РІРµРґРёС‚Рµ С‚РµРєСЃС‚ РєРѕРјР±Рѕ-СѓСЂРѕРєР°..."
+                                placeholder="Введите текст комбо-урока..."
                                 minHeight={220}
                               />
                             </div>
@@ -7880,7 +7866,7 @@ function CourseBuilder({
                               <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5">
                                 <p className="text-[11px] text-slate-500">Видео в уроке</p>
                                 <p className="text-sm font-semibold text-slate-800 mt-0.5">{selectedLessonComboVideoMaterials.length}</p>
-                                <p className="text-[11px] text-slate-500 mt-1">Тест будет доступен после просмотра всех видео.</p>
+                                <p className="text-[11px] text-slate-500 mt-1">Тест будет доступен после прочтения текста и просмотра всех видео.</p>
                               </div>
                             </div>
                             <div>
@@ -7937,7 +7923,7 @@ function CourseBuilder({
                               </div>
                             </div>
                             <div>
-                              <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Р”РѕРїРѕР»РЅРёС‚РµР»СЊРЅС‹Рµ РјР°С‚РµСЂРёР°Р»С‹</label>
+                              <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Дополнительные материалы</label>
                               <div className="flex gap-2 mb-2">
                                 <button
                                   type="button"
@@ -7946,7 +7932,7 @@ function CourseBuilder({
                                   className="px-3 py-2 bg-slate-100 hover:bg-slate-200 rounded-lg text-xs font-semibold text-slate-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center gap-2"
                                 >
                                   {lessonUploading ? <RefreshCw size={12} className="animate-spin" /> : <Upload size={12} />}
-                                  Р¤Р°Р№Р»
+                                  Файл
                                 </button>
                                 <input
                                   value={lessonMaterialLink}
@@ -7955,18 +7941,18 @@ function CourseBuilder({
                                   className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-700 placeholder-slate-400 focus:outline-none focus:border-indigo-400 transition-all"
                                 />
                                 <button type="button" onClick={handleAddMaterialLink} className="px-3 py-2 bg-indigo-600 hover:bg-indigo-700 rounded-lg text-xs font-semibold text-white transition-colors inline-flex items-center gap-1">
-                                  <Link2 size={12} /> Р”РѕР±Р°РІРёС‚СЊ
+                                  <Link2 size={12} /> Добавить
                                 </button>
                               </div>
                               <div className="space-y-2">
                                 {selectedLessonExtraMaterials.length === 0 && (
-                                  <div className="text-xs text-slate-400">РџРѕРєР° РЅРёС‡РµРіРѕ РЅРµ РїСЂРёРєСЂРµРїР»РµРЅРѕ</div>
+                                  <div className="text-xs text-slate-400">Пока ничего не прикреплено</div>
                                 )}
                                 {selectedLessonExtraMaterials.map((material, index) => (
                                   <div key={`${material?.title || "material"}-${index}`} className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2">
                                     <FileCheck size={13} className="text-indigo-500 flex-shrink-0" />
                                     <div className="flex-1 min-w-0">
-                                      <div className="text-xs text-slate-700 truncate">{material?.metadata?.uploaded_file_name || material?.title || `РњР°С‚РµСЂРёР°Р» ${index + 1}`}</div>
+                                      <div className="text-xs text-slate-700 truncate">{material?.metadata?.uploaded_file_name || material?.title || `Материал ${index + 1}`}</div>
                                       <div className="text-[10px] text-slate-400 uppercase">{String(material?.material_type || material?.type || "file")}</div>
                                     </div>
                                     <button type="button" onClick={() => handleRemoveLessonMaterial(material._originalIndex)} className="p-1 text-slate-400 hover:text-red-500 transition-colors"><Trash2 size={12} /></button>
@@ -8041,6 +8027,9 @@ function CourseBuilder({
                           <div>
                             <h4 className="text-sm font-semibold text-slate-900">Банк вопросов урока</h4>
                             <p className="text-xs text-slate-500 mt-0.5">{selectedLessonQuizQuestions.length} вопросов</p>
+                            {selectedLessonModel.type === "combo" && (
+                              <p className="text-[11px] text-slate-500 mt-1">Если вопросов нет, комбо-урок будет сохранён без теста.</p>
+                            )}
                           </div>
                           <div className="flex items-center gap-2">
                             {questionTypes.map(t => (
