@@ -1118,6 +1118,99 @@ const resolveCourseMandatoryFlag = (courseLike = {}) => {
 
 const clampLmsProgress = (value) => Math.max(0, Math.min(100, Number(value) || 0));
 
+const LMS_VIDEO_POSITION_STORAGE_PREFIX = "lms:video-position:v1";
+const LMS_VIDEO_POSITION_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 30;
+
+const normalizeVideoStorageSource = (value) => {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw, typeof window !== "undefined" ? window.location.origin : "http://localhost");
+    const origin = String(parsed.origin || "").toLowerCase();
+    const pathname = String(parsed.pathname || "").toLowerCase();
+    return `${origin}${pathname}`.trim();
+  } catch (_) {
+    return raw.split("#")[0].split("?")[0].trim().toLowerCase();
+  }
+};
+
+const buildLmsVideoPositionStorageKey = ({ scope = "lesson", lessonId = 0, materialId = 0, videoUrl = "" } = {}) => {
+  const safeScope = String(scope || "lesson").trim().toLowerCase() || "lesson";
+  const lessonToken = Number(lessonId || 0) > 0 ? String(Number(lessonId || 0)) : "0";
+  const materialToken = Number(materialId || 0) > 0 ? String(Number(materialId || 0)) : "0";
+  const sourceTokenRaw = normalizeVideoStorageSource(videoUrl) || "no-source";
+  const sourceToken = sourceTokenRaw.slice(0, 280);
+  return `${LMS_VIDEO_POSITION_STORAGE_PREFIX}:${safeScope}:${lessonToken}:${materialToken}:${sourceToken}`;
+};
+
+const readLmsVideoPositionFromStorage = (storageKey) => {
+  if (!storageKey || typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(storageKey);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+
+    const updatedAtMs = Number(parsed.updated_at_ms || 0);
+    if (Number.isFinite(updatedAtMs) && updatedAtMs > 0) {
+      const ageMs = Date.now() - updatedAtMs;
+      if (ageMs > LMS_VIDEO_POSITION_MAX_AGE_MS) {
+        window.localStorage.removeItem(storageKey);
+        return null;
+      }
+    }
+
+    const positionSeconds = Math.max(0, Number(parsed.position_seconds || 0));
+    const durationSeconds = Math.max(0, Number(parsed.duration_seconds || 0));
+    const progressFromPayload = parsed.progress_ratio != null ? Number(parsed.progress_ratio) : null;
+    const progressFromPosition = durationSeconds > 0 ? (positionSeconds / durationSeconds) * 100 : 0;
+    const progressRatio = clampLmsProgress(
+      progressFromPayload != null && Number.isFinite(progressFromPayload)
+        ? progressFromPayload
+        : progressFromPosition
+    );
+
+    return {
+      position_seconds: Number(positionSeconds.toFixed(2)),
+      duration_seconds: Number(durationSeconds.toFixed(2)),
+      progress_ratio: Number(progressRatio.toFixed(2)),
+      updated_at_ms: Number.isFinite(updatedAtMs) ? updatedAtMs : 0,
+    };
+  } catch (_) {
+    return null;
+  }
+};
+
+const writeLmsVideoPositionToStorage = (storageKey, payload = {}) => {
+  if (!storageKey || typeof window === "undefined") return;
+  try {
+    const positionSeconds = Math.max(0, Number(payload.position_seconds || 0));
+    const durationSeconds = Math.max(0, Number(payload.duration_seconds || 0));
+    const progressCandidate = payload.progress_ratio != null
+      ? Number(payload.progress_ratio)
+      : (durationSeconds > 0 ? (positionSeconds / durationSeconds) * 100 : 0);
+    const progressRatio = clampLmsProgress(progressCandidate);
+    const normalizedPayload = {
+      position_seconds: Number(positionSeconds.toFixed(2)),
+      duration_seconds: Number(durationSeconds.toFixed(2)),
+      progress_ratio: Number(progressRatio.toFixed(2)),
+      updated_at_ms: Date.now(),
+    };
+    window.localStorage.setItem(storageKey, JSON.stringify(normalizedPayload));
+  } catch (_) {
+    // ignore storage write errors (quota/security)
+  }
+};
+
+const clearLmsVideoPositionFromStorage = (storageKey) => {
+  if (!storageKey || typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(storageKey);
+  } catch (_) {
+    // ignore storage remove errors
+  }
+};
+
 const isCompletedLmsStatus = (status) => status === "completed" || status === "completed_late";
 
 const mapAdminProgressRowToUiStatus = (row) => {
@@ -3668,9 +3761,22 @@ function CombinedVideoBlockPlayer({
   const seekToastAtRef = useRef(0);
   const reportIntervalRef = useRef(null);
   const lastProgressReportAtRef = useRef(0);
+  const lastLocalPersistAtRef = useRef(0);
+  const restoredPositionRef = useRef(0);
+  const totalSecondsRef = useRef(totalSeconds);
+  const displayCurrentSecondsRef = useRef(displayCurrentSeconds);
 
   const safeTotalSeconds = Math.max(1, Number(totalSeconds || 0));
   const currentSeconds = Math.max(0, Math.floor(Number(displayCurrentSeconds || 0)));
+  const localStorageKey = useMemo(() => {
+    if (isManagerMode) return "";
+    return buildLmsVideoPositionStorageKey({
+      scope: "combined",
+      lessonId: Number(lessonId || 0),
+      materialId: Number(blockMaterialId || 0),
+      videoUrl: blockVideoUrl,
+    });
+  }, [isManagerMode, lessonId, blockMaterialId, blockVideoUrl]);
   const canTrackEvents =
     !isManagerMode
     && typeof lmsRequest === "function"
@@ -3679,14 +3785,69 @@ function CombinedVideoBlockPlayer({
   const canSeekForward = isManagerMode || Boolean(allowFastForward) || progress >= normalizedThreshold;
 
   useEffect(() => {
+    totalSecondsRef.current = totalSeconds;
+  }, [totalSeconds]);
+
+  useEffect(() => {
+    displayCurrentSecondsRef.current = displayCurrentSeconds;
+  }, [displayCurrentSeconds]);
+
+  const persistLocalProgress = useCallback((force = false, override = null) => {
+    if (!localStorageKey) return;
+    const nowTs = Date.now();
+    if (!force && nowTs - lastLocalPersistAtRef.current < 1000) return;
+    const video = videoRef.current;
+    const duration = Math.max(1, Number(
+      override?.durationSeconds
+      ?? video?.duration
+      ?? totalSecondsRef.current
+      ?? 0
+    ));
+    const position = Math.max(0, Number(
+      override?.positionSeconds
+      ?? video?.currentTime
+      ?? displayCurrentSecondsRef.current
+      ?? 0
+    ));
+    const progressCandidate = override?.progressRatio != null
+      ? Number(override.progressRatio)
+      : (duration > 0 ? (position / duration) * 100 : Number(progressRef.current || 0));
+    writeLmsVideoPositionToStorage(localStorageKey, {
+      position_seconds: position,
+      duration_seconds: duration,
+      progress_ratio: clampLmsProgress(progressCandidate),
+    });
+    lastLocalPersistAtRef.current = nowTs;
+  }, [localStorageKey]);
+
+  useEffect(() => {
     const nextProgress = clampLmsProgress(initialProgress);
     const nextDuration = Math.max(1, Number(initialDurationSeconds || 18 * 60));
+    const storedPosition = readLmsVideoPositionFromStorage(localStorageKey);
+    const storedDuration = Math.max(1, Number(storedPosition?.duration_seconds || 0) || nextDuration);
+    const restoredProgressByPosition = clampLmsProgress(
+      storedDuration > 0
+        ? (Math.max(0, Number(storedPosition?.position_seconds || 0)) / storedDuration) * 100
+        : 0
+    );
+    const restoredProgress = clampLmsProgress(
+      storedPosition?.progress_ratio != null
+        ? Number(storedPosition.progress_ratio)
+        : restoredProgressByPosition
+    );
+    const mergedProgress = Math.max(nextProgress, restoredProgress);
+    const mergedDuration = Math.max(nextDuration, storedDuration);
+    const restoredPositionSeconds = Math.max(
+      Math.max(0, Number(storedPosition?.position_seconds || 0)),
+      (mergedProgress / 100) * mergedDuration
+    );
     setPlaying(false);
-    setProgress(nextProgress);
-    setTotalSeconds(nextDuration);
-    setDisplayCurrentSeconds((nextProgress / 100) * nextDuration);
-    progressRef.current = nextProgress;
-    maxAllowedSecondsRef.current = (nextProgress / 100) * nextDuration;
+    setProgress(mergedProgress);
+    setTotalSeconds(mergedDuration);
+    setDisplayCurrentSeconds(restoredPositionSeconds);
+    progressRef.current = mergedProgress;
+    maxAllowedSecondsRef.current = (mergedProgress / 100) * mergedDuration;
+    restoredPositionRef.current = restoredPositionSeconds;
     if (videoRef.current) {
       try {
         videoRef.current.pause();
@@ -3694,7 +3855,27 @@ function CombinedVideoBlockPlayer({
         // ignore
       }
     }
-  }, [blockMaterialId, blockVideoUrl, initialDurationSeconds, initialProgress]);
+    writeLmsVideoPositionToStorage(localStorageKey, {
+      position_seconds: restoredPositionSeconds,
+      duration_seconds: mergedDuration,
+      progress_ratio: mergedProgress,
+    });
+    lastLocalPersistAtRef.current = Date.now();
+  }, [blockMaterialId, blockVideoUrl, initialDurationSeconds, initialProgress, localStorageKey]);
+
+  useEffect(() => {
+    if (!localStorageKey || typeof window === "undefined") return undefined;
+    const flushLocalProgress = () => {
+      persistLocalProgress(true);
+    };
+    window.addEventListener("pagehide", flushLocalProgress);
+    window.addEventListener("beforeunload", flushLocalProgress);
+    return () => {
+      flushLocalProgress();
+      window.removeEventListener("pagehide", flushLocalProgress);
+      window.removeEventListener("beforeunload", flushLocalProgress);
+    };
+  }, [localStorageKey, persistLocalProgress]);
 
   useEffect(() => {
     progressRef.current = progress;
@@ -3765,6 +3946,7 @@ function CombinedVideoBlockPlayer({
         if (videoRef.current && !videoRef.current.paused) {
           videoRef.current.pause();
         }
+        persistLocalProgress(true);
         setTabHidden(true);
         setTimeout(() => setTabHidden(false), 3000);
       }
@@ -3772,7 +3954,7 @@ function CombinedVideoBlockPlayer({
     };
     document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
-  }, [canTrackEvents, lmsRequest, lessonId, playing, isManagerMode]);
+  }, [canTrackEvents, lmsRequest, lessonId, playing, isManagerMode, persistLocalProgress]);
 
   const handleLoadedMetadata = useCallback(() => {
     const video = videoRef.current;
@@ -3781,15 +3963,23 @@ function CombinedVideoBlockPlayer({
     if (!Number.isFinite(mediaDuration) || mediaDuration <= 0) return;
     const safeDuration = Math.max(1, mediaDuration);
     setTotalSeconds((prev) => (Math.abs(prev - safeDuration) >= 0.25 ? safeDuration : prev));
-    const resumePosition = Math.max(0, Math.min(mediaDuration, (progressRef.current / 100) * mediaDuration));
+    const resumeFromProgress = Math.max(0, Math.min(mediaDuration, (progressRef.current / 100) * mediaDuration));
+    const resumeFromStorage = Math.max(0, Math.min(mediaDuration, Number(restoredPositionRef.current || 0)));
+    const resumePosition = Math.max(resumeFromProgress, resumeFromStorage);
     if (resumePosition > 0 && Math.abs(Number(video.currentTime || 0) - resumePosition) > 1.5) {
       video.currentTime = resumePosition;
     }
     const normalizedProgress = clampLmsProgress(progressRef.current || 0);
     const restoredAllowed = Math.max(0, (normalizedProgress / 100) * safeDuration);
     maxAllowedSecondsRef.current = Math.max(Number(video.currentTime || 0), restoredAllowed);
-    setDisplayCurrentSeconds(Math.max(0, Number(video.currentTime || resumePosition || 0)));
-  }, []);
+    const nextSeconds = Math.max(0, Number(video.currentTime || resumePosition || 0));
+    setDisplayCurrentSeconds(nextSeconds);
+    persistLocalProgress(true, {
+      positionSeconds: nextSeconds,
+      durationSeconds: safeDuration,
+      progressRatio: clampLmsProgress((nextSeconds / safeDuration) * 100),
+    });
+  }, [persistLocalProgress]);
 
   const maybeReportProgress = () => {
     if (!canTrackEvents) return;
@@ -3814,8 +4004,13 @@ function CombinedVideoBlockPlayer({
     const nextProgress = clampLmsProgress((currentTime / safeDuration) * 100);
     setProgress(nextProgress);
     progressRef.current = nextProgress;
+    persistLocalProgress(false, {
+      positionSeconds: currentTime,
+      durationSeconds: safeDuration,
+      progressRatio: nextProgress,
+    });
     maybeReportProgress();
-  }, [safeTotalSeconds, totalSeconds, canTrackEvents, reportCombinedProgress]);
+  }, [safeTotalSeconds, totalSeconds, canTrackEvents, reportCombinedProgress, persistLocalProgress]);
 
   const notifySeekBlocked = () => {
     const nowTs = Date.now();
@@ -3837,6 +4032,11 @@ function CombinedVideoBlockPlayer({
       const correctedProgress = clampLmsProgress((restoredSeconds / duration) * 100);
       setProgress(correctedProgress);
       progressRef.current = correctedProgress;
+      persistLocalProgress(true, {
+        positionSeconds: restoredSeconds,
+        durationSeconds: duration,
+        progressRatio: correctedProgress,
+      });
       notifySeekBlocked();
       return;
     }
@@ -3848,6 +4048,11 @@ function CombinedVideoBlockPlayer({
     if (canSeekForward) {
       maxAllowedSecondsRef.current = Math.max(maxAllowedSecondsRef.current, boundedSeconds);
     }
+    persistLocalProgress(true, {
+      positionSeconds: boundedSeconds,
+      durationSeconds: duration,
+      progressRatio: nextProgress,
+    });
     maybeReportProgress();
   };
 
@@ -3874,6 +4079,11 @@ function CombinedVideoBlockPlayer({
       );
       setProgress(correctedProgress);
       progressRef.current = correctedProgress;
+      persistLocalProgress(true, {
+        positionSeconds: restoredSeconds,
+        durationSeconds: Math.max(1, Number(video.duration || safeTotalSeconds || 0)),
+        progressRatio: correctedProgress,
+      });
       notifySeekBlocked();
     }
   };
@@ -3884,6 +4094,7 @@ function CombinedVideoBlockPlayer({
 
   const handleVideoPause = () => {
     setPlaying(false);
+    persistLocalProgress(true);
     void reportCombinedProgress();
   };
 
@@ -4412,6 +4623,10 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
   const maxAllowedSecondsRef = useRef(0);
   const seekToastAtRef = useRef(0);
   const autoCompleteTriggeredRef = useRef(false);
+  const lastLocalPersistAtRef = useRef(0);
+  const restoredPositionRef = useRef(0);
+  const totalSecondsRef = useRef(totalSeconds);
+  const displayCurrentSecondsRef = useRef(displayCurrentSeconds);
 
   const lessonId = Number(lesson?.apiLessonId || 0);
   const canTrack = !isManagerMode && apiMode && typeof lmsRequest === "function" && lessonId > 0;
@@ -4426,8 +4641,18 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
   });
   const videoDurationMeta = Number(videoMaterial?.metadata?.duration_seconds || 0);
   const videoUrl = videoMaterial?.url || videoMaterial?.signed_url || videoMaterial?.content_url || "";
+  const videoMaterialId = Number(videoMaterial?.id || videoMaterial?.material_id || 0);
   const safeTotalSeconds = Math.max(1, Number(totalSeconds || 0));
   const currentSeconds = Math.max(0, Math.floor(Number(displayCurrentSeconds || 0)));
+  const videoStorageKey = useMemo(() => {
+    if (isManagerMode) return "";
+    return buildLmsVideoPositionStorageKey({
+      scope: "lesson",
+      lessonId: lessonId || Number(lesson?.id || 0),
+      materialId: videoMaterialId,
+      videoUrl,
+    });
+  }, [isManagerMode, lessonId, lesson?.id, videoMaterialId, videoUrl]);
   const transcriptMaterial = materials.find((item) => String(item?.material_type || "").toLowerCase() === "text" && item?.content_text);
   const transcriptText = normalizeRichTextValue(transcriptMaterial?.content_text || lesson?.description || "");
   const lessonFiles = materials.filter((item) => {
@@ -4437,14 +4662,74 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
   });
 
   useEffect(() => {
-    const next = Math.max(0, Math.min(100, Number(lesson?.completionRatio ?? (String(lesson?.status || "").toLowerCase() === "completed" ? 100 : 0))));
+    totalSecondsRef.current = totalSeconds;
+  }, [totalSeconds]);
+
+  useEffect(() => {
+    displayCurrentSecondsRef.current = displayCurrentSeconds;
+  }, [displayCurrentSeconds]);
+
+  const persistLocalProgress = useCallback((force = false, override = null) => {
+    if (!videoStorageKey) return;
+    const nowTs = Date.now();
+    if (!force && nowTs - lastLocalPersistAtRef.current < 1000) return;
+    const video = videoRef.current;
+    const duration = Math.max(1, Number(
+      override?.durationSeconds
+      ?? video?.duration
+      ?? totalSecondsRef.current
+      ?? 0
+    ));
+    const position = Math.max(0, Number(
+      override?.positionSeconds
+      ?? video?.currentTime
+      ?? displayCurrentSecondsRef.current
+      ?? 0
+    ));
+    const progressCandidate = override?.progressRatio != null
+      ? Number(override.progressRatio)
+      : (duration > 0 ? (position / duration) * 100 : Number(progressRef.current || 0));
+    writeLmsVideoPositionToStorage(videoStorageKey, {
+      position_seconds: position,
+      duration_seconds: duration,
+      progress_ratio: clampLmsProgress(progressCandidate),
+    });
+    lastLocalPersistAtRef.current = nowTs;
+  }, [videoStorageKey]);
+
+  useEffect(() => {
+    const isLessonCompleted = String(lesson?.status || "").toLowerCase() === "completed";
+    const next = clampLmsProgress(lesson?.completionRatio ?? (isLessonCompleted ? 100 : 0));
     const fallbackDuration = Math.max(1, Number(videoDurationMeta || lesson?.durationSeconds || 18 * 60));
-    setProgress(next);
-    setTotalSeconds(fallbackDuration);
-    setDisplayCurrentSeconds(Math.max(0, (next / 100) * fallbackDuration));
-    setCompleted(String(lesson?.status || "").toLowerCase() === "completed");
+    const storedPosition = isLessonCompleted ? null : readLmsVideoPositionFromStorage(videoStorageKey);
+    const storedDuration = Math.max(1, Number(storedPosition?.duration_seconds || 0) || fallbackDuration);
+    const restoredProgressByPosition = clampLmsProgress(
+      storedDuration > 0
+        ? (Math.max(0, Number(storedPosition?.position_seconds || 0)) / storedDuration) * 100
+        : 0
+    );
+    const restoredProgress = clampLmsProgress(
+      storedPosition?.progress_ratio != null
+        ? Number(storedPosition.progress_ratio)
+        : restoredProgressByPosition
+    );
+    const mergedProgress = isLessonCompleted ? 100 : Math.max(next, restoredProgress);
+    const mergedDuration = Math.max(fallbackDuration, storedDuration);
+    const restoredPositionSeconds = isLessonCompleted
+      ? mergedDuration
+      : Math.max(
+        Math.max(0, Number(storedPosition?.position_seconds || 0)),
+        (mergedProgress / 100) * mergedDuration
+      );
+
+    setProgress(mergedProgress);
+    setTotalSeconds(mergedDuration);
+    setDisplayCurrentSeconds(restoredPositionSeconds);
+    progressRef.current = mergedProgress;
+    setCompleted(isLessonCompleted);
     setPlaying(false);
-    maxAllowedSecondsRef.current = Math.max(0, (next / 100) * fallbackDuration);
+    maxAllowedSecondsRef.current = Math.max(0, (mergedProgress / 100) * mergedDuration);
+    restoredPositionRef.current = restoredPositionSeconds;
     if (videoRef.current) {
       try {
         videoRef.current.pause();
@@ -4452,8 +4737,45 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
         // ignore
       }
     }
+    if (isLessonCompleted) {
+      clearLmsVideoPositionFromStorage(videoStorageKey);
+    } else {
+      writeLmsVideoPositionToStorage(videoStorageKey, {
+        position_seconds: restoredPositionSeconds,
+        duration_seconds: mergedDuration,
+        progress_ratio: mergedProgress,
+      });
+      lastLocalPersistAtRef.current = Date.now();
+    }
     autoCompleteTriggeredRef.current = false;
-  }, [lesson?.id, lesson?.apiLessonId, lesson?.completionRatio, lesson?.status, lesson?.durationSeconds, videoDurationMeta]);
+  }, [
+    lesson?.id,
+    lesson?.apiLessonId,
+    lesson?.completionRatio,
+    lesson?.status,
+    lesson?.durationSeconds,
+    videoDurationMeta,
+    videoStorageKey,
+  ]);
+
+  useEffect(() => {
+    if (!videoStorageKey || typeof window === "undefined") return undefined;
+    const flushLocalProgress = () => {
+      persistLocalProgress(true);
+    };
+    window.addEventListener("pagehide", flushLocalProgress);
+    window.addEventListener("beforeunload", flushLocalProgress);
+    return () => {
+      flushLocalProgress();
+      window.removeEventListener("pagehide", flushLocalProgress);
+      window.removeEventListener("beforeunload", flushLocalProgress);
+    };
+  }, [videoStorageKey, persistLocalProgress]);
+
+  useEffect(() => {
+    if (!completed) return;
+    clearLmsVideoPositionFromStorage(videoStorageKey);
+  }, [completed, videoStorageKey]);
 
   useEffect(() => {
     progressRef.current = progress;
@@ -4479,16 +4801,27 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
     });
     if (payload?.position_seconds != null && Number.isFinite(Number(payload.position_seconds))) {
       const serverPosition = Math.max(0, Number(payload.position_seconds));
-      const nextProgress = Math.max(0, Math.min(100, (serverPosition / safeTotalSeconds) * 100));
+      const serverProgress = clampLmsProgress((serverPosition / safeTotalSeconds) * 100);
+      const nextProgress = Math.max(clampLmsProgress(progressRef.current), serverProgress);
       setProgress(nextProgress);
       progressRef.current = nextProgress;
-      maxAllowedSecondsRef.current = Math.max(maxAllowedSecondsRef.current, serverPosition);
+      const resolvedPosition = Math.max(
+        serverPosition,
+        Number(videoRef.current?.currentTime || 0),
+        Number(displayCurrentSecondsRef.current || 0)
+      );
+      maxAllowedSecondsRef.current = Math.max(maxAllowedSecondsRef.current, resolvedPosition);
       if (!videoRef.current || videoRef.current.paused) {
-        setDisplayCurrentSeconds(Math.min(safeTotalSeconds, serverPosition));
+        setDisplayCurrentSeconds(Math.min(safeTotalSeconds, resolvedPosition));
       }
+      persistLocalProgress(true, {
+        positionSeconds: Math.min(safeTotalSeconds, resolvedPosition),
+        durationSeconds: safeTotalSeconds,
+        progressRatio: nextProgress,
+      });
     }
     return payload || null;
-  }, [canTrack, lmsRequest, lessonId, safeTotalSeconds]);
+  }, [canTrack, lmsRequest, lessonId, safeTotalSeconds, persistLocalProgress]);
 
   useEffect(() => {
     if (isManagerMode) return undefined;
@@ -4516,6 +4849,7 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
         if (videoRef.current && !videoRef.current.paused) {
           videoRef.current.pause();
         }
+        persistLocalProgress(true);
         setTabHidden(true);
         setTimeout(() => setTabHidden(false), 3000);
       }
@@ -4523,7 +4857,7 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
     };
     document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
-  }, [canTrack, lmsRequest, lessonId, playing, isManagerMode]);
+  }, [canTrack, lmsRequest, lessonId, playing, isManagerMode, persistLocalProgress]);
 
   useEffect(() => {
     if (!playing || !canTrack || !lessonId) {
@@ -4554,15 +4888,23 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
     if (!Number.isFinite(mediaDuration) || mediaDuration <= 0) return;
     const safeDuration = Math.max(1, mediaDuration);
     setTotalSeconds((prev) => (Math.abs(prev - safeDuration) >= 0.25 ? safeDuration : prev));
-    const resumePosition = Math.max(0, Math.min(mediaDuration, (progressRef.current / 100) * mediaDuration));
+    const resumeFromProgress = Math.max(0, Math.min(mediaDuration, (progressRef.current / 100) * mediaDuration));
+    const resumeFromStorage = Math.max(0, Math.min(mediaDuration, Number(restoredPositionRef.current || 0)));
+    const resumePosition = Math.max(resumeFromProgress, resumeFromStorage);
     if (resumePosition > 0 && Math.abs(Number(video.currentTime || 0) - resumePosition) > 1.5) {
       video.currentTime = resumePosition;
     }
-    const normalizedProgress = Math.max(0, Math.min(100, Number(progressRef.current || 0)));
+    const normalizedProgress = clampLmsProgress(progressRef.current || 0);
     const restoredAllowed = Math.max(0, (normalizedProgress / 100) * safeDuration);
     maxAllowedSecondsRef.current = Math.max(Number(video.currentTime || 0), restoredAllowed);
-    setDisplayCurrentSeconds(Math.max(0, Number(video.currentTime || resumePosition || 0)));
-  }, []);
+    const nextSeconds = Math.max(0, Number(video.currentTime || resumePosition || 0));
+    setDisplayCurrentSeconds(nextSeconds);
+    persistLocalProgress(true, {
+      positionSeconds: nextSeconds,
+      durationSeconds: safeDuration,
+      progressRatio: clampLmsProgress((nextSeconds / safeDuration) * 100),
+    });
+  }, [persistLocalProgress]);
 
   const handleTimeUpdate = useCallback(() => {
     const video = videoRef.current;
@@ -4576,10 +4918,15 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
     }
     maxAllowedSecondsRef.current = Math.max(maxAllowedSecondsRef.current, currentTime);
     setDisplayCurrentSeconds(currentTime);
-    const nextProgress = Math.max(0, Math.min(100, (currentTime / safeDuration) * 100));
+    const nextProgress = clampLmsProgress((currentTime / safeDuration) * 100);
     setProgress(nextProgress);
     progressRef.current = nextProgress;
-  }, [safeTotalSeconds, totalSeconds]);
+    persistLocalProgress(false, {
+      positionSeconds: currentTime,
+      durationSeconds: safeDuration,
+      progressRatio: nextProgress,
+    });
+  }, [safeTotalSeconds, totalSeconds, persistLocalProgress]);
 
   const notifySeekBlocked = () => {
     const nowTs = Date.now();
@@ -4598,20 +4945,30 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
       const restoredSeconds = Math.max(0, maxAllowedSecondsRef.current);
       video.currentTime = restoredSeconds;
       setDisplayCurrentSeconds(restoredSeconds);
-      const correctedProgress = Math.max(0, Math.min(100, (restoredSeconds / duration) * 100));
+      const correctedProgress = clampLmsProgress((restoredSeconds / duration) * 100);
       setProgress(correctedProgress);
       progressRef.current = correctedProgress;
+      persistLocalProgress(true, {
+        positionSeconds: restoredSeconds,
+        durationSeconds: duration,
+        progressRatio: correctedProgress,
+      });
       notifySeekBlocked();
       return;
     }
     video.currentTime = boundedSeconds;
     setDisplayCurrentSeconds(boundedSeconds);
-    const nextProgress = Math.max(0, Math.min(100, (boundedSeconds / duration) * 100));
+    const nextProgress = clampLmsProgress((boundedSeconds / duration) * 100);
     setProgress(nextProgress);
     progressRef.current = nextProgress;
     if (canSeekForward) {
       maxAllowedSecondsRef.current = Math.max(maxAllowedSecondsRef.current, boundedSeconds);
     }
+    persistLocalProgress(true, {
+      positionSeconds: boundedSeconds,
+      durationSeconds: duration,
+      progressRatio: nextProgress,
+    });
   };
 
   const handleSeekSliderChange = (event) => {
@@ -4632,9 +4989,16 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
       const restoredSeconds = Math.max(0, maxAllowedSecondsRef.current);
       video.currentTime = restoredSeconds;
       setDisplayCurrentSeconds(restoredSeconds);
-      const correctedProgress = Math.max(0, Math.min(100, (restoredSeconds / Math.max(1, Number(video.duration || safeTotalSeconds || 0))) * 100));
+      const correctedProgress = clampLmsProgress(
+        (restoredSeconds / Math.max(1, Number(video.duration || safeTotalSeconds || 0))) * 100
+      );
       setProgress(correctedProgress);
       progressRef.current = correctedProgress;
+      persistLocalProgress(true, {
+        positionSeconds: restoredSeconds,
+        durationSeconds: Math.max(1, Number(video.duration || safeTotalSeconds || 0)),
+        progressRatio: correctedProgress,
+      });
       notifySeekBlocked();
     }
   };
@@ -4645,6 +5009,7 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
 
   const handleVideoPause = () => {
     setPlaying(false);
+    persistLocalProgress(true);
     void sendHeartbeat().catch(() => {});
   };
 
@@ -4681,11 +5046,12 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
         setCompleted(true);
         setProgress(100);
         setDisplayCurrentSeconds(safeTotalSeconds);
+        clearLmsVideoPositionFromStorage(videoStorageKey);
       }
     } finally {
       setCompleting(false);
     }
-  }, [completed, completing, onCompleteLesson, lesson, syncHeartbeatBeforeComplete, safeTotalSeconds, isManagerMode]);
+  }, [completed, completing, onCompleteLesson, lesson, syncHeartbeatBeforeComplete, safeTotalSeconds, isManagerMode, videoStorageKey]);
 
   useEffect(() => {
     if (isManagerMode) return;
