@@ -497,7 +497,11 @@ const syncAppViewWithUrl = (nextView) => {
     try {
         const url = new URL(window.location.href);
         if (nextView === 'lms') {
-            url.pathname = resolveAppPathname('/lms');
+            // Preserve existing LMS sub-path (e.g. /lms/course/5, /lms/admin)
+            // Only reset to /lms if the current URL is not already an LMS path
+            if (!isLmsAppPath(url.pathname)) {
+                url.pathname = resolveAppPathname('/lms');
+            }
             url.searchParams.delete(APP_VIEW_QUERY_PARAM);
         } else {
             url.pathname = resolveAppPathname('');
