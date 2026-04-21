@@ -2066,6 +2066,44 @@ class Database:
                     WHEN duplicate_object THEN
                         NULL;
                 END $$;
+                -- Backfill legacy lesson types after introducing `lesson_type`
+                UPDATE lms_lessons l
+                SET lesson_type = 'text'
+                WHERE COALESCE(NULLIF(TRIM(LOWER(l.lesson_type)), ''), 'video') = 'video'
+                  AND EXISTS (
+                      SELECT 1
+                      FROM lms_lesson_materials lm
+                      WHERE lm.lesson_id = l.id
+                        AND lm.material_type = 'text'
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM lms_lesson_materials lm
+                      WHERE lm.lesson_id = l.id
+                        AND lm.material_type = 'video'
+                  );
+                UPDATE lms_lessons l
+                SET lesson_type = 'combined'
+                WHERE COALESCE(NULLIF(TRIM(LOWER(l.lesson_type)), ''), 'video') IN ('video', 'text')
+                  AND EXISTS (
+                      SELECT 1
+                      FROM lms_lesson_materials lm
+                      WHERE lm.lesson_id = l.id
+                        AND lm.material_type = 'video'
+                  )
+                  AND EXISTS (
+                      SELECT 1
+                      FROM lms_lesson_materials lm
+                      WHERE lm.lesson_id = l.id
+                        AND lm.material_type = 'text'
+                  )
+                  AND EXISTS (
+                      SELECT 1
+                      FROM lms_lesson_materials lm
+                      WHERE lm.lesson_id = l.id
+                        AND lm.material_type IN ('text', 'video')
+                        AND COALESCE(LOWER(lm.metadata->>'combined_block'), '') IN ('1', 'true', 't', 'yes', 'y')
+                  );
 
                 -- LMS indexes
                 CREATE INDEX IF NOT EXISTS idx_lms_courses_status ON lms_courses(status);
