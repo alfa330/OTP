@@ -1396,6 +1396,11 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
     let testStatus = "not_started";
     if (passedAny) testStatus = "completed";
     else if (attemptsUsed > 0) testStatus = attemptsUsed >= attemptLimit ? "test_failed" : "in_progress";
+    
+    // Safely parse score if available. Different APIs might return max_score_percent or score_percent or score.
+    const rawScore = testState?.max_score_percent ?? testState?.score_percent ?? testState?.score ?? testState?.best_score_percent ?? testState?.best_score ?? null;
+    const scoreVal = rawScore != null ? Number(rawScore) : null;
+
     return {
       id: `test-${test.id}`,
       apiTestId: Number(test.id),
@@ -1411,6 +1416,7 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
       requiresTest: true,
       maxAttempts: attemptLimit,
       attemptsUsed,
+      score: scoreVal,
       isFinal: Boolean(test?.is_final),
       passingScore: Number(test?.pass_threshold || coursePayload?.course_version?.pass_threshold || coursePayload?.default_pass_threshold || 80),
       questionCount: Math.max(0, Number(test?.question_count || 0)),
@@ -4224,27 +4230,33 @@ function CombinedLesson({
           </div>
         )
       )}
-      {completed && !isManagerMode && linkedTestPending && (
-        <div className="rounded-2xl border border-indigo-200 bg-indigo-50/60 px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+      {completed && !isManagerMode && linkedTest && (
+        <div className={`rounded-2xl border px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 ${linkedTestStatus === "completed" ? "border-emerald-200 bg-emerald-50" : linkedTest.attemptsUsed > 0 && linkedTest.attemptsUsed >= linkedTest.maxAttempts ? "border-red-200 bg-red-50" : "border-indigo-200 bg-indigo-50/60"}`}>
           <div>
-            <p className="text-xs font-semibold text-indigo-900">{"\u041c\u0430\u0442\u0435\u0440\u0438\u0430\u043b\u044b \u043a\u043e\u043c\u0431\u043e-\u0443\u0440\u043e\u043a\u0430 \u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u044b"}</p>
-            <p className="text-[11px] text-indigo-700 mt-0.5">{"\u0422\u0435\u0441\u0442 \u043e\u0442\u043a\u0440\u043e\u0435\u0442\u0441\u044f \u0432 \u043e\u0442\u0434\u0435\u043b\u044c\u043d\u043e\u043c \u043e\u043a\u043d\u0435"}</p>
+            <p className={`text-xs font-semibold ${linkedTestStatus === "completed" ? "text-emerald-900" : linkedTest.attemptsUsed > 0 && linkedTest.attemptsUsed >= linkedTest.maxAttempts ? "text-red-900" : "text-indigo-900"}`}>
+              {linkedTestStatus === "completed" ? "Тест пройден" : linkedTest.attemptsUsed > 0 && linkedTest.attemptsUsed >= linkedTest.maxAttempts ? "Тест не пройден" : "Материалы комбо-урока завершены"}
+            </p>
+            {linkedTest.score != null ? (
+              <p className={`text-[11px] mt-0.5 ${linkedTestStatus === "completed" ? "text-emerald-700" : "text-red-700"}`}>
+                Максимальный балл: {Math.round(linkedTest.score)}% (Порог: {Math.round(linkedTest.passingScore || 80)}%)
+              </p>
+            ) : (
+              <p className={`text-[11px] font-medium mt-0.5 ${linkedTest.attemptsUsed >= linkedTest.maxAttempts ? "text-red-700" : "text-indigo-700"}`}>
+                {linkedTest.attemptsUsed >= linkedTest.maxAttempts ? "Попытки исчерпаны" : "\u0422\u0435\u0441\u0442 \u043e\u0442\u043a\u0440\u043e\u0435\u0442\u0441\u044f \u0432 \u043e\u0442\u0434\u0435\u043b\u044c\u043d\u043e\u043c \u043e\u043a\u043d\u0435"}
+              </p>
+            )}
           </div>
           <button
             type="button"
             onClick={openCombinedTestModal}
-            className="inline-flex items-center justify-center gap-2 px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold transition-colors"
+            className={`inline-flex items-center justify-center gap-2 px-3.5 py-2 rounded-xl text-white text-xs font-semibold transition-colors ${linkedTestStatus === "completed" ? "bg-emerald-600 hover:bg-emerald-700" : linkedTest.attemptsUsed >= linkedTest.maxAttempts ? "bg-red-600 hover:bg-red-700" : "bg-indigo-600 hover:bg-indigo-700"}`}
           >
-            <PlayCircle size={13} /> {"\u041f\u0435\u0440\u0435\u0439\u0442\u0438 \u043a \u0442\u0435\u0441\u0442\u0443"}
+            {(linkedTestStatus === "completed" || linkedTest.attemptsUsed >= linkedTest.maxAttempts) ? <RefreshCw size={13} /> : <PlayCircle size={13} />}
+            {(linkedTestStatus === "completed" || linkedTest.attemptsUsed > 0) ? "Просмотр результатов" : "\u041f\u0435\u0440\u0435\u0439\u0442\u0438 \u043a \u0442\u0435\u0441\u0442\u0443"}
           </button>
         </div>
       )}
-      {false && completed && (!linkedTest || isManagerMode || !linkedTestPending) && (
-        <div className="flex items-center gap-1.5 text-xs text-emerald-700 bg-emerald-50 px-3 py-2 rounded-xl font-semibold w-fit">
-          <CheckCircle size={12} /> РЈСЂРѕРє Р·Р°РІРµСЂС€РµРЅ
-        </div>
-      )}
-      {completed && (!linkedTest || isManagerMode || !linkedTestPending) && (
+      {completed && (!linkedTest || isManagerMode) && (
         <div className="flex items-center gap-1.5 text-xs text-emerald-700 bg-emerald-50 px-3 py-2 rounded-xl font-semibold w-fit">
           <CheckCircle size={12} /> {"\u0423\u0440\u043e\u043a \u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043d"}
         </div>
@@ -5052,6 +5064,11 @@ function ApiQuizSection({ quizView, setQuizView, answers, setAnswers, course, le
       <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center max-w-2xl mx-auto">
         <div className="w-16 h-16 bg-violet-100 rounded-2xl flex items-center justify-center mx-auto mb-5"><HelpCircle size={28} className="text-violet-600" /></div>
         <h2 className="text-xl font-bold text-slate-900 mb-2">{lesson?.title || "Тест"}</h2>
+        {lesson?.score != null && (
+          <div className="mb-4 inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-indigo-50 border border-indigo-100 text-indigo-700 font-medium text-sm">
+            Ваш лучший результат: {Math.round(lesson.score)}% (Порог: {Math.round(passThreshold)}%)
+          </div>
+        )}
         <p className="text-sm text-slate-500 mb-4">Проверьте свои знания по материалам курса</p>
         
         <div className="grid grid-cols-3 gap-4 mb-5">
