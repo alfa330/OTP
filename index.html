@@ -8,6 +8,23 @@
   </head>
   <body class="bg-gray-50 font-sans antialiased text-gray-900">
     <div id="root"></div>
+    <script>
+      // GitHub Pages SPA redirect handler
+      // Decodes the __spa_path query parameter set by 404.html and restores
+      // the correct URL via history.replaceState before the app loads.
+      (function () {
+        var params = new URLSearchParams(window.location.search);
+        var spaPath = params.get('__spa_path');
+        if (spaPath) {
+          params.delete('__spa_path');
+          var decoded = decodeURIComponent(spaPath);
+          var base = window.location.pathname.replace(/\/$/, '');
+          var remaining = params.toString();
+          var newUrl = base + decoded + (remaining ? '?' + remaining : '') + window.location.hash;
+          window.history.replaceState(null, '', newUrl);
+        }
+      })();
+    </script>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

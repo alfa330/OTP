@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>OTP</title>
+    <script>
+      // GitHub Pages SPA redirect
+      // Encodes the current path + query into a query parameter and redirects
+      // to the root index.html which will decode it and restore the correct URL
+      // via history.replaceState before the app boots.
+      (function () {
+        var segmentCount = 1; // number of path segments to keep (repo name)
+        var loc = window.location;
+        var pathSegments = loc.pathname.split('/');
+        // Keep the first `segmentCount` segments (e.g. /OTP) as the base
+        var kept = pathSegments.slice(0, segmentCount + 1).join('/');
+        var rest = pathSegments.slice(segmentCount + 1).join('/');
+        var search = loc.search;
+        var hash = loc.hash;
+        // Encode the SPA path into a special query parameter __spa_path
+        var redirectUrl =
+          kept +
+          '/?' +
+          '__spa_path=/' +
+          encodeURIComponent(rest) +
+          (search ? '&' + search.slice(1) : '') +
+          hash;
+        loc.replace(redirectUrl);
+      })();
+    </script>
+  </head>
+  <body></body>
+</html>
