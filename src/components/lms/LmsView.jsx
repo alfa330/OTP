@@ -5052,11 +5052,31 @@ function ApiQuizSection({ quizView, setQuizView, answers, setAnswers, course, le
       <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center max-w-2xl mx-auto">
         <div className="w-16 h-16 bg-violet-100 rounded-2xl flex items-center justify-center mx-auto mb-5"><HelpCircle size={28} className="text-violet-600" /></div>
         <h2 className="text-xl font-bold text-slate-900 mb-2">{lesson?.title || "Тест"}</h2>
-        <p className="text-sm text-slate-500 mb-6">Тест будет загружен из LMS API</p>
-        <div className={`flex items-center justify-center gap-2 text-sm mb-6 p-3 rounded-xl ${attemptsLeft <= 1 ? "bg-red-50 text-red-700" : "bg-slate-50 text-slate-600"}`}>
+        <p className="text-sm text-slate-500 mb-4">Проверьте свои знания по материалам курса</p>
+        
+        <div className="grid grid-cols-3 gap-4 mb-5">
+          {[{ label: "Вопросов", value: lesson?.questionCount || "—" }, { label: "Время", value: lesson?.duration || "—" }, { label: "Порог", value: `${Math.round(passThreshold)}%` }].map(s => (
+            <div key={s.label} className="bg-slate-50 rounded-xl p-4">
+              <div className="text-xl font-bold text-slate-900">{s.value}</div>
+              <div className="text-xs text-slate-500 mt-1">{s.label}</div>
+            </div>
+          ))}
+        </div>
+
+        <div className={`flex items-center justify-center gap-2 text-sm mb-5 p-3 rounded-xl ${attemptsLeft <= 1 ? "bg-red-50 text-red-700" : "bg-slate-50 text-slate-600"}`}>
           <RefreshCw size={14} />
           <span>Доступно попыток: <strong>{attemptsLeft}</strong> из {lesson?.maxAttempts ?? course?.maxAttempts ?? 3}</span>
         </div>
+
+        <div className="text-left bg-slate-50 rounded-xl p-4 mb-6">
+          <p className="text-xs font-semibold text-slate-700 mb-2">На тесте могут быть следующие типы вопросов:</p>
+          <div className="grid grid-cols-2 gap-2">
+            {[{ icon: RadioIcon, label: "Один правильный ответ" }, { icon: CheckSquare, label: "Несколько ответов" }, { icon: Check, label: "Верно / Неверно" }, { icon: Type, label: "Текстовый ввод" }].map(t => (
+              <div key={t.label} className="flex items-center gap-2 text-xs text-slate-600"><t.icon size={12} className="text-indigo-500" />{t.label}</div>
+            ))}
+          </div>
+        </div>
+
         <button onClick={startApiQuiz} disabled={attemptsLeft <= 0 || loadingStart} className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold py-3 rounded-xl text-sm transition-colors">
           {loadingStart ? "Подготовка..." : attemptsLeft <= 0 ? "Попытки исчерпаны" : "Начать тест"}
         </button>
@@ -5070,10 +5090,35 @@ function ApiQuizSection({ quizView, setQuizView, answers, setAnswers, course, le
     return (
       <div className="space-y-5 max-w-3xl 2xl:max-w-4xl mx-auto">
         <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center">
-          {autoFinished && <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 mb-5 text-xs text-amber-700">Тест завершён автоматически по времени</div>}
+          {autoFinished && (
+            <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 mb-5 text-xs text-amber-700 flex items-center justify-center gap-2">
+              <Clock size={13} /> Тест завершён автоматически по истечении времени
+            </div>
+          )}
+          <div className={`w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-5 ${passed ? "bg-emerald-100" : "bg-red-100"}`}>
+            {passed ? <CheckCircle size={36} className="text-emerald-600" /> : <XCircle size={36} className="text-red-500" />}
+          </div>
           <h2 className="text-3xl font-bold text-slate-900 mb-1">{Math.round(scorePercent)}%</h2>
-          <p className={`text-sm font-semibold mb-1 ${passed ? "text-emerald-600" : "text-red-600"}`}>{passed ? "Тест пройден" : "Тест не пройден"}</p>
-          <p className="text-sm text-slate-500">Порог: {Math.round(passThreshold)}%</p>
+          <p className={`text-sm font-semibold mb-1 ${passed ? "text-emerald-600" : "text-red-600"}`}>{passed ? "Тест пройден!" : "Тест не пройден"}</p>
+          <p className="text-sm text-slate-500 mb-6">{passed ? "Отличный результат." : `Для прохождения необходимо набрать ${Math.round(passThreshold)}%.`}</p>
+
+          <div className="flex gap-3 justify-center">
+            {attemptsLeft > 0 && (
+              <button onClick={() => setQuizView("intro")} className="max-w-[200px] w-full bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold py-3 rounded-xl text-sm transition-colors flex items-center justify-center gap-2">
+                <RefreshCw size={14} /> {passed ? "Повторить тест" : "Пересдать"}
+              </button>
+            )}
+            {attemptsLeft <= 0 && (
+              <div className="max-w-[200px] w-full bg-red-50 text-red-700 font-semibold py-3 rounded-xl text-sm flex items-center justify-center gap-2">
+                <XCircle size={14} /> Попытки исчерпаны
+              </div>
+            )}
+            {passed && (
+              <div className="max-w-[200px] w-full text-emerald-700 bg-emerald-50 font-semibold py-3 rounded-xl text-sm flex items-center justify-center gap-2 border border-emerald-100">
+                <CheckCircle size={14} /> Успешно
+              </div>
+            )}
+          </div>
         </div>
         <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
           <div className="px-6 py-4 border-b border-slate-100 text-sm font-semibold text-slate-900">Разбор ответов</div>
@@ -5426,20 +5471,22 @@ function QuizSection({ quizView, setQuizView, answers, setAnswers, course }) {
               </div>
             ))}
           </div>
-          <div className="flex gap-3">
-            {!passed && attemptsLeft > 1 && (
-              <button onClick={() => { setAnswers({}); setCurrentQ(0); setTimeLeft(20*60); setAutoFinished(false); setTextInput(""); setQuizView("active"); }} className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold py-3 rounded-xl text-sm transition-colors flex items-center justify-center gap-2">
-                <RefreshCw size={14} /> Пересдать
+          <div className="flex gap-3 justify-center">
+            {attemptsLeft > 1 && (
+              <button onClick={() => { setAnswers({}); setCurrentQ(0); setTimeLeft(20*60); setAutoFinished(false); setTextInput(""); setQuizView("active"); }} className="max-w-[250px] w-full bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold py-3 rounded-xl text-sm transition-colors flex items-center justify-center gap-2">
+                <RefreshCw size={14} /> {passed ? "Повторить тест" : "Пересдать"}
               </button>
             )}
-            {!passed && attemptsLeft <= 1 && (
-              <div className="flex-1 bg-red-50 text-red-700 font-semibold py-3 rounded-xl text-sm flex items-center justify-center gap-2">
+            {attemptsLeft <= 1 && (
+              <div className="max-w-[250px] w-full bg-red-50 text-red-700 font-semibold py-3 rounded-xl text-sm flex items-center justify-center gap-2">
                 <XCircle size={14} /> Попытки исчерпаны
               </div>
             )}
-            <button className={`flex-1 font-semibold py-3 rounded-xl text-sm transition-colors ${passed ? "bg-indigo-600 hover:bg-indigo-700 text-white" : "bg-indigo-50 text-indigo-700 hover:bg-indigo-100"}`}>
-              {passed ? "Следующий урок →" : "Просмотр ошибок"}
-            </button>
+            {passed && (
+              <div className="max-w-[250px] w-full text-emerald-700 bg-emerald-50 font-semibold py-3 rounded-xl text-sm flex items-center justify-center gap-2 border border-emerald-100">
+                <CheckCircle size={14} /> Успешно
+              </div>
+            )}
           </div>
         </div>
 
