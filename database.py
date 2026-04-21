@@ -1836,6 +1836,7 @@ class Database:
                     module_id INTEGER NOT NULL REFERENCES lms_modules(id) ON DELETE CASCADE,
                     title VARCHAR(255) NOT NULL,
                     description TEXT,
+                    lesson_type VARCHAR(20) NOT NULL DEFAULT 'video' CHECK(lesson_type IN ('video', 'text', 'combined')),
                     position INTEGER NOT NULL DEFAULT 1 CHECK(position >= 1),
                     duration_seconds INTEGER NOT NULL DEFAULT 0 CHECK(duration_seconds >= 0),
                     allow_fast_forward BOOLEAN NOT NULL DEFAULT FALSE,
@@ -1933,6 +1934,7 @@ class Database:
                     stale_gap_count INTEGER NOT NULL DEFAULT 0,
                     anti_cheat_flags JSONB NOT NULL DEFAULT '[]'::jsonb,
                     started_at TIMESTAMP,
+                    content_completed_at TIMESTAMP,
                     completed_at TIMESTAMP,
                     created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
                     updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
@@ -2051,6 +2053,19 @@ class Database:
                     ADD COLUMN IF NOT EXISTS source_lesson_id INTEGER;
                 ALTER TABLE lms_test_attempts
                     ADD COLUMN IF NOT EXISTS question_ids JSONB NOT NULL DEFAULT '[]'::jsonb;
+                ALTER TABLE lms_lessons
+                    ADD COLUMN IF NOT EXISTS lesson_type VARCHAR(20) NOT NULL DEFAULT 'video';
+                ALTER TABLE lms_lesson_progress
+                    ADD COLUMN IF NOT EXISTS content_completed_at TIMESTAMP;
+                DO $$
+                BEGIN
+                    ALTER TABLE lms_lessons
+                    ADD CONSTRAINT lms_lessons_lesson_type_check
+                    CHECK (lesson_type IN ('video', 'text', 'combined'));
+                EXCEPTION
+                    WHEN duplicate_object THEN
+                        NULL;
+                END $$;
 
                 -- LMS indexes
                 CREATE INDEX IF NOT EXISTS idx_lms_courses_status ON lms_courses(status);

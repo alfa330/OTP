@@ -973,7 +973,7 @@ const statusConfig = {
   test_failed: { label: "Тест не пройден", bg: "bg-red-50", text: "text-red-700", border: "border-red-200", dot: "bg-red-500" },
 };
 
-const lessonIcons = { video: Video, text: FileText, quiz: HelpCircle };
+const lessonIcons = { video: Video, text: FileText, quiz: HelpCircle, combined: Layers };
 
 const formatDeadline = (date) => {
   if (!date) return null;
@@ -1172,9 +1172,13 @@ const inferLessonType = (lessonLike) => {
   if (explicit === "quiz") return "quiz";
   if (explicit === "text") return "text";
   if (explicit === "video") return "video";
+  if (explicit === "combined") return "combined";
   const materials = Array.isArray(lessonLike?.materials) ? lessonLike.materials : [];
+  const hasVideo = materials.some((m) => String(m?.material_type || "").toLowerCase() === "video");
+  const hasText = materials.some((m) => String(m?.material_type || "").toLowerCase() === "text");
+  if (hasVideo && hasText) return "combined";
   if (!materials.length) return "text";
-  if (materials.some((m) => String(m?.material_type || "").toLowerCase() === "video")) return "video";
+  if (hasVideo) return "video";
   if (materials.every((m) => TEXT_MATERIAL_TYPES.has(String(m?.material_type || "").toLowerCase()))) return "text";
   return "video";
 };
@@ -1317,12 +1321,20 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
     ? coursePayload.course_version.skills.map((item) => String(item || "").trim()).filter(Boolean)
     : [];
   const testsByModule = new Map();
+  const testsBySourceLesson = new Map();
   testsRaw.forEach((test) => {
     const key = test?.module_id == null ? "__course__" : String(test.module_id);
     const prev = testsByModule.get(key) || [];
     prev.push(test);
     testsByModule.set(key, prev);
+    const sourceLessonId = Number(test?.source_lesson_id || 0);
+    if (sourceLessonId > 0) {
+      const list = testsBySourceLesson.get(sourceLessonId) || [];
+      list.push(test);
+      testsBySourceLesson.set(sourceLessonId, list);
+    }
   });
+  const consumedSourceLinkedTestIds = new Set();
 
   const assignmentId = Number(assignment?.id || fallbackCourse?.assignmentId || 0);
   const hasAssignmentContext = assignmentId > 0;
@@ -1382,6 +1394,7 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
       passingScore: Number(test?.pass_threshold || coursePayload?.course_version?.pass_threshold || coursePayload?.default_pass_threshold || 80),
       questionCount: Math.max(0, Number(test?.question_count || 0)),
       moduleId: test?.module_id == null ? null : Number(test.module_id),
+      sourceLessonId: Number(test?.source_lesson_id || 0) || null,
       _position: Number(test?.position || test?.id || 0),
       quizQuestions: previewQuestions,
     };
@@ -1405,7 +1418,44 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
         else if (String(progressRow?.status || "").toLowerCase() === "in_progress" || completionRatio > 0) status = "in_progress";
         const isLocked = progressionLocked && status !== "completed";
         const lessonType = inferLessonType(lessonItem);
+        const lessonMaterials = Array.isArray(lessonItem?.materials) ? lessonItem.materials : [];
         const duration = formatDurationLabel(Number(lessonItem?.duration_seconds || 0));
+        const linkedTests = Array.isArray(testsBySourceLesson.get(lessonId)) ? testsBySourceLesson.get(lessonId) : [];
+        const linkedTestRaw = lessonType === "combined"
+          ? (linkedTests.find((item) => !Boolean(item?.is_final)) || linkedTests[0] || null)
+          : null;
+        const linkedTestLesson = linkedTestRaw ? mapTestLesson(linkedTestRaw, false) : null;
+        if (linkedTestLesson?.apiTestId) {
+          consumedSourceLinkedTestIds.add(Number(linkedTestLesson.apiTestId));
+        }
+        const combinedBlocks = lessonType === "combined"
+          ? (
+            Array.isArray(lessonItem?.blocks) && lessonItem.blocks.length > 0
+              ? lessonItem.blocks
+              : lessonMaterials
+                .filter((materialItem) => {
+                  const materialType = String(materialItem?.material_type || materialItem?.type || "").toLowerCase();
+                  return materialType === "text" || materialType === "video";
+                })
+                .map((materialItem, blockIndex) => ({
+                  id: Number(materialItem?.id || 0) || `block-${lessonId}-${blockIndex + 1}`,
+                  type: String(materialItem?.material_type || materialItem?.type || "text").toLowerCase(),
+                  title: String(materialItem?.title || `Блок ${blockIndex + 1}`),
+                  content_text: materialItem?.content_text || "",
+                  content_url: materialItem?.content_url || materialItem?.url || materialItem?.signed_url || "",
+                  url: materialItem?.url || materialItem?.signed_url || materialItem?.content_url || "",
+                  signed_url: materialItem?.signed_url || materialItem?.url || materialItem?.content_url || "",
+                  mime_type: materialItem?.mime_type || "",
+                  bucket: materialItem?.bucket || materialItem?.gcs_bucket || "",
+                  blob_path: materialItem?.blob_path || materialItem?.gcs_blob_path || "",
+                  metadata: materialItem?.metadata && typeof materialItem.metadata === "object" ? materialItem.metadata : {},
+                  position: Number(materialItem?.position || blockIndex + 1),
+                }))
+          )
+          : [];
+        const contentCompleted = status === "completed";
+        const combinedNeedsTest = Boolean(linkedTestLesson) && linkedTestLesson.status !== "completed";
+        const visualStatus = lessonType === "combined" && contentCompleted && combinedNeedsTest ? "in_progress" : status;
 
         lessons.push({
           id: lessonId,
@@ -1415,12 +1465,20 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
           type: lessonType,
           duration,
           durationSeconds: Number(lessonItem?.duration_seconds || 0),
-          status,
+          status: visualStatus,
+          contentCompleted,
           locked: isLocked,
           completionRatio,
           allowFastForward: Boolean(lessonItem?.allow_fast_forward),
           completionThreshold: Number(lessonItem?.completion_threshold || 0),
-          materials: Array.isArray(lessonItem?.materials) ? lessonItem.materials : [],
+          materials: lessonMaterials,
+          combinedBlocks,
+          combinedTest: linkedTestLesson ? {
+            ...linkedTestLesson,
+            locked: !contentCompleted || Boolean(isLocked),
+            canStart: contentCompleted && linkedTestLesson.status !== "completed" && linkedTestLesson.attemptsUsed < linkedTestLesson.maxAttempts,
+          } : null,
+          combinedHasTest: Boolean(linkedTestLesson),
           moduleId,
           _position: Number(lessonItem?.position || lessonIndex + 1),
         });
@@ -1428,14 +1486,22 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
         regularLessonsTotal += 1;
         progressItemsTotal += 1;
         durationSeconds += Math.max(0, Number(lessonItem?.duration_seconds || 0));
-        if (status === "completed") {
+        if (contentCompleted) {
           regularLessonsCompleted += 1;
           progressItemsCompleted += 1;
         }
-        if (status !== "completed") progressionLocked = true;
+        if (!contentCompleted) progressionLocked = true;
+        if (linkedTestLesson) {
+          progressItemsTotal += 1;
+          durationSeconds += Math.max(0, Number(linkedTestLesson.durationSeconds || 0));
+          if (linkedTestLesson.status === "completed") progressItemsCompleted += 1;
+          if (linkedTestLesson.status !== "completed") progressionLocked = true;
+        }
       });
 
-      const moduleTests = (testsByModule.get(String(moduleId)) || []).slice();
+      const moduleTests = (testsByModule.get(String(moduleId)) || [])
+        .slice()
+        .filter((test) => !consumedSourceLinkedTestIds.has(Number(test?.id || 0)));
       moduleTests.forEach((test) => {
         const moduleHasIncompleteLesson = lessons.some((item) => item.type !== "quiz" && item.status !== "completed");
         const mappedTest = mapTestLesson(test, progressionLocked || moduleHasIncompleteLesson);
@@ -1457,7 +1523,9 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
       };
     });
 
-  const unboundTests = (testsByModule.get("__course__") || []).slice();
+  const unboundTests = (testsByModule.get("__course__") || [])
+    .slice()
+    .filter((test) => !consumedSourceLinkedTestIds.has(Number(test?.id || 0)));
   if (unboundTests.length > 0) {
     if (modulesData.length === 0) {
       modulesData.push({
@@ -2097,15 +2165,79 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
       const detail = await lmsRequest(`/api/lms/lessons/${lesson.apiLessonId}`);
       const lessonPayload = detail?.lesson || {};
       const progressPayload = detail?.progress || {};
+      const materialsPayload = Array.isArray(detail?.materials) ? detail.materials : (lesson?.materials || []);
+      const linkedTestPayload = detail?.linked_test && typeof detail.linked_test === "object" ? detail.linked_test : null;
+      const combinedVideoProgressPayload = Array.isArray(detail?.combined_video_progress) ? detail.combined_video_progress : [];
+      const mappedCombinedVideoProgress = combinedVideoProgressPayload.reduce((acc, item) => {
+        const materialId = Number(item?.material_id || 0);
+        if (materialId <= 0) return acc;
+        acc[String(materialId)] = clampLmsProgress(item?.progress_ratio);
+        return acc;
+      }, {});
+      const mappedLinkedTest = linkedTestPayload ? {
+        id: `test-${linkedTestPayload.id}`,
+        apiTestId: Number(linkedTestPayload.id || 0),
+        title: String(linkedTestPayload.title || "Тест"),
+        description: String(linkedTestPayload.description || ""),
+        type: "quiz",
+        duration: Number(linkedTestPayload.time_limit_minutes || 0) > 0
+          ? `${Math.max(1, Number(linkedTestPayload.time_limit_minutes || 0))} мин`
+          : "20 мин",
+        durationSeconds: Number(linkedTestPayload.time_limit_minutes || 0) > 0
+          ? Math.max(1, Number(linkedTestPayload.time_limit_minutes || 0)) * 60
+          : 20 * 60,
+        timeLimitMinutes: Number(linkedTestPayload.time_limit_minutes || 0) || null,
+        status: linkedTestPayload.passed_any ? "completed" : (Number(linkedTestPayload.attempts_used || 0) > 0 ? "in_progress" : "not_started"),
+        locked: !Boolean(linkedTestPayload.content_completed),
+        requiresTest: true,
+        maxAttempts: Math.max(1, Number(linkedTestPayload.attempt_limit || 3)),
+        attemptsUsed: Math.max(0, Number(linkedTestPayload.attempts_used || 0)),
+        isFinal: Boolean(linkedTestPayload.is_final),
+        passingScore: Number(linkedTestPayload.pass_threshold || 80),
+        questionCount: Math.max(0, Number(linkedTestPayload.question_count || 0)),
+        canStart: Boolean(linkedTestPayload.can_start),
+      } : null;
+      const inferredType = inferLessonType({
+        ...lessonPayload,
+        type: lessonPayload?.lesson_type || lesson?.type,
+        materials: materialsPayload,
+      });
       setSelectedLesson((prev) => {
         if (!prev) return prev;
         return {
           ...prev,
           title: lessonPayload?.title || prev.title,
           description: lessonPayload?.description || prev.description,
+          type: inferredType,
           duration: formatDurationLabel(lessonPayload?.duration_seconds || prev.durationSeconds || 0),
           durationSeconds: Number(lessonPayload?.duration_seconds || prev.durationSeconds || 0),
-          materials: Array.isArray(detail?.materials) ? detail.materials : (prev.materials || []),
+          materials: materialsPayload,
+          combinedBlocks: inferredType === "combined"
+            ? (
+              Array.isArray(lessonPayload?.blocks) && lessonPayload.blocks.length > 0
+                ? lessonPayload.blocks
+                : materialsPayload
+                  .filter((materialItem) => {
+                    const materialType = String(materialItem?.material_type || materialItem?.type || "").toLowerCase();
+                    return materialType === "text" || materialType === "video";
+                  })
+                  .map((materialItem, blockIndex) => ({
+                    id: Number(materialItem?.id || 0) || `block-${lesson?.apiLessonId || lesson?.id || "x"}-${blockIndex + 1}`,
+                    type: String(materialItem?.material_type || materialItem?.type || "text").toLowerCase(),
+                    title: String(materialItem?.title || `Блок ${blockIndex + 1}`),
+                    content_text: materialItem?.content_text || "",
+                    content_url: materialItem?.content_url || materialItem?.url || materialItem?.signed_url || "",
+                    url: materialItem?.url || materialItem?.signed_url || materialItem?.content_url || "",
+                    signed_url: materialItem?.signed_url || materialItem?.url || materialItem?.content_url || "",
+                    metadata: materialItem?.metadata && typeof materialItem.metadata === "object" ? materialItem.metadata : {},
+                    position: Number(materialItem?.position || blockIndex + 1),
+                  }))
+            )
+            : [],
+          combinedTest: inferredType === "combined" ? mappedLinkedTest : null,
+          combinedHasTest: inferredType === "combined" && Boolean(mappedLinkedTest),
+          combinedVideoProgress: inferredType === "combined" ? mappedCombinedVideoProgress : {},
+          contentCompleted: String(progressPayload?.status || "").toLowerCase() === "completed",
           completionRatio: Number(progressPayload?.completion_ratio || prev.completionRatio || 0),
           status: String(progressPayload?.status || prev.status || "not_started"),
           apiProgress: progressPayload,
@@ -2123,7 +2255,11 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
     try {
       await lmsRequest(`/api/lms/lessons/${lesson.apiLessonId}/complete`, { method: "POST" });
       emitToast("Урок отмечен как завершенный", "success");
-      setSelectedLesson((prev) => (prev ? { ...prev, status: "completed", completionRatio: 100 } : prev));
+      setSelectedLesson((prev) => (
+        prev
+          ? { ...prev, status: "completed", completionRatio: 100, contentCompleted: true }
+          : prev
+      ));
       const refreshedCourse = await refreshSelectedCourse();
       await loadLearnerDashboard();
       if (refreshedCourse) {
@@ -3323,6 +3459,7 @@ function LessonView({
 }) {
   const isQuiz = lesson.type === "quiz";
   const isTextLesson = lesson.type === "text";
+  const isCombinedLesson = lesson.type === "combined";
   const lessonAttemptLimit = Math.max(0, Number(lesson?.maxAttempts ?? course?.maxAttempts ?? 0));
   const lessonAttemptsUsed = Math.max(0, Number(lesson?.attemptsUsed ?? course?.attemptsUsed ?? 0));
   const lessonAttemptsLeft = Math.max(0, lessonAttemptLimit - lessonAttemptsUsed);
@@ -3358,7 +3495,7 @@ function LessonView({
                 <p className="text-xs font-semibold text-slate-600">{moduleIndex + 1}. {mod.title}</p>
               </div>
               {mod.lessons.map((l, lessonIndex) => {
-                const Icon = lessonIcons[l.type];
+                const Icon = lessonIcons[l.type] || BookOpen;
                 const isActive = l.id === lesson.id;
                 const dl = course.deadline ? formatDeadline(course.deadline) : null;
                 const lessonLocked = isManagerMode ? false : Boolean(l.locked);
@@ -3380,6 +3517,7 @@ function LessonView({
                       <div className="flex items-center gap-1.5 mt-1 flex-wrap">
                         <span className="text-[10px] text-slate-400">{l.duration}</span>
                         {l.type === "quiz" && <span className="text-[10px] bg-violet-50 text-violet-600 px-1.5 py-0.5 rounded-full font-medium">Тест</span>}
+                        {l.type === "combined" && <span className="text-[10px] bg-sky-50 text-sky-700 px-1.5 py-0.5 rounded-full font-medium">Комбо</span>}
                         {!isManagerMode && l.status === "in_progress" && <span className="text-[10px] bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded-full font-medium">В процессе</span>}
                         {!isManagerMode && l.requiresTest && l.status !== "completed" && !lessonLocked && <span className="text-[10px] bg-violet-50 text-violet-600 px-1.5 py-0.5 rounded-full font-medium flex items-center gap-0.5"><HelpCircle size={8} /> Тест</span>}
                         {!isManagerMode && dl?.overdue && l.status !== "completed" && <span className="text-[10px] bg-red-50 text-red-600 px-1.5 py-0.5 rounded-full font-medium">Просрочен</span>}
@@ -3438,6 +3576,20 @@ function LessonView({
                 course={course}
               />
             )
+          ) : isCombinedLesson ? (
+            <CombinedLesson
+              lesson={lesson}
+              course={course}
+              onCompleteLesson={onCompleteLesson}
+              isManagerMode={isManagerMode}
+              quizView={quizView}
+              setQuizView={setQuizView}
+              quizAnswers={quizAnswers}
+              setQuizAnswers={setQuizAnswers}
+              lmsRequest={lmsRequest}
+              onQuizFinished={onQuizFinished}
+              emitToast={emitToast}
+            />
           ) : isTextLesson ? (
             <TextLesson
               lesson={lesson}
@@ -3457,6 +3609,567 @@ function LessonView({
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+function CombinedVideoBlockPlayer({
+  lessonId,
+  blockMaterialId,
+  blockVideoUrl,
+  completionThreshold = 95,
+  allowFastForward = false,
+  isManagerMode = false,
+  lmsRequest,
+  emitToast,
+  initialDurationSeconds = 0,
+  initialProgress = 0,
+  onProgressChange,
+}) {
+  const normalizedThreshold = Math.max(1, Math.min(100, Number(completionThreshold || 95)));
+  const [playing, setPlaying] = useState(false);
+  const [progress, setProgress] = useState(clampLmsProgress(initialProgress));
+  const [tabHidden, setTabHidden] = useState(false);
+  const [totalSeconds, setTotalSeconds] = useState(Math.max(1, Number(initialDurationSeconds || 18 * 60)));
+  const [displayCurrentSeconds, setDisplayCurrentSeconds] = useState(
+    Math.max(0, (clampLmsProgress(initialProgress) / 100) * Math.max(1, Number(initialDurationSeconds || 18 * 60)))
+  );
+  const videoRef = useRef(null);
+  const progressRef = useRef(progress);
+  const visibleRef = useRef(typeof document !== "undefined" ? !document.hidden : true);
+  const maxAllowedSecondsRef = useRef(0);
+  const seekToastAtRef = useRef(0);
+  const reportIntervalRef = useRef(null);
+  const lastProgressReportAtRef = useRef(0);
+
+  const safeTotalSeconds = Math.max(1, Number(totalSeconds || 0));
+  const currentSeconds = Math.max(0, Math.floor(Number(displayCurrentSeconds || 0)));
+  const canTrackEvents =
+    !isManagerMode
+    && typeof lmsRequest === "function"
+    && Number(lessonId || 0) > 0
+    && Number(blockMaterialId || 0) > 0;
+  const canSeekForward = isManagerMode || Boolean(allowFastForward) || progress >= normalizedThreshold;
+
+  useEffect(() => {
+    const nextProgress = clampLmsProgress(initialProgress);
+    const nextDuration = Math.max(1, Number(initialDurationSeconds || 18 * 60));
+    setPlaying(false);
+    setProgress(nextProgress);
+    setTotalSeconds(nextDuration);
+    setDisplayCurrentSeconds((nextProgress / 100) * nextDuration);
+    progressRef.current = nextProgress;
+    maxAllowedSecondsRef.current = (nextProgress / 100) * nextDuration;
+    if (videoRef.current) {
+      try {
+        videoRef.current.pause();
+      } catch (_) {
+        // ignore
+      }
+    }
+  }, [blockMaterialId, blockVideoUrl, initialDurationSeconds, initialProgress]);
+
+  useEffect(() => {
+    progressRef.current = progress;
+    if (typeof onProgressChange === "function") {
+      onProgressChange(progress);
+    }
+  }, [progress, onProgressChange]);
+
+  const reportCombinedProgress = useCallback(async () => {
+    if (!canTrackEvents) return;
+    const video = videoRef.current;
+    const duration = Math.max(1, Number(video?.duration || safeTotalSeconds || 0));
+    const position = Math.max(0, Number(video?.currentTime || displayCurrentSeconds || 0));
+    const ratio = clampLmsProgress((position / duration) * 100);
+    try {
+      await lmsRequest(`/api/lms/lessons/${lessonId}/event`, {
+        method: "POST",
+        body: {
+          event_type: "combined_video_progress",
+          payload: {
+            material_id: Number(blockMaterialId),
+            progress_ratio: Number(ratio.toFixed(2)),
+            position_seconds: Number(position.toFixed(2)),
+            duration_seconds: Number(duration.toFixed(2)),
+            tab_visible: visibleRef.current,
+          },
+          client_ts: new Date().toISOString(),
+        },
+      });
+    } catch (_) {
+      // silent: non-blocking telemetry
+    }
+  }, [canTrackEvents, lmsRequest, lessonId, blockMaterialId, safeTotalSeconds, displayCurrentSeconds]);
+
+  useEffect(() => {
+    if (!playing || !canTrackEvents) {
+      clearInterval(reportIntervalRef.current);
+      return undefined;
+    }
+    reportIntervalRef.current = setInterval(() => {
+      void reportCombinedProgress();
+    }, 5000);
+    return () => clearInterval(reportIntervalRef.current);
+  }, [playing, canTrackEvents, reportCombinedProgress]);
+
+  useEffect(() => {
+    if (isManagerMode) return undefined;
+    const sendVisibilityEvent = async (isVisible) => {
+      if (!canTrackEvents || !playing) return;
+      try {
+        await lmsRequest(`/api/lms/lessons/${lessonId}/event`, {
+          method: "POST",
+          body: {
+            event_type: "visibility",
+            payload: { is_visible: Boolean(isVisible) },
+            client_ts: new Date().toISOString(),
+          },
+        });
+      } catch (_) {
+        // silent: non-blocking anti-cheat event
+      }
+    };
+    const handleVisibilityChange = () => {
+      const isVisible = !document.hidden;
+      visibleRef.current = isVisible;
+      if (!isVisible && playing) {
+        setPlaying(false);
+        if (videoRef.current && !videoRef.current.paused) {
+          videoRef.current.pause();
+        }
+        setTabHidden(true);
+        setTimeout(() => setTabHidden(false), 3000);
+      }
+      sendVisibilityEvent(isVisible);
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+  }, [canTrackEvents, lmsRequest, lessonId, playing, isManagerMode]);
+
+  const handleLoadedMetadata = useCallback(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const mediaDuration = Number(video.duration || 0);
+    if (!Number.isFinite(mediaDuration) || mediaDuration <= 0) return;
+    const safeDuration = Math.max(1, mediaDuration);
+    setTotalSeconds((prev) => (Math.abs(prev - safeDuration) >= 0.25 ? safeDuration : prev));
+    const resumePosition = Math.max(0, Math.min(mediaDuration, (progressRef.current / 100) * mediaDuration));
+    if (resumePosition > 0 && Math.abs(Number(video.currentTime || 0) - resumePosition) > 1.5) {
+      video.currentTime = resumePosition;
+    }
+    const normalizedProgress = clampLmsProgress(progressRef.current || 0);
+    const restoredAllowed = Math.max(0, (normalizedProgress / 100) * safeDuration);
+    maxAllowedSecondsRef.current = Math.max(Number(video.currentTime || 0), restoredAllowed);
+    setDisplayCurrentSeconds(Math.max(0, Number(video.currentTime || resumePosition || 0)));
+  }, []);
+
+  const maybeReportProgress = () => {
+    if (!canTrackEvents) return;
+    const nowTs = Date.now();
+    if (nowTs - lastProgressReportAtRef.current < 2500) return;
+    lastProgressReportAtRef.current = nowTs;
+    void reportCombinedProgress();
+  };
+
+  const handleTimeUpdate = useCallback(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const mediaDuration = Number(video.duration || safeTotalSeconds || 0);
+    const currentTime = Math.max(0, Number(video.currentTime || 0));
+    if (!Number.isFinite(mediaDuration) || mediaDuration <= 0) return;
+    const safeDuration = Math.max(1, mediaDuration);
+    if (Math.abs(totalSeconds - safeDuration) >= 0.25) {
+      setTotalSeconds(safeDuration);
+    }
+    maxAllowedSecondsRef.current = Math.max(maxAllowedSecondsRef.current, currentTime);
+    setDisplayCurrentSeconds(currentTime);
+    const nextProgress = clampLmsProgress((currentTime / safeDuration) * 100);
+    setProgress(nextProgress);
+    progressRef.current = nextProgress;
+    maybeReportProgress();
+  }, [safeTotalSeconds, totalSeconds, canTrackEvents, reportCombinedProgress]);
+
+  const notifySeekBlocked = () => {
+    const nowTs = Date.now();
+    if (nowTs - seekToastAtRef.current > 1500) {
+      seekToastAtRef.current = nowTs;
+      emitToast?.("Перемотка вперед недоступна", "error");
+    }
+  };
+
+  const seekVideoTo = (targetSeconds) => {
+    const video = videoRef.current;
+    if (!video) return;
+    const duration = Math.max(1, Number(video.duration || safeTotalSeconds || 0));
+    const boundedSeconds = Math.max(0, Math.min(duration, Number(targetSeconds || 0)));
+    if (!canSeekForward && boundedSeconds > maxAllowedSecondsRef.current + 0.75) {
+      const restoredSeconds = Math.max(0, maxAllowedSecondsRef.current);
+      video.currentTime = restoredSeconds;
+      setDisplayCurrentSeconds(restoredSeconds);
+      const correctedProgress = clampLmsProgress((restoredSeconds / duration) * 100);
+      setProgress(correctedProgress);
+      progressRef.current = correctedProgress;
+      notifySeekBlocked();
+      return;
+    }
+    video.currentTime = boundedSeconds;
+    setDisplayCurrentSeconds(boundedSeconds);
+    const nextProgress = clampLmsProgress((boundedSeconds / duration) * 100);
+    setProgress(nextProgress);
+    progressRef.current = nextProgress;
+    if (canSeekForward) {
+      maxAllowedSecondsRef.current = Math.max(maxAllowedSecondsRef.current, boundedSeconds);
+    }
+    maybeReportProgress();
+  };
+
+  const handleSeekSliderChange = (event) => {
+    seekVideoTo(Number(event?.target?.value || 0));
+  };
+
+  const handleRewind10 = () => {
+    const current = Number(videoRef.current?.currentTime || currentSeconds || 0);
+    seekVideoTo(current - 10);
+  };
+
+  const handleSeeking = () => {
+    const video = videoRef.current;
+    if (!video || canSeekForward) return;
+    const current = Math.max(0, Number(video.currentTime || 0));
+    const allowed = maxAllowedSecondsRef.current + 0.75;
+    if (current > allowed) {
+      const restoredSeconds = Math.max(0, maxAllowedSecondsRef.current);
+      video.currentTime = restoredSeconds;
+      setDisplayCurrentSeconds(restoredSeconds);
+      const correctedProgress = clampLmsProgress(
+        (restoredSeconds / Math.max(1, Number(video.duration || safeTotalSeconds || 0))) * 100
+      );
+      setProgress(correctedProgress);
+      progressRef.current = correctedProgress;
+      notifySeekBlocked();
+    }
+  };
+
+  const handleVideoPlay = () => {
+    setPlaying(true);
+  };
+
+  const handleVideoPause = () => {
+    setPlaying(false);
+    void reportCombinedProgress();
+  };
+
+  const togglePlayback = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (video.paused) {
+      void video.play().catch(() => {});
+      return;
+    }
+    video.pause();
+  };
+
+  const formatVideoClock = (seconds) => {
+    const safe = Math.max(0, Math.floor(Number(seconds || 0)));
+    const minutes = Math.floor(safe / 60);
+    const secs = safe % 60;
+    return `${minutes}:${String(secs).padStart(2, "0")}`;
+  };
+
+  return (
+    <div className="space-y-2">
+      {tabHidden && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 flex items-center gap-2 text-xs text-amber-700">
+          <AlertTriangle size={14} /> Видео поставлено на паузу — вы переключили вкладку браузера
+        </div>
+      )}
+      <div className="bg-slate-900 rounded-2xl overflow-hidden relative aspect-video">
+        {blockVideoUrl ? (
+          <>
+            <video
+              ref={videoRef}
+              src={blockVideoUrl}
+              className="w-full h-full bg-black cursor-pointer"
+              controls={false}
+              playsInline
+              preload="metadata"
+              disablePictureInPicture
+              controlsList="nodownload noplaybackrate nofullscreen"
+              onClick={togglePlayback}
+              onLoadedMetadata={handleLoadedMetadata}
+              onTimeUpdate={handleTimeUpdate}
+              onSeeking={handleSeeking}
+              onPlay={handleVideoPlay}
+              onPause={handleVideoPause}
+            />
+            {!playing && (
+              <button
+                type="button"
+                onClick={togglePlayback}
+                className="absolute inset-0 m-auto w-16 h-16 rounded-full bg-white/20 hover:bg-white/30 text-white flex items-center justify-center transition-colors backdrop-blur-sm"
+                aria-label="Play"
+              >
+                <Play size={26} className="ml-1" />
+              </button>
+            )}
+            <div
+              className="absolute left-0 right-0 bottom-0 p-3 bg-gradient-to-t from-black/80 via-black/45 to-transparent"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleRewind10}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-white/20 hover:bg-white/30 text-white text-[11px] font-semibold transition-colors"
+                >
+                  <ChevronLeft size={12} /> 10с
+                </button>
+                <input
+                  type="range"
+                  min={0}
+                  max={Math.max(1, Math.floor(safeTotalSeconds))}
+                  step={1}
+                  value={Math.max(0, Math.min(Math.floor(safeTotalSeconds), currentSeconds))}
+                  onChange={handleSeekSliderChange}
+                  className="flex-1 accent-indigo-500"
+                />
+                <div className="text-[11px] text-white/90 font-mono tabular-nums min-w-[92px] text-right">
+                  {formatVideoClock(currentSeconds)} / {formatVideoClock(safeTotalSeconds)}
+                </div>
+              </div>
+              {!canSeekForward && (
+                <p className="mt-1 text-[10px] text-white/70">Перемотка вперед станет доступна после завершения просмотра</p>
+              )}
+            </div>
+          </>
+        ) : (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-center px-4">
+            <Video size={24} className="text-white/50" />
+            <p className="text-sm text-white/70">Видео не прикреплено к блоку</p>
+          </div>
+        )}
+      </div>
+      <div className="flex items-center justify-between text-[11px]">
+        <span className="text-slate-500">
+          Прогресс просмотра: <strong className="text-slate-700">{Math.round(progress)}%</strong>
+        </span>
+        <span className={progress >= normalizedThreshold ? "text-emerald-700 font-semibold" : "text-slate-500"}>
+          Порог: {normalizedThreshold}%
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function CombinedLesson({
+  lesson,
+  course,
+  onCompleteLesson,
+  isManagerMode = false,
+  quizView,
+  setQuizView,
+  quizAnswers,
+  setQuizAnswers,
+  lmsRequest,
+  onQuizFinished,
+  emitToast,
+}) {
+  const resolveContentCompletion = (lessonLike) => (
+    Boolean(lessonLike?.contentCompleted)
+    || String(lessonLike?.status || "").toLowerCase() === "completed"
+  );
+  const [completing, setCompleting] = useState(false);
+  const [completed, setCompleted] = useState(resolveContentCompletion(lesson));
+  const [videoProgressMap, setVideoProgressMap] = useState({});
+  const materials = Array.isArray(lesson?.materials) ? lesson.materials : [];
+  const linkedTest = lesson?.combinedTest && typeof lesson.combinedTest === "object" ? lesson.combinedTest : null;
+  const lessonApiId = Number(lesson?.apiLessonId || 0);
+  const completionThreshold = Math.max(1, Math.min(100, Number(lesson?.completionThreshold || 95)));
+  const allowFastForward = Boolean(lesson?.allowFastForward);
+  const serverVideoProgressByMaterial = useMemo(() => (
+    lesson?.combinedVideoProgress && typeof lesson.combinedVideoProgress === "object"
+      ? lesson.combinedVideoProgress
+      : {}
+  ), [lesson?.combinedVideoProgress]);
+  const blocks = useMemo(() => (
+    (
+      Array.isArray(lesson?.combinedBlocks) && lesson.combinedBlocks.length > 0
+        ? lesson.combinedBlocks
+        : materials
+          .filter((materialItem) => {
+            const materialType = String(materialItem?.material_type || materialItem?.type || "").toLowerCase();
+            return materialType === "text" || materialType === "video";
+          })
+          .map((materialItem, idx) => ({
+            id: Number(materialItem?.id || 0) || `combined-block-${lesson?.id || "x"}-${idx + 1}`,
+            type: String(materialItem?.material_type || materialItem?.type || "text").toLowerCase(),
+            title: String(materialItem?.title || `Блок ${idx + 1}`),
+            content_text: materialItem?.content_text || "",
+            content_url: materialItem?.content_url || materialItem?.url || materialItem?.signed_url || "",
+            url: materialItem?.url || materialItem?.signed_url || materialItem?.content_url || "",
+            signed_url: materialItem?.signed_url || materialItem?.url || materialItem?.content_url || "",
+            metadata: materialItem?.metadata && typeof materialItem.metadata === "object" ? materialItem.metadata : {},
+            position: Number(materialItem?.position || idx + 1),
+          }))
+    )
+      .slice()
+      .sort((left, right) => Number(left?.position || 0) - Number(right?.position || 0))
+  ), [lesson?.combinedBlocks, lesson?.id, materials]);
+
+  const resolveBlockKey = (blockItem, blockIndex) => String(blockItem?.id || `block-${blockIndex + 1}`);
+  const videoBlocks = useMemo(
+    () => blocks.filter((blockItem) => String(blockItem?.type || "").toLowerCase() === "video"),
+    [blocks]
+  );
+
+  useEffect(() => {
+    setCompleted(resolveContentCompletion(lesson));
+  }, [lesson?.id, lesson?.status, lesson?.contentCompleted]);
+
+  useEffect(() => {
+    setVideoProgressMap((prev) => {
+      const next = {};
+      videoBlocks.forEach((blockItem, blockIndex) => {
+        const blockKey = resolveBlockKey(blockItem, blockIndex);
+        const materialId = Number(blockItem?.id || blockItem?.material_id || 0);
+        const serverProgress = materialId > 0
+          ? clampLmsProgress(serverVideoProgressByMaterial?.[String(materialId)] ?? serverVideoProgressByMaterial?.[materialId])
+          : 0;
+        const prevProgress = clampLmsProgress(prev?.[blockKey]);
+        next[blockKey] = completed ? 100 : Math.max(prevProgress, serverProgress);
+      });
+      return next;
+    });
+  }, [lesson?.id, lesson?.apiLessonId, completed, serverVideoProgressByMaterial, videoBlocks]);
+
+  const allVideosReady = videoBlocks.every((blockItem, blockIndex) => {
+    const blockKey = resolveBlockKey(blockItem, blockIndex);
+    return clampLmsProgress(videoProgressMap?.[blockKey]) >= completionThreshold;
+  });
+
+  const handleComplete = async () => {
+    if (completed || completing) return;
+    if (!allVideosReady) {
+      emitToast?.(`Просмотрите все видео-блоки минимум на ${completionThreshold}%`, "error");
+      return;
+    }
+    if (typeof onCompleteLesson !== "function") return;
+    setCompleting(true);
+    try {
+      const ok = await onCompleteLesson(lesson);
+      if (ok) setCompleted(true);
+    } finally {
+      setCompleting(false);
+    }
+  };
+
+  return (
+    <div className="space-y-5">
+      {blocks.length === 0 && (
+        <div className="bg-white rounded-2xl border border-dashed border-slate-300 px-5 py-8 text-center text-sm text-slate-500">
+          Блоки урока не добавлены
+        </div>
+      )}
+      {blocks.map((blockItem, blockIndex) => {
+        const blockType = String(blockItem?.type || "text").toLowerCase();
+        const blockTitle = String(blockItem?.title || (blockType === "video" ? `Видео блок ${blockIndex + 1}` : `Текстовый блок ${blockIndex + 1}`));
+        if (blockType === "video") {
+          const videoUrl = String(blockItem?.url || blockItem?.signed_url || blockItem?.content_url || "").trim();
+          const blockKey = resolveBlockKey(blockItem, blockIndex);
+          const materialId = Number(blockItem?.id || blockItem?.material_id || 0);
+          const initialProgress = materialId > 0
+            ? clampLmsProgress(serverVideoProgressByMaterial?.[String(materialId)] ?? serverVideoProgressByMaterial?.[materialId])
+            : 0;
+          return (
+            <div key={blockKey} className="bg-white rounded-2xl border border-slate-200 p-5">
+              <div className="flex items-center gap-2 mb-3">
+                <span className="w-7 h-7 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center"><Video size={14} /></span>
+                <h3 className="text-sm font-semibold text-slate-900">{blockTitle}</h3>
+              </div>
+              <CombinedVideoBlockPlayer
+                lessonId={lessonApiId}
+                blockMaterialId={materialId}
+                blockVideoUrl={videoUrl}
+                completionThreshold={completionThreshold}
+                allowFastForward={allowFastForward}
+                isManagerMode={isManagerMode}
+                lmsRequest={lmsRequest}
+                emitToast={emitToast}
+                initialDurationSeconds={Number(blockItem?.metadata?.duration_seconds || 0)}
+                initialProgress={initialProgress}
+                onProgressChange={(nextProgress) => {
+                  setVideoProgressMap((prev) => {
+                    const prevProgress = clampLmsProgress(prev?.[blockKey]);
+                    const normalizedNext = clampLmsProgress(nextProgress);
+                    if (Math.abs(prevProgress - normalizedNext) < 0.2) return prev;
+                    return { ...prev, [blockKey]: normalizedNext };
+                  });
+                }}
+              />
+            </div>
+          );
+        }
+        const richText = normalizeRichTextValue(blockItem?.content_text || "");
+        return (
+          <div key={blockItem?.id || `${blockType}-${blockIndex + 1}`} className="bg-white rounded-2xl border border-slate-200 p-6">
+            <div className="flex items-center gap-2 mb-3">
+              <span className="w-7 h-7 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center"><FileText size={14} /></span>
+              <h3 className="text-sm font-semibold text-slate-900">{blockTitle}</h3>
+            </div>
+            <RichTextContent
+              value={richText}
+              className="text-sm text-slate-700 leading-relaxed"
+              emptyState={<div className="text-xs text-slate-400">Текст блока не заполнен</div>}
+            />
+          </div>
+        );
+      })}
+
+      {!isManagerMode && !completed && (
+        <div className="space-y-2">
+          {!allVideosReady && videoBlocks.length > 0 && (
+            <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+              Для завершения урока просмотрите все видео-блоки минимум на {completionThreshold}%.
+            </div>
+          )}
+          <div className="flex justify-end">
+            <button
+              onClick={handleComplete}
+              disabled={completing || !allVideosReady}
+              className="inline-flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-semibold px-4 py-2.5 rounded-xl transition-colors"
+            >
+              {completing ? <RefreshCw size={14} className="animate-spin" /> : <CheckCircle size={14} />}
+              {completing ? "Сохранение..." : "Отметить урок пройденным"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {completed && (
+        linkedTest && !isManagerMode ? (
+          <ApiQuizSection
+            quizView={quizView}
+            setQuizView={setQuizView}
+            answers={quizAnswers}
+            setAnswers={setQuizAnswers}
+            course={course}
+            lesson={linkedTest}
+            lmsRequest={lmsRequest}
+            onFinished={onQuizFinished}
+            emitToast={emitToast}
+          />
+        ) : (
+          <div className="flex items-center gap-1.5 text-xs text-emerald-700 bg-emerald-50 px-3 py-2 rounded-xl font-semibold w-fit">
+            <CheckCircle size={12} /> Урок завершен
+          </div>
+        )
+      )}
+      {isManagerMode && linkedTest && (
+        <div className="rounded-xl border border-violet-200 bg-violet-50 px-4 py-3 text-xs text-violet-700">
+          После завершения блоков у сотрудника станет доступен тест: <strong>{linkedTest.title || "Тест"}</strong>
+        </div>
+      )}
     </div>
   );
 }
@@ -4967,6 +5680,16 @@ function CourseBuilder({
     quizRandomOrder: true,
     quizShowExplanations: true,
     quizQuestions: [],
+    combinedBlocks: [],
+    removedCombinedBlocks: [],
+    combinedHasQuiz: false,
+    combinedQuizQuestionsPerTest: 5,
+    combinedQuizTimeLimitMinutes: "",
+    combinedQuizPassingScore: 80,
+    combinedQuizAttemptLimit: 3,
+    combinedQuizRandomOrder: true,
+    combinedQuizShowExplanations: true,
+    combinedQuizQuestions: [],
     ...overrides,
   }), []);
 
@@ -5008,6 +5731,7 @@ function CourseBuilder({
   const [newSkill, setNewSkill] = useState("");
   const [lessonMaterialLink, setLessonMaterialLink] = useState("");
   const [selectedLessonId, setSelectedLessonId] = useState(null);
+  const [draggedCombinedBlockId, setDraggedCombinedBlockId] = useState(null);
   const [builderLessonPanelMode, setBuilderLessonPanelMode] = useState("edit");
   const [operatorEditField, setOperatorEditField] = useState(null);
   const [saved, setSaved] = useState(false);
@@ -5239,6 +5963,46 @@ function CourseBuilder({
         const videoMaterial = lessonMaterials.find((material) => String(material?.material_type || material?.type || "").toLowerCase() === "video");
         const textMaterial = lessonMaterials.find((material) => String(material?.material_type || material?.type || "").toLowerCase() === "text");
         const lessonType = inferLessonType({ ...lessonItem, materials: lessonMaterials });
+        const normalizedMaterials = lessonMaterials.map((material) => ({
+          ...material,
+          title: String(material?.title || "").trim() || "Материал",
+          material_type: String(material?.material_type || material?.type || "file").toLowerCase(),
+          content_url: String(material?.content_url || material?.url || material?.signed_url || "").trim(),
+          signed_url: String(material?.signed_url || material?.url || material?.content_url || "").trim(),
+          mime_type: String(material?.mime_type || "").trim(),
+          bucket: String(material?.bucket || material?.gcs_bucket || "").trim(),
+          blob_path: String(material?.blob_path || material?.gcs_blob_path || "").trim(),
+          metadata: material?.metadata && typeof material.metadata === "object" ? material.metadata : {},
+          position: Number(material?.position || 0) || 0,
+        }));
+        const combinedBlocks = lessonType === "combined"
+          ? (
+            Array.isArray(lessonItem?.blocks) && lessonItem.blocks.length > 0
+              ? lessonItem.blocks
+              : normalizedMaterials.filter((material) => {
+                const materialType = String(material?.material_type || material?.type || "").toLowerCase();
+                return materialType === "text" || materialType === "video";
+              }).map((material, materialIndex) => ({
+                id: Number(material?.id || 0) || Date.now() + materialIndex + Math.floor(Math.random() * 1000),
+                type: String(material?.material_type || material?.type || "text").toLowerCase(),
+                title: String(material?.title || `Блок ${materialIndex + 1}`).trim(),
+                contentText: normalizeRichTextValue(material?.content_text || ""),
+                contentUrl: String(material?.content_url || material?.signed_url || material?.url || "").trim(),
+                signed_url: String(material?.signed_url || material?.url || material?.content_url || "").trim(),
+                mime_type: String(material?.mime_type || "").trim(),
+                bucket: String(material?.bucket || material?.gcs_bucket || "").trim(),
+                blob_path: String(material?.blob_path || material?.gcs_blob_path || "").trim(),
+                metadata: material?.metadata && typeof material.metadata === "object" ? material.metadata : {},
+                position: Number(material?.position || materialIndex + 1),
+              }))
+          )
+          : [];
+        const filteredLessonMaterials = lessonType === "combined"
+          ? normalizedMaterials.filter((material) => {
+            const materialType = String(material?.material_type || material?.type || "").toLowerCase();
+            return materialType !== "text" && materialType !== "video";
+          })
+          : normalizedMaterials;
         return buildLesson({
           id: Number(lessonItem?.id || `${moduleIndex + 1}${lessonIndex + 1}${Date.now()}`),
           title: String(lessonItem?.title || "").trim() || `Урок ${lessonIndex + 1}`,
@@ -5247,18 +6011,17 @@ function CourseBuilder({
           durationSeconds: Number(lessonItem?.duration_seconds || videoMaterial?.metadata?.duration_seconds || 0) || "",
           completionThreshold: Number(lessonItem?.completion_threshold || 95) || 95,
           contentText: normalizeRichTextValue(textMaterial?.content_text || ""),
-          materials: lessonMaterials.map((material) => ({
-            ...material,
-            title: String(material?.title || "").trim() || "Материал",
-            material_type: String(material?.material_type || material?.type || "file").toLowerCase(),
-            content_url: String(material?.content_url || material?.url || "").trim(),
-            signed_url: String(material?.signed_url || material?.url || material?.content_url || "").trim(),
-            mime_type: String(material?.mime_type || "").trim(),
-            bucket: String(material?.bucket || material?.gcs_bucket || "").trim(),
-            blob_path: String(material?.blob_path || material?.gcs_blob_path || "").trim(),
-            metadata: material?.metadata && typeof material.metadata === "object" ? material.metadata : {},
-            position: Number(material?.position || 0) || 0,
-          })),
+          materials: filteredLessonMaterials,
+          combinedBlocks,
+          removedCombinedBlocks: [],
+          combinedHasQuiz: false,
+          combinedQuizQuestionsPerTest: 5,
+          combinedQuizTimeLimitMinutes: "",
+          combinedQuizPassingScore: Math.max(1, Math.min(100, Number(coursePayload?.course_version?.pass_threshold || 80))),
+          combinedQuizAttemptLimit: Math.max(1, Number(coursePayload?.course_version?.attempt_limit || 3)),
+          combinedQuizRandomOrder: true,
+          combinedQuizShowExplanations: true,
+          combinedQuizQuestions: [],
         });
       });
       return {
@@ -5279,8 +6042,21 @@ function CourseBuilder({
     }
 
     const moduleById = new Map(mappedModules.map((moduleItem) => [Number(moduleItem.id), moduleItem]));
+    const lessonById = new Map();
+    mappedModules.forEach((moduleItem) => {
+      (Array.isArray(moduleItem?.lessons) ? moduleItem.lessons : []).forEach((lessonItem) => {
+        lessonById.set(Number(lessonItem?.id || 0), lessonItem);
+      });
+    });
     const finalTests = testsPayload.filter((test) => Boolean(test?.is_final));
-    const moduleTests = testsPayload.filter((test) => !Boolean(test?.is_final));
+    const combinedLinkedTests = testsPayload.filter((test) => {
+      if (Boolean(test?.is_final)) return false;
+      const sourceLessonId = Number(test?.source_lesson_id || 0);
+      if (!sourceLessonId) return false;
+      const sourceLesson = lessonById.get(sourceLessonId);
+      return String(sourceLesson?.type || "").toLowerCase() === "combined";
+    });
+    const moduleTests = testsPayload.filter((test) => !Boolean(test?.is_final) && !combinedLinkedTests.includes(test));
 
     moduleTests.forEach((test, testIndex) => {
       const questionsForTest = Array.isArray(test?.questions) ? test.questions : [];
@@ -5306,6 +6082,25 @@ function CourseBuilder({
         quizQuestions: mappedQuizQuestions.length > 0 ? mappedQuizQuestions : [createQuestionTemplate("single")],
         materials: [],
       }));
+    });
+
+    combinedLinkedTests.forEach((test, testIndex) => {
+      const sourceLessonId = Number(test?.source_lesson_id || 0);
+      const targetLesson = sourceLessonId > 0 ? lessonById.get(sourceLessonId) : null;
+      if (!targetLesson) return;
+      const questionsForTest = Array.isArray(test?.questions) ? test.questions : [];
+      const mappedQuizQuestions = questionsForTest.map((question, questionIndex) => (
+        mapApiQuestionToBuilder(question, Number(`${test?.id || 700 + testIndex}${questionIndex + 1}`))
+      ));
+      const timeLimitMinutes = Number(test?.time_limit_minutes || 0);
+      targetLesson.combinedHasQuiz = true;
+      targetLesson.combinedQuizQuestionsPerTest = Math.max(1, Number(test?.question_count || mappedQuizQuestions.length || 1));
+      targetLesson.combinedQuizTimeLimitMinutes = timeLimitMinutes > 0 ? timeLimitMinutes : "";
+      targetLesson.combinedQuizPassingScore = Math.max(1, Math.min(100, Number(test?.pass_threshold || coursePayload?.course_version?.pass_threshold || 80)));
+      targetLesson.combinedQuizAttemptLimit = Math.max(1, Number(test?.attempt_limit || coursePayload?.course_version?.attempt_limit || 3));
+      targetLesson.combinedQuizRandomOrder = test?.random_order !== false;
+      targetLesson.combinedQuizShowExplanations = true;
+      targetLesson.combinedQuizQuestions = mappedQuizQuestions.length > 0 ? mappedQuizQuestions : [createQuestionTemplate("single")];
     });
 
     const primaryFinalTest = finalTests[0] || null;
@@ -5854,7 +6649,13 @@ function CourseBuilder({
             const lessonTitle = String(lessonItem?.title || "").trim();
             if (!lessonTitle) return null;
             const rawType = String(lessonItem?.type || "video").toLowerCase();
-            const lessonType = rawType === "text" ? "text" : rawType === "quiz" ? "quiz" : "video";
+            const lessonType = rawType === "text"
+              ? "text"
+              : rawType === "quiz"
+                ? "quiz"
+                : rawType === "combined"
+                  ? "combined"
+                  : "video";
             const description = normalizeRichTextValue(lessonItem?.description || "");
             const contentText = normalizeRichTextValue(lessonItem?.contentText || "");
 
@@ -5893,6 +6694,139 @@ function CourseBuilder({
                 invalidQuizLessons.push(lessonTitle);
               }
               return null;
+            }
+
+            if (lessonType === "combined") {
+              const rawCombinedBlocks = Array.isArray(lessonItem?.combinedBlocks) ? lessonItem.combinedBlocks : [];
+              let mappedCombinedBlocks = rawCombinedBlocks
+                .filter((blockItem) => {
+                  const blockType = String(blockItem?.type || blockItem?.material_type || "").toLowerCase();
+                  if (blockType !== "text" && blockType !== "video") return false;
+                  if (blockType === "text") return Boolean(String(blockItem?.contentText || blockItem?.content_text || "").trim());
+                  return Boolean(String(blockItem?.contentUrl || blockItem?.content_url || blockItem?.signed_url || blockItem?.url || "").trim());
+                })
+                .map((blockItem, blockIndex) => {
+                  const blockType = String(blockItem?.type || blockItem?.material_type || "").toLowerCase() === "video" ? "video" : "text";
+                  const blockContentText = normalizeRichTextValue(blockItem?.contentText || blockItem?.content_text || "");
+                  const blockContentUrl = String(blockItem?.contentUrl || blockItem?.content_url || blockItem?.signed_url || blockItem?.url || "").trim();
+                  return {
+                    title: String(blockItem?.title || (blockType === "video" ? `Видео блок ${blockIndex + 1}` : `Текстовый блок ${blockIndex + 1}`)).trim(),
+                    material_type: blockType,
+                    content_url: blockType === "video" ? (blockContentUrl || null) : null,
+                    content_text: blockType === "text" ? (blockContentText || null) : null,
+                    mime_type: String(blockItem?.mime_type || (blockType === "text" ? "text/html" : "video/mp4")).trim() || null,
+                    bucket: String(blockItem?.bucket || "").trim() || null,
+                    blob_path: String(blockItem?.blob_path || "").trim() || null,
+                    metadata: blockItem?.metadata && typeof blockItem.metadata === "object"
+                      ? { ...blockItem.metadata, combined_block: true }
+                      : { combined_block: true },
+                    position: blockIndex + 1,
+                  };
+                });
+
+              if (mappedCombinedBlocks.length === 0) {
+                const fallbackText = normalizeRichTextValue(lessonItem?.contentText || description || "");
+                if (fallbackText) {
+                  mappedCombinedBlocks = [{
+                    title: "Текстовый блок",
+                    material_type: "text",
+                    content_url: null,
+                    content_text: fallbackText,
+                    mime_type: "text/html",
+                    bucket: null,
+                    blob_path: null,
+                    metadata: { combined_block: true },
+                    position: 1,
+                  }];
+                }
+              }
+
+              const rawMaterials = Array.isArray(lessonItem?.materials) ? lessonItem.materials : [];
+              const mappedExtraMaterials = rawMaterials
+                .map((materialItem, materialIndex) => {
+                  const materialType = String(materialItem?.material_type || materialItem?.type || "file").toLowerCase();
+                  if (materialType === "text" || materialType === "video") return null;
+                  const safeType = ["pdf", "link", "file"].includes(materialType) ? materialType : "file";
+                  const contentUrl = String(materialItem?.content_url || materialItem?.signed_url || materialItem?.url || "").trim();
+                  const contentText = String(materialItem?.content_text || "").trim();
+                  if (!contentUrl && !contentText) return null;
+                  return {
+                    title: String(materialItem?.title || "Материал").trim(),
+                    material_type: safeType,
+                    content_url: contentUrl || null,
+                    content_text: contentText || null,
+                    mime_type: String(materialItem?.mime_type || "").trim() || null,
+                    bucket: String(materialItem?.bucket || "").trim() || null,
+                    blob_path: String(materialItem?.blob_path || "").trim() || null,
+                    metadata: materialItem?.metadata && typeof materialItem.metadata === "object" ? materialItem.metadata : {},
+                    position: mappedCombinedBlocks.length + materialIndex + 1,
+                  };
+                })
+                .filter(Boolean);
+
+              const hasCombinedQuiz = Boolean(lessonItem?.combinedHasQuiz);
+              if (hasCombinedQuiz) {
+                const combinedQuizQuestions = mapQuestionsToPayload(lessonItem?.combinedQuizQuestions);
+                if (combinedQuizQuestions.length > 0) {
+                  const maxCombinedQuestions = Math.max(1, combinedQuizQuestions.length);
+                  const combinedQuestionsPerTest = Math.max(1, Math.min(maxCombinedQuestions, Number(lessonItem?.combinedQuizQuestionsPerTest || maxCombinedQuestions)));
+                  const defaultCombinedMinutes = Math.max(1, Math.ceil(combinedQuestionsPerTest * 1.5));
+                  const combinedTimeLimitMinutes = Math.max(1, Number(lessonItem?.combinedQuizTimeLimitMinutes || defaultCombinedMinutes));
+                  const combinedPassingScore = Math.max(1, Math.min(100, Number(lessonItem?.combinedQuizPassingScore || settings.passingScore || 80)));
+                  const combinedAttemptRaw = Number(lessonItem?.combinedQuizAttemptLimit || attemptLimit);
+                  const combinedAttemptLimit = Number.isFinite(combinedAttemptRaw) ? Math.max(1, combinedAttemptRaw) : attemptLimit;
+                  moduleTestsPayload.push({
+                    title: String(lessonItem?.combinedQuizTitle || `${lessonTitle} — тест`).trim(),
+                    description: `Тест комбинированного урока «${lessonTitle}»`,
+                    pass_threshold: combinedPassingScore,
+                    attempt_limit: combinedAttemptLimit,
+                    is_final: false,
+                    module_position: moduleIndex + 1,
+                    position: lessonIndex + 1,
+                    source_lesson_id: lessonItem.id,
+                    time_limit_minutes: combinedTimeLimitMinutes,
+                    question_count: combinedQuestionsPerTest,
+                    random_order: lessonItem?.combinedQuizRandomOrder !== false,
+                    show_explanations: lessonItem?.combinedQuizShowExplanations !== false,
+                    metadata: {
+                      source_lesson_type: "combined_lesson",
+                      source_lesson_position: lessonIndex + 1,
+                      questions_per_test: combinedQuestionsPerTest,
+                      random_order: lessonItem?.combinedQuizRandomOrder !== false,
+                      show_explanations: lessonItem?.combinedQuizShowExplanations !== false,
+                    },
+                    questions: combinedQuizQuestions,
+                  });
+                } else {
+                  invalidQuizLessons.push(`${lessonTitle} (комбинированный)`);
+                }
+              }
+
+              return {
+                id: lessonItem.id,
+                title: lessonTitle,
+                description,
+                lesson_type: "combined",
+                position: lessonIndex + 1,
+                duration_seconds: Number(lessonItem?.durationSeconds) || 0,
+                allow_fast_forward: false,
+                completion_threshold: Number(lessonItem?.completionThreshold) || 95,
+                content_text: null,
+                blocks: mappedCombinedBlocks.map((blockItem, blockIndex) => ({
+                  id: blockIndex + 1,
+                  type: blockItem.material_type,
+                  title: blockItem.title,
+                  content_text: blockItem.content_text,
+                  content_url: blockItem.content_url,
+                  mime_type: blockItem.mime_type,
+                  bucket: blockItem.bucket,
+                  blob_path: blockItem.blob_path,
+                  metadata: blockItem.metadata,
+                  position: blockIndex + 1,
+                })),
+                materials: [...mappedCombinedBlocks, ...mappedExtraMaterials]
+                  .map((materialItem, idx) => ({ ...materialItem, position: idx + 1 })),
+              };
             }
 
             const rawMaterials = Array.isArray(lessonItem?.materials) ? lessonItem.materials : [];
@@ -6233,6 +7167,7 @@ function CourseBuilder({
       const materialType = String(item?.material_type || item?.type || "").toLowerCase();
       if (selectedLessonModel?.type === "text") return materialType !== "text";
       if (selectedLessonModel?.type === "video") return materialType !== "video" && materialType !== "text";
+      if (selectedLessonModel?.type === "combined") return materialType !== "video" && materialType !== "text";
       if (selectedLessonModel?.type === "quiz") return false;
       return materialType !== "video";
     });
@@ -6251,6 +7186,134 @@ function CourseBuilder({
     }
     return { moduleNumber: 1, lessonNumber: 1 };
   })();
+  const selectedCombinedBlocks = (Array.isArray(selectedLessonModel?.combinedBlocks) ? selectedLessonModel.combinedBlocks : [])
+    .slice()
+    .sort((left, right) => Number(left?.position || 0) - Number(right?.position || 0));
+  const selectedRemovedCombinedBlocks = (Array.isArray(selectedLessonModel?.removedCombinedBlocks) ? selectedLessonModel.removedCombinedBlocks : [])
+    .slice()
+    .sort((left, right) => Number(left?.removedAt || 0) - Number(right?.removedAt || 0));
+
+  const addCombinedBlock = useCallback((blockType = "text") => {
+    if (!selectedLessonModel?.id) return;
+    const normalizedType = String(blockType || "").toLowerCase() === "video" ? "video" : "text";
+    updateLessonById(selectedLessonModel.id, (prev) => {
+      const blocks = Array.isArray(prev?.combinedBlocks) ? prev.combinedBlocks : [];
+      const nextPosition = blocks.length + 1;
+      return {
+        ...prev,
+        combinedBlocks: [
+          ...blocks,
+          {
+            id: Date.now() + Math.floor(Math.random() * 1000),
+            type: normalizedType,
+            title: normalizedType === "video" ? `Видео блок ${nextPosition}` : `Текстовый блок ${nextPosition}`,
+            contentText: "",
+            contentUrl: "",
+            signed_url: "",
+            mime_type: normalizedType === "video" ? "video/mp4" : "text/html",
+            bucket: "",
+            blob_path: "",
+            metadata: {},
+            position: nextPosition,
+          },
+        ],
+      };
+    });
+  }, [selectedLessonModel?.id, updateLessonById]);
+
+  const updateCombinedBlock = useCallback((blockId, updater) => {
+    if (!selectedLessonModel?.id || !blockId) return;
+    updateLessonById(selectedLessonModel.id, (prev) => ({
+      ...prev,
+      combinedBlocks: (Array.isArray(prev?.combinedBlocks) ? prev.combinedBlocks : []).map((blockItem) => {
+        if (String(blockItem?.id) !== String(blockId)) return blockItem;
+        return typeof updater === "function" ? updater(blockItem) : { ...blockItem, ...(updater || {}) };
+      }),
+    }));
+  }, [selectedLessonModel?.id, updateLessonById]);
+
+  const removeCombinedBlock = useCallback((blockId) => {
+    if (!selectedLessonModel?.id || !blockId) return;
+    updateLessonById(selectedLessonModel.id, (prev) => {
+      const blocks = Array.isArray(prev?.combinedBlocks) ? prev.combinedBlocks : [];
+      const removed = blocks.find((blockItem) => String(blockItem?.id) === String(blockId));
+      if (!removed) return prev;
+      const nextBlocks = blocks
+        .filter((blockItem) => String(blockItem?.id) !== String(blockId))
+        .map((blockItem, index) => ({ ...blockItem, position: index + 1 }));
+      return {
+        ...prev,
+        combinedBlocks: nextBlocks,
+        removedCombinedBlocks: [
+          ...(Array.isArray(prev?.removedCombinedBlocks) ? prev.removedCombinedBlocks : []),
+          { ...removed, removedAt: Date.now() },
+        ],
+      };
+    });
+  }, [selectedLessonModel?.id, updateLessonById]);
+
+  const restoreCombinedBlock = useCallback((blockId) => {
+    if (!selectedLessonModel?.id || !blockId) return;
+    updateLessonById(selectedLessonModel.id, (prev) => {
+      const removed = Array.isArray(prev?.removedCombinedBlocks) ? prev.removedCombinedBlocks : [];
+      const restoring = removed.find((blockItem) => String(blockItem?.id) === String(blockId));
+      if (!restoring) return prev;
+      const nextBlocks = [...(Array.isArray(prev?.combinedBlocks) ? prev.combinedBlocks : []), { ...restoring, removedAt: undefined }];
+      return {
+        ...prev,
+        combinedBlocks: nextBlocks.map((blockItem, index) => ({ ...blockItem, position: index + 1 })),
+        removedCombinedBlocks: removed.filter((blockItem) => String(blockItem?.id) !== String(blockId)),
+      };
+    });
+  }, [selectedLessonModel?.id, updateLessonById]);
+
+  const moveCombinedBlock = useCallback((sourceId, targetId) => {
+    if (!selectedLessonModel?.id || !sourceId || !targetId || String(sourceId) === String(targetId)) return;
+    updateLessonById(selectedLessonModel.id, (prev) => {
+      const blocks = Array.isArray(prev?.combinedBlocks) ? prev.combinedBlocks : [];
+      const sourceIndex = blocks.findIndex((blockItem) => String(blockItem?.id) === String(sourceId));
+      const targetIndex = blocks.findIndex((blockItem) => String(blockItem?.id) === String(targetId));
+      if (sourceIndex < 0 || targetIndex < 0) return prev;
+      const nextBlocks = [...blocks];
+      const [moved] = nextBlocks.splice(sourceIndex, 1);
+      nextBlocks.splice(targetIndex, 0, moved);
+      return {
+        ...prev,
+        combinedBlocks: nextBlocks.map((blockItem, index) => ({ ...blockItem, position: index + 1 })),
+      };
+    });
+  }, [selectedLessonModel?.id, updateLessonById]);
+
+  const handleCombinedBlockVideoUpload = async (blockId, event) => {
+    const file = event?.target?.files?.[0];
+    event.target.value = "";
+    if (!file || !selectedLessonModel?.id || !blockId) return;
+    setLessonUploading(true);
+    try {
+      const uploaded = await uploadSingleMaterial(file, "video");
+      const detectedDuration = await readVideoDurationSeconds(file);
+      updateCombinedBlock(blockId, (prev) => ({
+        ...prev,
+        type: "video",
+        title: String(prev?.title || file.name || "Видео блок").trim() || "Видео блок",
+        contentUrl: uploaded.signed_url || "",
+        signed_url: uploaded.signed_url || "",
+        mime_type: uploaded.content_type || file.type || "video/mp4",
+        bucket: uploaded.bucket || "",
+        blob_path: uploaded.blob_path || "",
+        metadata: {
+          ...(prev?.metadata && typeof prev.metadata === "object" ? prev.metadata : {}),
+          uploaded_file_name: uploaded.file_name || file.name || "video",
+          duration_seconds: detectedDuration != null ? Math.max(1, Math.round(detectedDuration)) : undefined,
+        },
+      }));
+      emitToast?.("Видео блок обновлен", "success");
+    } catch (error) {
+      emitToast?.(`Не удалось загрузить видео в блок: ${String(error?.message || "ошибка")}`, "error");
+    } finally {
+      setLessonUploading(false);
+    }
+  };
 
   const applyLessonType = useCallback((lessonId, nextType) => {
     if (!lessonId) return;
@@ -6278,6 +7341,35 @@ function CourseBuilder({
       }
       if (normalizedType === "text") {
         return { ...prev, type: "text", completionThreshold: 100, durationSeconds: prev?.durationSeconds || "" };
+      }
+      if (normalizedType === "combined") {
+        const existingBlocks = Array.isArray(prev?.combinedBlocks) ? prev.combinedBlocks : [];
+        const fallbackBlocks = existingBlocks.length > 0 ? existingBlocks : [{
+          id: Date.now() + Math.floor(Math.random() * 1000),
+          type: "text",
+          title: "Текстовый блок 1",
+          contentText: "",
+          contentUrl: "",
+          position: 1,
+        }];
+        return {
+          ...prev,
+          type: "combined",
+          completionThreshold: Number(prev?.completionThreshold || 95) || 95,
+          allowFastForward: false,
+          durationSeconds: prev?.durationSeconds || "",
+          contentText: "",
+          combinedBlocks: fallbackBlocks,
+          removedCombinedBlocks: Array.isArray(prev?.removedCombinedBlocks) ? prev.removedCombinedBlocks : [],
+          combinedHasQuiz: Boolean(prev?.combinedHasQuiz),
+          combinedQuizQuestionsPerTest: prev?.combinedQuizQuestionsPerTest || 5,
+          combinedQuizTimeLimitMinutes: prev?.combinedQuizTimeLimitMinutes || "",
+          combinedQuizPassingScore: prev?.combinedQuizPassingScore || settings.passingScore || 80,
+          combinedQuizAttemptLimit: prev?.combinedQuizAttemptLimit || fallbackAttemptLimit,
+          combinedQuizRandomOrder: prev?.combinedQuizRandomOrder !== false,
+          combinedQuizShowExplanations: prev?.combinedQuizShowExplanations !== false,
+          combinedQuizQuestions: Array.isArray(prev?.combinedQuizQuestions) ? prev.combinedQuizQuestions : [],
+        };
       }
       return { ...prev, type: "video", durationSeconds: prev?.durationSeconds || "" };
     });
@@ -7062,12 +8154,25 @@ function CourseBuilder({
                   <div className="p-4 space-y-2">
                     {mod.lessons.length === 0 && <div className="text-center py-6 text-slate-300 text-xs">Добавьте уроки в этот модуль</div>}
                     {mod.lessons.map(l => {
-                      const types = [{ id: "video", icon: Video, label: "Видео" }, { id: "text", icon: FileText, label: "Текст" }, { id: "quiz", icon: HelpCircle, label: "Тест" }];
+                      const types = [
+                        { id: "video", icon: Video, label: "Видео" },
+                        { id: "text", icon: FileText, label: "Текст" },
+                        { id: "combined", icon: Layers, label: "Комбо" },
+                        { id: "quiz", icon: HelpCircle, label: "Тест" },
+                      ];
                       const LIcon = lessonIcons[l.type];
                       return (
                         <div key={l.id} onClick={() => setSelectedLessonId(selectedLessonId === l.id ? null : l.id)} className={`flex items-center gap-3 p-3 rounded-xl border-2 cursor-pointer transition-all ${selectedLessonId === l.id ? "border-indigo-300 bg-indigo-50" : "border-transparent hover:border-slate-200 hover:bg-slate-50"}`}>
                           <GripVertical size={13} className="text-slate-300 cursor-grab flex-shrink-0" />
-                          <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${l.type === "video" ? "bg-blue-100 text-blue-600" : l.type === "text" ? "bg-emerald-100 text-emerald-600" : "bg-violet-100 text-violet-600"}`}><LIcon size={14} /></div>
+                          <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${
+                            l.type === "video"
+                              ? "bg-blue-100 text-blue-600"
+                              : l.type === "text"
+                                ? "bg-emerald-100 text-emerald-600"
+                                : l.type === "combined"
+                                  ? "bg-sky-100 text-sky-700"
+                                  : "bg-violet-100 text-violet-600"
+                          }`}><LIcon size={14} /></div>
                           <input value={l.title} onChange={e => setModules(p => p.map(m => m.id === mod.id ? { ...m, lessons: m.lessons.map(ls => ls.id === l.id ? { ...ls, title: e.target.value } : ls) } : m))} onClick={(e) => e.stopPropagation()} className="flex-1 text-sm font-medium text-slate-800 bg-transparent focus:outline-none" />
                           <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
                             {types.map(t => (
@@ -7293,7 +8398,7 @@ function CourseBuilder({
                         <div className="grid grid-cols-2 gap-3">
                           <div>
                             <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Длительность (сек)</label>
-                            {selectedLessonModel.type === "text" ? (
+                            {(selectedLessonModel.type === "text" || selectedLessonModel.type === "combined") ? (
                               <input
                                 type="number"
                                 min={0}
@@ -7321,6 +8426,246 @@ function CourseBuilder({
                             />
                           </div>
                         </div>
+
+                        {selectedLessonModel.type === "combined" && (
+                          <div className="space-y-4">
+                            <div className="flex items-center justify-between">
+                              <div>
+                                <h4 className="text-sm font-semibold text-slate-900">Блоки комбинированного урока</h4>
+                                <p className="text-xs text-slate-500 mt-0.5">Текст и видео идут в порядке, заданном администратором</p>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => addCombinedBlock("text")}
+                                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-emerald-200 bg-emerald-50 text-emerald-700 text-xs font-semibold hover:bg-emerald-100 transition-colors"
+                                >
+                                  <FileText size={12} /> Текст
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => addCombinedBlock("video")}
+                                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-blue-200 bg-blue-50 text-blue-700 text-xs font-semibold hover:bg-blue-100 transition-colors"
+                                >
+                                  <Video size={12} /> Видео
+                                </button>
+                              </div>
+                            </div>
+
+                            <div className="space-y-3">
+                              {selectedCombinedBlocks.length === 0 && (
+                                <div className="rounded-xl border border-dashed border-slate-300 px-4 py-8 text-center text-xs text-slate-500">
+                                  Добавьте блоки текста или видео
+                                </div>
+                              )}
+                              {selectedCombinedBlocks.map((blockItem, blockIndex) => {
+                                const blockType = String(blockItem?.type || "text").toLowerCase() === "video" ? "video" : "text";
+                                const uploadInputId = `combined-video-upload-${selectedLessonModel.id}-${blockItem.id}`;
+                                const blockVideoUrl = String(blockItem?.contentUrl || blockItem?.content_url || blockItem?.signed_url || blockItem?.url || "").trim();
+                                return (
+                                  <div
+                                    key={blockItem.id || `${blockType}-${blockIndex + 1}`}
+                                    draggable
+                                    onDragStart={() => setDraggedCombinedBlockId(blockItem.id)}
+                                    onDragOver={(event) => event.preventDefault()}
+                                    onDrop={() => {
+                                      moveCombinedBlock(draggedCombinedBlockId, blockItem.id);
+                                      setDraggedCombinedBlockId(null);
+                                    }}
+                                    onDragEnd={() => setDraggedCombinedBlockId(null)}
+                                    className={`rounded-xl border bg-white p-3 transition-colors ${draggedCombinedBlockId === blockItem.id ? "border-indigo-300" : "border-slate-200"}`}
+                                  >
+                                    <div className="flex items-center gap-2 mb-2">
+                                      <GripVertical size={14} className="text-slate-400 cursor-grab" />
+                                      <span className={`text-[10px] font-semibold px-2 py-1 rounded-full ${blockType === "video" ? "bg-blue-50 text-blue-700" : "bg-emerald-50 text-emerald-700"}`}>
+                                        {blockType === "video" ? "Видео" : "Текст"}
+                                      </span>
+                                      <input
+                                        value={blockItem?.title || ""}
+                                        onChange={(event) => updateCombinedBlock(blockItem.id, { title: event.target.value })}
+                                        placeholder={`Блок ${blockIndex + 1}`}
+                                        className="flex-1 px-2 py-1 text-xs rounded-lg border border-slate-200 bg-slate-50 text-slate-700 focus:outline-none focus:border-indigo-400 transition-all"
+                                      />
+                                      <button
+                                        type="button"
+                                        onClick={() => removeCombinedBlock(blockItem.id)}
+                                        className="p-1.5 text-slate-400 hover:text-red-500 rounded-lg hover:bg-red-50 transition-colors"
+                                      >
+                                        <Trash2 size={12} />
+                                      </button>
+                                    </div>
+
+                                    {blockType === "text" ? (
+                                      <RichTextEditor
+                                        key={`combined-${selectedLessonModel.id}-${blockItem.id}-text`}
+                                        value={blockItem?.contentText || blockItem?.content_text || ""}
+                                        onChange={(nextValue) => updateCombinedBlock(blockItem.id, { contentText: nextValue })}
+                                        onImageUpload={handleRichTextImageUpload}
+                                        onFileUpload={handleRichTextFileUpload}
+                                        placeholder="Введите текст блока..."
+                                        minHeight={140}
+                                      />
+                                    ) : (
+                                      <div className="space-y-2">
+                                        <div className="flex gap-2">
+                                          <input
+                                            value={blockVideoUrl}
+                                            onChange={(event) => updateCombinedBlock(blockItem.id, { contentUrl: event.target.value, signed_url: event.target.value })}
+                                            placeholder="https://... (ссылка на видео)"
+                                            className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-700 placeholder-slate-400 focus:outline-none focus:border-indigo-400 transition-all"
+                                          />
+                                          <label
+                                            htmlFor={uploadInputId}
+                                            className="px-3 py-2 bg-slate-100 hover:bg-slate-200 rounded-lg text-xs font-semibold text-slate-700 transition-colors cursor-pointer inline-flex items-center gap-1.5"
+                                          >
+                                            {lessonUploading ? <RefreshCw size={12} className="animate-spin" /> : <Upload size={12} />}
+                                            Загрузить
+                                          </label>
+                                          <input
+                                            id={uploadInputId}
+                                            type="file"
+                                            accept="video/*"
+                                            className="hidden"
+                                            onChange={(event) => { void handleCombinedBlockVideoUpload(blockItem.id, event); }}
+                                          />
+                                        </div>
+                                        {blockVideoUrl ? (
+                                          <video
+                                            key={`${blockItem.id}-${blockVideoUrl}`}
+                                            src={blockVideoUrl}
+                                            controls
+                                            preload="metadata"
+                                            className="w-full max-h-60 rounded-xl bg-slate-950"
+                                          />
+                                        ) : (
+                                          <div className="rounded-xl border border-dashed border-slate-300 px-3 py-6 text-center text-xs text-slate-500">
+                                            Видео не прикреплено
+                                          </div>
+                                        )}
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+
+                            {selectedRemovedCombinedBlocks.length > 0 && (
+                              <div className="rounded-xl border border-amber-200 bg-amber-50 p-3">
+                                <p className="text-xs font-semibold text-amber-800 mb-2">Удаленные блоки</p>
+                                <div className="space-y-1.5">
+                                  {selectedRemovedCombinedBlocks.map((blockItem, index) => (
+                                    <div key={`removed-block-${blockItem?.id || index}`} className="flex items-center justify-between gap-2 rounded-lg bg-white/80 border border-amber-100 px-2.5 py-2">
+                                      <p className="text-xs text-amber-900 truncate">
+                                        {String(blockItem?.title || `Блок ${index + 1}`)} · {String(blockItem?.type || "text").toLowerCase() === "video" ? "Видео" : "Текст"}
+                                      </p>
+                                      <button
+                                        type="button"
+                                        onClick={() => restoreCombinedBlock(blockItem?.id)}
+                                        className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-semibold bg-amber-100 text-amber-800 hover:bg-amber-200 transition-colors"
+                                      >
+                                        <RotateCcw size={11} /> Вернуть
+                                      </button>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+
+                            <div className="rounded-xl border border-violet-200 bg-violet-50 p-3 space-y-3">
+                              <div className="flex items-center justify-between">
+                                <div>
+                                  <p className="text-xs font-semibold text-violet-800">Тест в конце комбинированного урока</p>
+                                  <p className="text-[11px] text-violet-700 mt-0.5">Тест запускается только после отметки урока как пройденного</p>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => updateLessonById(selectedLessonModel.id, (prev) => {
+                                    const enabled = !Boolean(prev?.combinedHasQuiz);
+                                    return {
+                                      ...prev,
+                                      combinedHasQuiz: enabled,
+                                      combinedQuizQuestions: enabled
+                                        ? (Array.isArray(prev?.combinedQuizQuestions) && prev.combinedQuizQuestions.length > 0
+                                          ? prev.combinedQuizQuestions
+                                          : (Array.isArray(questions) ? questions.map((questionItem, questionIndex) => ({
+                                            ...questionItem,
+                                            id: Number(`${selectedLessonModel.id || 0}${questionIndex + 1}${Date.now()}`),
+                                          })) : []))
+                                        : [],
+                                    };
+                                  })}
+                                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${selectedLessonModel?.combinedHasQuiz ? "bg-violet-600 text-white hover:bg-violet-700" : "bg-white text-violet-700 border border-violet-200 hover:bg-violet-100"}`}
+                                >
+                                  {selectedLessonModel?.combinedHasQuiz ? "Тест включен" : "Добавить тест"}
+                                </button>
+                              </div>
+
+                              {selectedLessonModel?.combinedHasQuiz && (
+                                <div className="space-y-2">
+                                  <div className="grid grid-cols-2 gap-2">
+                                    <input
+                                      type="number"
+                                      min={1}
+                                      value={selectedLessonModel?.combinedQuizQuestionsPerTest || ""}
+                                      onChange={(event) => updateLessonById(selectedLessonModel.id, { combinedQuizQuestionsPerTest: event.target.value === "" ? "" : Math.max(1, Number(event.target.value)) })}
+                                      className="w-full px-2.5 py-2 bg-white border border-violet-200 rounded-lg text-xs text-slate-700 focus:outline-none focus:border-violet-400 transition-all"
+                                      placeholder="Вопросов в попытке"
+                                    />
+                                    <input
+                                      type="number"
+                                      min={1}
+                                      value={selectedLessonModel?.combinedQuizTimeLimitMinutes || ""}
+                                      onChange={(event) => updateLessonById(selectedLessonModel.id, { combinedQuizTimeLimitMinutes: event.target.value === "" ? "" : Math.max(1, Number(event.target.value)) })}
+                                      className="w-full px-2.5 py-2 bg-white border border-violet-200 rounded-lg text-xs text-slate-700 focus:outline-none focus:border-violet-400 transition-all"
+                                      placeholder="Лимит времени (мин)"
+                                    />
+                                    <input
+                                      type="number"
+                                      min={1}
+                                      max={100}
+                                      value={selectedLessonModel?.combinedQuizPassingScore || ""}
+                                      onChange={(event) => updateLessonById(selectedLessonModel.id, { combinedQuizPassingScore: event.target.value === "" ? "" : Math.max(1, Math.min(100, Number(event.target.value))) })}
+                                      className="w-full px-2.5 py-2 bg-white border border-violet-200 rounded-lg text-xs text-slate-700 focus:outline-none focus:border-violet-400 transition-all"
+                                      placeholder="Проходной балл (%)"
+                                    />
+                                    <input
+                                      type="number"
+                                      min={1}
+                                      value={selectedLessonModel?.combinedQuizAttemptLimit || ""}
+                                      onChange={(event) => updateLessonById(selectedLessonModel.id, { combinedQuizAttemptLimit: event.target.value === "" ? "" : Math.max(1, Number(event.target.value)) })}
+                                      className="w-full px-2.5 py-2 bg-white border border-violet-200 rounded-lg text-xs text-slate-700 focus:outline-none focus:border-violet-400 transition-all"
+                                      placeholder="Попыток"
+                                    />
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => updateLessonById(selectedLessonModel.id, {
+                                        combinedQuizQuestions: (Array.isArray(questions) ? questions : []).map((questionItem, questionIndex) => ({
+                                          ...questionItem,
+                                          id: Number(`${selectedLessonModel.id || 0}${questionIndex + 1}${Date.now()}`),
+                                        })),
+                                      })}
+                                      className="px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-white border border-violet-200 text-violet-700 hover:bg-violet-100 transition-colors"
+                                    >
+                                      Скопировать из итогового теста
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => updateLessonById(selectedLessonModel.id, { combinedQuizQuestions: [] })}
+                                      className="px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-white border border-rose-200 text-rose-700 hover:bg-rose-100 transition-colors"
+                                    >
+                                      Очистить вопросы
+                                    </button>
+                                    <span className="text-[11px] text-violet-700">
+                                      Вопросов: <strong>{Array.isArray(selectedLessonModel?.combinedQuizQuestions) ? selectedLessonModel.combinedQuizQuestions.length : 0}</strong>
+                                    </span>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )}
 
                         {selectedLessonModel.type === "text" && (
                           <div>
