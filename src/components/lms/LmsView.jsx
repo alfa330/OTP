@@ -1900,6 +1900,11 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
     ? (Number(searchParams.get("draftVersionId") || 0) || null)
     : null;
   const routeBackTo = typeof location.state?.backTo === "string" ? location.state.backTo : "";
+  // Grand-parent back-link (e.g. the catalog/admin URL when we are inside a
+  // lesson). It is propagated one level deeper so that goBack from a lesson
+  // returns to the course page while still letting the course page remember
+  // the exact catalog/admin tab the user originally came from.
+  const routeParentBackTo = typeof location.state?.parentBackTo === "string" ? location.state.parentBackTo : "";
   const [selectedCourse, setSelectedCourse] = useState(null);
   const [selectedLesson, setSelectedLesson] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
@@ -2650,9 +2655,14 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
         } catch (error) {
           emitToast(`РќРµ СѓРґР°Р»РѕСЃСЊ РѕС‚РєСЂС‹С‚СЊ СѓСЂРѕРє: ${String(error?.message || "РѕС€РёР±РєР°")}`, "error");
           if (isCurrentRoute()) {
+            // When bouncing the user back to the course page on lesson load
+            // error we must use the *grand-parent* back-link (catalog/admin),
+            // not the lesson's own routeBackTo — which now points to the
+            // course page itself and would create a back-loop from course.
+            const listFallback = canGoCatalog ? buildLmsCatalogPath(catalogTab) : buildLmsAdminPath(adminTab);
             navigate(buildLmsCoursePath(routeCourseId), {
               replace: true,
-              state: { backTo: routeBackTo || (canGoCatalog ? buildLmsCatalogPath(catalogTab) : buildLmsAdminPath(adminTab)) },
+              state: { backTo: routeParentBackTo || listFallback },
             });
           }
         }
@@ -2667,6 +2677,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
     routeCourseId,
     routeLessonId,
     routeBackTo,
+    routeParentBackTo,
     canGoCatalog,
     canUseLearnerApi,
     canUseManagerApi,
@@ -2972,20 +2983,29 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
     }
 
     const targetPath = buildLmsLessonPath(activeCourseId, normalizedLessonId);
-    const backTo = routeBackTo || buildLmsCoursePath(activeCourseId);
+    // A lesson's immediate parent is always its course page. Previously we
+    // fell back to `routeBackTo`, which meant that when the user opened a
+    // lesson from the course page (whose routeBackTo was the catalog URL),
+    // the lesson's backTo became the catalog URL — causing goBack from the
+    // lesson to jump past the course page straight to the catalog.
+    const backTo = buildLmsCoursePath(activeCourseId);
+    // Preserve the grand-parent (catalog/admin) URL so goBack chain still
+    // returns course → original catalog tab.
+    const parentBackTo = routeParentBackTo || routeBackTo || "";
     if (isModifiedRouteEvent(event)) {
       window.open(targetPath, "_blank", "noopener,noreferrer");
       return;
     }
 
     navigate(targetPath, {
-      state: { backTo },
+      state: parentBackTo ? { backTo, parentBackTo } : { backTo },
     });
   }, [
     getCourseCacheKey,
     mergeLessonIntoCourse,
     navigate,
     routeBackTo,
+    routeParentBackTo,
     routeCourseId,
     selectedCourse,
     storeCourseInCache,
@@ -3036,14 +3056,35 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
   }, [location.pathname, location.search, navigate]);
 
   const goBack = useCallback(() => {
-    let fallbackPath = canGoCatalog ? buildLmsCatalogPath(catalogTab) : buildLmsAdminPath(adminTab);
+    const listPath = canGoCatalog ? buildLmsCatalogPath(catalogTab) : buildLmsAdminPath(adminTab);
+
+    // From a lesson we always return to the parent course page. We also
+    // forward the grand-parent (catalog/admin) back-link so the user can
+    // unwind the full chain: lesson → course → original catalog tab.
     if (view === "lesson" && routeCourseId) {
-      fallbackPath = buildLmsCoursePath(routeCourseId);
-    } else if ((view === "builder" || view === "admin") && canUseManagerApi) {
-      fallbackPath = canGoCatalog ? buildLmsCatalogPath(catalogTab) : buildLmsAdminPath(adminTab);
+      const coursePath = buildLmsCoursePath(routeCourseId);
+      const target = routeBackTo || coursePath;
+      const nextState = routeParentBackTo ? { backTo: routeParentBackTo } : undefined;
+      navigate(target, nextState ? { state: nextState } : undefined);
+      return;
+    }
+
+    let fallbackPath = listPath;
+    if ((view === "builder" || view === "admin") && canUseManagerApi) {
+      fallbackPath = listPath;
     }
     navigate(routeBackTo || fallbackPath);
-  }, [view, routeCourseId, routeBackTo, canGoCatalog, canUseManagerApi, catalogTab, adminTab, navigate]);
+  }, [
+    view,
+    routeCourseId,
+    routeBackTo,
+    routeParentBackTo,
+    canGoCatalog,
+    canUseManagerApi,
+    catalogTab,
+    adminTab,
+    navigate,
+  ]);
 
   const setCatalogTab = useCallback((nextTab) => {
     navigate(buildLmsCatalogPath(nextTab));
