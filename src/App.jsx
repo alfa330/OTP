@@ -26605,6 +26605,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, [user?.id, user?.role, canAccessLmsSection, requestedViewFromLocation]);
 
             useEffect(() => {
+                // Do not touch view while authentication is still initializing
+                // or before the user session has been restored. Otherwise the
+                // URL-derived initial view (e.g. 'lms' for /lms/course/16) gets
+                // overwritten by the role-based default ('hours') while user is
+                // null, and the subsequent URL sync effect rewrites the
+                // pathname, erasing the original LMS sub-path on reload.
+                if (isAuthInitializing || !user) return;
                 if (user?.role === 'trainer' && !['surveys', 'manage_operators', 'lms'].includes(view)) {
                     setView('surveys');
                 }
@@ -26614,13 +26621,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     else if (user?.role === 'trainer') setView('surveys');
                     else setView('hours');
                 }
-            }, [user?.role, view, canAccessLmsSection]);
+            }, [isAuthInitializing, user?.role, view, canAccessLmsSection]);
 
             useEffect(() => {
+                // Only mirror `view` into the URL after authentication has
+                // finished. While `isAuthInitializing` is true the `view`
+                // state can still be the initial URL-derived value and must
+                // not race with the role-resolution effect above.
+                if (isAuthInitializing) return;
                 if (view && user) { // Only save if user is logged in
                     syncAppViewWithUrl(view);
                 }
-            }, [view, user]);
+            }, [isAuthInitializing, view, user]);
             
             useEffect(() => {
                 if (selectedMonth && user) {
