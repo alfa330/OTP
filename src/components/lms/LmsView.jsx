@@ -1738,6 +1738,11 @@ const mapCourseDetailToView = (coursePayload, fallbackCourse = {}) => {
     modules_data: modulesData,
     tests: testsRaw,
     assignment,
+    // Marker that this course object came from a full detail payload
+    // (POST /api/lms/courses/:id/open or admin detail) and therefore
+    // carries modules/lessons data. Partial home-list courses don't set it,
+    // which lets the cache logic distinguish "lightweight" from "full" entries.
+    __detailLoaded: true,
   };
 };
 
@@ -2388,7 +2393,13 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
     const cacheKey = getCourseCacheKey(normalizedCourseId);
     if (!options?.force) {
       const cachedCourse = courseCacheRef.current.get(cacheKey);
-      if (cachedCourse && Array.isArray(cachedCourse?.modules_data)) {
+      // Only trust the cache when we have a full course detail payload
+      // (marked with __detailLoaded by mapCourseDetailToView). Lightweight
+      // entries produced by openCourse / the home dashboard mapper have
+      // modules_data === [] and must not short-circuit the detail fetch,
+      // otherwise the course page renders with no modules/lessons and the
+      // "Продолжить" button stays disabled until a hard reload.
+      if (cachedCourse && cachedCourse.__detailLoaded && Array.isArray(cachedCourse?.modules_data)) {
         return cachedCourse;
       }
     }
