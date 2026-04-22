@@ -2324,12 +2324,12 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
     const mappedLinkedTest = linkedTestPayload ? {
       id: `test-${linkedTestPayload.id}`,
       apiTestId: Number(linkedTestPayload.id || 0),
-      title: String(linkedTestPayload.title || "РўРµСЃС‚"),
+      title: String(linkedTestPayload.title || "Тест"),
       description: String(linkedTestPayload.description || ""),
       type: "quiz",
       duration: Number(linkedTestPayload.time_limit_minutes || 0) > 0
-        ? `${Math.max(1, Number(linkedTestPayload.time_limit_minutes || 0))} РјРёРЅ`
-        : "20 РјРёРЅ",
+        ? `${Math.max(1, Number(linkedTestPayload.time_limit_minutes || 0))} мин`
+        : "20 мин",
       durationSeconds: Number(linkedTestPayload.time_limit_minutes || 0) > 0
         ? Math.max(1, Number(linkedTestPayload.time_limit_minutes || 0)) * 60
         : 20 * 60,
@@ -2370,7 +2370,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
               .map((materialItem, blockIndex) => ({
                 id: Number(materialItem?.id || 0) || `block-${lesson?.apiLessonId || lesson?.id || "x"}-${blockIndex + 1}`,
                 type: String(materialItem?.material_type || materialItem?.type || "text").toLowerCase(),
-                title: String(materialItem?.title || `Р‘Р»РѕРє ${blockIndex + 1}`),
+                title: String(materialItem?.title || `Блок ${blockIndex + 1}`),
                 content_text: materialItem?.content_text || "",
                 content_url: materialItem?.content_url || materialItem?.url || materialItem?.signed_url || "",
                 url: materialItem?.url || materialItem?.signed_url || materialItem?.content_url || "",
@@ -2424,7 +2424,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
         const openQuery = options?.skipStart ? "?skip_start=1" : "";
         const detail = await lmsRequest(`/api/lms/courses/${normalizedCourseId}/open${openQuery}`, { method: "POST" });
         if (!detail?.course) {
-          throw new Error("РќРµ СѓРґР°Р»РѕСЃСЊ Р·Р°РіСЂСѓР·РёС‚СЊ РєСѓСЂСЃ");
+          throw new Error("Не удалось загрузить курс");
         }
         nextCourse = mapCourseDetailToView(detail.course, fallbackCourse);
         setCourses((prev) => {
@@ -2436,7 +2436,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
       } else {
         const detail = await lmsRequest(`/api/lms/admin/courses?course_id=${normalizedCourseId}`);
         if (!detail?.course) {
-          throw new Error("РќРµ СѓРґР°Р»РѕСЃСЊ Р·Р°РіСЂСѓР·РёС‚СЊ РєСѓСЂСЃ");
+          throw new Error("Не удалось загрузить курс");
         }
         nextCourse = mapCourseDetailToView(detail.course, fallbackCourse);
       }
@@ -2482,7 +2482,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
       const baseCourse = options?.course || courseCacheRef.current.get(getCourseCacheKey(normalizedCourseId));
       const baseLesson = flattenCourseLessons(baseCourse).find((item) => String(item?.id) === normalizedLessonId) || null;
       if (!baseLesson) {
-        throw new Error("РЈСЂРѕРє РЅРµ РЅР°Р№РґРµРЅ");
+        throw new Error("Урок не найден");
       }
 
       if (!canUseLearnerApi || !baseLesson?.apiLessonId || baseLesson?.type === "quiz") {
@@ -2618,7 +2618,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
             void loadAdminData({ scope: "course", courseId: routeCourseId });
           }
         } catch (error) {
-          emitToast(`РќРµ СѓРґР°Р»РѕСЃСЊ РѕС‚РєСЂС‹С‚СЊ РєСѓСЂСЃ: ${String(error?.message || "РѕС€РёР±РєР°")}`, "error");
+          emitToast(`Не удалось открыть курс: ${String(error?.message || "ошибка")}`, "error");
           if (isCurrentRoute()) {
             setBusyCourseId(null);
             navigate(canGoCatalog ? buildLmsCatalogPath(catalogTab) : buildLmsAdminPath(adminTab), { replace: true });
@@ -2639,7 +2639,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
           setBusyCourseId(null);
           const baseLesson = flattenCourseLessons(courseLike).find((item) => String(item?.id) === String(routeLessonId));
           if (!baseLesson) {
-            throw new Error("РЈСЂРѕРє РЅРµ РЅР°Р№РґРµРЅ РІ РєСѓСЂСЃРµ");
+            throw new Error("Урок не найден в курсе");
           }
           syncSelectedLesson(baseLesson);
           setQuizView("intro");
@@ -2653,7 +2653,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
             void loadAdminData({ scope: "course", courseId: routeCourseId });
           }
         } catch (error) {
-          emitToast(`РќРµ СѓРґР°Р»РѕСЃСЊ РѕС‚РєСЂС‹С‚СЊ СѓСЂРѕРє: ${String(error?.message || "РѕС€РёР±РєР°")}`, "error");
+          emitToast(`Не удалось открыть урок: ${String(error?.message || "ошибка")}`, "error");
           if (isCurrentRoute()) {
             // When bouncing the user back to the course page on lesson load
             // error we must use the *grand-parent* back-link (catalog/admin),
