@@ -5121,7 +5121,7 @@ function CombinedLesson({
                 </div>
                 <div className="p-5">
                   <div
-                    className="max-h-[420px] overflow-y-auto custom-scrollbar pr-2 text-sm text-slate-600 leading-relaxed"
+                    className="max-h-[min(420px,55vh)] overflow-y-auto custom-scrollbar pr-2 text-sm text-slate-600 leading-relaxed"
                     onCopy={handleBlockTranscriptCopyAttempt}
                     onCut={handleBlockTranscriptCopyAttempt}
                     onContextMenu={handleBlockTranscriptCopyAttempt}
@@ -5910,6 +5910,19 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
                 <Play size={26} className="ml-1" />
               </button>
             )}
+            {!isManagerMode && !completed && (
+              <button
+                type="button"
+                onClick={(event) => { event.stopPropagation(); handleComplete(); }}
+                disabled={completing || progress < completionThreshold}
+                title={progress < completionThreshold ? `Досмотрите минимум до ${completionThreshold}%` : "Отметить урок как завершенный"}
+                className="absolute top-3 right-3 inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-[11px] font-semibold shadow-lg backdrop-blur-sm transition-colors bg-indigo-600/90 hover:bg-indigo-600 text-white disabled:bg-slate-900/55 disabled:text-white/70 disabled:cursor-not-allowed"
+              >
+                {completing ? <RefreshCw size={13} className="animate-spin" /> : <CheckCircle size={13} />}
+                <span className="hidden sm:inline">{completing ? "Сохранение..." : progress < completionThreshold ? `До завершения ${Math.max(0, Math.ceil(completionThreshold - progress))}%` : "Отметить как завершенный"}</span>
+                <span className="sm:hidden">{completing ? "..." : progress < completionThreshold ? `${Math.max(0, Math.ceil(completionThreshold - progress))}%` : "Завершить"}</span>
+              </button>
+            )}
             <div className="absolute left-0 right-0 bottom-0 p-3 bg-gradient-to-t from-black/80 via-black/45 to-transparent" onClick={(event) => event.stopPropagation()}>
               <div className="flex items-center gap-2">
                 <button
@@ -5944,18 +5957,6 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
           </div>
         )}
       </div>
-      {!isManagerMode && !completed && (
-        <div className="mb-6 flex justify-end">
-          <button
-            onClick={handleComplete}
-            disabled={completing || progress < completionThreshold}
-            className="inline-flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-semibold px-4 py-2.5 rounded-xl transition-colors"
-          >
-            {completing ? <RefreshCw size={14} className="animate-spin" /> : <CheckCircle size={14} />}
-            {completing ? "Сохранение..." : "Отметить как завершенный"}
-          </button>
-        </div>
-      )}
 
       <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
         <div className="flex border-b border-slate-100">
@@ -5968,7 +5969,7 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
         <div className="p-5">
           {activeTab === "transcript" && (
             <div
-              className="max-h-[420px] overflow-y-auto custom-scrollbar pr-2 text-sm text-slate-600 leading-relaxed"
+              className="max-h-[min(420px,55vh)] overflow-y-auto custom-scrollbar pr-2 text-sm text-slate-600 leading-relaxed"
               onCopy={handleTranscriptCopyAttempt}
               onCut={handleTranscriptCopyAttempt}
               onContextMenu={handleTranscriptCopyAttempt}
