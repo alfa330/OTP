@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useState, useEffect, useCallback, useRef, useMemo } from 'react';
+﻿import React, { Suspense, lazy, useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useLocation } from 'react-router-dom';
 import axios from 'axios';
 import _ from 'lodash';
@@ -17033,7 +17033,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             const eM = timeToMinutes(s.end);
                                             const crossing = eM <= sM;
                                             const crossesForDisplay = crossing && s.end !== '00:00';
-                                            const text = plannerShiftDisplayLabel(s);
+                                            // In week/month views use compact time-only label (no +1, no type prefix)
+                                            const text = viewMode === 'day' ? plannerShiftDisplayLabel(s) : `${s.start} — ${s.end}`;
                                             return {
                                                 text,
                                                 crossing: crossesForDisplay,
@@ -17050,14 +17051,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     const crossesForDisplay = crossing && s.end !== '00:00';
                                                     if (!crossesForDisplay) return null;
                                                     return {
-                                                        text: plannerShiftDisplayLabel(s),
+                                                        // In week/month views use compact time-only label
+                                                        text: viewMode === 'day' ? plannerShiftDisplayLabel(s) : `${s.start} — ${s.end}`,
                                                         crossing: true,
                                                         idx,
                                                         isPractice: isPlannerOfficePracticeShift(s)
                                                     };
                                                 })
                                                 .filter(Boolean);
-                                            const labelList = [...origArr, ...prevCont];
+                                            // In week/month: exclude prevCont so night shifts (e.g. 20:00-02:00) do not
+                                            // duplicate into the next day's cell. Only day view shows carry-overs.
+                                            const labelList = viewMode === 'day' ? [...origArr, ...prevCont] : [...origArr];
                                             const hasPracticeShift = labelList.some(item => !!item?.isPractice);
                                             const displayParts = (viewMode === 'day') ? parts : parts.filter(p => p.sourceDate === d);
                                             const durationHours = (viewMode === 'day')
@@ -17117,19 +17121,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 style={viewMode === 'day' ? { flex: 1 } : { minWidth: cellMinWidth, flex: '0 0 auto' }}
                                                 onClick={(e) => handleDayClick(e, op.id, d)}
                                             >
-                                                {pendingFlagLabels.length > 0 && (
-                                                    <span
-                                                        className="absolute top-0.5 left-0.5 z-50 flex items-center gap-0.5"
-                                                        title={`Ожидает подтверждения: ${pendingFlagLabels.join(', ')}`}
-                                                    >
-                                                        <span className="px-1 py-[1px] rounded-md bg-amber-500 text-white text-[8px] font-bold uppercase tracking-wide shadow-sm shadow-amber-500/35 animate-pulse leading-none">
-                                                            Ожидает
-                                                        </span>
-                                                        <span className="px-0.5 py-[1px] rounded bg-amber-100 text-amber-800 text-[8px] font-semibold border border-amber-300 leading-none">
-                                                            {pendingFlagLabels.length}
-                                                        </span>
-                                                    </span>
-                                                )}
+                                                {/* "Ожидает" badge removed — pending shown via yellow dot */}
                                                 {showTopRightIndicators && (
                                                     <span className="absolute top-0.5 right-0.5 z-50 flex items-center gap-1" title={topRightIndicatorsTitle || 'Есть недочеты/переработка'}>
                                                         {showCarryDayOffBadge && (
@@ -17150,12 +17142,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         )}
                                                         {hasDefectMarker && (
                                                             <span className="relative inline-flex items-center justify-center">
-                                                                {hasPendingDefectMarker && (
-                                                                    <span className="absolute inline-flex h-3.5 w-3.5 rounded-full bg-amber-400 opacity-70 animate-ping"></span>
-                                                                )}
                                                                 <span
                                                                     className={`relative w-2.5 h-2.5 rounded-full border border-white ring-1 shadow-sm ${hasPendingDefectMarker
-                                                                        ? 'bg-amber-500 ring-amber-700/70 shadow-amber-500/55'
+                                                                        ? 'bg-amber-400 ring-amber-600/60 shadow-amber-400/45'
                                                                         : 'bg-rose-600 ring-rose-700/70 shadow-rose-600/55'}`}
                                                                 />
                                                             </span>
