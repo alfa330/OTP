@@ -8647,20 +8647,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 () => new Set(selectedCells.map(target => makeSelectedCellKey(target.opId, target.date))),
                 [selectedCells]
             );
-            const plannerHourLabelCols = useMemo(() =>
-                Array.from({ length: 24 }, (_, i) => (
-                    <div key={i} className="flex-1 text-center text-[11px] leading-[12px]">{String(i).padStart(2, '0')}</div>
-                )),
-                []
-            );
-            const plannerHourGridPlain = useMemo(() =>
-                Array.from({ length: 24 }, (_, i) => <div key={i} className="flex-1 border-r last:border-r-0" />),
-                []
-            );
-            const plannerHourGridSlate = useMemo(() =>
-                Array.from({ length: 24 }, (_, i) => <div key={i} className="flex-1 border-r last:border-r-0 border-slate-100" />),
-                []
-            );
             const selectedOperatorsCount = useMemo(
                 () => new Set(selectedCells.map(target => target.opId)).size,
                 [selectedCells]
@@ -16754,9 +16740,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         <div className="flex-1 bg-white rounded shadow-sm p-2 w-full flex flex-col min-h-0 overflow-hidden">
                         <div className="table-scroll overflow-auto w-full flex-1 min-h-0" style={{ position: 'relative' }}>
                             <div style={{ minWidth: 'max-content', width: '100%' }}>
-                            <div className="flex items-start border-b pb-2 mb-2 sticky top-0 z-[60] bg-white">
-                                <div className="w-64 sticky left-0 top-0 z-[60] bg-white pr-2 border-r" style={{ minWidth: '256px', boxShadow: '2px 0 4px rgba(0,0,0,0.05)' }} />
-                                <div className="flex-1">
+                            <div className="flex items-start border-b pb-2 mb-2 sticky top-0 z-[50] bg-white">
+                                <div className="w-64 sticky left-0 top-0 z-50 bg-white pr-2 border-r" style={{ minWidth: '256px', boxShadow: '2px 0 4px rgba(0,0,0,0.05)' }} />
+                                <div className="flex-1" style={{ overflow: 'visible' }}>
                                 <div className="flex gap-2" style={{ whiteSpace: 'nowrap' }}>
                                     {visibleRange.map(d => (
                                     <div
@@ -16782,10 +16768,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <div className="mt-2">
                                     <div className="relative h-8 px-1 isolate bg-white">
                                         <div className="absolute inset-0 flex items-end z-20">
-                                        {plannerHourLabelCols}
+                                        {Array.from({ length: 24 }).map((_, i) => (
+                                            <div key={i} className="flex-1 text-center text-[11px] leading-[12px]">{pad(i)}</div>
+                                        ))}
                                         </div>
                                         <div className="absolute inset-0 flex z-10">
-                                        {plannerHourGridPlain}
+                                        {Array.from({ length: 24 }).map((_, i) => (
+                                            <div key={i} className="flex-1 border-r last:border-r-0" />
+                                        ))}
                                         </div>
                                     </div>
 
@@ -16797,7 +16787,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         })()}
                                         </div>
                                         <div className="absolute inset-0 flex pointer-events-none z-10">
-                                        {plannerHourGridPlain}
+                                        {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0" />))}
                                         </div>
                                     </div>
                                     </div>
@@ -16807,7 +16797,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                             {filteredOperators.map(op => (
                                 <div key={op.id} className="flex items-center border-b"> 
-                                <div className={`w-64 ${plannerStatusSpecialDayViewEnabled ? 'h-[6.25rem]' : 'h-[4.5rem]'} pr-2 sticky left-0 z-[51] bg-white border-r`} style={{ minWidth: '256px', boxShadow: '2px 0 4px rgba(0,0,0,0.05)' }}>
+                                <div className={`w-64 ${plannerStatusSpecialDayViewEnabled ? 'h-[6.25rem]' : 'h-[4.5rem]'} pr-2 sticky left-0 z-40 bg-white border-r`} style={{ minWidth: '256px', boxShadow: '2px 0 4px rgba(0,0,0,0.05)' }}>
                                     <div className="font-medium">{op.name || '—'}</div>
                                     <div className="flex items-center justify-between mt-1">
                                         <div className="text-xs text-slate-500">{op.direction || '—'}</div>
@@ -16816,7 +16806,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         )}
                                     </div>
                                 </div>
-                                <div className="flex-1">
+                                <div className="flex-1" style={{ overflow: 'visible' }}>
                                     <div className="flex gap-2" style={{ whiteSpace: 'nowrap' }}>
                                         {visibleRange.map(d => {
                                             const parts = getShiftPartsForDate(op, d);
@@ -17127,7 +17117,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             return (
                                             <div
                                                 key={d}
-                                                className={`${plannerStatusSpecialDayViewEnabled ? 'h-[6.25rem]' : 'h-[4.5rem]'} overflow-hidden border rounded p-1 relative` + borderClass + bgColor + emphasisClass + (viewMode !== 'day' ? ' cursor-pointer hover:border-slate-500 hover:shadow-sm' : '')}
+                                                className={`${plannerStatusSpecialDayViewEnabled ? 'h-[100px]' : 'h-[56px]'} overflow-hidden border rounded p-1 relative` + borderClass + bgColor + emphasisClass + (viewMode !== 'day' ? ' cursor-pointer hover:border-slate-500 hover:shadow-sm' : '')}
                                                 style={viewMode === 'day' ? { flex: 1 } : { minWidth: cellMinWidth, flex: '0 0 auto' }}
                                                 onClick={(e) => handleDayClick(e, op.id, d)}
                                             >
@@ -17207,7 +17197,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         onMouseUp={(e) => handleOfflineTimelineRightMouseUp(e, op.id, d)}
                                                                     >
                                                                         <div className="absolute inset-0 flex pointer-events-none">
-                                                                            {plannerHourGridSlate}
+                                                                            {Array.from({ length: specialTimelineHourCount }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0 border-slate-100" />))}
                                                                         </div>
                                                                         {hasPendingOfflineRangeForCell && (
                                                                             <div
@@ -17333,7 +17323,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         onMouseUp={(e) => handleOfflineTimelineRightMouseUp(e, op.id, d)}
                                                                     >
                                                                         <div className="absolute inset-0 flex pointer-events-none">
-                                                                            {plannerHourGridSlate}
+                                                                            {Array.from({ length: specialTimelineHourCount }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0 border-slate-100" />))}
                                                                         </div>
                                                                         {hasPendingOfflineRangeForCell && (
                                                                             <div
@@ -17402,7 +17392,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     ) : (
                                                         <>
                                                         <div className="absolute inset-0 flex">
-                                                        {plannerHourGridPlain}
+                                                        {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0" />))}
                                                         </div>
                                                         {hasPendingOfflineRangeForCell && (
                                                             <div
