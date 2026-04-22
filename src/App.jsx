@@ -25516,7 +25516,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 };
             }, [showSidebarEmployeesDropdown, isEmployeesClosing]);
 
-            function TrainingModal({ isOpen, onClose, onSave, initialData = {}, selectedOperators = [] }) {
+            function TrainingModal({
+                isOpen,
+                onClose,
+                onSave,
+                initialData = {},
+                selectedOperators = [],
+                selectedOperatorIds = [],
+                selectableOperators = [],
+                onSelectedOperatorsChange,
+            }) {
                 const [date, setDate] = useState(initialData.date || "");
                 const [startTime, setStartTime] = useState(initialData.start_time || "");
                 const [endTime, setEndTime] = useState(initialData.end_time || "");
@@ -25561,6 +25570,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setError("");
                     setCountInHours(initialData.count_in_hours ?? true);
                 }, [initialData, isOpen]);
+
+                const safeHandleSelectedOperatorsChange = useCallback((nextIds) => {
+                    if (typeof onSelectedOperatorsChange === "function") {
+                        onSelectedOperatorsChange(nextIds);
+                    }
+                }, [onSelectedOperatorsChange]);
 
                 // Фокус на дату при открытии
                 useEffect(() => {
@@ -25678,6 +25693,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             {!isEditMode && (
                                 <div className="rounded-xl border border-blue-100 bg-blue-50 px-3 py-3">
                                 <div className="text-[11px] font-semibold uppercase tracking-wide text-blue-500">Операторы</div>
+                                <div className="mt-2">
+                                    <TrainingOperatorMultiSelect
+                                        items={selectableOperators}
+                                        selectedIds={selectedOperatorIds}
+                                        onChange={safeHandleSelectedOperatorsChange}
+                                        placeholder="Выберите операторов..."
+                                        emptyText="Нет доступных операторов"
+                                    />
+                                </div>
                                 <div className="mt-1 text-sm font-semibold text-blue-900">
                                     {selectedOperatorNames.length > 0
                                         ? `Будет создано для ${selectedOperatorNames.length} ${selectedOperatorNames.length === 1 ? "оператора" : "операторов"}`
@@ -26021,7 +26045,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const [trainings, setTrainings] = useState({}); // {operator_id: [trainings]}
                 const [showModal, setShowModal] = useState(false);
                 const [modalOperatorIds, setModalOperatorIds] = useState([]);
-                const [bulkOperatorIds, setBulkOperatorIds] = useState([]);
                 const [editingTraining, setEditingTraining] = useState(null);
                 // Группировка операторов по SV
                 const [svGroups, setSvGroups] = useState([]);
@@ -26084,11 +26107,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         .sort((left, right) => String(left?.name || '').localeCompare(String(right?.name || ''), 'ru', { sensitivity: 'base' }));
                 }, [operators, operatorsTab]);
 
-                const selectedBulkOperators = useMemo(
-                    () => bulkOperatorIds.map((id) => operatorsById.get(Number(id))).filter(Boolean),
-                    [bulkOperatorIds, operatorsById]
-                );
-
                 const modalOperators = useMemo(
                     () => modalOperatorIds.map((id) => operatorsById.get(Number(id))).filter(Boolean),
                     [modalOperatorIds, operatorsById]
@@ -26127,18 +26145,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setSvGroups(Object.entries(svMap)); // [[svName, [operators]]]
                 }, [operators]);
 
-                useEffect(() => {
-                    const allowedIds = new Set(
-                        selectableOperators
-                            .map((operator) => Number(operator?.id))
-                            .filter((id) => Number.isFinite(id))
-                    );
-                    setBulkOperatorIds((prev) => {
-                        const next = (Array.isArray(prev) ? prev : []).filter((id) => allowedIds.has(Number(id)));
-                        return next.length === prev.length ? prev : next;
-                    });
-                }, [selectableOperators]);
-
                 // Initialize which groups are expanded when svGroups or user changes.
                 useEffect(() => {
                     const map = {};
@@ -26159,15 +26165,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 };
 
                 const handleHeaderAdd = () => {
-                    if (selectedBulkOperators.length === 0) {
-                        showToast('Выберите хотя бы одного оператора', 'error');
-                        return;
-                    }
-                    setModalOperatorIds(
-                        selectedBulkOperators
-                            .map((operator) => Number(operator?.id))
-                            .filter((id) => Number.isFinite(id))
-                    );
+                    setModalOperatorIds([]);
                     setEditingTraining(null);
                     setShowModal(true);
                 };
@@ -26507,34 +26505,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 </button>
                             </div>
 
-                            <div className="min-w-[260px] md:min-w-[320px]">
-                                <label className="block text-xs font-medium text-gray-700 mb-1">Массовое добавление:</label>
-                                <TrainingOperatorMultiSelect
-                                    items={selectableOperators}
-                                    selectedIds={bulkOperatorIds}
-                                    onChange={setBulkOperatorIds}
-                                    placeholder="Выберите операторов..."
-                                    emptyText="Нет доступных операторов"
-                                />
-                            </div>
+                            <div className="hidden md:block h-10 border-l border-gray-300 mx-1" aria-hidden="true" />
 
                             <button
                                 onClick={handleHeaderAdd}
-                                disabled={bulkOperatorIds.length === 0}
-                                title={bulkOperatorIds.length === 0 ? 'Сначала выберите операторов' : `Создать одинаковый тренинг для ${bulkOperatorIds.length} операторов`}
-                                className={`px-3 py-2 rounded-lg text-xs font-semibold transition inline-flex items-center gap-2 ${
-                                    bulkOperatorIds.length === 0
-                                        ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
-                                        : 'bg-green-600 text-white hover:bg-green-700 shadow-sm'
-                                }`}
+                                className="px-3 py-2 rounded-lg text-xs font-semibold transition inline-flex items-center gap-2 bg-green-600 text-white hover:bg-green-700 shadow-sm"
                             >
                                 <FaIcon className="fas fa-plus" />
                                 Добавить тренинг
                             </button>
 
-                            <div className="hidden md:block h-10 border-l border-gray-300 mx-1" aria-hidden="true" />
-
-                            <button onClick={() => setCalendarView(v => !v)} className={`ml-4 px-3 py-1 rounded-lg border text-xs font-semibold ${calendarView ? 'bg-blue-500 text-white' : 'bg-white text-blue-700 border-blue-400'} hover:bg-blue-100 transition`}>
+                            <button onClick={() => setCalendarView(v => !v)} className={`px-3 py-1 rounded-lg border text-xs font-semibold ${calendarView ? 'bg-blue-500 text-white' : 'bg-white text-blue-700 border-blue-400'} hover:bg-blue-100 transition`}>
                                 {calendarView ? 'Список' : 'Календарь'}
                             </button>
                         </div>
@@ -26694,6 +26675,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             onSave={handleSave}
                             initialData={editingTraining || {}}
                             selectedOperators={modalOperators}
+                            selectedOperatorIds={modalOperatorIds}
+                            selectableOperators={selectableOperators}
+                            onSelectedOperatorsChange={setModalOperatorIds}
                         />
                         {/* Модальное окно календаря по дню (общий) */}
                         {calendarModal.open && (
