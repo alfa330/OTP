@@ -24254,7 +24254,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [operatorData, setOperatorData] = useState(null);
             const [profileData, setProfileData] = useState(null);
             const [hoursData, setHoursData] = useState(null);
-            const [view, setView] = useState('hours');
+            // Initialize view from URL so that direct navigation / page reload to
+            // an LMS sub-path (e.g. /lms/course/20/lesson/67) keeps the view as
+            // 'lms' on the very first render. Otherwise the default 'hours' value
+            // would trigger syncAppViewWithUrl() and rewrite the pathname to '/'
+            // before effect #26575 had a chance to set view to 'lms'.
+            const [view, setView] = useState(() => {
+                const initialViewFromUrl = readAppViewFromUrl();
+                return initialViewFromUrl || 'hours';
+            });
             const [pendingSurveysBadgeCount, setPendingSurveysBadgeCount] = useState(0);
             const [newSvName, setNewSvName] = useState('');
             const [newTableUrl, setNewTableUrl] = useState('');
