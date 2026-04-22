@@ -2326,6 +2326,28 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
       acc[String(materialId)] = clampLmsProgress(item?.progress_ratio);
       return acc;
     }, {});
+    const linkedTestBestScoreRaw = linkedTestPayload
+      ? (linkedTestPayload.best_score
+        ?? linkedTestPayload.max_score_percent
+        ?? linkedTestPayload.score_percent
+        ?? linkedTestPayload.score
+        ?? null)
+      : null;
+    const linkedTestBestScore = linkedTestBestScoreRaw != null ? Number(linkedTestBestScoreRaw) : null;
+    const linkedTestAttemptLimit = linkedTestPayload
+      ? Math.max(1, Number(linkedTestPayload.attempt_limit || 3))
+      : 0;
+    const linkedTestAttemptsUsed = linkedTestPayload
+      ? Math.max(0, Number(linkedTestPayload.attempts_used || 0))
+      : 0;
+    let linkedTestStatus = "not_started";
+    if (linkedTestPayload) {
+      if (linkedTestPayload.passed_any) {
+        linkedTestStatus = "completed";
+      } else if (linkedTestAttemptsUsed > 0) {
+        linkedTestStatus = linkedTestAttemptsUsed >= linkedTestAttemptLimit ? "test_failed" : "in_progress";
+      }
+    }
     const mappedLinkedTest = linkedTestPayload ? {
       id: `test-${linkedTestPayload.id}`,
       apiTestId: Number(linkedTestPayload.id || 0),
@@ -2339,11 +2361,12 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
         ? Math.max(1, Number(linkedTestPayload.time_limit_minutes || 0)) * 60
         : 20 * 60,
       timeLimitMinutes: Number(linkedTestPayload.time_limit_minutes || 0) || null,
-      status: linkedTestPayload.passed_any ? "completed" : (Number(linkedTestPayload.attempts_used || 0) > 0 ? "in_progress" : "not_started"),
+      status: linkedTestStatus,
       locked: !Boolean(linkedTestPayload.content_completed),
       requiresTest: true,
-      maxAttempts: Math.max(1, Number(linkedTestPayload.attempt_limit || 3)),
-      attemptsUsed: Math.max(0, Number(linkedTestPayload.attempts_used || 0)),
+      maxAttempts: linkedTestAttemptLimit,
+      attemptsUsed: linkedTestAttemptsUsed,
+      score: linkedTestBestScore,
       isFinal: Boolean(linkedTestPayload.is_final),
       passingScore: Number(linkedTestPayload.pass_threshold || 80),
       questionCount: Math.max(0, Number(linkedTestPayload.question_count || 0)),
@@ -4415,6 +4438,7 @@ function LessonView({
               lmsRequest={lmsRequest}
               onQuizFinished={onQuizFinished}
               emitToast={emitToast}
+              blockTranscriptCopy={blockTranscriptCopy}
             />
           ) : isTextLesson ? (
             <TextLesson
@@ -4918,7 +4942,13 @@ function CombinedLesson({
   lmsRequest,
   onQuizFinished,
   emitToast,
+  blockTranscriptCopy = false,
 }) {
+  const effectiveBlockTranscriptCopy = !isManagerMode && Boolean(blockTranscriptCopy);
+  const handleBlockTranscriptCopyAttempt = useCallback((event) => {
+    if (!effectiveBlockTranscriptCopy) return;
+    event.preventDefault();
+  }, [effectiveBlockTranscriptCopy]);
   const resolveContentCompletion = (lessonLike) => (
     Boolean(lessonLike?.contentCompleted)
     || String(lessonLike?.status || "").toLowerCase() === "completed"
@@ -5056,38 +5086,55 @@ function CombinedLesson({
             ? clampLmsProgress(serverVideoProgressByMaterial?.[String(materialId)] ?? serverVideoProgressByMaterial?.[materialId])
             : 0;
           return (
-            <div key={blockKey} className="bg-white rounded-2xl border border-slate-200 p-5">
-              <div className="flex items-center gap-2 mb-3">
-                <span className="w-7 h-7 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center"><Video size={14} /></span>
-                <h3 className="text-sm font-semibold text-slate-900">{blockTitle}</h3>
-              </div>
-              <CombinedVideoBlockPlayer
-                lessonId={lessonApiId}
-                blockMaterialId={materialId}
-                blockVideoUrl={videoUrl}
-                completionThreshold={completionThreshold}
-                allowFastForward={allowFastForward}
-                isManagerMode={isManagerMode}
-                lmsRequest={lmsRequest}
-                emitToast={emitToast}
-                initialDurationSeconds={Number(blockItem?.metadata?.duration_seconds || 0)}
-                initialProgress={initialProgress}
-                onProgressChange={(nextProgress) => {
-                  setVideoProgressMap((prev) => {
-                    const prevProgress = clampLmsProgress(prev?.[blockKey]);
-                    const normalizedNext = clampLmsProgress(nextProgress);
-                    if (Math.abs(prevProgress - normalizedNext) < 0.2) return prev;
-                    return { ...prev, [blockKey]: normalizedNext };
-                  });
-                }}
-              />
-              <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
-                <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-2">Транскрипт</p>
-                <RichTextContent
-                  value={transcriptRich}
-                  className="text-sm text-slate-700 leading-relaxed"
-                  emptyState={<div className="text-xs text-slate-400">Транскрипт видео-блока не заполнен</div>}
+            <div key={blockKey} className="space-y-3">
+              <div className="bg-white rounded-2xl border border-slate-200 p-5">
+                <div className="flex items-center gap-2 mb-3">
+                  <span className="w-7 h-7 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center"><Video size={14} /></span>
+                  <h3 className="text-sm font-semibold text-slate-900">{blockTitle}</h3>
+                </div>
+                <CombinedVideoBlockPlayer
+                  lessonId={lessonApiId}
+                  blockMaterialId={materialId}
+                  blockVideoUrl={videoUrl}
+                  completionThreshold={completionThreshold}
+                  allowFastForward={allowFastForward}
+                  isManagerMode={isManagerMode}
+                  lmsRequest={lmsRequest}
+                  emitToast={emitToast}
+                  initialDurationSeconds={Number(blockItem?.metadata?.duration_seconds || 0)}
+                  initialProgress={initialProgress}
+                  onProgressChange={(nextProgress) => {
+                    setVideoProgressMap((prev) => {
+                      const prevProgress = clampLmsProgress(prev?.[blockKey]);
+                      const normalizedNext = clampLmsProgress(nextProgress);
+                      if (Math.abs(prevProgress - normalizedNext) < 0.2) return prev;
+                      return { ...prev, [blockKey]: normalizedNext };
+                    });
+                  }}
                 />
+              </div>
+              <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+                <div className="flex border-b border-slate-100">
+                  <div className="flex items-center gap-2 px-5 py-3.5 text-xs font-medium border-b-2 border-indigo-500 text-indigo-600">
+                    <AlignLeft size={13} /> Транскрипт
+                  </div>
+                </div>
+                <div className="p-5">
+                  <div
+                    className="max-h-[420px] overflow-y-auto custom-scrollbar pr-2 text-sm text-slate-600 leading-relaxed"
+                    onCopy={handleBlockTranscriptCopyAttempt}
+                    onCut={handleBlockTranscriptCopyAttempt}
+                    onContextMenu={handleBlockTranscriptCopyAttempt}
+                    onDragStart={handleBlockTranscriptCopyAttempt}
+                    onSelectStart={handleBlockTranscriptCopyAttempt}
+                    style={effectiveBlockTranscriptCopy ? { userSelect: "none", WebkitUserSelect: "none" } : undefined}
+                  >
+                    <RichTextContent
+                      value={transcriptRich}
+                      emptyState={<div className="text-xs text-slate-400">Транскрипт видео-блока не заполнен</div>}
+                    />
+                  </div>
+                </div>
               </div>
             </div>
           );
@@ -5147,32 +5194,85 @@ function CombinedLesson({
           </div>
         )
       )}
-      {completed && !isManagerMode && linkedTest && (
-        <div className={`rounded-2xl border px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 ${linkedTestStatus === "completed" ? "border-emerald-200 bg-emerald-50" : linkedTest.attemptsUsed > 0 && linkedTest.attemptsUsed >= linkedTest.maxAttempts ? "border-red-200 bg-red-50" : "border-indigo-200 bg-indigo-50/60"}`}>
-          <div>
-            <p className={`text-xs font-semibold ${linkedTestStatus === "completed" ? "text-emerald-900" : linkedTest.attemptsUsed > 0 && linkedTest.attemptsUsed >= linkedTest.maxAttempts ? "text-red-900" : "text-indigo-900"}`}>
-              {linkedTestStatus === "completed" ? "Тест пройден" : linkedTest.attemptsUsed > 0 && linkedTest.attemptsUsed >= linkedTest.maxAttempts ? "Тест не пройден" : "Материалы комбо-урока завершены"}
-            </p>
-            {linkedTest.score != null ? (
-              <p className={`text-[11px] mt-0.5 ${linkedTestStatus === "completed" ? "text-emerald-700" : "text-red-700"}`}>
-                Максимальный балл: {Math.round(linkedTest.score)}% (Порог: {Math.round(linkedTest.passingScore || 80)}%)
-              </p>
-            ) : (
-              <p className={`text-[11px] font-medium mt-0.5 ${linkedTest.attemptsUsed >= linkedTest.maxAttempts ? "text-red-700" : "text-indigo-700"}`}>
-                {linkedTest.attemptsUsed >= linkedTest.maxAttempts ? "Попытки исчерпаны" : "\u0422\u0435\u0441\u0442 \u043e\u0442\u043a\u0440\u043e\u0435\u0442\u0441\u044f \u0432 \u043e\u0442\u0434\u0435\u043b\u044c\u043d\u043e\u043c \u043e\u043a\u043d\u0435"}
-              </p>
+      {completed && !isManagerMode && linkedTest && (() => {
+        const lt = linkedTest;
+        const ltPassed = linkedTestStatus === "completed";
+        const ltExhausted = lt.attemptsUsed > 0 && lt.attemptsUsed >= lt.maxAttempts && !ltPassed;
+        const ltAttempted = lt.attemptsUsed > 0;
+        const ltAttemptsLeft = Math.max(0, Number(lt.maxAttempts || 0) - Number(lt.attemptsUsed || 0));
+        const ltPassingScore = Math.round(Number(lt.passingScore || 80));
+        const ltScore = lt.score != null ? Math.round(Number(lt.score)) : null;
+        const accent = ltPassed
+          ? { icon: "bg-emerald-100 text-emerald-600", chip: "bg-emerald-50 text-emerald-700", bar: "bg-emerald-500", btn: "bg-emerald-600 hover:bg-emerald-700" }
+          : ltExhausted
+            ? { icon: "bg-red-100 text-red-600", chip: "bg-red-50 text-red-700", bar: "bg-red-500", btn: "bg-red-600 hover:bg-red-700" }
+            : ltAttempted
+              ? { icon: "bg-amber-100 text-amber-600", chip: "bg-amber-50 text-amber-700", bar: "bg-amber-500", btn: "bg-indigo-600 hover:bg-indigo-700" }
+              : { icon: "bg-indigo-100 text-indigo-600", chip: "bg-indigo-50 text-indigo-700", bar: "bg-indigo-500", btn: "bg-indigo-600 hover:bg-indigo-700" };
+        const statusLabel = ltPassed
+          ? "Тест пройден"
+          : ltExhausted
+            ? "Тест не пройден"
+            : ltAttempted
+              ? "Можно улучшить результат"
+              : "Можно пройти тест";
+        const buttonLabel = ltExhausted
+          ? "Попытки исчерпаны"
+          : ltPassed
+            ? "Просмотр результатов"
+            : ltAttempted
+              ? "Пересдать тест"
+              : "Перейти к тесту";
+        const ButtonIcon = ltPassed ? CheckCircle : ltAttempted ? RefreshCw : PlayCircle;
+        return (
+          <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+            <div className="p-5 flex flex-col sm:flex-row sm:items-center gap-4">
+              <div className={`w-12 h-12 rounded-2xl flex items-center justify-center flex-shrink-0 ${accent.icon}`}>
+                {ltPassed ? <CheckCircle size={22} /> : ltExhausted ? <XCircle size={22} /> : <HelpCircle size={22} />}
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap mb-1">
+                  <p className="text-sm font-semibold text-slate-900 truncate">{lt.title || "Тест по уроку"}</p>
+                  <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full whitespace-nowrap ${accent.chip}`}>{statusLabel}</span>
+                </div>
+                {ltScore != null ? (
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-2xl font-bold text-slate-900 leading-none">{ltScore}%</span>
+                    <span className="text-[11px] text-slate-500">лучший результат · порог {ltPassingScore}%</span>
+                  </div>
+                ) : (
+                  <p className="text-xs text-slate-500">
+                    {ltExhausted ? "Попытки исчерпаны" : `Порог прохождения ${ltPassingScore}% · ${lt.questionCount || "—"} вопросов`}
+                  </p>
+                )}
+                <div className="flex items-center gap-3 mt-2 text-[11px] text-slate-500 flex-wrap">
+                  <span className="inline-flex items-center gap-1"><Clock size={11} /> {lt.duration || "—"}</span>
+                  {Number(lt.maxAttempts || 0) > 0 && (
+                    <span className="inline-flex items-center gap-1">
+                      <RefreshCw size={11} />
+                      Попыток: <strong className={ltAttemptsLeft <= 1 && !ltPassed ? "text-red-600" : "text-slate-700"}>{ltAttemptsLeft}</strong> / {lt.maxAttempts}
+                    </span>
+                  )}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={openCombinedTestModal}
+                disabled={ltExhausted && !ltPassed}
+                className={`inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-white text-xs font-semibold transition-colors whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed ${accent.btn}`}
+              >
+                <ButtonIcon size={13} />
+                {buttonLabel}
+              </button>
+            </div>
+            {ltScore != null && (
+              <div className="h-1 bg-slate-100">
+                <div className={`h-full ${accent.bar} transition-all`} style={{ width: `${Math.min(100, Math.max(0, ltScore))}%` }} />
+              </div>
             )}
           </div>
-          <button
-            type="button"
-            onClick={openCombinedTestModal}
-            className={`inline-flex items-center justify-center gap-2 px-3.5 py-2 rounded-xl text-white text-xs font-semibold transition-colors ${linkedTestStatus === "completed" ? "bg-emerald-600 hover:bg-emerald-700" : linkedTest.attemptsUsed >= linkedTest.maxAttempts ? "bg-red-600 hover:bg-red-700" : "bg-indigo-600 hover:bg-indigo-700"}`}
-          >
-            {(linkedTestStatus === "completed" || linkedTest.attemptsUsed >= linkedTest.maxAttempts) ? <RefreshCw size={13} /> : <PlayCircle size={13} />}
-            {(linkedTestStatus === "completed" || linkedTest.attemptsUsed > 0) ? "Просмотр результатов" : "\u041f\u0435\u0440\u0435\u0439\u0442\u0438 \u043a \u0442\u0435\u0441\u0442\u0443"}
-          </button>
-        </div>
-      )}
+        );
+      })()}
       {completed && (!linkedTest || isManagerMode) && (
         <div className="flex items-center gap-1.5 text-xs text-emerald-700 bg-emerald-50 px-3 py-2 rounded-xl font-semibold w-fit">
           <CheckCircle size={12} /> {"\u0423\u0440\u043e\u043a \u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043d"}
