@@ -4567,8 +4567,9 @@ function CombinedVideoBlockPlayer({
     );
     const mergedProgress = Math.max(nextProgress, restoredProgress);
     const mergedDuration = Math.max(nextDuration, storedDuration);
+    const storedPositionSeconds = Math.max(0, Number(storedPosition?.position_seconds || 0));
     const restoredPositionSeconds = Math.max(
-      Math.max(0, Number(storedPosition?.position_seconds || 0)),
+      storedPositionSeconds,
       (mergedProgress / 100) * mergedDuration
     );
     setPlaying(false);
@@ -4576,7 +4577,14 @@ function CombinedVideoBlockPlayer({
     setTotalSeconds(mergedDuration);
     setDisplayCurrentSeconds(restoredPositionSeconds);
     progressRef.current = mergedProgress;
-    maxAllowedSecondsRef.current = (mergedProgress / 100) * mergedDuration;
+    // Seed anti-seek ceiling with the actual restored position so the
+    // programmatic seek in handleLoadedMetadata is not immediately
+    // rewound back by handleSeeking.
+    maxAllowedSecondsRef.current = Math.max(
+      (mergedProgress / 100) * mergedDuration,
+      storedPositionSeconds,
+      restoredPositionSeconds
+    );
     restoredPositionRef.current = restoredPositionSeconds;
     if (videoRef.current) {
       try {
@@ -4696,13 +4704,21 @@ function CombinedVideoBlockPlayer({
     const resumeFromProgress = Math.max(0, Math.min(mediaDuration, (progressRef.current / 100) * mediaDuration));
     const resumeFromStorage = Math.max(0, Math.min(mediaDuration, Number(restoredPositionRef.current || 0)));
     const resumePosition = Math.max(resumeFromProgress, resumeFromStorage);
+    // Raise anti-seek ceiling BEFORE programmatically seeking so the
+    // resulting `seeking` event is not rewound by handleSeeking.
+    const normalizedProgress = clampLmsProgress(progressRef.current || 0);
+    const restoredAllowed = Math.max(0, (normalizedProgress / 100) * safeDuration);
+    maxAllowedSecondsRef.current = Math.max(
+      maxAllowedSecondsRef.current,
+      restoredAllowed,
+      resumePosition,
+      Number(video.currentTime || 0)
+    );
     if (resumePosition > 0 && Math.abs(Number(video.currentTime || 0) - resumePosition) > 1.5) {
       video.currentTime = resumePosition;
     }
-    const normalizedProgress = clampLmsProgress(progressRef.current || 0);
-    const restoredAllowed = Math.max(0, (normalizedProgress / 100) * safeDuration);
-    maxAllowedSecondsRef.current = Math.max(Number(video.currentTime || 0), restoredAllowed);
     const nextSeconds = Math.max(0, Number(video.currentTime || resumePosition || 0));
+    maxAllowedSecondsRef.current = Math.max(maxAllowedSecondsRef.current, nextSeconds);
     setDisplayCurrentSeconds(nextSeconds);
     persistLocalProgress(true, {
       positionSeconds: nextSeconds,
@@ -4710,6 +4726,42 @@ function CombinedVideoBlockPlayer({
       progressRatio: clampLmsProgress((nextSeconds / safeDuration) * 100),
     });
   }, [persistLocalProgress]);
+
+  const handleVideoEnded = useCallback(() => {
+    const video = videoRef.current;
+    const duration = Math.max(
+      1,
+      Number(video?.duration || 0) > 0
+        ? Number(video.duration)
+        : Number(totalSecondsRef.current || 0)
+    );
+    setPlaying(false);
+    setProgress(100);
+    progressRef.current = 100;
+    setDisplayCurrentSeconds(duration);
+    maxAllowedSecondsRef.current = Math.max(maxAllowedSecondsRef.current, duration);
+    persistLocalProgress(true, {
+      positionSeconds: duration,
+      durationSeconds: duration,
+      progressRatio: 100,
+    });
+    if (canTrackEvents) {
+      void lmsRequest(`/api/lms/lessons/${lessonId}/event`, {
+        method: "POST",
+        body: {
+          event_type: "combined_video_progress",
+          payload: {
+            material_id: Number(blockMaterialId),
+            progress_ratio: 100,
+            position_seconds: Number(duration.toFixed(2)),
+            duration_seconds: Number(duration.toFixed(2)),
+            tab_visible: visibleRef.current,
+          },
+          client_ts: new Date().toISOString(),
+        },
+      }).catch(() => {});
+    }
+  }, [canTrackEvents, lmsRequest, lessonId, blockMaterialId, persistLocalProgress]);
 
   const maybeReportProgress = () => {
     if (!canTrackEvents) return;
@@ -4870,6 +4922,7 @@ function CombinedVideoBlockPlayer({
               onSeeking={handleSeeking}
               onPlay={handleVideoPlay}
               onPause={handleVideoPause}
+              onEnded={handleVideoEnded}
             />
             {!playing && (
               <button
@@ -5503,15 +5556,21 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
     lastLocalPersistAtRef.current = nowTs;
   }, [videoStorageKey]);
 
+  // Full hydration — runs only when the lesson identity (or its video
+  // source/storage key) changes. Intentionally independent of
+  // lesson.completionRatio / lesson.status so that our own completion
+  // flow (which updates those fields on the parent) does NOT re-pause the
+  // video, reset playback state, or make the slider oscillate.
   useEffect(() => {
     const isLessonCompleted = String(lesson?.status || "").toLowerCase() === "completed";
     const next = clampLmsProgress(lesson?.completionRatio ?? (isLessonCompleted ? 100 : 0));
     const fallbackDuration = Math.max(1, Number(videoDurationMeta || lesson?.durationSeconds || 18 * 60));
     const storedPosition = isLessonCompleted ? null : readLmsVideoPositionFromStorage(videoStorageKey);
     const storedDuration = Math.max(1, Number(storedPosition?.duration_seconds || 0) || fallbackDuration);
+    const storedPositionSeconds = Math.max(0, Number(storedPosition?.position_seconds || 0));
     const restoredProgressByPosition = clampLmsProgress(
       storedDuration > 0
-        ? (Math.max(0, Number(storedPosition?.position_seconds || 0)) / storedDuration) * 100
+        ? (storedPositionSeconds / storedDuration) * 100
         : 0
     );
     const restoredProgress = clampLmsProgress(
@@ -5524,7 +5583,7 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
     const restoredPositionSeconds = isLessonCompleted
       ? mergedDuration
       : Math.max(
-        Math.max(0, Number(storedPosition?.position_seconds || 0)),
+        storedPositionSeconds,
         (mergedProgress / 100) * mergedDuration
       );
 
@@ -5534,7 +5593,18 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
     progressRef.current = mergedProgress;
     setCompleted(isLessonCompleted);
     setPlaying(false);
-    maxAllowedSecondsRef.current = Math.max(0, (mergedProgress / 100) * mergedDuration);
+    // Seed the anti-seek ceiling with the larger of (progress-derived seconds,
+    // stored position, restored resume position). Otherwise the initial
+    // programmatic seek in handleLoadedMetadata — which restores the user
+    // to their last position — is immediately rewound by handleSeeking
+    // because allowed < currentTime when progress_ratio was persisted
+    // slightly above position_seconds/duration.
+    maxAllowedSecondsRef.current = Math.max(
+      0,
+      (mergedProgress / 100) * mergedDuration,
+      storedPositionSeconds,
+      restoredPositionSeconds
+    );
     restoredPositionRef.current = restoredPositionSeconds;
     if (videoRef.current) {
       try {
@@ -5554,15 +5624,21 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
       lastLocalPersistAtRef.current = Date.now();
     }
     autoCompleteTriggeredRef.current = false;
-  }, [
-    lesson?.id,
-    lesson?.apiLessonId,
-    lesson?.completionRatio,
-    lesson?.status,
-    lesson?.durationSeconds,
-    videoDurationMeta,
-    videoStorageKey,
-  ]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [videoStorageKey]);
+
+  // Light sync of the "completed" flag when the lesson arrives already
+  // completed (e.g. from an external tab or after our own complete call).
+  // This intentionally does NOT touch video playback or the progress
+  // bar position so it will not interfere with live playback.
+  useEffect(() => {
+    const isLessonCompleted = String(lesson?.status || "").toLowerCase() === "completed";
+    if (!isLessonCompleted) return;
+    setCompleted(true);
+    setProgress((prev) => (prev >= 100 ? prev : 100));
+    progressRef.current = Math.max(progressRef.current, 100);
+    clearLmsVideoPositionFromStorage(videoStorageKey);
+  }, [lesson?.status, videoStorageKey]);
 
   useEffect(() => {
     if (!videoStorageKey || typeof window === "undefined") return undefined;
@@ -5684,8 +5760,35 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
 
   const syncHeartbeatBeforeComplete = useCallback(async () => {
     if (!canTrack) return;
+    // If the user has watched past the completion threshold, send one
+    // heartbeat with the full confirmed position so the server's
+    // completion_ratio reaches >= threshold even when the browser freezes
+    // video.currentTime a fraction short of duration on the final frame.
+    const currentProgress = clampLmsProgress(progressRef.current || 0);
+    const duration = Math.max(
+      1,
+      Number(videoRef.current?.duration || 0) > 0
+        ? Number(videoRef.current.duration)
+        : Number(totalSecondsRef.current || 0)
+    );
+    if (currentProgress >= completionThreshold && lessonId) {
+      try {
+        await lmsRequest(`/api/lms/lessons/${lessonId}/heartbeat`, {
+          method: "POST",
+          body: {
+            position_seconds: Number(duration.toFixed(2)),
+            media_duration_seconds: Number(duration.toFixed(2)),
+            tab_visible: visibleRef.current,
+            client_ts: new Date().toISOString(),
+          },
+        });
+      } catch (_) {
+        // fall through to the normal heartbeat
+      }
+      return;
+    }
     await sendHeartbeat();
-  }, [canTrack, sendHeartbeat]);
+  }, [canTrack, completionThreshold, lessonId, lmsRequest, sendHeartbeat]);
 
   const handleLoadedMetadata = useCallback(() => {
     const video = videoRef.current;
@@ -5697,13 +5800,23 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
     const resumeFromProgress = Math.max(0, Math.min(mediaDuration, (progressRef.current / 100) * mediaDuration));
     const resumeFromStorage = Math.max(0, Math.min(mediaDuration, Number(restoredPositionRef.current || 0)));
     const resumePosition = Math.max(resumeFromProgress, resumeFromStorage);
+    // Raise the anti-seek ceiling BEFORE programmatically seeking to the
+    // resume position — otherwise the resulting `seeking` event arrives
+    // with currentTime > allowed and handleSeeking rewinds the user back
+    // to the lower, progress-derived ceiling.
+    const normalizedProgress = clampLmsProgress(progressRef.current || 0);
+    const restoredAllowed = Math.max(0, (normalizedProgress / 100) * safeDuration);
+    maxAllowedSecondsRef.current = Math.max(
+      maxAllowedSecondsRef.current,
+      restoredAllowed,
+      resumePosition,
+      Number(video.currentTime || 0)
+    );
     if (resumePosition > 0 && Math.abs(Number(video.currentTime || 0) - resumePosition) > 1.5) {
       video.currentTime = resumePosition;
     }
-    const normalizedProgress = clampLmsProgress(progressRef.current || 0);
-    const restoredAllowed = Math.max(0, (normalizedProgress / 100) * safeDuration);
-    maxAllowedSecondsRef.current = Math.max(Number(video.currentTime || 0), restoredAllowed);
     const nextSeconds = Math.max(0, Number(video.currentTime || resumePosition || 0));
+    maxAllowedSecondsRef.current = Math.max(maxAllowedSecondsRef.current, nextSeconds);
     setDisplayCurrentSeconds(nextSeconds);
     persistLocalProgress(true, {
       positionSeconds: nextSeconds,
@@ -5711,6 +5824,40 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
       progressRatio: clampLmsProgress((nextSeconds / safeDuration) * 100),
     });
   }, [persistLocalProgress]);
+
+  const handleVideoEnded = useCallback(() => {
+    const video = videoRef.current;
+    const duration = Math.max(
+      1,
+      Number(video?.duration || 0) > 0
+        ? Number(video.duration)
+        : Number(totalSecondsRef.current || 0)
+    );
+    setPlaying(false);
+    setProgress(100);
+    progressRef.current = 100;
+    setDisplayCurrentSeconds(duration);
+    maxAllowedSecondsRef.current = Math.max(maxAllowedSecondsRef.current, duration);
+    persistLocalProgress(true, {
+      positionSeconds: duration,
+      durationSeconds: duration,
+      progressRatio: 100,
+    });
+    // Force one heartbeat reporting the full duration so the server's
+    // confirmed_seconds reaches 100% even if video.currentTime stops a
+    // fraction short of duration on the final frame.
+    if (canTrack && lessonId) {
+      void lmsRequest(`/api/lms/lessons/${lessonId}/heartbeat`, {
+        method: "POST",
+        body: {
+          position_seconds: Number(duration.toFixed(2)),
+          media_duration_seconds: Number(duration.toFixed(2)),
+          tab_visible: visibleRef.current,
+          client_ts: new Date().toISOString(),
+        },
+      }).catch(() => {});
+    }
+  }, [canTrack, lessonId, lmsRequest, persistLocalProgress]);
 
   const handleTimeUpdate = useCallback(() => {
     const video = videoRef.current;
@@ -5899,6 +6046,7 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
               onSeeking={handleSeeking}
               onPlay={handleVideoPlay}
               onPause={handleVideoPause}
+              onEnded={handleVideoEnded}
             />
             {!playing && (
               <button
