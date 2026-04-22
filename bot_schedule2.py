@@ -10382,11 +10382,23 @@ def get_trainings():
 @require_api_key
 def add_training():
     try:
-        data = request.get_json()
-        required_fields = ['operator_id', 'date', 'start_time', 'end_time', 'reason']
+        data = request.get_json(silent=True) or {}
+        required_fields = ['date', 'start_time', 'end_time', 'reason']
         if not data or not all(field in data for field in required_fields):
             logging.warning(f"Missing required fields in add_training: {data}")
             return jsonify({"error": "Missing required fields"}), 400
+
+        raw_operator_ids = _normalize_int_id_list(data.get('operator_ids'))
+        if raw_operator_ids:
+            is_batch_request = True
+            operator_ids = raw_operator_ids
+        else:
+            is_batch_request = False
+            operator_ids = _normalize_int_id_list(data.get('operator_id'))
+
+        if not operator_ids:
+            logging.warning("Missing operator_id/operator_ids in add_training: %s", data)
+            return jsonify({"error": "operator_id or operator_ids is required"}), 400
 
         requester_id, requester, auth_error = _get_authenticated_requester()
         if auth_error:
@@ -10395,20 +10407,6 @@ def add_training():
         if not _is_admin_role(requester[3]) and not _is_supervisor_role(requester[3]):
             logging.warning(f"Unauthorized attempt to add training by user {requester_id}")
             return jsonify({"error": "Unauthorized"}), 403
-
-        operator, scope_error = _load_target_user_with_scope(
-            requester,
-            requester_id,
-            data['operator_id'],
-            allow_self=False,
-            supervisor_target_roles=('operator',),
-            not_found_message="Operator not found",
-            forbidden_message="Forbidden for this operator"
-        )
-        if scope_error:
-            message, status_code = scope_error
-            logging.warning("Blocked training creation: requester=%s operator=%s error=%s", requester_id, data['operator_id'], message)
-            return jsonify({"error": message}), status_code
 
         try:
             datetime.strptime(data['date'], '%Y-%m-%d')
@@ -10428,18 +10426,117 @@ def add_training():
             logging.warning(f"Invalid training reason: {data['reason']}")
             return jsonify({"error": "Invalid training reason"}), 400
 
-        training_id = db.add_training(
-            operator_id=int(operator[0]),
-            training_date=data['date'],
-            start_time=data['start_time'],
-            end_time=data['end_time'],
-            reason=data['reason'],
-            comment=data.get('comment'),
-            created_by=requester_id,
-            count_in_hours=data.get("count_in_hours", True)
+        if not is_batch_request:
+            operator, scope_error = _load_target_user_with_scope(
+                requester,
+                requester_id,
+                operator_ids[0],
+                allow_self=False,
+                supervisor_target_roles=('operator',),
+                not_found_message="Operator not found",
+                forbidden_message="Forbidden for this operator"
+            )
+            if scope_error:
+                message, status_code = scope_error
+                logging.warning("Blocked training creation: requester=%s operator=%s error=%s", requester_id, operator_ids[0], message)
+                return jsonify({"error": message}), status_code
+
+            training_id = db.add_training(
+                operator_id=int(operator[0]),
+                training_date=data['date'],
+                start_time=data['start_time'],
+                end_time=data['end_time'],
+                reason=data['reason'],
+                comment=data.get('comment'),
+                created_by=requester_id,
+                count_in_hours=data.get("count_in_hours", True)
+            )
+            logging.info("Training added: ID %s for operator %s", training_id, operator_ids[0])
+            return jsonify({"status": "success", "id": training_id}), 201
+
+        created_ids = []
+        scoped_operator_ids = []
+        errors = []
+
+        for raw_operator_id in operator_ids:
+            try:
+                operator, scope_error = _load_target_user_with_scope(
+                    requester,
+                    requester_id,
+                    raw_operator_id,
+                    allow_self=False,
+                    supervisor_target_roles=('operator',),
+                    not_found_message="Operator not found",
+                    forbidden_message="Forbidden for this operator"
+                )
+                if scope_error:
+                    message, status_code = scope_error
+                    logging.warning(
+                        "Blocked batch training creation: requester=%s operator=%s error=%s",
+                        requester_id,
+                        raw_operator_id,
+                        message
+                    )
+                    errors.append({
+                        "operator_id": int(raw_operator_id),
+                        "error": str(message),
+                        "status_code": int(status_code)
+                    })
+                    continue
+
+                scoped_operator_id = int(operator[0])
+                training_id = db.add_training(
+                    operator_id=scoped_operator_id,
+                    training_date=data['date'],
+                    start_time=data['start_time'],
+                    end_time=data['end_time'],
+                    reason=data['reason'],
+                    comment=data.get('comment'),
+                    created_by=requester_id,
+                    count_in_hours=data.get("count_in_hours", True)
+                )
+                scoped_operator_ids.append(scoped_operator_id)
+                created_ids.append(training_id)
+            except Exception as operator_error:
+                logging.error(
+                    "Error adding batch training for requester=%s operator=%s: %s",
+                    requester_id,
+                    raw_operator_id,
+                    operator_error,
+                    exc_info=True
+                )
+                errors.append({
+                    "operator_id": int(raw_operator_id),
+                    "error": "Internal server error",
+                    "status_code": 500
+                })
+
+        if not created_ids:
+            status_code = errors[0].get("status_code", 400) if errors else 400
+            if errors and any(item.get("status_code") != status_code for item in errors):
+                status_code = 400
+            return jsonify({
+                "status": "error",
+                "error": errors[0]["error"] if errors else "Failed to create trainings",
+                "errors": errors,
+                "created_count": 0,
+                "operator_ids": scoped_operator_ids
+            }), status_code
+
+        response_payload = {
+            "status": "success" if not errors else "partial_success",
+            "ids": created_ids,
+            "created_count": len(created_ids),
+            "operator_ids": scoped_operator_ids,
+            "errors": errors
+        }
+        logging.info(
+            "Batch training request processed: requester=%s created=%s failed=%s",
+            requester_id,
+            len(created_ids),
+            len(errors)
         )
-        logging.info(f"Training added: ID {training_id} for operator {data['operator_id']}")
-        return jsonify({"status": "success", "id": training_id}), 201
+        return jsonify(response_payload), (201 if not errors else 207)
     except Exception as e:
         logging.error(f"Error adding training: {e}", exc_info=True)
         return jsonify({"error": f"Internal server error"}), 500

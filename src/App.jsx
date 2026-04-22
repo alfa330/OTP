@@ -25516,7 +25516,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 };
             }, [showSidebarEmployeesDropdown, isEmployeesClosing]);
 
-            function TrainingModal({ isOpen, onClose, onSave, initialData = {} }) {
+            function TrainingModal({ isOpen, onClose, onSave, initialData = {}, selectedOperators = [] }) {
                 const [date, setDate] = useState(initialData.date || "");
                 const [startTime, setStartTime] = useState(initialData.start_time || "");
                 const [endTime, setEndTime] = useState(initialData.end_time || "");
@@ -25526,6 +25526,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const [error, setError] = useState("");
                 const [countInHours, setCountInHours] = useState(initialData.count_in_hours ?? true);
                 const dateRef = React.useRef(null);
+                const isEditMode = Boolean(initialData?.id);
+                const selectedOperatorNames = useMemo(
+                    () => (Array.isArray(selectedOperators) ? selectedOperators : [])
+                        .map((operator) => String(operator?.name || "").trim())
+                        .filter(Boolean),
+                    [selectedOperators]
+                );
+                const selectedOperatorsSummary = useMemo(() => {
+                    if (selectedOperatorNames.length === 0) return "";
+                    if (selectedOperatorNames.length <= 3) return selectedOperatorNames.join(", ");
+                    return `${selectedOperatorNames.slice(0, 3).join(", ")} +${selectedOperatorNames.length - 3}`;
+                }, [selectedOperatorNames]);
 
                 const reasons = [
                     "Обратная связь",
@@ -25581,6 +25593,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 };
 
                 const validate = () => {
+                    if (!isEditMode && selectedOperatorNames.length === 0) return "Выберите хотя бы одного оператора.";
                     if (!date) return "Укажите дату тренинга.";
                     if (!startTime) return "Укажите время начала.";
                     if (!endTime) return "Укажите время окончания.";
@@ -25662,6 +25675,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             </div>
 
                             <div className="mt-4 space-y-4">
+                            {!isEditMode && (
+                                <div className="rounded-xl border border-blue-100 bg-blue-50 px-3 py-3">
+                                <div className="text-[11px] font-semibold uppercase tracking-wide text-blue-500">Операторы</div>
+                                <div className="mt-1 text-sm font-semibold text-blue-900">
+                                    {selectedOperatorNames.length > 0
+                                        ? `Будет создано для ${selectedOperatorNames.length} ${selectedOperatorNames.length === 1 ? "оператора" : "операторов"}`
+                                        : "Операторы не выбраны"}
+                                </div>
+                                {selectedOperatorsSummary && (
+                                    <div className="mt-1 text-xs text-blue-700">{selectedOperatorsSummary}</div>
+                                )}
+                                </div>
+                            )}
+
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
                                 Дата тренинга <span className="text-red-500">*</span>
@@ -25792,6 +25819,182 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 );
                 }
 
+            function TrainingOperatorMultiSelect({
+                items = [],
+                selectedIds = [],
+                onChange,
+                placeholder = "Выберите операторов...",
+                emptyText = "Нет доступных операторов",
+            }) {
+                const [open, setOpen] = useState(false);
+                const [search, setSearch] = useState("");
+                const ref = useRef(null);
+
+                useEffect(() => {
+                    if (!open) return undefined;
+                    const handleOutsideClick = (event) => {
+                        if (ref.current && !ref.current.contains(event.target)) {
+                            setOpen(false);
+                        }
+                    };
+                    document.addEventListener("mousedown", handleOutsideClick);
+                    return () => document.removeEventListener("mousedown", handleOutsideClick);
+                }, [open]);
+
+                const normalizedSelectedIds = useMemo(
+                    () => (Array.isArray(selectedIds) ? selectedIds : []).map((id) => Number(id)).filter((id) => Number.isFinite(id)),
+                    [selectedIds]
+                );
+
+                const filteredItems = useMemo(() => {
+                    const normalizedQuery = String(search || "").trim().toLowerCase();
+                    if (!normalizedQuery) return items;
+                    return items.filter((item) => {
+                        const name = String(item?.name || "").toLowerCase();
+                        const supervisor = String(item?.supervisor_name || "").toLowerCase();
+                        return name.includes(normalizedQuery) || supervisor.includes(normalizedQuery);
+                    });
+                }, [items, search]);
+
+                const selectedItems = useMemo(() => {
+                    const selectedIdSet = new Set(normalizedSelectedIds);
+                    return items.filter((item) => selectedIdSet.has(Number(item?.id)));
+                }, [items, normalizedSelectedIds]);
+
+                const selectedLabel = useMemo(() => {
+                    if (selectedItems.length === 0) return "";
+                    if (selectedItems.length === 1) return selectedItems[0]?.name || "1 выбран";
+                    if (selectedItems.length === 2) {
+                        return selectedItems.map((item) => item?.name).filter(Boolean).join(", ");
+                    }
+                    return `${selectedItems[0]?.name || "Оператор"}, ${selectedItems[1]?.name || "оператор"} +${selectedItems.length - 2}`;
+                }, [selectedItems]);
+
+                const toggleItem = (id) => {
+                    const normalizedId = Number(id);
+                    if (!Number.isFinite(normalizedId)) return;
+                    if (normalizedSelectedIds.includes(normalizedId)) {
+                        onChange(normalizedSelectedIds.filter((item) => item !== normalizedId));
+                        return;
+                    }
+                    onChange([...normalizedSelectedIds, normalizedId]);
+                };
+
+                const selectAllFiltered = () => {
+                    const nextIds = Array.from(
+                        new Set([
+                            ...normalizedSelectedIds,
+                            ...filteredItems.map((item) => Number(item?.id)).filter((id) => Number.isFinite(id)),
+                        ])
+                    );
+                    onChange(nextIds);
+                };
+
+                const clearAll = () => onChange([]);
+
+                return (
+                    <div ref={ref} className="relative min-w-[240px]">
+                        <button
+                            type="button"
+                            onClick={() => setOpen((prev) => !prev)}
+                            className="flex w-full items-center gap-2 rounded-lg border border-blue-200 bg-white px-3 py-2 text-sm shadow-sm hover:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-400"
+                        >
+                            <FaIcon className="fas fa-users text-blue-400 shrink-0" style={{ width: "0.9em", height: "0.9em" }} />
+                            <span className="flex-1 truncate text-left">
+                                {selectedLabel ? (
+                                    <span className="text-gray-800">{selectedLabel}</span>
+                                ) : (
+                                    <span className="text-gray-400">{placeholder}</span>
+                                )}
+                            </span>
+                            {selectedItems.length > 0 && (
+                                <span className="shrink-0 rounded-full bg-blue-600 px-2 py-0.5 text-[10px] font-bold text-white leading-none">
+                                    {selectedItems.length}
+                                </span>
+                            )}
+                            <FaIcon
+                                className="fas fa-chevron-down text-gray-300 shrink-0"
+                                style={{ width: "0.8em", height: "0.8em", transform: open ? "rotate(180deg)" : "none", transition: "transform .2s" }}
+                            />
+                        </button>
+
+                        {open && (
+                            <div className="absolute top-full left-0 right-0 z-50 mt-1 overflow-hidden rounded-xl border border-blue-100 bg-white shadow-2xl">
+                                <div className="border-b border-blue-50 p-2 space-y-2">
+                                    <div className="flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50/60 px-2 py-1.5">
+                                        <FaIcon className="fas fa-search text-blue-300" style={{ width: "0.8em", height: "0.8em" }} />
+                                        <input
+                                            type="text"
+                                            value={search}
+                                            onChange={(event) => setSearch(event.target.value)}
+                                            placeholder="Поиск по оператору или супервайзеру..."
+                                            autoFocus
+                                            className="flex-1 bg-transparent text-sm text-gray-700 focus:outline-none"
+                                        />
+                                    </div>
+                                    <div className="flex gap-2">
+                                        <button
+                                            type="button"
+                                            onClick={selectAllFiltered}
+                                            className="flex-1 rounded-md bg-blue-50 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-100"
+                                        >
+                                            Выбрать все
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={clearAll}
+                                            className="flex-1 rounded-md bg-gray-100 py-1 text-xs font-semibold text-gray-600 hover:bg-gray-200"
+                                        >
+                                            Очистить
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <div className="max-h-60 overflow-y-auto py-1">
+                                    {items.length === 0 ? (
+                                        <div className="px-3 py-3 text-center text-sm text-gray-400">{emptyText}</div>
+                                    ) : filteredItems.length === 0 ? (
+                                        <div className="px-3 py-3 text-center text-sm text-gray-400">Ничего не найдено</div>
+                                    ) : (
+                                        filteredItems.map((item) => {
+                                            const isSelected = normalizedSelectedIds.includes(Number(item?.id));
+                                            const supervisorName = String(item?.supervisor_name || "").trim();
+                                            return (
+                                                <div
+                                                    key={item.id}
+                                                    onClick={() => toggleItem(item.id)}
+                                                    className={`flex items-start gap-3 px-3 py-2 text-sm cursor-pointer transition-colors ${
+                                                        isSelected ? "bg-blue-50/80" : "hover:bg-gray-50"
+                                                    }`}
+                                                >
+                                                    <div className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border-2 transition-colors ${
+                                                        isSelected ? "border-blue-600 bg-blue-600" : "border-gray-300 bg-white"
+                                                    }`}>
+                                                        {isSelected && (
+                                                            <FaIcon className="fas fa-check text-white" style={{ width: "0.55em", height: "0.55em" }} />
+                                                        )}
+                                                    </div>
+                                                    <div className="min-w-0 flex-1">
+                                                        <div className={isSelected ? "font-medium text-blue-800" : "text-gray-700"}>
+                                                            {item?.name || "Без имени"}
+                                                        </div>
+                                                        {supervisorName && (
+                                                            <div className="truncate text-[11px] text-gray-400">
+                                                                СВ: {supervisorName}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            );
+                                        })
+                                    )}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                );
+            }
+
             // Make accessible in global scope for nested components defined earlier
             if (typeof window !== 'undefined') {
                 window.TrainingModal = TrainingModal;
@@ -25817,7 +26020,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }, [month]);
                 const [trainings, setTrainings] = useState({}); // {operator_id: [trainings]}
                 const [showModal, setShowModal] = useState(false);
-                const [currentOperator, setCurrentOperator] = useState(null);
+                const [modalOperatorIds, setModalOperatorIds] = useState([]);
+                const [bulkOperatorIds, setBulkOperatorIds] = useState([]);
                 const [editingTraining, setEditingTraining] = useState(null);
                 // Группировка операторов по SV
                 const [svGroups, setSvGroups] = useState([]);
@@ -25848,6 +26052,55 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return color;
                 }
 
+                const buildGroupedTrainings = (rows = []) => {
+                    const grouped = {};
+                    (Array.isArray(rows) ? rows : []).forEach((trainingItem) => {
+                        const operatorId = Number(trainingItem?.operator_id);
+                        if (!Number.isFinite(operatorId)) return;
+                        if (!grouped[operatorId]) grouped[operatorId] = [];
+                        grouped[operatorId].push(trainingItem);
+                    });
+                    return grouped;
+                };
+
+                const getTrainingErrorMessage = (error) => {
+                    const responseMessage = error?.response?.data?.error;
+                    const responseItemMessage = error?.response?.data?.errors?.[0]?.error;
+                    const fallbackMessage = error?.message;
+                    return String(responseMessage || responseItemMessage || fallbackMessage || 'Неизвестная ошибка');
+                };
+
+                const operatorsById = useMemo(() => new Map(
+                    (Array.isArray(operators) ? operators : [])
+                        .map((operator) => [Number(operator?.id), operator])
+                        .filter(([id]) => Number.isFinite(id))
+                ), [operators]);
+
+                const selectableOperators = useMemo(() => {
+                    const sourceOperators = Array.isArray(operators) ? operators : [];
+                    return sourceOperators
+                        .filter((operator) => operatorsTab === 'active' ? (operator.status !== 'fired') : (operator.status === 'fired'))
+                        .slice()
+                        .sort((left, right) => String(left?.name || '').localeCompare(String(right?.name || ''), 'ru', { sensitivity: 'base' }));
+                }, [operators, operatorsTab]);
+
+                const selectedBulkOperators = useMemo(
+                    () => bulkOperatorIds.map((id) => operatorsById.get(Number(id))).filter(Boolean),
+                    [bulkOperatorIds, operatorsById]
+                );
+
+                const modalOperators = useMemo(
+                    () => modalOperatorIds.map((id) => operatorsById.get(Number(id))).filter(Boolean),
+                    [modalOperatorIds, operatorsById]
+                );
+
+                const refreshTrainings = async () => {
+                    const response = await axios.get(`${apiBaseUrl}/api/trainings?month=${month}`, {
+                        headers: withAccessTokenHeader({ 'X-User-Id': user.id })
+                    });
+                    setTrainings(buildGroupedTrainings(response?.data?.trainings || []));
+                };
+
                 useEffect(() => {
                     // Флаг, что операторы загружены (не пустой массив)
                     if (operators && operators.length > 0) {
@@ -25858,15 +26111,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 useEffect(() => {
                     // Получаем тренинги только если операторы загружены
                     if (!operatorsLoaded || !user?.id) return;
-                    axios.get(`${apiBaseUrl}/api/trainings?month=${month}`, {
-                        headers: withAccessTokenHeader({ 'X-User-Id': user.id })
-                    }).then(res => {
-                        const grouped = {};
-                        (res.data.trainings || []).forEach(t => {
-                            if (!grouped[t.operator_id]) grouped[t.operator_id] = [];
-                            grouped[t.operator_id].push(t);
-                        });
-                        setTrainings(grouped);
+                    refreshTrainings().catch((error) => {
+                        console.error('Error loading trainings:', error);
+                        showToast('Ошибка при загрузке тренингов', 'error');
                     });
                 }, [month, operatorsLoaded, user?.id, apiBaseUrl]);
 
@@ -25879,6 +26126,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     });
                     setSvGroups(Object.entries(svMap)); // [[svName, [operators]]]
                 }, [operators]);
+
+                useEffect(() => {
+                    const allowedIds = new Set(
+                        selectableOperators
+                            .map((operator) => Number(operator?.id))
+                            .filter((id) => Number.isFinite(id))
+                    );
+                    setBulkOperatorIds((prev) => {
+                        const next = (Array.isArray(prev) ? prev : []).filter((id) => allowedIds.has(Number(id)));
+                        return next.length === prev.length ? prev : next;
+                    });
+                }, [selectableOperators]);
 
                 // Initialize which groups are expanded when svGroups or user changes.
                 useEffect(() => {
@@ -25894,90 +26153,99 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }, [svGroups, user && user.role, user && user.name]);
 
                 const handleAdd = (opId) => {
-                    setCurrentOperator(opId);
+                    setModalOperatorIds([Number(opId)]);
+                    setEditingTraining(null);
+                    setShowModal(true);
+                };
+
+                const handleHeaderAdd = () => {
+                    if (selectedBulkOperators.length === 0) {
+                        showToast('Выберите хотя бы одного оператора', 'error');
+                        return;
+                    }
+                    setModalOperatorIds(
+                        selectedBulkOperators
+                            .map((operator) => Number(operator?.id))
+                            .filter((id) => Number.isFinite(id))
+                    );
                     setEditingTraining(null);
                     setShowModal(true);
                 };
 
                 const handleEdit = (opId, training) => {
-                    setCurrentOperator(opId);
+                    setModalOperatorIds([Number(opId)]);
                     // Передаём копию объекта, чтобы не было мутаций
                     setEditingTraining({ ...training });
                     setShowModal(true);
                 };
 
-                const handleDelete = (trainingId) => {
-                    axios.delete(`${apiBaseUrl}/api/trainings/${trainingId}`, {
-                        headers: withAccessTokenHeader({ 'X-User-Id': user.id })
-                    })
-                        .then(() => {
-                            // Обновляем только тренинги
-                            axios.get(`${apiBaseUrl}/api/trainings?month=${month}`, {
-                                headers: withAccessTokenHeader({ 'X-User-Id': user.id })
-                            })
-                                .then(res => {
-                                    const grouped = {};
-                                    (res.data.trainings || []).forEach(t => {
-                                        if (!grouped[t.operator_id]) grouped[t.operator_id] = [];
-                                        grouped[t.operator_id].push(t);
-                                    });
-                                    setTrainings(grouped);
-                                    showToast('Тренинг успешно удален', 'success');
-                                })
-                                .catch(err => {
-                                    console.error('Error updating trainings after delete:', err);
-                                    showToast('Ошибка при обновлении списка тренингов', 'error');
-                                });
-                        })
-                        .catch(err => {
-                            console.error('Error deleting training:', err);
-                            showToast('Ошибка при удалении тренинга', 'error');
+                const handleDelete = async (trainingId) => {
+                    try {
+                        await axios.delete(`${apiBaseUrl}/api/trainings/${trainingId}`, {
+                            headers: withAccessTokenHeader({ 'X-User-Id': user.id })
                         });
+                        await refreshTrainings();
+                        showToast('Тренинг успешно удален', 'success');
+                    } catch (error) {
+                        console.error('Error deleting training:', error);
+                        showToast('Ошибка при удалении тренинга', 'error');
+                        throw error;
+                    }
                 };
 
-                const handleSave = (data) => {
-                    const updateTrainings = () => {
-                        axios.get(`${apiBaseUrl}/api/trainings?month=${month}`, {
-                            headers: withAccessTokenHeader({ 'X-User-Id': user.id })
-                        })
-                            .then(res => {
-                                const grouped = {};
-                                (res.data.trainings || []).forEach(t => {
-                                    if (!grouped[t.operator_id]) grouped[t.operator_id] = [];
-                                    grouped[t.operator_id].push(t);
-                                });
-                                setTrainings(grouped);
-                                setShowModal(false);
-                            })
-                            .catch(err => {
-                                console.error('Error updating trainings:', err);
-                                showToast('Ошибка при обновлении списка тренингов','error')
-                            });
+                const handleSave = async (data) => {
+                    const headers = {
+                        headers: withAccessTokenHeader({ 'X-User-Id': user.id })
                     };
+
                     if (editingTraining) {
-                        axios.put(`${apiBaseUrl}/api/trainings/${editingTraining.id}`, data, {
-                            headers: withAccessTokenHeader({ 'X-User-Id': user.id })
-                        })
-                            .then(() => {
-                                updateTrainings();
-                                showToast('Тренинг успешно обновлен','success');
-                            })
-                            .catch(err => {
-                                console.error('Error updating training:', err);
-                                showToast('Ошибка при обновлении тренинга','error');
-                            });
-                    } else {
-                        axios.post(`${apiBaseUrl}/api/trainings`, { ...data, operator_id: currentOperator }, {
-                            headers: withAccessTokenHeader({ 'X-User-Id': user.id })
-                        })
-                            .then(() => {
-                                updateTrainings();
-                                showToast('Тренинг успешно добавлен','success');
-                            })
-                            .catch(err => {
-                                console.error('Error adding training:', err);
-                                showToast('Ошибка при добавлении тренинга','error');
-                            });
+                        try {
+                            await axios.put(`${apiBaseUrl}/api/trainings/${editingTraining.id}`, data, headers);
+                            await refreshTrainings();
+                            showToast('Тренинг успешно обновлен', 'success');
+                            return;
+                        } catch (error) {
+                            console.error('Error updating training:', error);
+                            showToast('Ошибка при обновлении тренинга', 'error');
+                            throw error;
+                        }
+                    }
+
+                    const targetOperatorIds = modalOperatorIds
+                        .map((id) => Number(id))
+                        .filter((id) => Number.isFinite(id));
+
+                    if (targetOperatorIds.length === 0) {
+                        const message = 'Выберите хотя бы одного оператора';
+                        showToast(message, 'error');
+                        throw new Error(message);
+                    }
+
+                    const response = await axios.post(
+                        `${apiBaseUrl}/api/trainings`,
+                        { ...data, operator_ids: targetOperatorIds },
+                        headers
+                    );
+                    const payload = response?.data || {};
+                    await refreshTrainings();
+
+                    if (response.status === 207 || payload.status === 'partial_success') {
+                        const createdCount = Number(payload?.created_count || 0);
+                        const totalCount = targetOperatorIds.length;
+                        const firstErrorMessage = String(payload?.errors?.[0]?.error || 'Часть тренингов не удалось создать');
+                        showToast(`Создано для ${createdCount} из ${totalCount}. ${firstErrorMessage}`, 'info');
+                        return;
+                    }
+
+                    const createdCount = Number(payload?.created_count || targetOperatorIds.length || 0);
+                    if (createdCount > 0) {
+                        showToast(
+                            createdCount === 1
+                                ? 'Тренинг успешно добавлен'
+                                : `Тренинг добавлен для ${createdCount} операторов`,
+                            'success'
+                        );
+                        return;
                     }
                 };
 
@@ -26239,6 +26507,31 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 </button>
                             </div>
 
+                            <div className="min-w-[260px] md:min-w-[320px]">
+                                <label className="block text-xs font-medium text-gray-700 mb-1">Массовое добавление:</label>
+                                <TrainingOperatorMultiSelect
+                                    items={selectableOperators}
+                                    selectedIds={bulkOperatorIds}
+                                    onChange={setBulkOperatorIds}
+                                    placeholder="Выберите операторов..."
+                                    emptyText="Нет доступных операторов"
+                                />
+                            </div>
+
+                            <button
+                                onClick={handleHeaderAdd}
+                                disabled={bulkOperatorIds.length === 0}
+                                title={bulkOperatorIds.length === 0 ? 'Сначала выберите операторов' : `Создать одинаковый тренинг для ${bulkOperatorIds.length} операторов`}
+                                className={`px-3 py-2 rounded-lg text-xs font-semibold transition inline-flex items-center gap-2 ${
+                                    bulkOperatorIds.length === 0
+                                        ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
+                                        : 'bg-green-600 text-white hover:bg-green-700 shadow-sm'
+                                }`}
+                            >
+                                <FaIcon className="fas fa-plus" />
+                                Добавить тренинг
+                            </button>
+
                             <div className="hidden md:block h-10 border-l border-gray-300 mx-1" aria-hidden="true" />
 
                             <button onClick={() => setCalendarView(v => !v)} className={`ml-4 px-3 py-1 rounded-lg border text-xs font-semibold ${calendarView ? 'bg-blue-500 text-white' : 'bg-white text-blue-700 border-blue-400'} hover:bg-blue-100 transition`}>
@@ -26395,7 +26688,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     });
                             })()
                         )}
-                        <TrainingModal isOpen={showModal} onClose={() => setShowModal(false)} onSave={handleSave} initialData={editingTraining || {}} />
+                        <TrainingModal
+                            isOpen={showModal}
+                            onClose={() => setShowModal(false)}
+                            onSave={handleSave}
+                            initialData={editingTraining || {}}
+                            selectedOperators={modalOperators}
+                        />
                         {/* Модальное окно календаря по дню (общий) */}
                         {calendarModal.open && (
                             <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => { setCalendarModal({ open: false, date: '', trainings: [] }); setSelectedCalendarTraining(null); }}>
