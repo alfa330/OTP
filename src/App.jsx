@@ -26509,7 +26509,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                             <button
                                 onClick={handleHeaderAdd}
-                                className="px-3 py-2 rounded-lg text-xs font-semibold transition inline-flex items-center gap-2 bg-green-600 text-white hover:bg-green-700 shadow-sm"
+                                className="px-3 py-1 rounded-lg border border-green-600 text-xs font-semibold transition inline-flex items-center gap-2 bg-green-600 text-white hover:bg-green-700 hover:border-green-700"
                             >
                                 <FaIcon className="fas fa-plus" />
                                 Добавить тренинг
