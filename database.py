@@ -13970,6 +13970,7 @@ class Database:
             if not requested_segments:
                 raise ValueError("Запрос не содержит сегменты смен для переноса")
             target_segments = payload.get('targetSegments') or []
+            is_replacement_request = len(target_segments) == 0
 
             requested_intervals_payload = self._swap_parse_payload_segments(
                 requested_segments,
@@ -14111,11 +14112,17 @@ class Database:
 
             requester_affected_dates = []
             target_affected_dates = []
+            # Plain replacements should leave an explicit day off instead of an empty day cell.
+            requester_day_off_dates = []
             for day_obj, day_key in day_candidates:
-                before_req = _shift_signature(requester_day_map.get(day_key) or [])
-                after_req = _shift_signature(requester_save_day_map.get(day_key) or [])
+                before_req_shifts = requester_day_map.get(day_key) or []
+                after_req_shifts = requester_save_day_map.get(day_key) or []
+                before_req = _shift_signature(before_req_shifts)
+                after_req = _shift_signature(after_req_shifts)
                 if before_req != after_req:
                     requester_affected_dates.append(day_obj)
+                if is_replacement_request and before_req_shifts and not after_req_shifts:
+                    requester_day_off_dates.append(day_obj)
 
                 before_tgt = _shift_signature(target_day_map.get(day_key) or [])
                 after_tgt = _shift_signature(target_save_day_map.get(day_key) or [])
@@ -14158,6 +14165,9 @@ class Database:
                         # Перерывы пересчитываем по правилам после обмена, старые не переносим.
                         breaks=None
                     )
+
+            for day_obj in requester_day_off_dates:
+                self._set_day_off_tx(cursor, requester_operator_id, day_obj)
 
             cursor.execute(
                 """
