@@ -4495,6 +4495,8 @@ function CombinedVideoBlockPlayer({
   const restoredPositionRef = useRef(0);
   const totalSecondsRef = useRef(totalSeconds);
   const displayCurrentSecondsRef = useRef(displayCurrentSeconds);
+  const hideControlsTimerRef = useRef(null);
+  const [controlsVisible, setControlsVisible] = useState(true);
 
   const safeTotalSeconds = Math.max(1, Number(totalSeconds || 0));
   const currentSeconds = Math.max(0, Math.floor(Number(displayCurrentSeconds || 0)));
@@ -4890,6 +4892,41 @@ function CombinedVideoBlockPlayer({
     video.pause();
   };
 
+  const scheduleHideControls = useCallback(() => {
+    if (hideControlsTimerRef.current) {
+      clearTimeout(hideControlsTimerRef.current);
+    }
+    hideControlsTimerRef.current = setTimeout(() => {
+      const video = videoRef.current;
+      if (video && !video.paused) {
+        setControlsVisible(false);
+      }
+    }, 2500);
+  }, []);
+
+  const revealControls = useCallback(() => {
+    setControlsVisible(true);
+    scheduleHideControls();
+  }, [scheduleHideControls]);
+
+  useEffect(() => {
+    if (!playing) {
+      setControlsVisible(true);
+      if (hideControlsTimerRef.current) {
+        clearTimeout(hideControlsTimerRef.current);
+        hideControlsTimerRef.current = null;
+      }
+      return;
+    }
+    scheduleHideControls();
+  }, [playing, scheduleHideControls]);
+
+  useEffect(() => () => {
+    if (hideControlsTimerRef.current) {
+      clearTimeout(hideControlsTimerRef.current);
+    }
+  }, []);
+
   const formatVideoClock = (seconds) => {
     const safe = Math.max(0, Math.floor(Number(seconds || 0)));
     const minutes = Math.floor(safe / 60);
@@ -4904,7 +4941,13 @@ function CombinedVideoBlockPlayer({
           <AlertTriangle size={14} /> Видео поставлено на паузу — вы переключили вкладку браузера
         </div>
       )}
-      <div className="bg-slate-900 rounded-2xl overflow-hidden relative aspect-video">
+      <div
+        className={`bg-slate-900 rounded-2xl overflow-hidden relative aspect-video ${playing && !controlsVisible ? "cursor-none" : ""}`}
+        onMouseMove={revealControls}
+        onMouseEnter={revealControls}
+        onMouseLeave={() => { if (playing) setControlsVisible(false); }}
+        onTouchStart={revealControls}
+      >
         {blockVideoUrl ? (
           <>
             <video
@@ -4935,7 +4978,7 @@ function CombinedVideoBlockPlayer({
               </button>
             )}
             <div
-              className="absolute left-0 right-0 bottom-0 p-3 bg-gradient-to-t from-black/80 via-black/45 to-transparent"
+              className={`absolute left-0 right-0 bottom-0 p-3 bg-gradient-to-t from-black/80 via-black/45 to-transparent transition-opacity duration-300 ${controlsVisible ? "opacity-100" : "opacity-0 pointer-events-none"}`}
               onClick={(event) => event.stopPropagation()}
             >
               <div className="flex items-center gap-2">
@@ -4959,9 +5002,6 @@ function CombinedVideoBlockPlayer({
                   {formatVideoClock(currentSeconds)} / {formatVideoClock(safeTotalSeconds)}
                 </div>
               </div>
-              {!canSeekForward && (
-                <p className="mt-1 text-[10px] text-white/70">Перемотка вперед станет доступна после завершения просмотра</p>
-              )}
             </div>
           </>
         ) : (
@@ -4970,14 +5010,6 @@ function CombinedVideoBlockPlayer({
             <p className="text-sm text-white/70">Видео не прикреплено к блоку</p>
           </div>
         )}
-      </div>
-      <div className="flex items-center justify-between text-[11px]">
-        <span className="text-slate-500">
-          Прогресс просмотра: <strong className="text-slate-700">{Math.round(progress)}%</strong>
-        </span>
-        <span className={progress >= normalizedThreshold ? "text-emerald-700 font-semibold" : "text-slate-500"}>
-          Порог: {normalizedThreshold}%
-        </span>
       </div>
     </div>
   );
@@ -5486,6 +5518,8 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
   const restoredPositionRef = useRef(0);
   const totalSecondsRef = useRef(totalSeconds);
   const displayCurrentSecondsRef = useRef(displayCurrentSeconds);
+  const hideControlsTimerRef = useRef(null);
+  const [controlsVisible, setControlsVisible] = useState(true);
 
   const lessonId = Number(lesson?.apiLessonId || 0);
   const canTrack = !isManagerMode && apiMode && typeof lmsRequest === "function" && lessonId > 0;
@@ -5976,6 +6010,41 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
     video.pause();
   };
 
+  const scheduleHideControls = useCallback(() => {
+    if (hideControlsTimerRef.current) {
+      clearTimeout(hideControlsTimerRef.current);
+    }
+    hideControlsTimerRef.current = setTimeout(() => {
+      const video = videoRef.current;
+      if (video && !video.paused) {
+        setControlsVisible(false);
+      }
+    }, 2500);
+  }, []);
+
+  const revealControls = useCallback(() => {
+    setControlsVisible(true);
+    scheduleHideControls();
+  }, [scheduleHideControls]);
+
+  useEffect(() => {
+    if (!playing) {
+      setControlsVisible(true);
+      if (hideControlsTimerRef.current) {
+        clearTimeout(hideControlsTimerRef.current);
+        hideControlsTimerRef.current = null;
+      }
+      return;
+    }
+    scheduleHideControls();
+  }, [playing, scheduleHideControls]);
+
+  useEffect(() => () => {
+    if (hideControlsTimerRef.current) {
+      clearTimeout(hideControlsTimerRef.current);
+    }
+  }, []);
+
   const formatVideoClock = (seconds) => {
     const safe = Math.max(0, Math.floor(Number(seconds || 0)));
     const minutes = Math.floor(safe / 60);
@@ -6028,7 +6097,13 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
         </div>
       )}
 
-      <div className="bg-slate-900 rounded-2xl overflow-hidden mb-6 relative aspect-video">
+      <div
+        className={"bg-slate-900 rounded-2xl overflow-hidden mb-6 relative aspect-video" + (playing && !controlsVisible ? " cursor-none" : "")}
+        onMouseMove={revealControls}
+        onMouseEnter={revealControls}
+        onMouseLeave={() => { if (playing) setControlsVisible(false); }}
+        onTouchStart={revealControls}
+      >
         {videoUrl ? (
           <>
             <video
@@ -6064,14 +6139,17 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
                 onClick={(event) => { event.stopPropagation(); handleComplete(); }}
                 disabled={completing || progress < completionThreshold}
                 title={progress < completionThreshold ? `Досмотрите минимум до ${completionThreshold}%` : "Отметить урок как завершенный"}
-                className="absolute top-3 right-3 inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-[11px] font-semibold shadow-lg backdrop-blur-sm transition-colors bg-indigo-600/90 hover:bg-indigo-600 text-white disabled:bg-slate-900/55 disabled:text-white/70 disabled:cursor-not-allowed"
+                className={"absolute top-3 right-3 inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-[11px] font-semibold shadow-lg backdrop-blur-sm transition-all duration-300 bg-indigo-600/90 hover:bg-indigo-600 text-white disabled:bg-slate-900/55 disabled:text-white/70 disabled:cursor-not-allowed" + (controlsVisible ? " opacity-100" : " opacity-0 pointer-events-none")}
               >
                 {completing ? <RefreshCw size={13} className="animate-spin" /> : <CheckCircle size={13} />}
                 <span className="hidden sm:inline">{completing ? "Сохранение..." : progress < completionThreshold ? `До завершения ${Math.max(0, Math.ceil(completionThreshold - progress))}%` : "Отметить как завершенный"}</span>
                 <span className="sm:hidden">{completing ? "..." : progress < completionThreshold ? `${Math.max(0, Math.ceil(completionThreshold - progress))}%` : "Завершить"}</span>
               </button>
             )}
-            <div className="absolute left-0 right-0 bottom-0 p-3 bg-gradient-to-t from-black/80 via-black/45 to-transparent" onClick={(event) => event.stopPropagation()}>
+            <div
+              className={"absolute left-0 right-0 bottom-0 p-3 bg-gradient-to-t from-black/80 via-black/45 to-transparent transition-opacity duration-300" + (controlsVisible ? " opacity-100" : " opacity-0 pointer-events-none")}
+              onClick={(event) => event.stopPropagation()}
+            >
               <div className="flex items-center gap-2">
                 <button
                   type="button"
