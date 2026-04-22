@@ -1930,6 +1930,11 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
   const showToastRef = useRef(showToast);
   const withAccessTokenHeaderRef = useRef(withAccessTokenHeader);
   const routeLoadTokenRef = useRef(0);
+  // Tracks which lesson's quiz state (view/answers) we have already
+  // initialized to "intro". Prevents re-mounting of the quiz "result" view
+  // back to "intro" when the route effect re-runs after post-finish data
+  // refresh (e.g. loadLearnerDashboard identity changing).
+  const quizInitializedLessonKeyRef = useRef(null);
   const homeLoadPromiseRef = useRef(null);
   const homeLoadedRef = useRef(false);
   const adminLoadPromisesRef = useRef(new Map());
@@ -2574,6 +2579,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
       setBusyCourseId(null);
       syncSelectedCourse(null);
       syncSelectedLesson(null);
+      quizInitializedLessonKeyRef.current = null;
       if (canUseLearnerApi) {
         void loadLearnerDashboard();
       }
@@ -2586,6 +2592,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
       setBusyCourseId(null);
       syncSelectedCourse(null);
       syncSelectedLesson(null);
+      quizInitializedLessonKeyRef.current = null;
       if (canUseManagerApi) {
         void loadAdminData({ scope: "dashboard" });
       }
@@ -2598,6 +2605,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
       setBusyCourseId(null);
       syncSelectedCourse(null);
       syncSelectedLesson(null);
+      quizInitializedLessonKeyRef.current = null;
       if (canUseManagerApi) {
         void loadAdminData({ scope: "builder" });
       }
@@ -2608,6 +2616,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
 
     if (view === "course" && routeCourseId) {
       syncSelectedLesson(null);
+      quizInitializedLessonKeyRef.current = null;
       void (async () => {
         try {
           const courseLike = await ensureCourseLoaded(routeCourseId);
@@ -2642,8 +2651,17 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
             throw new Error("Урок не найден в курсе");
           }
           syncSelectedLesson(baseLesson);
-          setQuizView("intro");
-          setQuizAnswers({});
+          // Only reset quiz UI state on a genuine lesson change. If the effect
+          // re-runs for the same lesson (e.g. after a post-quiz data refresh
+          // bumps loadLearnerDashboard identity), preserve the current
+          // quiz view so the user keeps seeing the result screen instead of
+          // being snapped back to the intro.
+          const lessonKey = `${routeCourseId}:${routeLessonId}`;
+          if (quizInitializedLessonKeyRef.current !== lessonKey) {
+            quizInitializedLessonKeyRef.current = lessonKey;
+            setQuizView("intro");
+            setQuizAnswers({});
+          }
           const hydratedLesson = await ensureLessonLoaded(routeCourseId, routeLessonId, { course: courseLike });
           if (!isCurrentRoute()) return;
           const cachedCourse = courseCacheRef.current.get(getCourseCacheKey(routeCourseId)) || courseLike;
@@ -6114,43 +6132,61 @@ function ApiQuizSection({ quizView, setQuizView, answers, setAnswers, course, le
   };
 
   if (quizView === "intro") {
+    const hasPriorScore = lesson?.score != null;
+    const priorScore = hasPriorScore ? Math.round(Number(lesson.score) || 0) : 0;
+    const priorPassed = hasPriorScore && priorScore >= Math.round(passThreshold);
+    const totalAttempts = Number(lesson?.maxAttempts ?? course?.maxAttempts ?? 3);
     return (
-      <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center max-w-2xl mx-auto">
-        <div className="w-16 h-16 bg-violet-100 rounded-2xl flex items-center justify-center mx-auto mb-5"><HelpCircle size={28} className="text-violet-600" /></div>
-        <h2 className="text-xl font-bold text-slate-900 mb-2">{lesson?.title || "Тест"}</h2>
-        {lesson?.score != null && (
-          <div className="mb-4 inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-indigo-50 border border-indigo-100 text-indigo-700 font-medium text-sm">
-            Ваш лучший результат: {Math.round(lesson.score)}% (Порог: {Math.round(passThreshold)}%)
+      <div className="space-y-5 max-w-2xl mx-auto">
+        {hasPriorScore && (
+          <div className={`rounded-2xl border p-6 text-center ${priorPassed ? "bg-emerald-50/70 border-emerald-200" : "bg-amber-50/70 border-amber-200"}`}>
+            <div className={`w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-4 ${priorPassed ? "bg-emerald-100" : "bg-amber-100"}`}>
+              {priorPassed ? <CheckCircle size={30} className="text-emerald-600" /> : <RefreshCw size={28} className="text-amber-600" />}
+            </div>
+            <p className="text-[11px] uppercase tracking-wide text-slate-500 mb-1">Ваш лучший результат</p>
+            <div className="flex items-baseline justify-center gap-2 mb-2">
+              <span className="text-5xl font-bold text-slate-900 leading-none">{priorScore}%</span>
+              <span className="text-sm text-slate-400">/ 100%</span>
+            </div>
+            <p className={`text-sm font-semibold ${priorPassed ? "text-emerald-700" : "text-amber-700"}`}>
+              {priorPassed ? "Тест пройден" : "Тест не пройден"}
+            </p>
+            <p className="text-xs text-slate-500 mt-1">Порог прохождения: {Math.round(passThreshold)}%</p>
           </div>
         )}
-        <p className="text-sm text-slate-500 mb-4">Проверьте свои знания по материалам курса</p>
-        
-        <div className="grid grid-cols-3 gap-4 mb-5">
-          {[{ label: "Вопросов", value: lesson?.questionCount || "—" }, { label: "Время", value: lesson?.duration || "—" }, { label: "Порог", value: `${Math.round(passThreshold)}%` }].map(s => (
-            <div key={s.label} className="bg-slate-50 rounded-xl p-4">
-              <div className="text-xl font-bold text-slate-900">{s.value}</div>
-              <div className="text-xs text-slate-500 mt-1">{s.label}</div>
-            </div>
-          ))}
-        </div>
 
-        <div className={`flex items-center justify-center gap-2 text-sm mb-5 p-3 rounded-xl ${attemptsLeft <= 1 ? "bg-red-50 text-red-700" : "bg-slate-50 text-slate-600"}`}>
-          <RefreshCw size={14} />
-          <span>Доступно попыток: <strong>{attemptsLeft}</strong> из {lesson?.maxAttempts ?? course?.maxAttempts ?? 3}</span>
-        </div>
+        <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center">
+          <div className="w-16 h-16 bg-violet-100 rounded-2xl flex items-center justify-center mx-auto mb-5"><HelpCircle size={28} className="text-violet-600" /></div>
+          <h2 className="text-xl font-bold text-slate-900 mb-2">{lesson?.title || "Тест"}</h2>
+          <p className="text-sm text-slate-500 mb-4">{hasPriorScore ? "Вы можете пройти тест ещё раз, чтобы улучшить результат" : "Проверьте свои знания по материалам курса"}</p>
 
-        <div className="text-left bg-slate-50 rounded-xl p-4 mb-6">
-          <p className="text-xs font-semibold text-slate-700 mb-2">На тесте могут быть следующие типы вопросов:</p>
-          <div className="grid grid-cols-2 gap-2">
-            {[{ icon: RadioIcon, label: "Один правильный ответ" }, { icon: CheckSquare, label: "Несколько ответов" }, { icon: Check, label: "Верно / Неверно" }, { icon: Type, label: "Текстовый ввод" }].map(t => (
-              <div key={t.label} className="flex items-center gap-2 text-xs text-slate-600"><t.icon size={12} className="text-indigo-500" />{t.label}</div>
+          <div className="grid grid-cols-3 gap-4 mb-5">
+            {[{ label: "Вопросов", value: lesson?.questionCount || "—" }, { label: "Время", value: lesson?.duration || "—" }, { label: "Порог", value: `${Math.round(passThreshold)}%` }].map(s => (
+              <div key={s.label} className="bg-slate-50 rounded-xl p-4">
+                <div className="text-xl font-bold text-slate-900">{s.value}</div>
+                <div className="text-xs text-slate-500 mt-1">{s.label}</div>
+              </div>
             ))}
           </div>
-        </div>
 
-        <button onClick={startApiQuiz} disabled={attemptsLeft <= 0 || loadingStart} className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold py-3 rounded-xl text-sm transition-colors">
-          {loadingStart ? "Подготовка..." : attemptsLeft <= 0 ? "Попытки исчерпаны" : "Начать тест"}
-        </button>
+          <div className={`flex items-center justify-center gap-2 text-sm mb-5 p-3 rounded-xl ${attemptsLeft <= 1 ? "bg-red-50 text-red-700" : "bg-slate-50 text-slate-600"}`}>
+            <RefreshCw size={14} />
+            <span>Доступно попыток: <strong>{attemptsLeft}</strong> из {totalAttempts}</span>
+          </div>
+
+          <div className="text-left bg-slate-50 rounded-xl p-4 mb-6">
+            <p className="text-xs font-semibold text-slate-700 mb-2">На тесте могут быть следующие типы вопросов:</p>
+            <div className="grid grid-cols-2 gap-2">
+              {[{ icon: RadioIcon, label: "Один правильный ответ" }, { icon: CheckSquare, label: "Несколько ответов" }, { icon: Check, label: "Верно / Неверно" }, { icon: Type, label: "Текстовый ввод" }].map(t => (
+                <div key={t.label} className="flex items-center gap-2 text-xs text-slate-600"><t.icon size={12} className="text-indigo-500" />{t.label}</div>
+              ))}
+            </div>
+          </div>
+
+          <button onClick={startApiQuiz} disabled={attemptsLeft <= 0 || loadingStart} className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold py-3 rounded-xl text-sm transition-colors">
+            {loadingStart ? "Подготовка..." : attemptsLeft <= 0 ? "Попытки исчерпаны" : hasPriorScore ? (priorPassed ? "Пройти ещё раз" : "Пересдать тест") : "Начать тест"}
+          </button>
+        </div>
       </div>
     );
   }

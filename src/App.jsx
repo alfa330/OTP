@@ -31732,7 +31732,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 ? 'p-0 h-screen overflow-hidden'
                                 : (canAccessLmsSection && view === 'lms')
                                     ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
-                                    : (view === 'tasks')
+                                    : (view === 'tasks' || view === 'work_schedules')
                                         ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
                                     : 'p-8 bg-gray-50 min-h-screen overflow-y-auto'
                         } ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}
