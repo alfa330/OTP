@@ -6956,22 +6956,37 @@ def _resolve_reevaluation_request(call_id, approver_user_id, decision, comment=N
             logging.error("Failed to send reevaluation decision to supervisor: %s", exc)
 
     if requester_role == 'operator' and decision_norm == 'approved' and resolved_ctx.get('supervisor_tg_id') and API_TOKEN:
-        operator_name = resolved_ctx.get('operator_name') or '\u2014'
-        approver_display_name = approver[2] if approver and len(approver) > 2 else '\u0410\u0434\u043c\u0438\u043d\u0438\u0441\u0442\u0440\u0430\u0442\u043e\u0440'
+        operator_name = resolved_ctx.get('operator_name') or '—'
+        approver_display_name = approver[2] if approver and len(approver) > 2 else 'Администратор'
+        phone_number = resolved_ctx.get('phone_number') or '—'
+        appeal_date_text = resolved_ctx.get('appeal_date_text') or '—'
+        request_created_at = resolved_ctx.get('sv_request_at_text') or '—'
+        month_text = resolved_ctx.get('month') or '—'
+        current_score = resolved_ctx.get('score')
+        score_text = '—' if current_score is None else f"{float(current_score):.2f}"
+        evaluator_name = resolved_ctx.get('evaluator_name') or '—'
+        requester_name = resolved_ctx.get('requester_name') or operator_name
         supervisor_message = (
-            "\U0001f514 <b>\u041d\u0443\u0436\u043d\u043e \u043f\u0435\u0440\u0435\u043e\u0446\u0435\u043d\u0438\u0442\u044c \u0437\u0432\u043e\u043d\u043e\u043a</b>\n\n"
-            f"<b>\u041e\u043f\u0435\u0440\u0430\u0442\u043e\u0440:</b> {_escape_telegram_html(operator_name, 120)}\n"
+            "🔔 <b>Одобрен запрос на переоценку</b>\n\n"
+            f"<b>Оператор:</b> {_escape_telegram_html(operator_name, 120)}\n"
             f"<b>Call ID:</b> <code>{_escape_telegram_html(call_id, 32)}</code>\n"
-            f"<b>\u0410\u0434\u043c\u0438\u043d\u0438\u0441\u0442\u0440\u0430\u0442\u043e\u0440:</b> {_escape_telegram_html(approver_display_name, 120)}"
+            f"<b>Телефон:</b> {_escape_telegram_html(phone_number, 64)}\n"
+            f"<b>Дата обращения:</b> {_escape_telegram_html(appeal_date_text, 64)}\n"
+            f"<b>Месяц:</b> {_escape_telegram_html(month_text, 16)}\n"
+            f"<b>Текущий балл:</b> {_escape_telegram_html(score_text, 16)}\n"
+            f"<b>Текущий оценщик:</b> {_escape_telegram_html(evaluator_name, 120)}\n"
+            f"<b>Запросил:</b> {_escape_telegram_html(requester_name, 120)}\n"
+            f"<b>Дата запроса:</b> {_escape_telegram_html(request_created_at, 64)}\n"
+            f"<b>Одобрил админ:</b> {_escape_telegram_html(approver_display_name, 120)}"
         )
         if resolved_ctx.get('sv_request_comment'):
             supervisor_message += (
-                f"\n<b>\u041a\u043e\u043c\u043c\u0435\u043d\u0442\u0430\u0440\u0438\u0439 \u043a \u0437\u0430\u043f\u0440\u043e\u0441\u0443:</b> "
+                f"\n<b>Комментарий к запросу:</b> "
                 f"{_escape_telegram_html(resolved_ctx.get('sv_request_comment'), 700)}"
             )
         supervisor_message += (
-            "\n\n\u0417\u0430\u043f\u0440\u043e\u0441 \u043e\u043f\u0435\u0440\u0430\u0442\u043e\u0440\u0430 \u043e\u0434\u043e\u0431\u0440\u0435\u043d. "
-            "\u041f\u043e\u0436\u0430\u043b\u0443\u0439\u0441\u0442\u0430, \u0432\u044b\u043f\u043e\u043b\u043d\u0438\u0442\u0435 \u043f\u0435\u0440\u0435\u043e\u0446\u0435\u043d\u043a\u0443 \u044d\u0442\u043e\u0433\u043e \u0437\u0432\u043e\u043d\u043a\u0430."
+            "\n\n<b>Что нужно сделать:</b> "
+            "перейдите в журнал оценок и выполните переоценку этого звонка."
         )
         try:
             response = _send_telegram_text_message(
