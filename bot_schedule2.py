@@ -6907,25 +6907,39 @@ def _resolve_reevaluation_request(call_id, approver_user_id, decision, comment=N
     requester_tg_id = resolved_ctx.get('requester_tg_id')
     if requester_tg_id and API_TOKEN:
         if decision_norm == 'approved':
-            performer_name = (
-                resolved_ctx.get('supervisor_name') if requester_role == 'operator' else resolved_ctx.get('requester_name')
-            ) or 'Сотрудник'
-            requester_message = (
-                "✅ <b>Запрос на переоценку одобрен</b>\n\n"
-                f"<b>Call ID:</b> <code>{_escape_telegram_html(call_id, 32)}</code>\n"
-                f"<b>Одобрил:</b> {_escape_telegram_html(approver_name, 120)}\n"
-                f"<b>Переоценит:</b> {_escape_telegram_html(performer_name, 120)}"
-            )
             if requester_role == 'operator':
-                requester_message += "\n\nСупервайзер может перейти к переоценке звонка."
+                requester_message = (
+                    "✅ <b>Ваш запрос на переоценку одобрен</b>\n\n"
+                    f"👤 <b>Решение принял:</b> {_escape_telegram_html(approver_name, 120)}\n"
+                    "🔔 <b>Что дальше:</b> супервайзер уже получил уведомление и сможет перейти к переоценке звонка."
+                )
+            else:
+                performer_name = (
+                    resolved_ctx.get('supervisor_name') if requester_role == 'operator' else resolved_ctx.get('requester_name')
+                ) or 'Сотрудник'
+                requester_message = (
+                    "✅ <b>Запрос на переоценку одобрен</b>\n\n"
+                    f"🆔 <b>Call ID:</b> <code>{_escape_telegram_html(call_id, 32)}</code>\n"
+                    f"👤 <b>Одобрил:</b> {_escape_telegram_html(approver_name, 120)}\n"
+                    f"📝 <b>Переоценит:</b> {_escape_telegram_html(performer_name, 120)}"
+                )
         else:
-            requester_message = (
-                "❌ <b>Запрос на переоценку отклонён</b>\n\n"
-                f"<b>Call ID:</b> <code>{_escape_telegram_html(call_id, 32)}</code>\n"
-                f"<b>Отклонил:</b> {_escape_telegram_html(approver_name, 120)}"
-            )
-            if decision_comment:
-                requester_message += f"\n<b>Причина:</b> {_escape_telegram_html(decision_comment, 700)}"
+            if requester_role == 'operator':
+                requester_message = (
+                    "❌ <b>Запрос на переоценку отклонён</b>\n\n"
+                    f"👤 <b>Решение принял:</b> {_escape_telegram_html(approver_name, 120)}"
+                )
+                if decision_comment:
+                    requester_message += f"\n💬 <b>Причина:</b> {_escape_telegram_html(decision_comment, 700)}"
+                requester_message += "\n\nℹ️ Если нужно, вы можете обсудить это решение с супервайзером."
+            else:
+                requester_message = (
+                    "❌ <b>Запрос на переоценку отклонён</b>\n\n"
+                    f"🆔 <b>Call ID:</b> <code>{_escape_telegram_html(call_id, 32)}</code>\n"
+                    f"👤 <b>Отклонил:</b> {_escape_telegram_html(approver_name, 120)}"
+                )
+                if decision_comment:
+                    requester_message += f"\n💬 <b>Причина:</b> {_escape_telegram_html(decision_comment, 700)}"
         try:
             response = _send_telegram_text_message(chat_id=requester_tg_id, text=requester_message, parse_mode='HTML')
             if response.status_code != 200:
@@ -6968,25 +6982,25 @@ def _resolve_reevaluation_request(call_id, approver_user_id, decision, comment=N
         requester_name = resolved_ctx.get('requester_name') or operator_name
         supervisor_message = (
             "🔔 <b>Одобрен запрос на переоценку</b>\n\n"
-            f"<b>Оператор:</b> {_escape_telegram_html(operator_name, 120)}\n"
-            f"<b>Call ID:</b> <code>{_escape_telegram_html(call_id, 32)}</code>\n"
-            f"<b>Телефон:</b> {_escape_telegram_html(phone_number, 64)}\n"
-            f"<b>Дата обращения:</b> {_escape_telegram_html(appeal_date_text, 64)}\n"
-            f"<b>Месяц:</b> {_escape_telegram_html(month_text, 16)}\n"
-            f"<b>Текущий балл:</b> {_escape_telegram_html(score_text, 16)}\n"
-            f"<b>Текущий оценщик:</b> {_escape_telegram_html(evaluator_name, 120)}\n"
-            f"<b>Запросил:</b> {_escape_telegram_html(requester_name, 120)}\n"
-            f"<b>Дата запроса:</b> {_escape_telegram_html(request_created_at, 64)}\n"
-            f"<b>Одобрил админ:</b> {_escape_telegram_html(approver_display_name, 120)}"
+            "Оператору согласовали переоценку. Ниже все детали, чтобы можно было сразу взять звонок в работу.\n\n"
+            f"👤 <b>Оператор:</b> {_escape_telegram_html(operator_name, 120)}\n"
+            f"🆔 <b>Call ID:</b> <code>{_escape_telegram_html(call_id, 32)}</code>\n"
+            f"📞 <b>Телефон:</b> {_escape_telegram_html(phone_number, 64)}\n"
+            f"🗓 <b>Дата обращения:</b> {_escape_telegram_html(appeal_date_text, 64)}\n"
+            f"📅 <b>Месяц:</b> {_escape_telegram_html(month_text, 16)}\n"
+            f"📊 <b>Текущий балл:</b> {_escape_telegram_html(score_text, 16)}\n"
+            f"🎧 <b>Текущий оценщик:</b> {_escape_telegram_html(evaluator_name, 120)}\n"
+            f"🙋 <b>Запросил:</b> {_escape_telegram_html(requester_name, 120)}\n"
+            f"⏱ <b>Дата запроса:</b> {_escape_telegram_html(request_created_at, 64)}\n"
+            f"✅ <b>Одобрил администратор:</b> {_escape_telegram_html(approver_display_name, 120)}"
         )
         if resolved_ctx.get('sv_request_comment'):
             supervisor_message += (
-                f"\n<b>Комментарий к запросу:</b> "
+                f"\n💬 <b>Комментарий к запросу:</b> "
                 f"{_escape_telegram_html(resolved_ctx.get('sv_request_comment'), 700)}"
             )
         supervisor_message += (
-            "\n\n<b>Что нужно сделать:</b> "
-            "перейдите в журнал оценок и выполните переоценку этого звонка."
+            "\n\n👉 <b>Что дальше:</b> откройте журнал оценок, найдите этот звонок и выполните переоценку."
         )
         try:
             response = _send_telegram_text_message(
