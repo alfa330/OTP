@@ -5541,6 +5541,135 @@ class Database:
 
             return evaluations
 
+    def get_call_reevaluation_requests(self, month=None, operator_id=None, supervisor_id=None):
+        query = """
+            SELECT
+                c.id,
+                c.month,
+                c.phone_number,
+                TO_CHAR(c.appeal_date, 'YYYY-MM-DD HH24:MI') AS appeal_date_text,
+                c.score,
+                TO_CHAR(c.created_at, 'YYYY-MM-DD HH24:MI') AS evaluation_date,
+                c.sv_request,
+                c.sv_request_comment,
+                c.sv_request_by,
+                req.name AS sv_request_by_name,
+                c.sv_request_by_role,
+                TO_CHAR(c.sv_request_at, 'YYYY-MM-DD HH24:MI') AS sv_request_at,
+                c.sv_request_approved,
+                c.sv_request_approved_by,
+                apu.name AS sv_request_approved_by_name,
+                TO_CHAR(c.sv_request_approved_at, 'YYYY-MM-DD HH24:MI') AS sv_request_approved_at,
+                c.sv_request_rejected,
+                c.sv_request_rejected_by,
+                rju.name AS sv_request_rejected_by_name,
+                TO_CHAR(c.sv_request_rejected_at, 'YYYY-MM-DD HH24:MI') AS sv_request_rejected_at,
+                c.sv_request_reject_comment,
+                c.operator_id,
+                op.name AS operator_name,
+                op.supervisor_id,
+                sv.name AS supervisor_name,
+                d.id AS direction_id,
+                d.name AS direction_name,
+                u.name AS evaluator_name,
+                corr.id AS correction_call_id,
+                corr.score AS correction_score,
+                corr.evaluator_name AS correction_evaluator_name,
+                TO_CHAR(corr.created_at, 'YYYY-MM-DD HH24:MI') AS correction_created_at
+            FROM calls c
+            JOIN users op ON op.id = c.operator_id
+            LEFT JOIN users sv ON sv.id = op.supervisor_id
+            LEFT JOIN users req ON req.id = c.sv_request_by
+            LEFT JOIN users apu ON apu.id = c.sv_request_approved_by
+            LEFT JOIN users rju ON rju.id = c.sv_request_rejected_by
+            LEFT JOIN users u ON u.id = c.evaluator_id
+            LEFT JOIN directions d ON d.id = c.direction_id
+            LEFT JOIN LATERAL (
+                SELECT
+                    cc.id,
+                    cc.score,
+                    cc.created_at,
+                    cu.name AS evaluator_name
+                FROM calls cc
+                LEFT JOIN users cu ON cu.id = cc.evaluator_id
+                WHERE cc.previous_version_id = c.id
+                  AND COALESCE(cc.is_correction, FALSE) = TRUE
+                ORDER BY cc.created_at DESC
+                LIMIT 1
+            ) corr ON TRUE
+            WHERE c.sv_request = TRUE
+        """
+        params = []
+
+        if month:
+            query += " AND c.month = %s"
+            params.append(month)
+        if operator_id:
+            query += " AND c.operator_id = %s"
+            params.append(operator_id)
+        if supervisor_id:
+            query += " AND op.supervisor_id = %s"
+            params.append(supervisor_id)
+
+        query += """
+            ORDER BY
+                CASE
+                    WHEN COALESCE(c.sv_request_approved, FALSE) = FALSE AND COALESCE(c.sv_request_rejected, FALSE) = FALSE THEN 0
+                    WHEN COALESCE(c.sv_request_approved, FALSE) = TRUE AND corr.id IS NULL THEN 1
+                    WHEN COALESCE(c.sv_request_approved, FALSE) = TRUE AND corr.id IS NOT NULL THEN 2
+                    ELSE 3
+                END,
+                COALESCE(c.sv_request_at, c.created_at) DESC,
+                c.created_at DESC
+        """
+
+        with self._get_cursor() as cursor:
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+
+        requests = []
+        for row in rows:
+            requests.append(
+                {
+                    "id": row[0],
+                    "month": row[1],
+                    "phone_number": row[2],
+                    "appeal_date": row[3],
+                    "score": float(row[4]) if row[4] is not None else None,
+                    "evaluation_date": row[5],
+                    "sv_request": bool(row[6]),
+                    "sv_request_comment": row[7],
+                    "sv_request_by": row[8],
+                    "sv_request_by_name": row[9],
+                    "sv_request_by_role": row[10],
+                    "sv_request_at": row[11],
+                    "sv_request_approved": bool(row[12]),
+                    "sv_request_approved_by": row[13],
+                    "sv_request_approved_by_name": row[14],
+                    "sv_request_approved_at": row[15],
+                    "sv_request_rejected": bool(row[16]),
+                    "sv_request_rejected_by": row[17],
+                    "sv_request_rejected_by_name": row[18],
+                    "sv_request_rejected_at": row[19],
+                    "sv_request_reject_comment": row[20],
+                    "operator_id": row[21],
+                    "operator_name": row[22],
+                    "supervisor_id": row[23],
+                    "supervisor_name": row[24],
+                    "direction": {
+                        "id": row[25],
+                        "name": row[26]
+                    } if row[25] else None,
+                    "evaluator": row[27],
+                    "correction_call_id": row[28],
+                    "correction_score": float(row[29]) if row[29] is not None else None,
+                    "correction_evaluator_name": row[30],
+                    "correction_created_at": row[31]
+                }
+            )
+
+        return requests
+
     def get_operator_score_aggregates_for_month(self, month, operator_ids: Optional[List[int]] = None):
         """
         Быстрые агрегаты по операторам за месяц:

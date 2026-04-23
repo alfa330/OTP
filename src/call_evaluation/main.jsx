@@ -684,7 +684,28 @@ const buildReevaluationRequestTooltip = (call) => {
     return lines.join('\n');
 };
 
-const SvRequestButton = ({ call, userId, userRole, isAdminRole = false, fetchEvaluations, onReevaluate }) => {
+const getReevaluationRequestStatusMeta = (call) => {
+    const status = getReevaluationRequestStatus(call);
+    if (status === 'approved') {
+        return { status, label: 'Одобрено', color: 'var(--green)', icon: 'fas fa-check-circle' };
+    }
+    if (status === 'rejected') {
+        return { status, label: 'Отклонено', color: 'var(--red)', icon: 'fas fa-times-circle' };
+    }
+    if (status === 'pending') {
+        return { status, label: 'На рассмотрении', color: 'var(--amber)', icon: 'fas fa-clock' };
+    }
+    return { status: 'none', label: 'Нет запроса', color: 'var(--text-3)', icon: 'fas fa-minus-circle' };
+};
+
+const getReevaluationRequestOutcomeMeta = (call) => {
+    if (call?.correction_call_id) {
+        return { label: 'Переоценено', color: 'var(--accent)', icon: 'fas fa-redo' };
+    }
+    return getReevaluationRequestStatusMeta(call);
+};
+
+const SvRequestButton = ({ call, userId, userRole, isAdminRole = false, fetchEvaluations, onReevaluate, onUpdated }) => {
     const [showModal, setShowModal] = useState(false);
     const [showRejectModal, setShowRejectModal] = useState(false);
     const [comment, setComment] = useState('');
@@ -708,6 +729,7 @@ const SvRequestButton = ({ call, userId, userRole, isAdminRole = false, fetchEva
             const d = await r.json();
             if (!r.ok) throw new Error(d.error || 'Не удалось отправить запрос');
             await fetchEvaluations?.({ force: true });
+            await onUpdated?.();
             setShowModal(false);
             setComment('');
             emitCallEvaluationToast('Заявка отправлена', 'success');
@@ -729,6 +751,7 @@ const SvRequestButton = ({ call, userId, userRole, isAdminRole = false, fetchEva
             const d = await r.json();
             if (!r.ok) throw new Error(d.error || 'Не удалось обновить заявку');
             await fetchEvaluations?.({ force: true });
+            await onUpdated?.();
             setShowRejectModal(false);
             setDecisionComment('');
             emitCallEvaluationToast(decision === 'approved' ? 'Заявка одобрена' : 'Заявка отклонена', 'success');
@@ -744,7 +767,7 @@ const SvRequestButton = ({ call, userId, userRole, isAdminRole = false, fetchEva
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 {status === 'rejected' && tooltipText ? (
                     <HoverTooltip text={tooltipText}>
-                        <FaIcon className="fas fa-info-circle" style={{ color: 'var(--danger)', cursor: 'pointer' }} />
+                        <FaIcon className="fas fa-info-circle" style={{ color: 'var(--red)', cursor: 'pointer' }} />
                     </HoverTooltip>
                 ) : null}
                 <button className="btn btn-amber btn-sm" onClick={e => { e.stopPropagation(); setShowModal(true); }}>
@@ -809,7 +832,7 @@ const SvRequestButton = ({ call, userId, userRole, isAdminRole = false, fetchEva
                                 <div className="modal-footer">
                                     <button className="btn btn-secondary" onClick={() => setShowRejectModal(false)}>Отмена</button>
                                     <button className="btn btn-danger" onClick={() => void decideRequest('rejected')} disabled={loading}>
-                                        {loading ? <><span className="spinner" style={{ borderTopColor: 'var(--danger)' }} /> Отклонение...</> : 'Отклонить'}
+                                        {loading ? <><span className="spinner" style={{ borderTopColor: 'var(--red)' }} /> Отклонение...</> : 'Отклонить'}
                                     </button>
                                 </div>
                             </div>
@@ -829,6 +852,16 @@ const SvRequestButton = ({ call, userId, userRole, isAdminRole = false, fetchEva
     }
 
     if (status === 'approved') {
+        if (call?.correction_call_id) {
+            return (
+                <HoverTooltip text={tooltipText || 'Переоценка уже выполнена'}>
+                    <span style={{ fontSize: 13, color: 'var(--accent)', display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <FaIcon className="fas fa-redo" style={{ fontSize: 11 }} /> Переоценено
+                    </span>
+                </HoverTooltip>
+            );
+        }
+
         if (isSv) {
             return (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -852,7 +885,7 @@ const SvRequestButton = ({ call, userId, userRole, isAdminRole = false, fetchEva
     if (status === 'rejected') {
         return (
             <HoverTooltip text={tooltipText || 'Запрос отклонён'}>
-                <span style={{ fontSize: 13, color: 'var(--danger)', display: 'flex', alignItems: 'center', gap: 4 }}>
+                <span style={{ fontSize: 13, color: 'var(--red)', display: 'flex', alignItems: 'center', gap: 4 }}>
                     <FaIcon className="fas fa-times-circle" style={{ fontSize: 11 }} /> Отклонён
                 </span>
             </HoverTooltip>
@@ -2006,6 +2039,8 @@ const App = ({ user, initialSelection }) => {
     const [toDate, setToDate] = useState(null);
     const [viewMode, setViewMode] = useState('normal');
     const [activeSection, setActiveSection] = useState('journal');
+    const [reevaluationRequests, setReevaluationRequests] = useState([]);
+    const [isRequestsLoading, setIsRequestsLoading] = useState(false);
     const [calibrationRooms, setCalibrationRooms] = useState([]);
     const [isCalibrationLoading, setIsCalibrationLoading] = useState(false);
     const [isCalibrationExporting, setIsCalibrationExporting] = useState(false);
@@ -2039,6 +2074,7 @@ const App = ({ user, initialSelection }) => {
     const operatorsCacheRef = useRef(new Map());
     const callsCacheRef = useRef(new Map());
     const evaluationTargetCacheRef = useRef(new Map());
+    const reevaluationRequestsCacheRef = useRef(new Map());
     const calibrationJoinInFlightRef = useRef(new Map());
     const calibrationDetailInFlightRef = useRef(new Map());
     const calibrationDetailCacheRef = useRef(new Map());
@@ -2083,6 +2119,10 @@ const App = ({ user, initialSelection }) => {
 
     const getOperatorsCacheKey = useCallback((scopeId) => `${userRole || 'unknown'}:${scopeId || 'none'}`, [userRole]);
     const getCallsCacheKey = useCallback((operatorId, month) => `${operatorId}:${month}`, []);
+    const getReevaluationRequestsCacheKey = useCallback(
+        (month, supervisorId, operatorId) => `${month || 'all'}:${supervisorId || 'all'}:${operatorId || 'all'}`,
+        []
+    );
     const mapEvaluationToCall = useCallback((ev, operator) => ({
         id: ev.id,
         fileName: `Call ${ev.phone_number}`,
@@ -2356,6 +2396,56 @@ const App = ({ user, initialSelection }) => {
     }, [selectedOperator, userId, selectedMonth, operators, getCallsCacheKey, mapEvaluationToCall]);
 
     useEffect(() => { fetchEvaluations(); }, [fetchEvaluations]);
+
+    const fetchReevaluationRequests = useCallback(async ({ force = false } = {}) => {
+        if (!userId || !(isAdminRole || isSupervisorRole)) {
+            setReevaluationRequests([]);
+            return;
+        }
+
+        const supervisorFilter = isSupervisorRole
+            ? (selectedSupervisor || userId || null)
+            : (selectedSupervisor || null);
+        const operatorFilter = selectedOperator?.id || null;
+        const cacheKey = getReevaluationRequestsCacheKey(selectedMonth, supervisorFilter, operatorFilter);
+
+        if (!force && reevaluationRequestsCacheRef.current.has(cacheKey)) {
+            setReevaluationRequests(reevaluationRequestsCacheRef.current.get(cacheKey) || []);
+            return;
+        }
+
+        setIsRequestsLoading(true);
+        try {
+            const params = new URLSearchParams({ month: selectedMonth });
+            if (operatorFilter) params.set('operator_id', String(operatorFilter));
+            if (supervisorFilter) params.set('supervisor_id', String(supervisorFilter));
+
+            const r = await authFetch(`${API_BASE_URL}/api/call_evaluation/requests?${params.toString()}`, {
+                headers: { 'X-User-Id': userId }
+            });
+            const d = await r.json();
+            if (!r.ok || d?.status !== 'success') {
+                throw new Error(d?.error || 'Не удалось загрузить журнал запросов');
+            }
+
+            const nextRequests = Array.isArray(d.requests) ? d.requests : [];
+            reevaluationRequestsCacheRef.current.set(cacheKey, nextRequests);
+            setReevaluationRequests(nextRequests);
+        } catch (e) {
+            emitCallEvaluationToast('Ошибка загрузки журнала запросов: ' + e.message, 'error');
+        } finally {
+            setIsRequestsLoading(false);
+        }
+    }, [
+        userId,
+        isAdminRole,
+        isSupervisorRole,
+        selectedMonth,
+        selectedSupervisor,
+        selectedOperator,
+        getReevaluationRequestsCacheKey
+    ]);
+
     useEffect(() => { setFromDate(null); setToDate(null); }, [selectedMonth]);
     useEffect(() => {
         calibrationDetailCacheRef.current.clear();
@@ -2466,17 +2556,26 @@ const App = ({ user, initialSelection }) => {
     }, [activeSection, fetchCalibrationRooms]);
 
     useEffect(() => {
+        if (activeSection !== 'requests') return;
+        fetchReevaluationRequests();
+    }, [activeSection, fetchReevaluationRequests]);
+
+    useEffect(() => {
         window.__callEvaluationFocus = () => {
             callsCacheRef.current.clear();
             evaluationTargetCacheRef.current.clear();
+            reevaluationRequestsCacheRef.current.clear();
             fetchEvaluations({ force: true });
+            if (activeSection === 'requests') {
+                fetchReevaluationRequests({ force: true });
+            }
             if (activeSection === 'calibration') {
                 calibrationDetailCacheRef.current.clear();
                 fetchCalibrationRooms();
             }
         };
         return () => { window.__callEvaluationFocus = null; };
-    }, [fetchEvaluations, fetchCalibrationRooms, activeSection]);
+    }, [fetchEvaluations, fetchReevaluationRequests, fetchCalibrationRooms, activeSection]);
 
     const handleOpenCalibrationRoom = useCallback(async (room, callId = null) => {
         if (!room?.id || !userId) return;
@@ -2831,6 +2930,45 @@ const App = ({ user, initialSelection }) => {
     const selectedSupervisorObj = selectedSupervisor ? supervisors.find(sv => sv.id === selectedSupervisor) : null;
     const selectedSupervisorIsFired = isFiredStatus(selectedSupervisorObj?.status);
     const selectedOperatorIsFired = isFiredStatus(selectedOperator?.status);
+    const sectionTitle = activeSection === 'requests'
+        ? 'Журнал запросов'
+        : activeSection === 'calibration'
+            ? 'Калибровка звонков'
+            : 'Журнал оценок';
+    const requestStats = reevaluationRequests.reduce((acc, item) => {
+        acc.total += 1;
+        if (item?.correction_call_id) acc.completed += 1;
+        else if (item?.sv_request_approved) acc.approved += 1;
+        else if (item?.sv_request_rejected) acc.rejected += 1;
+        else acc.pending += 1;
+        return acc;
+    }, { total: 0, pending: 0, approved: 0, completed: 0, rejected: 0 });
+    const requestFooterInfo = [
+        `${requestStats.total} записей`,
+        selectedSupervisorObj?.name || (isSupervisorRole ? userName : null),
+        selectedOperator?.name || null,
+        months.find(m => m.value === selectedMonth)?.label || selectedMonth
+    ].filter(Boolean).join(' · ');
+    const handleRequestsUpdated = useCallback(async () => {
+        reevaluationRequestsCacheRef.current.clear();
+        await fetchReevaluationRequests({ force: true });
+        if (selectedOperator?.id) {
+            callsCacheRef.current.delete(getCallsCacheKey(selectedOperator.id, selectedMonth));
+            await fetchEvaluations({ force: true });
+        }
+    }, [fetchReevaluationRequests, selectedOperator, selectedMonth, getCallsCacheKey, fetchEvaluations]);
+    const openRequestInJournal = useCallback((requestItem) => {
+        if (!requestItem?.operator_id) return;
+        if (requestItem.supervisor_id) {
+            setSelectedSupervisor(Number(requestItem.supervisor_id) || null);
+        }
+        setOperatorFromToken({
+            id: Number(requestItem.operator_id),
+            name: requestItem.operator_name || ''
+        });
+        setExpandedId(requestItem.id);
+        setActiveSection('journal');
+    }, []);
 
     const getScoreClass = (s) => {
         const v = parseFloat(s);
@@ -2987,6 +3125,58 @@ const App = ({ user, initialSelection }) => {
                     <h1>Журнал Оценок</h1>
                 </div>
                 <div className="header-right">
+                    {canUseCalibration && (
+                        <div className="section-switch">
+                            <button
+                                className={`btn btn-sm ${activeSection === 'journal' ? 'btn-primary' : 'btn-secondary'}`}
+                                onClick={() => setActiveSection('journal')}
+                            >
+                                Журнал
+                            </button>
+                            <button
+                                className={`btn btn-sm ${activeSection === 'requests' ? 'btn-primary' : 'btn-secondary'}`}
+                                onClick={() => setActiveSection('requests')}
+                            >
+                                Журнал запросов
+                            </button>
+                            <button
+                                className={`btn btn-sm ${activeSection === 'calibration' ? 'btn-primary' : 'btn-secondary'}`}
+                                onClick={() => setActiveSection('calibration')}
+                            >
+                                Калибровка
+                            </button>
+                        </div>
+                    )}
+                    {isAdminRole && activeSection === 'journal' && (
+                        <label
+                            className="comment-visibility-toggle"
+                            style={{
+                                marginBottom: 0,
+                                padding: '6px 10px',
+                                border: '1px solid var(--border)',
+                                borderRadius: 'var(--radius)',
+                                background: 'var(--surface-2)'
+                            }}
+                        >
+                            <input
+                                type="checkbox"
+                                checked={!!feedbackReportSetting.enabled}
+                                disabled={
+                                    !!feedbackReportSetting.loading ||
+                                    !!feedbackReportSetting.saving ||
+                                    !feedbackReportSetting.telegramConnected
+                                }
+                                onChange={(e) => toggleFeedbackReportSetting(e.target.checked)}
+                            />
+                            <span>
+                                {feedbackReportSetting.loading
+                                    ? 'Telegram-отчёт ОС: загрузка...'
+                                    : (feedbackReportSetting.telegramConnected
+                                        ? 'Telegram-отчёт ОС'
+                                        : 'Telegram не подключён')}
+                            </span>
+                        </label>
+                    )}
                     {userName && <span className="header-user">{userName}</span>}
                 </div>
             </header>
@@ -2996,23 +3186,7 @@ const App = ({ user, initialSelection }) => {
                 {/* Panel header with filters */}
                 <div className="panel-header">
                     <div className="panel-title-wrap">
-                        <span className="panel-title">{activeSection === 'journal' ? 'Журнал оценок' : 'Калибровка звонков'}</span>
-                        {canUseCalibration && (
-                            <div className="section-switch">
-                                <button
-                                    className={`btn btn-sm ${activeSection === 'journal' ? 'btn-primary' : 'btn-secondary'}`}
-                                    onClick={() => setActiveSection('journal')}
-                                >
-                                    Журнал
-                                </button>
-                                <button
-                                    className={`btn btn-sm ${activeSection === 'calibration' ? 'btn-primary' : 'btn-secondary'}`}
-                                    onClick={() => setActiveSection('calibration')}
-                                >
-                                    Калибровка
-                                </button>
-                            </div>
-                        )}
+                        <span className="panel-title">{sectionTitle}</span>
                     </div>
                     <div className="filters">
                         {(isAdminRole || isSupervisorRole) && (
@@ -3026,7 +3200,7 @@ const App = ({ user, initialSelection }) => {
                                 </select>
                             </div>
                         )}
-                        {activeSection === 'journal' && (
+                        {activeSection !== 'calibration' && (
                             <div className="filter-group">
                                 <label className="label">Оператор</label>
                                 <select className="select" value={selectedOperator?.id||''} style={selectedOperatorIsFired ? { color:'var(--text-3)' } : undefined} onChange={e => { const op=operators.find(o=>o.id===parseInt(e.target.value))||null; setSelectedOperator(op); setCalls([]); setExpandedId(null); }}>
@@ -3043,30 +3217,6 @@ const App = ({ user, initialSelection }) => {
                                 {months.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
                             </select>
                         </div>
-                        {isAdminRole && activeSection === 'journal' && (
-                            <div className="filter-group" style={{minWidth: 280}}>
-                                <label className="label">Telegram-отчёт по ОС</label>
-                                <label className="comment-visibility-toggle" style={{marginBottom: 0}}>
-                                    <input
-                                        type="checkbox"
-                                        checked={!!feedbackReportSetting.enabled}
-                                        disabled={
-                                            !!feedbackReportSetting.loading ||
-                                            !!feedbackReportSetting.saving ||
-                                            !feedbackReportSetting.telegramConnected
-                                        }
-                                        onChange={(e) => toggleFeedbackReportSetting(e.target.checked)}
-                                    />
-                                    <span>
-                                        {feedbackReportSetting.loading
-                                            ? 'Загрузка...'
-                                            : (feedbackReportSetting.telegramConnected
-                                                ? 'Каждый ПН за текущий месяц'
-                                                : 'Требуется Telegram в профиле')}
-                                    </span>
-                                </label>
-                            </div>
-                        )}
                         {isAdminRole && activeSection === 'journal' && (() => {
                             const lastDay = new Date(parseInt(selectedMonth.slice(0,4)), parseInt(selectedMonth.slice(5,7)), 0).getDate();
                             return <DateRangePicker minDate={`${selectedMonth}-01`} maxDate={`${selectedMonth}-${String(lastDay).padStart(2,'0')}`} setFromDate={setFromDate} setToDate={setToDate} />;
@@ -3192,7 +3342,7 @@ const App = ({ user, initialSelection }) => {
                                                                         {call.feedback ? 'Ред. ОС' : 'ОС'}
                                                                     </button>
                                                                 )}
-                                                                <SvRequestButton call={call} userId={userId} userRole={isSupervisorRole ? 'sv' : userRole} isAdminRole={isAdminRole} fetchEvaluations={fetchEvaluations} onReevaluate={() => { setEvalModalMode('journal'); setEditingEval({...call,isReevaluation:true}); setShowEvalModal(true); }} />
+                                                                <SvRequestButton call={call} userId={userId} userRole={isSupervisorRole ? 'sv' : userRole} isAdminRole={isAdminRole} fetchEvaluations={fetchEvaluations} onUpdated={handleRequestsUpdated} onReevaluate={() => { setEvalModalMode('journal'); setEditingEval({...call,isReevaluation:true}); setShowEvalModal(true); }} />
                                                                 {isAdminRole && !call.isDraft && (
                                                                     <>
                                                                         <button className="btn btn-secondary btn-sm" onClick={() => { setEvalModalMode('journal'); setEditingEval({...call,isReevaluation:true}); setShowEvalModal(true); }}>
@@ -3243,7 +3393,7 @@ const App = ({ user, initialSelection }) => {
                                                             const statusColor = requestStatus === 'approved'
                                                                 ? 'var(--green)'
                                                                 : requestStatus === 'rejected'
-                                                                    ? 'var(--danger)'
+                                                                    ? 'var(--red)'
                                                                     : 'var(--amber)';
                                                             return (
                                                                 <div style={{marginBottom:12, fontSize:13, color:'var(--text-2)', padding:'10px 12px', border:`1px solid ${statusColor}`, borderRadius:'var(--radius)', background:'var(--surface)'}}>
@@ -3362,6 +3512,247 @@ const App = ({ user, initialSelection }) => {
                         )}
                     </div>
                 </div>
+                    </>
+                ) : activeSection === 'requests' ? (
+                    <>
+                        <div className="stats-bar">
+                            <div className="stat-item">
+                                <div className="stat-icon blue"><FaIcon className="fas fa-list-check" /></div>
+                                <div>
+                                    <div className="stat-value">{requestStats.total}</div>
+                                    <div className="stat-label">Всего запросов</div>
+                                </div>
+                            </div>
+                            <div className="stat-item">
+                                <div className="stat-icon" style={{ background: 'var(--amber-light)', color: 'var(--amber)' }}><FaIcon className="fas fa-hourglass-half" /></div>
+                                <div>
+                                    <div className="stat-value" style={{ color: 'var(--amber)' }}>{requestStats.pending}</div>
+                                    <div className="stat-label">На рассмотрении</div>
+                                </div>
+                            </div>
+                            <div className="stat-item">
+                                <div className="stat-icon green"><FaIcon className="fas fa-check-double" /></div>
+                                <div>
+                                    <div className="stat-value" style={{ color: 'var(--green)' }}>{requestStats.approved + requestStats.completed}</div>
+                                    <div className="stat-label">Одобрено</div>
+                                </div>
+                            </div>
+                            <div className="stat-item">
+                                <div className="stat-icon" style={{ background: 'var(--accent-light)', color: 'var(--accent)' }}><FaIcon className="fas fa-redo" /></div>
+                                <div>
+                                    <div className="stat-value" style={{ color: 'var(--accent)' }}>{requestStats.completed}</div>
+                                    <div className="stat-label">Переоценено</div>
+                                </div>
+                            </div>
+                            <div className="stat-item">
+                                <div className="stat-icon" style={{ background: 'var(--red-light)', color: 'var(--red)' }}><FaIcon className="fas fa-ban" /></div>
+                                <div>
+                                    <div className="stat-value" style={{ color: 'var(--red)' }}>{requestStats.rejected}</div>
+                                    <div className="stat-label">Отклонено</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="table-wrap">
+                            {isRequestsLoading ? (
+                                <table>
+                                    <thead>
+                                        <tr>
+                                            <th>#</th>
+                                            <th>Статус</th>
+                                            <th>Оператор</th>
+                                            <th>Инициатор</th>
+                                            <th>Телефон / Направление</th>
+                                            <th>Дата запроса</th>
+                                            <th>Итог / Действия</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {[...Array(5)].map((_, i) => (
+                                            <tr key={i}>
+                                                <td colSpan={7}>
+                                                    <div style={{ display: 'grid', gridTemplateColumns: '40px 120px 1fr 1fr 180px 160px 1fr', gap: 8, padding: '12px 16px 12px 20px' }}>
+                                                        {[40, 120, '1fr', '1fr', 180, 160, '1fr'].map((w, j) => (
+                                                            <div key={j} className="skeleton" style={{ height: 16, width: typeof w === 'number' ? w : '100%' }} />
+                                                        ))}
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            ) : reevaluationRequests.length === 0 ? (
+                                <div className="empty-state">
+                                    <div className="empty-state-icon"><FaIcon className="fas fa-clipboard-check" /></div>
+                                    <h3>Нет запросов</h3>
+                                    <p>За выбранный период запросы на переоценку не найдены. Попробуйте сменить фильтры по супервайзеру, оператору или месяцу.</p>
+                                </div>
+                            ) : (
+                                <table>
+                                    <thead>
+                                        <tr>
+                                            <th>#</th>
+                                            <th>Статус</th>
+                                            <th>Оператор</th>
+                                            <th>Инициатор</th>
+                                            <th>Телефон / Направление</th>
+                                            <th>Дата запроса</th>
+                                            <th>Итог / Действия</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {reevaluationRequests.map((requestItem, idx) => {
+                                            const statusMeta = getReevaluationRequestStatusMeta(requestItem);
+                                            const outcomeMeta = getReevaluationRequestOutcomeMeta(requestItem);
+                                            const statusToneStyle = statusMeta.status === 'approved'
+                                                ? { background: 'var(--green-light)', color: 'var(--green)' }
+                                                : statusMeta.status === 'rejected'
+                                                    ? { background: 'var(--red-light)', color: 'var(--red)' }
+                                                    : statusMeta.status === 'pending'
+                                                        ? { background: 'var(--amber-light)', color: 'var(--amber)' }
+                                                        : { background: 'var(--surface-2)', color: 'var(--text-2)' };
+                                            const outcomeToneStyle = outcomeMeta.label === 'Переоценено'
+                                                ? { background: 'var(--accent-light)', color: 'var(--accent)' }
+                                                : statusToneStyle;
+                                            return (
+                                                <React.Fragment key={requestItem.id}>
+                                                    <tr
+                                                        className={`clickable ${expandedId === requestItem.id ? 'expanded' : ''}`}
+                                                        onClick={() => setExpandedId(expandedId === requestItem.id ? null : requestItem.id)}
+                                                    >
+                                                        <td>{idx + 1}</td>
+                                                        <td>
+                                                            <span className="badge" style={statusToneStyle}>
+                                                                <span className="badge-dot" />
+                                                                {statusMeta.label}
+                                                            </span>
+                                                        </td>
+                                                        <td>
+                                                            <div style={{ fontWeight: 600 }}>{requestItem.operator_name || '—'}</div>
+                                                            <div style={{ fontSize: 12, color: 'var(--text-2)' }}>
+                                                                СВ: {requestItem.supervisor_name || '—'}
+                                                            </div>
+                                                        </td>
+                                                        <td>
+                                                            <div style={{ fontWeight: 600 }}>{requestItem.sv_request_by_name || '—'}</div>
+                                                            <div style={{ fontSize: 12, color: 'var(--text-2)' }}>
+                                                                {getReevaluationRequestRoleLabel(requestItem.sv_request_by_role)}
+                                                            </div>
+                                                        </td>
+                                                        <td>
+                                                            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{requestItem.phone_number || '—'}</div>
+                                                            <div style={{ fontSize: 12, color: 'var(--text-2)' }}>
+                                                                {requestItem.direction?.name || '—'}
+                                                            </div>
+                                                        </td>
+                                                        <td style={{ fontSize: 12, color: 'var(--text-2)' }}>{fmtDate(requestItem.sv_request_at)}</td>
+                                                        <td>
+                                                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                                                                <span className="badge" style={outcomeToneStyle}>
+                                                                    <span className="badge-dot" />
+                                                                    {outcomeMeta.label}
+                                                                </span>
+                                                                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }} onClick={(e) => e.stopPropagation()}>
+                                                                    {isAdminRole && statusMeta.status === 'pending' ? (
+                                                                        <SvRequestButton
+                                                                            call={requestItem}
+                                                                            userId={userId}
+                                                                            userRole={userRole}
+                                                                            isAdminRole={isAdminRole}
+                                                                            fetchEvaluations={selectedOperator?.id ? fetchEvaluations : undefined}
+                                                                            onUpdated={handleRequestsUpdated}
+                                                                        />
+                                                                    ) : null}
+                                                                    <button
+                                                                        className="btn btn-secondary btn-sm"
+                                                                        onClick={() => openRequestInJournal(requestItem)}
+                                                                    >
+                                                                        К журналу
+                                                                    </button>
+                                                                </div>
+                                                            </div>
+                                                        </td>
+                                                    </tr>
+
+                                                    {expandedId === requestItem.id && (
+                                                        <tr className="expanded-row">
+                                                            <td colSpan={7}>
+                                                                <div className="expanded-content">
+                                                                    <h4>Детали запроса</h4>
+                                                                    <div className="expanded-meta">
+                                                                        <div className="expanded-meta-item"><strong>Оператор:</strong> {requestItem.operator_name || '—'}</div>
+                                                                        <div className="expanded-meta-item"><strong>Супервайзер:</strong> {requestItem.supervisor_name || '—'}</div>
+                                                                        <div className="expanded-meta-item"><strong>Инициатор:</strong> {requestItem.sv_request_by_name || '—'} ({getReevaluationRequestRoleLabel(requestItem.sv_request_by_role)})</div>
+                                                                        <div className="expanded-meta-item"><strong>Дата запроса:</strong> {fmtDate(requestItem.sv_request_at)}</div>
+                                                                        <div className="expanded-meta-item"><strong>Телефон:</strong> {requestItem.phone_number || '—'}</div>
+                                                                        <div className="expanded-meta-item"><strong>Направление:</strong> {requestItem.direction?.name || '—'}</div>
+                                                                        <div className="expanded-meta-item"><strong>Исходный балл:</strong> {requestItem.score != null ? Math.round(requestItem.score) : '—'}</div>
+                                                                        <div className="expanded-meta-item"><strong>Оценщик:</strong> {requestItem.evaluator || '—'}</div>
+                                                                    </div>
+
+                                                                    <div style={{ marginBottom: 12, fontSize: 13, color: 'var(--text-2)', padding: '10px 12px', border: `1px solid ${statusMeta.color}`, borderRadius: 'var(--radius)', background: 'var(--surface)' }}>
+                                                                        <div style={{ marginBottom: 6 }}>
+                                                                            <strong style={{ color: 'var(--text)' }}>Статус запроса:</strong>{' '}
+                                                                            <span style={{ color: statusMeta.color, fontWeight: 600 }}>{statusMeta.label}</span>
+                                                                        </div>
+                                                                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 14px', marginBottom: (requestItem.sv_request_comment || requestItem.sv_request_reject_comment) ? 6 : 0 }}>
+                                                                            {requestItem.sv_request_approved_by_name ? <span><strong style={{ color: 'var(--text)' }}>Одобрил:</strong> {requestItem.sv_request_approved_by_name}{requestItem.sv_request_approved_at ? ` · ${requestItem.sv_request_approved_at}` : ''}</span> : null}
+                                                                            {requestItem.sv_request_rejected_by_name ? <span><strong style={{ color: 'var(--text)' }}>Отклонил:</strong> {requestItem.sv_request_rejected_by_name}{requestItem.sv_request_rejected_at ? ` · ${requestItem.sv_request_rejected_at}` : ''}</span> : null}
+                                                                        </div>
+                                                                        {requestItem.sv_request_comment ? (
+                                                                            <div style={{ marginBottom: requestItem.sv_request_reject_comment ? 4 : 0 }}>
+                                                                                <strong style={{ color: 'var(--text)' }}>Комментарий к запросу:</strong> {requestItem.sv_request_comment}
+                                                                            </div>
+                                                                        ) : null}
+                                                                        {requestItem.sv_request_reject_comment ? (
+                                                                            <div>
+                                                                                <strong style={{ color: 'var(--text)' }}>Причина отклонения:</strong> {requestItem.sv_request_reject_comment}
+                                                                            </div>
+                                                                        ) : null}
+                                                                    </div>
+
+                                                                    {requestItem.correction_call_id ? (
+                                                                        <div style={{ marginBottom: 12, fontSize: 13, color: 'var(--text-2)', padding: '10px 12px', border: '1px solid var(--accent)', borderRadius: 'var(--radius)', background: 'var(--accent-light)' }}>
+                                                                            <div style={{ marginBottom: 6 }}>
+                                                                                <strong style={{ color: 'var(--text)' }}>Итог переоценки:</strong>{' '}
+                                                                                <span style={{ color: 'var(--accent)', fontWeight: 600 }}>Переоценка выполнена</span>
+                                                                            </div>
+                                                                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 14px' }}>
+                                                                                <span><strong style={{ color: 'var(--text)' }}>Новый Call ID:</strong> {requestItem.correction_call_id}</span>
+                                                                                <span><strong style={{ color: 'var(--text)' }}>Новый балл:</strong> {requestItem.correction_score != null ? Math.round(requestItem.correction_score) : '—'}</span>
+                                                                                <span><strong style={{ color: 'var(--text)' }}>Переоценил:</strong> {requestItem.correction_evaluator_name || '—'}</span>
+                                                                                <span><strong style={{ color: 'var(--text)' }}>Дата:</strong> {fmtDate(requestItem.correction_created_at)}</span>
+                                                                            </div>
+                                                                        </div>
+                                                                    ) : requestItem.sv_request_approved ? (
+                                                                        <div style={{ marginBottom: 12, fontSize: 13, color: 'var(--text-2)', padding: '10px 12px', border: '1px dashed var(--border-strong)', borderRadius: 'var(--radius)', background: 'var(--surface-2)' }}>
+                                                                            Запрос одобрен, но переоценка ещё не выполнена.
+                                                                        </div>
+                                                                    ) : null}
+                                                                </div>
+                                                            </td>
+                                                        </tr>
+                                                    )}
+                                                </React.Fragment>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                            )}
+                        </div>
+
+                        <div className="panel-footer">
+                            <span className="panel-footer-info">
+                                {requestFooterInfo || 'Нет данных по выбранным фильтрам'}
+                            </span>
+                            <div style={{ display: 'flex', gap: 8 }}>
+                                {selectedOperator ? (
+                                    <button className="btn btn-secondary btn-sm" onClick={() => setSelectedOperator(null)}>
+                                        <FaIcon className="fas fa-filter" /> Все операторы
+                                    </button>
+                                ) : null}
+                            </div>
+                        </div>
                     </>
                 ) : (
                     <>

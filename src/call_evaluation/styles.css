@@ -83,6 +83,8 @@
             display: flex;
             align-items: center;
             justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 12px;
             padding: 16px 24px;
             background: var(--surface);
             border: 1px solid var(--border);
@@ -109,6 +111,8 @@
             display: flex;
             align-items: center;
             gap: 12px;
+            flex-wrap: wrap;
+            justify-content: flex-end;
         }
         .header-user {
             font-size: 13px;
@@ -212,7 +216,7 @@
         }
         .panel-title { font-size: 14px; font-weight: 600; color: var(--text); }
         .panel-title-wrap { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-        .section-switch { display: inline-flex; gap: 6px; align-items: center; }
+        .section-switch { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 
         .calibration-cards {
             display: grid;
@@ -647,6 +651,29 @@
         /* ── Two col grid ── */
         .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
         @media (max-width: 600px) { .grid-2 { grid-template-columns: 1fr; } }
+        @media (max-width: 900px) {
+            .header {
+                align-items: flex-start;
+            }
+            .header-right {
+                width: 100%;
+                justify-content: flex-start;
+            }
+            .panel-header {
+                align-items: flex-start;
+            }
+            .stats-bar {
+                flex-wrap: wrap;
+            }
+            .stat-item {
+                min-width: 220px;
+            }
+            .panel-footer {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 10px;
+            }
+        }
 
         /* ── Version history item ── */
         .version-item { border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; margin-bottom: 12px; }
