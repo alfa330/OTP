@@ -29319,9 +29319,79 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return parts.length ? parts.join(' • ') : '-';
             };
 
+            const normalizeReevaluationRequestRole = (role) => {
+                const normalized = String(role || '').trim().toLowerCase();
+                if (normalized === 'supervisor') return 'sv';
+                if (normalized === 'super_admin') return 'admin';
+                return normalized;
+            };
+
+            const getReevaluationRequestStatus = (evaluation) => {
+                if (!evaluation?.sv_request) return 'none';
+                if (evaluation?.sv_request_approved) return 'approved';
+                if (evaluation?.sv_request_rejected) return 'rejected';
+                return 'pending';
+            };
+
+            const getReevaluationRequestStatusMeta = (evaluation) => {
+                const status = getReevaluationRequestStatus(evaluation);
+                if (status === 'approved') {
+                    return {
+                        status,
+                        label: 'Одобрено',
+                        chipClass: 'bg-green-100 text-green-700 border border-green-200',
+                        textClass: 'text-green-600'
+                    };
+                }
+                if (status === 'rejected') {
+                    return {
+                        status,
+                        label: 'Отклонено',
+                        chipClass: 'bg-red-100 text-red-700 border border-red-200',
+                        textClass: 'text-red-600'
+                    };
+                }
+                if (status === 'pending') {
+                    return {
+                        status,
+                        label: 'На рассмотрении',
+                        chipClass: 'bg-amber-100 text-amber-700 border border-amber-200',
+                        textClass: 'text-amber-600'
+                    };
+                }
+                return {
+                    status,
+                    label: 'Без запроса',
+                    chipClass: 'bg-slate-100 text-slate-600 border border-slate-200',
+                    textClass: 'text-slate-500'
+                };
+            };
+
+            const buildReevaluationRequestTitle = (evaluation) => {
+                if (!evaluation?.sv_request) return '';
+                const requesterRoleLabel = (() => {
+                    const role = normalizeReevaluationRequestRole(evaluation.sv_request_by_role);
+                    if (role === 'operator') return 'оператор';
+                    if (role === 'sv') return 'супервайзер';
+                    if (role === 'admin') return 'администратор';
+                    return 'сотрудник';
+                })();
+                const parts = [
+                    evaluation.sv_request_by_name
+                        ? `Инициатор: ${evaluation.sv_request_by_name}${evaluation.sv_request_by_role ? ` (${requesterRoleLabel})` : ''}`
+                        : null,
+                    evaluation.sv_request_at ? `Создан: ${formatDate(evaluation.sv_request_at)}` : null,
+                    evaluation.sv_request_comment ? `Комментарий: ${evaluation.sv_request_comment}` : null,
+                    evaluation.sv_request_approved_by_name ? `Одобрил: ${evaluation.sv_request_approved_by_name}` : null,
+                    evaluation.sv_request_rejected_by_name ? `Отклонил: ${evaluation.sv_request_rejected_by_name}` : null,
+                    evaluation.sv_request_reject_comment ? `Причина: ${evaluation.sv_request_reject_comment}` : null
+                ].filter(Boolean);
+                return parts.join('\n');
+            };
+
             const handleSubmitDispute = async () => {
                 if (!selectedEvaluation || !disputeText.trim()) {
-                    showToast('Please enter dispute text', 'error');
+                    showToast('Введите комментарий к запросу', 'error');
                     return;
                 }
                 
@@ -29344,15 +29414,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     );
                     
                     if (response.data.status === 'success') {
-                        showToast('Dispute submitted successfully', 'success');
+                        showToast('Запрос на переоценку отправлен', 'success');
                         setShowDisputeModal(false);
                         setDisputeText('');
+                        await fetchOperatorData();
                     } else {
-                        showToast(response.data.error || 'Failed to submit dispute', 'error');
+                        showToast(response.data.error || 'Не удалось отправить запрос', 'error');
                     }
                 } catch (err) {
                     console.error('Submit dispute error:', err);
-                    showToast(err.response?.data?.error || 'Failed to submit dispute', 'error');
+                    showToast(err.response?.data?.error || 'Не удалось отправить запрос', 'error');
                 } finally {
                     setDisputeLoading(false);
                 }
@@ -35234,6 +35305,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     const id = ev.id ?? index;
                                                     const isExpanded = expandedEvalId === id;
                                                     const isImported = ev?.call?.is_imported === true || ev?.is_imported === true;
+                                                    const requestMeta = getReevaluationRequestStatusMeta(ev);
+                                                    const requestTitle = buildReevaluationRequestTitle(ev);
+                                                    const canSubmitReevaluationRequest = !isImported && ev.score < 100 && !['pending', 'approved'].includes(requestMeta.status);
 
                                                     const handleCardClick = () => {
                                                         if (isImported) return;
@@ -35299,9 +35373,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     <div className="text-xs text-gray-500 line-clamp-2">{String(ev.comment).slice(0,100)}</div>
                                                                 ) : null}
 
+                                                                {requestMeta.status !== 'none' && (
+                                                                    <div className="mt-2">
+                                                                        <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-medium ${requestMeta.chipClass}`} title={requestTitle || requestMeta.label}>
+                                                                            {requestMeta.label}
+                                                                        </span>
+                                                                    </div>
+                                                                )}
+
                                                                 {/* Action button */}
                                                                 <div className="flex items-center justify-between mt-3 pt-3 border-t border-gray-100">
-                                                                    {!isImported && ev.score < 100 ? (
+                                                                    {canSubmitReevaluationRequest ? (
                                                                         <button
                                                                             onClick={(e) => {
                                                                                 e.stopPropagation();
@@ -35311,8 +35393,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                             className="bg-yellow-500 text-white px-3 py-1.5 rounded-lg hover:bg-yellow-600 text-xs font-medium transition-all duration-200"
                                                                         >
                                                                             <FaIcon className="fas fa-exclamation-circle mr-1"></FaIcon>
-                                                                            Оспорить
+                                                                            {requestMeta.status === 'rejected' ? 'Повторить запрос' : 'Запросить переоценку'}
                                                                         </button>
+                                                                    ) : requestMeta.status !== 'none' ? (
+                                                                        <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-medium ${requestMeta.chipClass}`} title={requestTitle || requestMeta.label}>
+                                                                            {requestMeta.label}
+                                                                        </span>
                                                                     ) : <div></div>}
                                                                     <div className="flex items-center gap-1 text-xs text-blue-600">
                                                                         <span>{isExpanded ? 'Свернуть' : 'Подробнее'}</span>
@@ -35334,6 +35420,32 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                             <div className="text-sm text-gray-500">Комментариев нет.</div>
                                                                         )}
                                                                     </div>
+
+                                                                    {requestMeta.status !== 'none' && (
+                                                                        <div className="rounded-lg border border-slate-200 bg-white p-3">
+                                                                            <div className="flex flex-wrap items-center gap-2 mb-2">
+                                                                                <h4 className="font-semibold text-gray-900 text-sm">Запрос на переоценку</h4>
+                                                                                <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-medium ${requestMeta.chipClass}`}>
+                                                                                    {requestMeta.label}
+                                                                                </span>
+                                                                            </div>
+                                                                            {ev.sv_request_by_name && (
+                                                                                <div className="text-xs text-gray-600 mb-1">
+                                                                                    Инициатор: {ev.sv_request_by_name}
+                                                                                </div>
+                                                                            )}
+                                                                            {ev.sv_request_comment && (
+                                                                                <div className="text-sm text-gray-700 mb-1 whitespace-pre-wrap">
+                                                                                    {ev.sv_request_comment}
+                                                                                </div>
+                                                                            )}
+                                                                            {ev.sv_request_reject_comment && (
+                                                                                <div className="text-sm text-red-700 whitespace-pre-wrap">
+                                                                                    Причина отклонения: {ev.sv_request_reject_comment}
+                                                                                </div>
+                                                                            )}
+                                                                        </div>
+                                                                    )}
 
                                                                     <div>
                                                                         <h4 className="font-semibold text-gray-900 mb-2 text-sm">Критерии</h4>
@@ -35432,6 +35544,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     const id = ev.id ?? index;
                                                     const isExpanded = expandedEvalId === id;
                                                     const isImported = ev?.call?.is_imported === true || ev?.is_imported === true;
+                                                    const requestMeta = getReevaluationRequestStatusMeta(ev);
+                                                    const requestTitle = buildReevaluationRequestTitle(ev);
+                                                    const canSubmitReevaluationRequest = !isImported && ev.score < 100 && !['pending', 'approved'].includes(requestMeta.status);
 
                                                     const handleRowClick = () => {
                                                         if (isImported) return;
@@ -35468,11 +35583,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             ) : ev.comment ? (
                                                                 <div className="mt-1 text-xs text-gray-500 truncate">{String(ev.comment).slice(0,160)}</div>
                                                             ) : null}
+                                                            {requestMeta.status !== 'none' && (
+                                                                <div className="mt-2">
+                                                                    <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-medium ${requestMeta.chipClass}`} title={requestTitle || requestMeta.label}>
+                                                                        {requestMeta.label}
+                                                                    </span>
+                                                                </div>
+                                                            )}
                                                             </td>
                                                             <td className="px-6 py-4 whitespace-nowrap">{ev.month || '-'}</td>
                                                             <td className="px-6 py-4 whitespace-nowrap">{formatDate(ev.evaluation_date)}</td>
                                                             <td className="px-6 py-4 whitespace-nowrap">
-                                                            {!isImported && ev.score < 100 && (
+                                                            {canSubmitReevaluationRequest && (
                                                                 <button
                                                                 onClick={(e) => {
                                                                     e.stopPropagation();
@@ -35482,8 +35604,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 className="bg-yellow-500 text-white px-3 py-1.5 rounded-lg hover:bg-yellow-600 text-xs font-medium transition-all duration-200"
                                                                 >
                                                                 <FaIcon className="fas fa-exclamation-circle mr-1"></FaIcon>
-                                                                Оспорить
+                                                                {requestMeta.status === 'rejected' ? 'Повторить запрос' : 'Запросить переоценку'}
                                                                 </button>
+                                                            )}
+                                                            {!canSubmitReevaluationRequest && requestMeta.status !== 'none' && (
+                                                                <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-medium ${requestMeta.chipClass}`} title={requestTitle || requestMeta.label}>
+                                                                    {requestMeta.label}
+                                                                </span>
                                                             )}
                                                             </td>
                                                         </tr>
@@ -35502,6 +35629,32 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     <div className="text-sm text-gray-500">Комментариев нет.</div>
                                                                     )}
                                                                 </div>
+
+                                                                {requestMeta.status !== 'none' && (
+                                                                    <div className="rounded-lg border border-slate-200 bg-white p-3">
+                                                                        <div className="flex flex-wrap items-center gap-2 mb-2">
+                                                                            <h4 className="font-semibold text-gray-900">Запрос на переоценку</h4>
+                                                                            <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-medium ${requestMeta.chipClass}`}>
+                                                                                {requestMeta.label}
+                                                                            </span>
+                                                                        </div>
+                                                                        {ev.sv_request_by_name && (
+                                                                            <div className="text-xs text-gray-600 mb-1">
+                                                                                Инициатор: {ev.sv_request_by_name}
+                                                                            </div>
+                                                                        )}
+                                                                        {ev.sv_request_comment && (
+                                                                            <div className="text-sm text-gray-700 mb-1 whitespace-pre-wrap">
+                                                                                {ev.sv_request_comment}
+                                                                            </div>
+                                                                        )}
+                                                                        {ev.sv_request_reject_comment && (
+                                                                            <div className="text-sm text-red-700 whitespace-pre-wrap">
+                                                                                Причина отклонения: {ev.sv_request_reject_comment}
+                                                                            </div>
+                                                                        )}
+                                                                    </div>
+                                                                )}
 
                                                                 <div>
                                                                     <h4 className="font-semibold text-gray-900 mb-2">Критерии и статусы</h4>

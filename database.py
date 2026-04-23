@@ -609,10 +609,22 @@ class Database:
                     ADD COLUMN IF NOT EXISTS sv_request BOOLEAN NOT NULL DEFAULT FALSE,
                     ADD COLUMN IF NOT EXISTS sv_request_comment TEXT,
                     ADD COLUMN IF NOT EXISTS sv_request_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    ADD COLUMN IF NOT EXISTS sv_request_by_role VARCHAR(20),
                     ADD COLUMN IF NOT EXISTS sv_request_at TIMESTAMP,
                     ADD COLUMN IF NOT EXISTS sv_request_approved BOOLEAN NOT NULL DEFAULT FALSE,
                     ADD COLUMN IF NOT EXISTS sv_request_approved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
-                    ADD COLUMN IF NOT EXISTS sv_request_approved_at TIMESTAMP;
+                    ADD COLUMN IF NOT EXISTS sv_request_approved_at TIMESTAMP,
+                    ADD COLUMN IF NOT EXISTS sv_request_rejected BOOLEAN NOT NULL DEFAULT FALSE,
+                    ADD COLUMN IF NOT EXISTS sv_request_rejected_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    ADD COLUMN IF NOT EXISTS sv_request_rejected_at TIMESTAMP,
+                    ADD COLUMN IF NOT EXISTS sv_request_reject_comment TEXT;
+            """)
+            cursor.execute("""
+                UPDATE calls c
+                SET sv_request_by_role = LOWER(TRIM(u.role))
+                FROM users u
+                WHERE c.sv_request_by = u.id
+                  AND (c.sv_request_by_role IS NULL OR TRIM(c.sv_request_by_role) = '');
             """)
 
             cursor.execute("""
@@ -5304,11 +5316,17 @@ class Database:
                 c.sv_request_comment,
                 c.sv_request_by,
                 su.name AS sv_request_by_name,
+                c.sv_request_by_role,
                 TO_CHAR(c.sv_request_at, 'YYYY-MM-DD HH24:MI') AS sv_request_at,
                 c.sv_request_approved,
                 c.sv_request_approved_by,
                 apu.name AS sv_request_approved_by_name,
                 TO_CHAR(c.sv_request_approved_at, 'YYYY-MM-DD HH24:MI') AS sv_request_approved_at,
+                c.sv_request_rejected,
+                c.sv_request_rejected_by,
+                rju.name AS sv_request_rejected_by_name,
+                TO_CHAR(c.sv_request_rejected_at, 'YYYY-MM-DD HH24:MI') AS sv_request_rejected_at,
+                c.sv_request_reject_comment,
                 NULL::numeric AS duration, -- у оценённых нет длительности
                 FALSE AS is_imported,
                 COALESCE(c.comment_visible_to_operator, TRUE) AS comment_visible_to_operator,
@@ -5328,6 +5346,7 @@ class Database:
             LEFT JOIN users u ON c.evaluator_id = u.id
             LEFT JOIN users su ON c.sv_request_by = su.id
             LEFT JOIN users apu ON c.sv_request_approved_by = apu.id
+            LEFT JOIN users rju ON c.sv_request_rejected_by = rju.id
             LEFT JOIN call_feedbacks cf ON cf.call_id = c.id
             LEFT JOIN users cf_creator ON cf.created_by = cf_creator.id
             LEFT JOIN users cf_updater ON cf.updated_by = cf_updater.id
@@ -5364,11 +5383,17 @@ class Database:
                 NULL::text AS sv_request_comment,
                 NULL::integer AS sv_request_by,
                 NULL::text AS sv_request_by_name,
+                NULL::text AS sv_request_by_role,
                 NULL::text AS sv_request_at,
                 FALSE::boolean AS sv_request_approved,
                 NULL::integer AS sv_request_approved_by,
                 NULL::text AS sv_request_approved_by_name,
                 NULL::text AS sv_request_approved_at,
+                FALSE::boolean AS sv_request_rejected,
+                NULL::integer AS sv_request_rejected_by,
+                NULL::text AS sv_request_rejected_by_name,
+                NULL::text AS sv_request_rejected_at,
+                NULL::text AS sv_request_reject_comment,
                 ic.duration_sec::numeric AS duration, -- берем из imported_calls
                 TRUE AS is_imported,
                 TRUE AS comment_visible_to_operator,
@@ -5417,36 +5442,36 @@ class Database:
             for row in rows:
                 feedback_payload = (
                     {
-                        "id": row[30],
-                        "feedback_comment": row[31] or "",
-                        "delivery_comment": row[32] or "",
+                        "id": row[36],
+                        "feedback_comment": row[37] or "",
+                        "delivery_comment": row[38] or "",
                         "date": (
-                            row[33].strftime('%Y-%m-%d')
-                            if row[33] and hasattr(row[33], "strftime")
-                            else (row[33] if row[33] else None)
+                            row[39].strftime('%Y-%m-%d')
+                            if row[39] and hasattr(row[39], "strftime")
+                            else (row[39] if row[39] else None)
                         ),
                         "start_time": (
-                            row[34].strftime('%H:%M')
-                            if row[34] and hasattr(row[34], "strftime")
-                            else (row[34] if row[34] else None)
+                            row[40].strftime('%H:%M')
+                            if row[40] and hasattr(row[40], "strftime")
+                            else (row[40] if row[40] else None)
                         ),
                         "end_time": (
-                            row[35].strftime('%H:%M')
-                            if row[35] and hasattr(row[35], "strftime")
-                            else (row[35] if row[35] else None)
+                            row[41].strftime('%H:%M')
+                            if row[41] and hasattr(row[41], "strftime")
+                            else (row[41] if row[41] else None)
                         ),
-                        "training_id": row[36],
-                        "updated_at": row[37],
-                        "created_by_name": row[38],
-                        "updated_by_name": row[39],
+                        "training_id": row[42],
+                        "updated_at": row[43],
+                        "created_by_name": row[44],
+                        "updated_by_name": row[45],
                     }
-                    if row[30] is not None
+                    if row[36] is not None
                     else None
                 )
 
-                feedback_date_source = row[33] if row[33] is not None else None
+                feedback_date_source = row[39] if row[39] is not None else None
                 feedback_sla_payload = None
-                if not bool(row[28]) and not bool(row[7]):
+                if not bool(row[34]) and not bool(row[7]):
                     feedback_sla_payload = self._build_feedback_sla_payload(
                         evaluation_date_source=row[17],
                         score_value=row[4],
@@ -5489,14 +5514,20 @@ class Database:
                         "sv_request_comment": row[19],
                         "sv_request_by": row[20],
                         "sv_request_by_name": row[21],
-                        "sv_request_at": row[22],
-                        "sv_request_approved": bool(row[23]),
-                        "sv_request_approved_by": row[24],
-                        "sv_request_approved_by_name": row[25],
-                        "sv_request_approved_at": row[26],
-                        "duration": float(row[27]) if row[27] is not None else None,
-                        "is_imported": bool(row[28]),
-                        "comment_visible_to_operator": bool(row[29]) if row[29] is not None else True,
+                        "sv_request_by_role": row[22],
+                        "sv_request_at": row[23],
+                        "sv_request_approved": bool(row[24]),
+                        "sv_request_approved_by": row[25],
+                        "sv_request_approved_by_name": row[26],
+                        "sv_request_approved_at": row[27],
+                        "sv_request_rejected": bool(row[28]),
+                        "sv_request_rejected_by": row[29],
+                        "sv_request_rejected_by_name": row[30],
+                        "sv_request_rejected_at": row[31],
+                        "sv_request_reject_comment": row[32],
+                        "duration": float(row[33]) if row[33] is not None else None,
+                        "is_imported": bool(row[34]),
+                        "comment_visible_to_operator": bool(row[35]) if row[35] is not None else True,
                         "feedback": feedback_payload,
                         "feedback_sla": feedback_sla_payload
                     }
