@@ -11,7 +11,7 @@ import {
   BookMarked, Zap, ToggleLeft, ToggleRight, LayoutGrid, List, Percent,
   UserCheck, RefreshCw, ClipboardList, PlusCircle, LogOut, ChevronUp,
   Save, Image, Link2, FileCheck, Volume2, Maximize, AlertTriangle, Rocket, Archive, RotateCcw,
-  XCircle, CheckSquare, Square, Type, ToggleRight as RadioIcon
+  XCircle, CheckSquare, Square, Type, ToggleRight as RadioIcon, CalendarDays
 } from "lucide-react";
 import "react-quill/dist/quill.snow.css";
 import "./LmsRichText.css";
@@ -1922,6 +1922,10 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
   const [adminProgressRows, setAdminProgressRows] = useState([]);
   const [adminAttempts, setAdminAttempts] = useState([]);
   const [learners, setLearners] = useState([]);
+  const [adminSelectedMonth, setAdminSelectedMonth] = useState(() => {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  });
   const [loadingHome, setLoadingHome] = useState(false);
   const [loadingAdmin, setLoadingAdmin] = useState(false);
   const [busyCourseId, setBusyCourseId] = useState(null);
@@ -1939,9 +1943,10 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
   const homeLoadedRef = useRef(false);
   const adminLoadPromisesRef = useRef(new Map());
   const adminCacheRef = useRef({
-    dashboardLoaded: false,
     builderLoaded: false,
+    coursesLoaded: false,
     courseAnalytics: new Set(),
+    tabMonthCache: new Set(),
   });
   const courseCacheRef = useRef(new Map());
   const courseLoadPromisesRef = useRef(new Map());
@@ -2100,44 +2105,38 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
   }, [apiRoot, canUseLearnerApi, lmsRequest, user?.name, user?.login, emitToast, courses, certificates, notifications]);
 
   const loadAdminData = useCallback(async (options = {}) => {
-    const scope = String(options?.scope || "dashboard").trim().toLowerCase() || "dashboard";
+    const scope = String(options?.scope || "analytics").trim().toLowerCase();
+    const month = String(options?.month || "").trim();
     const force = Boolean(options?.force);
     const normalizedCourseId = Number(options?.courseId || 0) || null;
     if (!apiRoot || !canUseManagerApi) return null;
 
     const cacheState = adminCacheRef.current;
+
     if (!force) {
-      if (scope === "dashboard" && cacheState.dashboardLoaded) {
-        return {
-          adminCourses,
-          analytics: adminAnalytics,
-          progressRows: adminProgressRows,
-          attempts: adminAttempts,
-        };
-      }
       if (scope === "builder" && cacheState.builderLoaded) {
-        return {
-          adminCourses,
-          learners,
-        };
+        return { adminCourses, learners };
       }
-      if (scope === "course" && normalizedCourseId && (cacheState.dashboardLoaded || cacheState.courseAnalytics.has(normalizedCourseId))) {
-        return {
-          progressRows: adminProgressRows,
-          attempts: adminAttempts,
-        };
+      if (scope === "course" && normalizedCourseId && cacheState.courseAnalytics.has(normalizedCourseId)) {
+        return { progressRows: adminProgressRows, attempts: adminAttempts };
+      }
+      const tabKey = (scope === "analytics" || scope === "employees") ? `${scope}:${month}` : scope;
+      if (cacheState.tabMonthCache.has(tabKey)) {
+        return { adminCourses, analytics: adminAnalytics, progressRows: adminProgressRows, attempts: adminAttempts };
       }
     }
 
-    const loadKey = scope === "course" && normalizedCourseId ? `course:${normalizedCourseId}` : scope;
+    const loadKey = scope === "course" && normalizedCourseId
+      ? `course:${normalizedCourseId}`
+      : (scope === "analytics" || scope === "employees") ? `${scope}:${month}` : scope;
     const existingPromise = adminLoadPromisesRef.current.get(loadKey);
-    if (existingPromise) {
-      return existingPromise;
-    }
+    if (existingPromise) return existingPromise;
 
     const loadPromise = (async () => {
       setLoadingAdmin(true);
       try {
+        const mq = month ? `month=${encodeURIComponent(month)}` : "";
+
         if (scope === "builder") {
           const [coursesRes, learnersRes] = await Promise.all([
             lmsRequest("/api/lms/admin/courses"),
@@ -2148,11 +2147,9 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
           setAdminCourses(nextCourses);
           setLearners(nextLearners);
           cacheState.builderLoaded = true;
+          cacheState.coursesLoaded = true;
           setApiMode(true);
-          return {
-            adminCourses: nextCourses,
-            learners: nextLearners,
-          };
+          return { adminCourses: nextCourses, learners: nextLearners };
         }
 
         if (scope === "course" && normalizedCourseId) {
@@ -2166,34 +2163,65 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
           setAdminAttempts(nextAttempts);
           cacheState.courseAnalytics.add(normalizedCourseId);
           setApiMode(true);
-          return {
-            progressRows: nextProgressRows,
-            attempts: nextAttempts,
-          };
+          return { progressRows: nextProgressRows, attempts: nextAttempts };
         }
 
-        {
-          const dashboardRes = await lmsRequest("/api/lms/admin/dashboard?attempts_limit=1000");
-          const nextCourses = Array.isArray(dashboardRes?.courses) ? dashboardRes.courses : [];
-          const nextAnalytics = dashboardRes?.analytics && typeof dashboardRes.analytics === "object" ? dashboardRes.analytics : null;
-          const nextProgressRows = Array.isArray(dashboardRes?.rows) ? dashboardRes.rows : [];
-          const nextAttempts = Array.isArray(dashboardRes?.attempts) ? dashboardRes.attempts : [];
-          setAdminCourses(nextCourses);
+        if (scope === "analytics") {
+          const [analyticsRes, coursesRes] = await Promise.all([
+            lmsRequest(`/api/lms/admin/analytics${mq ? `?${mq}` : ""}`).catch(() => null),
+            cacheState.coursesLoaded ? Promise.resolve(null) : lmsRequest("/api/lms/admin/courses").catch(() => null),
+          ]);
+          const nextAnalytics = analyticsRes && typeof analyticsRes === "object" ? analyticsRes : null;
           setAdminAnalytics(nextAnalytics);
+          if (coursesRes) {
+            setAdminCourses(Array.isArray(coursesRes?.courses) ? coursesRes.courses : []);
+            cacheState.coursesLoaded = true;
+          }
+          cacheState.tabMonthCache.add(`analytics:${month}`);
+          setApiMode(true);
+          return { analytics: nextAnalytics };
+        }
+
+        if (scope === "employees") {
+          const [progressRes, attemptsRes] = await Promise.all([
+            lmsRequest(`/api/lms/admin/progress${mq ? `?${mq}` : ""}`).catch(() => ({ rows: [] })),
+            lmsRequest(`/api/lms/admin/attempts?limit=1000${mq ? `&${mq}` : ""}`).catch(() => ({ attempts: [] })),
+          ]);
+          const nextProgressRows = Array.isArray(progressRes?.rows) ? progressRes.rows : [];
+          const nextAttempts = Array.isArray(attemptsRes?.attempts) ? attemptsRes.attempts : [];
           setAdminProgressRows(nextProgressRows);
           setAdminAttempts(nextAttempts);
-          cacheState.dashboardLoaded = true;
-          cacheState.courseAnalytics = new Set();
+          if (!cacheState.coursesLoaded) {
+            lmsRequest("/api/lms/admin/courses").then((res) => {
+              if (Array.isArray(res?.courses)) { setAdminCourses(res.courses); cacheState.coursesLoaded = true; }
+            }).catch(() => {});
+          }
+          cacheState.tabMonthCache.add(`employees:${month}`);
           setApiMode(true);
-          return {
-            adminCourses: nextCourses,
-            analytics: nextAnalytics,
-            progressRows: nextProgressRows,
-            attempts: nextAttempts,
-          };
+          return { progressRows: nextProgressRows, attempts: nextAttempts };
         }
-    } catch (error) {
-      emitToast(`LMS admin: ${String(error?.message || "ошибка загрузки")}`, "error");
+
+        if (scope === "courses") {
+          const [coursesRes, analyticsRes] = await Promise.all([
+            lmsRequest("/api/lms/admin/courses").catch(() => null),
+            cacheState.tabMonthCache.has(`analytics:${month}`) ? Promise.resolve(null)
+              : lmsRequest(`/api/lms/admin/analytics${mq ? `?${mq}` : ""}`).catch(() => null),
+          ]);
+          if (coursesRes) {
+            setAdminCourses(Array.isArray(coursesRes?.courses) ? coursesRes.courses : []);
+            cacheState.coursesLoaded = true;
+          }
+          if (analyticsRes && typeof analyticsRes === "object") {
+            setAdminAnalytics(analyticsRes);
+            cacheState.tabMonthCache.add(`analytics:${month}`);
+          }
+          cacheState.tabMonthCache.add("courses");
+          setApiMode(true);
+          return { adminCourses };
+        }
+
+      } catch (error) {
+        emitToast(`LMS admin: ${String(error?.message || "ошибка загрузки")}`, "error");
       } finally {
         setLoadingAdmin(false);
       }
@@ -2302,7 +2330,6 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
 
   const invalidateAdminCache = useCallback((options = {}) => {
     const cacheState = adminCacheRef.current;
-    cacheState.dashboardLoaded = false;
     cacheState.builderLoaded = false;
 
     const normalizedCourseId = Number(options?.courseId || 0) || null;
@@ -2312,6 +2339,8 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
     }
 
     cacheState.courseAnalytics = new Set();
+    cacheState.tabMonthCache = new Set();
+    cacheState.coursesLoaded = false;
   }, []);
 
   const hydrateLearnerLessonDetail = useCallback((lesson, detail) => {
@@ -2617,7 +2646,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
       syncSelectedLesson(null);
       quizInitializedLessonKeyRef.current = null;
       if (canUseManagerApi) {
-        void loadAdminData({ scope: "dashboard" });
+        void loadAdminData({ scope: adminTab, month: adminSelectedMonth });
       }
       return () => {
         cancelled = true;
@@ -2724,6 +2753,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
     canUseManagerApi,
     catalogTab,
     adminTab,
+    adminSelectedMonth,
     loadLearnerDashboard,
     loadAdminData,
     ensureCourseLoaded,
@@ -2761,7 +2791,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
       setAdminProgressRows((prev) => prev.filter((item) => Number(item?.course_id || 0) !== courseId));
       setAdminAttempts((prev) => prev.filter((item) => Number(item?.course_id || 0) !== courseId));
       emitToast("Курс и его файлы в GCS удалены", "success");
-      await loadAdminData({ scope: "dashboard", force: true });
+      await loadAdminData({ scope: "courses", force: true });
       return true;
     } catch (error) {
       emitToast(`Не удалось удалить курс: ${String(error?.message || "ошибка")}`, "error");
@@ -2796,7 +2826,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
       invalidateAdminCache({ courseId });
       invalidateCourseCache(courseId);
       emitToast("Курс архивирован и скрыт из LMS сотрудников", "success");
-      await loadAdminData({ scope: "dashboard", force: true });
+      await loadAdminData({ scope: "courses", force: true });
       return true;
     } catch (error) {
       emitToast(`Не удалось архивировать курс: ${String(error?.message || "ошибка")}`, "error");
@@ -2831,7 +2861,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
       invalidateAdminCache({ courseId });
       invalidateCourseCache(courseId);
       emitToast("Курс восстановлен из архива", "success");
-      await loadAdminData({ scope: "dashboard", force: true });
+      await loadAdminData({ scope: "courses", force: true });
       return true;
     } catch (error) {
       emitToast(`Не удалось восстановить курс: ${String(error?.message || "ошибка")}`, "error");
@@ -3135,6 +3165,12 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
     navigate(buildLmsAdminPath(nextTab));
   }, [navigate]);
 
+  const handleAdminMonthChange = useCallback((newMonth) => {
+    setAdminSelectedMonth(newMonth);
+    const cacheState = adminCacheRef.current;
+    cacheState.tabMonthCache = new Set();
+  }, []);
+
   const unreadNotificationsCount = useMemo(
     () => (Array.isArray(notifications) ? notifications.filter((item) => !item?.read).length : 0),
     [notifications]
@@ -3392,6 +3428,8 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
             attempts={adminAttempts}
             analytics={adminAnalytics}
             loading={loadingAdmin}
+            selectedMonth={adminSelectedMonth}
+            onMonthChange={handleAdminMonthChange}
             onOpenBuilder={openBuilder}
             onOpenCourse={openCourse}
             onDeleteCourse={handleDeleteAdminCourse}
@@ -10887,6 +10925,8 @@ function AdminView({
   attempts = [],
   analytics = null,
   loading = false,
+  selectedMonth = "",
+  onMonthChange,
   onOpenBuilder,
   onOpenCourse,
   onDeleteCourse,
@@ -11626,12 +11666,25 @@ function AdminView({
         </div>
       </div>
 
-      <div className="flex items-center gap-1 mb-8 bg-slate-100 p-1 rounded-xl w-fit">
-        {tabs.map(t => (
-          <button key={t.id} onClick={() => setTab(t.id)} className={`flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium transition-all ${tab === t.id ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>
-            <t.icon size={14} /> {t.label}
-          </button>
-        ))}
+      <div className="flex flex-wrap items-center gap-3 mb-8">
+        <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl">
+          {tabs.map(t => (
+            <button key={t.id} onClick={() => setTab(t.id)} className={`flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium transition-all ${tab === t.id ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>
+              <t.icon size={14} /> {t.label}
+            </button>
+          ))}
+        </div>
+        {(tab === "analytics" || tab === "employees") && typeof onMonthChange === "function" && (
+          <div className="flex items-center gap-2 bg-slate-100 px-3 py-2 rounded-xl">
+            <CalendarDays size={14} className="text-slate-400 shrink-0" />
+            <input
+              type="month"
+              value={selectedMonth}
+              onChange={(e) => onMonthChange(e.target.value)}
+              className="bg-transparent text-sm text-slate-700 font-medium border-none outline-none cursor-pointer"
+            />
+          </div>
+        )}
       </div>
 
       {tab === "analytics" && (
