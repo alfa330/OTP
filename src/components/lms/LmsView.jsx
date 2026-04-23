@@ -10915,6 +10915,66 @@ function CourseBuilder({
   );
 }
 
+// ─── MONTH PICKER ─────────────────────────────────────────────────────────────
+
+const MONTH_NAMES_RU = [
+  "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+  "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
+];
+
+function MonthPicker({ value = "", onChange }) {
+  const parsed = (() => {
+    const parts = String(value || "").split("-");
+    if (parts.length === 2) {
+      const y = parseInt(parts[0], 10);
+      const m = parseInt(parts[1], 10);
+      if (y >= 2000 && y <= 2100 && m >= 1 && m <= 12) return { year: y, month: m };
+    }
+    const now = new Date();
+    return { year: now.getFullYear(), month: now.getMonth() + 1 };
+  })();
+
+  const toValue = (year, month) =>
+    `${year}-${String(month).padStart(2, "0")}`;
+
+  const step = (dir) => {
+    let { year, month } = parsed;
+    month += dir;
+    if (month < 1) { month = 12; year -= 1; }
+    if (month > 12) { month = 1; year += 1; }
+    onChange?.(toValue(year, month));
+  };
+
+  const now = new Date();
+  const isCurrentMonth = parsed.year === now.getFullYear() && parsed.month === now.getMonth() + 1;
+
+  return (
+    <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl select-none">
+      <button
+        onClick={() => step(-1)}
+        className="flex items-center justify-center w-8 h-8 rounded-lg text-slate-500 hover:text-slate-800 hover:bg-white hover:shadow-sm transition-all"
+        title="Предыдущий месяц"
+      >
+        <ChevronLeft size={14} />
+      </button>
+      <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white shadow-sm min-w-[148px] justify-center">
+        <CalendarDays size={13} className="text-indigo-500 shrink-0" />
+        <span className="text-sm font-semibold text-slate-800 whitespace-nowrap">
+          {MONTH_NAMES_RU[parsed.month - 1]} {parsed.year}
+        </span>
+      </div>
+      <button
+        onClick={() => step(1)}
+        disabled={isCurrentMonth}
+        className={`flex items-center justify-center w-8 h-8 rounded-lg transition-all ${isCurrentMonth ? "text-slate-300 cursor-not-allowed" : "text-slate-500 hover:text-slate-800 hover:bg-white hover:shadow-sm"}`}
+        title="Следующий месяц"
+      >
+        <ChevronRight size={14} />
+      </button>
+    </div>
+  );
+}
+
 // ─── ADMIN VIEW ───────────────────────────────────────────────────────────────
 
 function AdminView({

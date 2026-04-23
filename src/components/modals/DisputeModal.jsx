@@ -18,7 +18,7 @@ const DisputeModal = ({
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
       <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
-        <h2 className="text-xl font-semibold mb-4">Оспорить оценку</h2>
+        <h2 className="text-xl font-semibold mb-4">Запрос на переоценку</h2>
         
         <div className="mb-4 space-y-2">
           <p className="font-medium">Информация об оценке:</p>
@@ -33,11 +33,11 @@ const DisputeModal = ({
         </div>
 
         <div className="mb-4">
-          <label className="block mb-2 font-medium">Ваше сообщение супервайзеру:</label>
+          <label className="block mb-2 font-medium">Комментарий к запросу:</label>
           <textarea
             value={disputeText}
             onChange={(e) => setDisputeText(e.target.value)}
-            placeholder="Опишите причину оспаривания оценки..."
+            placeholder="Опишите, почему нужна переоценка..."
             className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
             rows={5}
           />
@@ -49,7 +49,7 @@ const DisputeModal = ({
             className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
             disabled={isLoading}
           >
-            {isLoading ? 'Отправка...' : 'Отправить запрос'}
+            {isLoading ? 'Отправка...' : 'Отправить'}
           </button>
           <button
             onClick={() => {

@@ -641,48 +641,134 @@ const HoverTooltip = ({ text, children }) => {
     );
 };
 
-const SvRequestButton = ({ call, userId, userRole, fetchEvaluations, onReevaluate }) => {
+const normalizeReevaluationRequestRole = (value) => {
+    const normalized = String(value || '').trim().toLowerCase();
+    if (normalized === 'supervisor') return 'sv';
+    if (normalized === 'super_admin') return 'admin';
+    return normalized;
+};
+
+const getReevaluationRequestStatus = (call) => {
+    if (!call?.sv_request) return 'none';
+    if (call?.sv_request_approved) return 'approved';
+    if (call?.sv_request_rejected) return 'rejected';
+    return 'pending';
+};
+
+const getReevaluationRequestRoleLabel = (role) => {
+    const normalized = normalizeReevaluationRequestRole(role);
+    if (normalized === 'operator') return 'Оператор';
+    if (normalized === 'sv') return 'Супервайзер';
+    if (normalized === 'admin') return 'Администратор';
+    return 'Сотрудник';
+};
+
+const buildReevaluationRequestTooltip = (call) => {
+    if (!call?.sv_request) return '';
+    const lines = [
+        call.sv_request_by_name
+            ? `Запросил: ${call.sv_request_by_name}${call.sv_request_by_role ? ` (${getReevaluationRequestRoleLabel(call.sv_request_by_role)})` : ''}`
+            : null,
+        call.sv_request_at ? `Создан: ${call.sv_request_at}` : null,
+        call.sv_request_comment ? `Комментарий: ${call.sv_request_comment}` : null,
+        call.sv_request_approved && call.sv_request_approved_by_name
+            ? `Одобрил: ${call.sv_request_approved_by_name}${call.sv_request_approved_at ? ` (${call.sv_request_approved_at})` : ''}`
+            : null,
+        call.sv_request_rejected && call.sv_request_rejected_by_name
+            ? `Отклонил: ${call.sv_request_rejected_by_name}${call.sv_request_rejected_at ? ` (${call.sv_request_rejected_at})` : ''}`
+            : null,
+        call.sv_request_rejected && call.sv_request_reject_comment
+            ? `Причина: ${call.sv_request_reject_comment}`
+            : null
+    ].filter(Boolean);
+    return lines.join('\n');
+};
+
+const SvRequestButton = ({ call, userId, userRole, isAdminRole = false, fetchEvaluations, onReevaluate }) => {
     const [showModal, setShowModal] = useState(false);
+    const [showRejectModal, setShowRejectModal] = useState(false);
     const [comment, setComment] = useState('');
+    const [decisionComment, setDecisionComment] = useState('');
     const [loading, setLoading] = useState(false);
-    const isSv = String(userRole) === 'sv';
-    if (!isSv) return null;
+    const normalizedRole = normalizeReevaluationRequestRole(userRole);
+    const isSv = normalizedRole === 'sv';
+    const isAdmin = isAdminRole || normalizedRole === 'admin';
+    const status = getReevaluationRequestStatus(call);
+    const tooltipText = buildReevaluationRequestTooltip(call);
+    const canSubmitRequest = isSv && (status === 'none' || status === 'rejected');
 
     const submit = async () => {
         setLoading(true);
         try {
             const r = await authFetch(`${API_BASE_URL}/api/call_evaluation/sv_request`, {
-                method: 'POST', headers: {'Content-Type':'application/json', 'X-User-Id': userId},
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-User-Id': userId },
                 body: JSON.stringify({ call_id: call.id, comment })
             });
             const d = await r.json();
-            if (!r.ok) throw new Error(d.error);
+            if (!r.ok) throw new Error(d.error || 'Не удалось отправить запрос');
             await fetchEvaluations?.({ force: true });
-            setShowModal(false); setComment('');
+            setShowModal(false);
+            setComment('');
             emitCallEvaluationToast('Заявка отправлена', 'success');
-        } catch(e) { emitCallEvaluationToast('Ошибка: ' + e.message, 'error'); }
-        finally { setLoading(false); }
+        } catch (e) {
+            emitCallEvaluationToast('Ошибка: ' + e.message, 'error');
+        } finally {
+            setLoading(false);
+        }
     };
 
-    if (!call.sv_request) return (
+    const decideRequest = async (decision) => {
+        setLoading(true);
+        try {
+            const r = await authFetch(`${API_BASE_URL}/api/call_evaluation/request_decision`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-User-Id': userId },
+                body: JSON.stringify({ call_id: call.id, decision, comment: decision === 'rejected' ? decisionComment : '' })
+            });
+            const d = await r.json();
+            if (!r.ok) throw new Error(d.error || 'Не удалось обновить заявку');
+            await fetchEvaluations?.({ force: true });
+            setShowRejectModal(false);
+            setDecisionComment('');
+            emitCallEvaluationToast(decision === 'approved' ? 'Заявка одобрена' : 'Заявка отклонена', 'success');
+        } catch (e) {
+            emitCallEvaluationToast('Ошибка: ' + e.message, 'error');
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    if (canSubmitRequest) return (
         <>
-            <button className="btn btn-amber btn-sm" onClick={e => { e.stopPropagation(); setShowModal(true); }}>Запрос</button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                {status === 'rejected' && tooltipText ? (
+                    <HoverTooltip text={tooltipText}>
+                        <FaIcon className="fas fa-info-circle" style={{ color: 'var(--danger)', cursor: 'pointer' }} />
+                    </HoverTooltip>
+                ) : null}
+                <button className="btn btn-amber btn-sm" onClick={e => { e.stopPropagation(); setShowModal(true); }}>
+                    {status === 'rejected' ? 'Повторить запрос' : 'Запрос'}
+                </button>
+            </div>
             {showModal && (
                 <div className="modal-backdrop" onClick={e => { e.stopPropagation(); setShowModal(false); }}>
                     <div className="modal request-modal" onClick={e => e.stopPropagation()}>
                         <div className="modal-header">
                             <div><h2>Запрос на переоценку</h2><div className="modal-header-sub">Call ID: {call.id}</div></div>
-                            <button className="close-btn" onClick={() => setShowModal(false)}><FaIcon className="fas fa-times"/></button>
+                            <button className="close-btn" onClick={() => setShowModal(false)}><FaIcon className="fas fa-times" /></button>
                         </div>
                         <div className="modal-body">
                             <div className="field">
-                                <label className="label">Комментарий (необязательно)</label>
+                                <label className="label">Комментарий</label>
                                 <textarea className="textarea" value={comment} onChange={e => setComment(e.target.value)} placeholder="Опишите причину запроса..." />
                             </div>
                         </div>
                         <div className="modal-footer">
                             <button className="btn btn-secondary" onClick={() => setShowModal(false)}>Отмена</button>
-                            <button className="btn btn-amber" onClick={submit} disabled={loading}>{loading ? <><span className="spinner" style={{borderTopColor:'var(--amber)'}} /> Отправка...</> : 'Отправить'}</button>
+                            <button className="btn btn-amber" onClick={submit} disabled={loading}>
+                                {loading ? <><span className="spinner" style={{ borderTopColor: 'var(--amber)' }} /> Отправка...</> : 'Отправить'}
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -690,22 +776,89 @@ const SvRequestButton = ({ call, userId, userRole, fetchEvaluations, onReevaluat
         </>
     );
 
-    if (call.sv_request && !call.sv_request_approved) return (
-        <HoverTooltip text={[call.sv_request_comment && `Комментарий: ${call.sv_request_comment}`, call.sv_request_by_name && `От: ${call.sv_request_by_name}`].filter(Boolean).join('\n') || 'Запрос на рассмотрении'}>
-            <span style={{fontSize:13, color:'var(--amber)', display:'flex', alignItems:'center', gap:4}}>
-                <FaIcon className="fas fa-clock" style={{fontSize:11}} /> Ожидает
-            </span>
-        </HoverTooltip>
-    );
+    if (status === 'pending') {
+        if (isAdmin) {
+            return (
+                <>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <HoverTooltip text={tooltipText || 'Запрос ожидает решения'}>
+                            <span style={{ fontSize: 13, color: 'var(--amber)', display: 'flex', alignItems: 'center', gap: 4 }}>
+                                <FaIcon className="fas fa-clock" style={{ fontSize: 11 }} /> Ожидает
+                            </span>
+                        </HoverTooltip>
+                        <button className="btn btn-green btn-sm" onClick={e => { e.stopPropagation(); void decideRequest('approved'); }} disabled={loading}>
+                            Принять
+                        </button>
+                        <button className="btn btn-danger btn-sm" onClick={e => { e.stopPropagation(); setShowRejectModal(true); }} disabled={loading}>
+                            Отклонить
+                        </button>
+                    </div>
+                    {showRejectModal && (
+                        <div className="modal-backdrop" onClick={e => { e.stopPropagation(); setShowRejectModal(false); }}>
+                            <div className="modal request-modal" onClick={e => e.stopPropagation()}>
+                                <div className="modal-header">
+                                    <div><h2>Отклонить запрос</h2><div className="modal-header-sub">Call ID: {call.id}</div></div>
+                                    <button className="close-btn" onClick={() => setShowRejectModal(false)}><FaIcon className="fas fa-times" /></button>
+                                </div>
+                                <div className="modal-body">
+                                    <div className="field">
+                                        <label className="label">Причина отклонения</label>
+                                        <textarea className="textarea" value={decisionComment} onChange={e => setDecisionComment(e.target.value)} placeholder="При необходимости укажите причину..." />
+                                    </div>
+                                </div>
+                                <div className="modal-footer">
+                                    <button className="btn btn-secondary" onClick={() => setShowRejectModal(false)}>Отмена</button>
+                                    <button className="btn btn-danger" onClick={() => void decideRequest('rejected')} disabled={loading}>
+                                        {loading ? <><span className="spinner" style={{ borderTopColor: 'var(--danger)' }} /> Отклонение...</> : 'Отклонить'}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </>
+            );
+        }
 
-    if (call.sv_request_approved) return (
-        <div style={{display:'flex', alignItems:'center', gap:6}}>
-            <HoverTooltip text={[call.sv_request_comment && `Комм.: ${call.sv_request_comment}`, call.sv_request_by_name && `Запросил: ${call.sv_request_by_name}`, call.sv_request_approved_by_name && `Одобрил: ${call.sv_request_approved_by_name}`].filter(Boolean).join('\n') || 'Запрос одобрен'}>
-                <FaIcon className="fas fa-info-circle" style={{color:'var(--green)', cursor:'pointer'}} />
+        return (
+            <HoverTooltip text={tooltipText || 'Запрос на рассмотрении'}>
+                <span style={{ fontSize: 13, color: 'var(--amber)', display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <FaIcon className="fas fa-clock" style={{ fontSize: 11 }} /> Ожидает
+                </span>
             </HoverTooltip>
-            <button className="btn btn-primary btn-sm" onClick={e => { e.stopPropagation(); onReevaluate(); }}>Переоценить</button>
-        </div>
-    );
+        );
+    }
+
+    if (status === 'approved') {
+        if (isSv) {
+            return (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <HoverTooltip text={tooltipText || 'Запрос одобрен'}>
+                        <FaIcon className="fas fa-info-circle" style={{ color: 'var(--green)', cursor: 'pointer' }} />
+                    </HoverTooltip>
+                    <button className="btn btn-primary btn-sm" onClick={e => { e.stopPropagation(); onReevaluate(); }}>Переоценить</button>
+                </div>
+            );
+        }
+
+        return (
+            <HoverTooltip text={tooltipText || 'Запрос одобрен'}>
+                <span style={{ fontSize: 13, color: 'var(--green)', display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <FaIcon className="fas fa-check-circle" style={{ fontSize: 11 }} /> Одобрено
+                </span>
+            </HoverTooltip>
+        );
+    }
+
+    if (status === 'rejected') {
+        return (
+            <HoverTooltip text={tooltipText || 'Запрос отклонён'}>
+                <span style={{ fontSize: 13, color: 'var(--danger)', display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <FaIcon className="fas fa-times-circle" style={{ fontSize: 11 }} /> Отклонён
+                </span>
+            </HoverTooltip>
+        );
+    }
+
     return null;
 };
 
@@ -1952,11 +2105,17 @@ const App = ({ user, initialSelection }) => {
         sv_request_comment: ev.sv_request_comment || null,
         sv_request_by: ev.sv_request_by || null,
         sv_request_by_name: ev.sv_request_by_name || null,
+        sv_request_by_role: ev.sv_request_by_role || null,
         sv_request_at: ev.sv_request_at || null,
         sv_request_approved: !!ev.sv_request_approved,
         sv_request_approved_by: ev.sv_request_approved_by || null,
         sv_request_approved_by_name: ev.sv_request_approved_by_name || null,
         sv_request_approved_at: ev.sv_request_approved_at || null,
+        sv_request_rejected: !!ev.sv_request_rejected,
+        sv_request_rejected_by: ev.sv_request_rejected_by || null,
+        sv_request_rejected_by_name: ev.sv_request_rejected_by_name || null,
+        sv_request_rejected_at: ev.sv_request_rejected_at || null,
+        sv_request_reject_comment: ev.sv_request_reject_comment || null,
         commentVisibleToOperator: ev.comment_visible_to_operator !== false,
         feedback: ev.feedback || null,
         feedbackSla: ev.feedback_sla || ev?.feedback?.sla || null,
@@ -3033,7 +3192,7 @@ const App = ({ user, initialSelection }) => {
                                                                         {call.feedback ? 'Ред. ОС' : 'ОС'}
                                                                     </button>
                                                                 )}
-                                                                <SvRequestButton call={call} userId={userId} userRole={isSupervisorRole ? 'sv' : userRole} fetchEvaluations={fetchEvaluations} onReevaluate={() => { setEvalModalMode('journal'); setEditingEval({...call,isReevaluation:true}); setShowEvalModal(true); }} />
+                                                                <SvRequestButton call={call} userId={userId} userRole={isSupervisorRole ? 'sv' : userRole} isAdminRole={isAdminRole} fetchEvaluations={fetchEvaluations} onReevaluate={() => { setEvalModalMode('journal'); setEditingEval({...call,isReevaluation:true}); setShowEvalModal(true); }} />
                                                                 {isAdminRole && !call.isDraft && (
                                                                     <>
                                                                         <button className="btn btn-secondary btn-sm" onClick={() => { setEvalModalMode('journal'); setEditingEval({...call,isReevaluation:true}); setShowEvalModal(true); }}>
@@ -3074,6 +3233,43 @@ const App = ({ user, initialSelection }) => {
                                                         <div style={{marginBottom:12, fontSize:13, color:'var(--text-2)'}}>
                                                             <strong style={{color:'var(--text)'}}>Общий комментарий:</strong> {call.combinedComment?.trim() || '—'}
                                                         </div>
+                                                        {call.sv_request && (() => {
+                                                            const requestStatus = getReevaluationRequestStatus(call);
+                                                            const statusLabel = requestStatus === 'approved'
+                                                                ? 'Одобрено'
+                                                                : requestStatus === 'rejected'
+                                                                    ? 'Отклонено'
+                                                                    : 'На рассмотрении';
+                                                            const statusColor = requestStatus === 'approved'
+                                                                ? 'var(--green)'
+                                                                : requestStatus === 'rejected'
+                                                                    ? 'var(--danger)'
+                                                                    : 'var(--amber)';
+                                                            return (
+                                                                <div style={{marginBottom:12, fontSize:13, color:'var(--text-2)', padding:'10px 12px', border:`1px solid ${statusColor}`, borderRadius:'var(--radius)', background:'var(--surface)'}}>
+                                                                    <div style={{marginBottom:6}}>
+                                                                        <strong style={{color:'var(--text)'}}>Запрос на переоценку:</strong>{' '}
+                                                                        <span style={{color: statusColor, fontWeight: 600}}>{statusLabel}</span>
+                                                                    </div>
+                                                                    <div style={{display:'flex', flexWrap:'wrap', gap:'6px 14px', marginBottom:(call.sv_request_comment || call.sv_request_reject_comment) ? 6 : 0}}>
+                                                                        <span><strong style={{color:'var(--text)'}}>Инициатор:</strong> {call.sv_request_by_name || '—'}{call.sv_request_by_role ? ` (${getReevaluationRequestRoleLabel(call.sv_request_by_role)})` : ''}</span>
+                                                                        <span><strong style={{color:'var(--text)'}}>Создан:</strong> {call.sv_request_at || '—'}</span>
+                                                                        {call.sv_request_approved_by_name ? <span><strong style={{color:'var(--text)'}}>Одобрил:</strong> {call.sv_request_approved_by_name}</span> : null}
+                                                                        {call.sv_request_rejected_by_name ? <span><strong style={{color:'var(--text)'}}>Отклонил:</strong> {call.sv_request_rejected_by_name}</span> : null}
+                                                                    </div>
+                                                                    {call.sv_request_comment ? (
+                                                                        <div style={{marginBottom: call.sv_request_reject_comment ? 4 : 0}}>
+                                                                            <strong style={{color:'var(--text)'}}>Комментарий:</strong> {call.sv_request_comment}
+                                                                        </div>
+                                                                    ) : null}
+                                                                    {call.sv_request_reject_comment ? (
+                                                                        <div>
+                                                                            <strong style={{color:'var(--text)'}}>Причина отклонения:</strong> {call.sv_request_reject_comment}
+                                                                        </div>
+                                                                    ) : null}
+                                                                </div>
+                                                            );
+                                                        })()}
                                                         {(() => {
                                                             const sla = call.feedbackSla || call.feedback?.sla || null;
                                                             if (!sla) return null;

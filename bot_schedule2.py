@@ -1383,7 +1383,7 @@ def _get_telegram_error_text(response):
     return f"HTTP {response.status_code}"
 
 
-def _send_telegram_text_message(chat_id, text, parse_mode='HTML'):
+def _send_telegram_text_message(chat_id, text, parse_mode='HTML', reply_markup=None):
     telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
     message_text = str(text or '')
     if parse_mode != 'HTML':
@@ -1395,6 +1395,8 @@ def _send_telegram_text_message(chat_id, text, parse_mode='HTML'):
     }
     if parse_mode:
         payload["parse_mode"] = parse_mode
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
     return requests.post(telegram_url, json=payload, timeout=TASK_TELEGRAM_TIMEOUT_SECONDS)
 
 
@@ -6640,14 +6642,350 @@ def change_sv_table():
         logging.error(f"Error updating SV table: {e}")
         return jsonify({"error": f"Internal server error"}), 500
 
+def _normalize_reevaluation_request_role(role):
+    role_norm = _normalize_user_role(role)
+    if _is_admin_role(role_norm):
+        return 'admin'
+    return role_norm
+
+
+def _reevaluation_request_role_label(role):
+    role_norm = _normalize_reevaluation_request_role(role)
+    labels = {
+        'operator': 'оператора',
+        'sv': 'супервайзера',
+        'admin': 'администратора'
+    }
+    return labels.get(role_norm, 'сотрудника')
+
+
+def _get_call_reevaluation_context(call_id):
+    with db._get_cursor() as cursor:
+        cursor.execute("""
+            SELECT
+                c.id,
+                c.operator_id,
+                op.name,
+                op.telegram_id,
+                op.supervisor_id,
+                sv.name,
+                sv.telegram_id,
+                c.evaluator_id,
+                ev.name,
+                ev.telegram_id,
+                c.month,
+                c.phone_number,
+                TO_CHAR(c.appeal_date, 'YYYY-MM-DD HH24:MI') AS appeal_date_text,
+                c.score,
+                c.is_draft,
+                c.sv_request,
+                c.sv_request_comment,
+                c.sv_request_by,
+                req.name,
+                req.telegram_id,
+                c.sv_request_by_role,
+                TO_CHAR(c.sv_request_at, 'YYYY-MM-DD HH24:MI') AS sv_request_at_text,
+                c.sv_request_approved,
+                c.sv_request_approved_by,
+                c.sv_request_rejected,
+                c.sv_request_rejected_by,
+                c.sv_request_reject_comment
+            FROM calls c
+            JOIN users op ON op.id = c.operator_id
+            LEFT JOIN users sv ON sv.id = op.supervisor_id
+            LEFT JOIN users ev ON ev.id = c.evaluator_id
+            LEFT JOIN users req ON req.id = c.sv_request_by
+            WHERE c.id = %s
+            LIMIT 1
+        """, (call_id,))
+        row = cursor.fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "call_id": int(row[0]),
+        "operator_id": int(row[1]),
+        "operator_name": row[2],
+        "operator_tg_id": row[3],
+        "supervisor_id": int(row[4]) if row[4] is not None else None,
+        "supervisor_name": row[5],
+        "supervisor_tg_id": row[6],
+        "evaluator_id": int(row[7]) if row[7] is not None else None,
+        "evaluator_name": row[8],
+        "evaluator_tg_id": row[9],
+        "month": row[10],
+        "phone_number": row[11],
+        "appeal_date_text": row[12],
+        "score": float(row[13]) if row[13] is not None else None,
+        "is_draft": bool(row[14]),
+        "sv_request": bool(row[15]),
+        "sv_request_comment": row[16],
+        "sv_request_by": int(row[17]) if row[17] is not None else None,
+        "requester_name": row[18],
+        "requester_tg_id": row[19],
+        "sv_request_by_role": row[20],
+        "sv_request_at_text": row[21],
+        "sv_request_approved": bool(row[22]),
+        "sv_request_approved_by": int(row[23]) if row[23] is not None else None,
+        "sv_request_rejected": bool(row[24]),
+        "sv_request_rejected_by": int(row[25]) if row[25] is not None else None,
+        "sv_request_reject_comment": row[26],
+    }
+
+
+def _build_reevaluation_request_admin_message(call_ctx, requester_name, requester_role, comment):
+    performer_name = (
+        call_ctx.get('supervisor_name') if requester_role == 'operator' else requester_name
+    ) or 'Сотрудник'
+    comment_text = str(comment or '').strip() or '—'
+    score_text = '—' if call_ctx.get('score') is None else f"{call_ctx.get('score'):.2f}"
+    return (
+        "⚠️ <b>Запрос на переоценку</b>\n\n"
+        f"<b>Источник:</b> от {_escape_telegram_html(_reevaluation_request_role_label(requester_role), 32)}\n"
+        f"<b>Call ID:</b> <code>{_escape_telegram_html(call_ctx.get('call_id'), 32)}</code>\n"
+        f"<b>Оператор:</b> {_escape_telegram_html(call_ctx.get('operator_name') or '—', 120)}\n"
+        f"<b>Супервайзер:</b> {_escape_telegram_html(call_ctx.get('supervisor_name') or '—', 120)}\n"
+        f"<b>Запросил:</b> {_escape_telegram_html(requester_name or 'Сотрудник', 120)}\n"
+        f"<b>Переоценит:</b> {_escape_telegram_html(performer_name, 120)}\n"
+        f"<b>Номер:</b> {_escape_telegram_html(call_ctx.get('phone_number') or '—', 64)}\n"
+        f"<b>Дата обращения:</b> {_escape_telegram_html(call_ctx.get('appeal_date_text') or '—', 32)}\n"
+        f"<b>Месяц:</b> {_escape_telegram_html(call_ctx.get('month') or '—', 16)}\n"
+        f"<b>Оценка:</b> {_escape_telegram_html(score_text, 16)}\n"
+        f"<b>Комментарий:</b> {_escape_telegram_html(comment_text, 600)}\n\n"
+        "Выберите действие ниже."
+    )
+
+
+def _notify_telegram_about_new_reevaluation_request(call_ctx, requester_name, requester_role, comment):
+    if not API_TOKEN:
+        return
+
+    admin_chat_id = os.getenv('ADMIN_ID')
+    if admin_chat_id:
+        reply_markup = {
+            "inline_keyboard": [[
+                {"text": "Одобрить ✅", "callback_data": f"approve_reval:{call_ctx['call_id']}"},
+                {"text": "Отклонить ❌", "callback_data": f"reject_reval:{call_ctx['call_id']}"}
+            ]]
+        }
+        try:
+            response = _send_telegram_text_message(
+                chat_id=admin_chat_id,
+                text=_build_reevaluation_request_admin_message(call_ctx, requester_name, requester_role, comment),
+                parse_mode='HTML',
+                reply_markup=reply_markup
+            )
+            if response.status_code != 200:
+                logging.error(
+                    "Failed to send reevaluation request to admin chat: %s",
+                    _get_telegram_error_text(response)
+                )
+        except Exception as exc:
+            logging.error("Failed to send telegram reevaluation admin notification: %s", exc)
+
+    if requester_role == 'operator' and call_ctx.get('supervisor_tg_id'):
+        supervisor_message = (
+            "📨 <b>Новая заявка оператора на переоценку</b>\n\n"
+            f"<b>Оператор:</b> {_escape_telegram_html(call_ctx.get('operator_name') or '—', 120)}\n"
+            f"<b>Call ID:</b> <code>{_escape_telegram_html(call_ctx.get('call_id'), 32)}</code>\n"
+            f"<b>Комментарий:</b> {_escape_telegram_html(comment or '—', 600)}\n\n"
+            "Заявка отправлена администратору на согласование. После одобрения вы сможете выполнить переоценку."
+        )
+        try:
+            response = _send_telegram_text_message(chat_id=call_ctx['supervisor_tg_id'], text=supervisor_message, parse_mode='HTML')
+            if response.status_code != 200:
+                logging.error(
+                    "Failed to send reevaluation request notification to supervisor: %s",
+                    _get_telegram_error_text(response)
+                )
+        except Exception as exc:
+            logging.error("Failed to notify supervisor about operator reevaluation request: %s", exc)
+
+
+def _create_reevaluation_request(call_id, requester, requester_id, comment):
+    call_ctx = _get_call_reevaluation_context(call_id)
+    if not call_ctx:
+        raise ValueError("Call not found")
+    if call_ctx.get('is_draft'):
+        raise ValueError("Reevaluation request is available only for completed evaluations")
+
+    requester_role = _normalize_reevaluation_request_role(requester[3] if requester else None)
+    if requester_role == 'operator':
+        if int(call_ctx.get('operator_id') or 0) != int(requester_id):
+            raise PermissionError("Operators can request reevaluation only for their own calls")
+        if not call_ctx.get('supervisor_id'):
+            raise ValueError("Supervisor not found for this operator")
+    elif requester_role == 'sv':
+        if int(call_ctx.get('supervisor_id') or 0) != int(requester_id):
+            raise PermissionError("Only the operator's supervisor can request reevaluation")
+    elif requester_role != 'admin':
+        raise PermissionError("Only operators, supervisors and admins can request reevaluation")
+
+    if call_ctx.get('sv_request') and not call_ctx.get('sv_request_approved') and not call_ctx.get('sv_request_rejected'):
+        raise RuntimeError("Reevaluation request is already pending")
+    if call_ctx.get('sv_request') and call_ctx.get('sv_request_approved'):
+        raise RuntimeError("Reevaluation request is already approved")
+
+    request_comment = str(comment or '').strip()
+    with db._get_cursor() as cursor:
+        cursor.execute("""
+            UPDATE calls
+            SET sv_request = TRUE,
+                sv_request_comment = %s,
+                sv_request_by = %s,
+                sv_request_by_role = %s,
+                sv_request_at = %s,
+                sv_request_approved = FALSE,
+                sv_request_approved_by = NULL,
+                sv_request_approved_at = NULL,
+                sv_request_rejected = FALSE,
+                sv_request_rejected_by = NULL,
+                sv_request_rejected_at = NULL,
+                sv_request_reject_comment = NULL
+            WHERE id = %s
+        """, (request_comment, requester_id, requester_role, datetime.utcnow(), call_id))
+
+    requester_name = requester[2] if requester and len(requester) > 2 else 'Сотрудник'
+    _notify_telegram_about_new_reevaluation_request(call_ctx, requester_name, requester_role, request_comment)
+    return {
+        "call": call_ctx,
+        "requester_role": requester_role,
+        "requester_name": requester_name
+    }
+
+
+def _resolve_reevaluation_request(call_id, approver_user_id, decision, comment=None):
+    decision_norm = str(decision or '').strip().lower()
+    if decision_norm in ('approve', 'approved'):
+        decision_norm = 'approved'
+    elif decision_norm in ('reject', 'rejected'):
+        decision_norm = 'rejected'
+    else:
+        raise ValueError("Invalid reevaluation request decision")
+
+    call_ctx = _get_call_reevaluation_context(call_id)
+    if not call_ctx:
+        raise ValueError("Call not found")
+    if not call_ctx.get('sv_request'):
+        raise ValueError("Reevaluation request not found")
+    if call_ctx.get('sv_request_approved') or call_ctx.get('sv_request_rejected'):
+        raise RuntimeError("Reevaluation request is already resolved")
+
+    decision_comment = str(comment or '').strip() or None
+    with db._get_cursor() as cursor:
+        if decision_norm == 'approved':
+            cursor.execute("""
+                UPDATE calls
+                SET sv_request_approved = TRUE,
+                    sv_request_approved_by = %s,
+                    sv_request_approved_at = %s,
+                    sv_request_rejected = FALSE,
+                    sv_request_rejected_by = NULL,
+                    sv_request_rejected_at = NULL,
+                    sv_request_reject_comment = NULL
+                WHERE id = %s
+            """, (approver_user_id, datetime.utcnow(), call_id))
+        else:
+            cursor.execute("""
+                UPDATE calls
+                SET sv_request_approved = FALSE,
+                    sv_request_approved_by = NULL,
+                    sv_request_approved_at = NULL,
+                    sv_request_rejected = TRUE,
+                    sv_request_rejected_by = %s,
+                    sv_request_rejected_at = %s,
+                    sv_request_reject_comment = %s
+                WHERE id = %s
+            """, (approver_user_id, datetime.utcnow(), decision_comment, call_id))
+
+    resolved_ctx = _get_call_reevaluation_context(call_id) or call_ctx
+    approver = db.get_user(id=approver_user_id) if approver_user_id else None
+    approver_name = approver[2] if approver and len(approver) > 2 else 'Администратор'
+    requester_role = _normalize_reevaluation_request_role(resolved_ctx.get('sv_request_by_role'))
+
+    requester_tg_id = resolved_ctx.get('requester_tg_id')
+    if requester_tg_id and API_TOKEN:
+        if decision_norm == 'approved':
+            performer_name = (
+                resolved_ctx.get('supervisor_name') if requester_role == 'operator' else resolved_ctx.get('requester_name')
+            ) or 'Сотрудник'
+            requester_message = (
+                "✅ <b>Запрос на переоценку одобрен</b>\n\n"
+                f"<b>Call ID:</b> <code>{_escape_telegram_html(call_id, 32)}</code>\n"
+                f"<b>Одобрил:</b> {_escape_telegram_html(approver_name, 120)}\n"
+                f"<b>Переоценит:</b> {_escape_telegram_html(performer_name, 120)}"
+            )
+            if requester_role == 'operator':
+                requester_message += "\n\nСупервайзер может перейти к переоценке звонка."
+        else:
+            requester_message = (
+                "❌ <b>Запрос на переоценку отклонён</b>\n\n"
+                f"<b>Call ID:</b> <code>{_escape_telegram_html(call_id, 32)}</code>\n"
+                f"<b>Отклонил:</b> {_escape_telegram_html(approver_name, 120)}"
+            )
+            if decision_comment:
+                requester_message += f"\n<b>Причина:</b> {_escape_telegram_html(decision_comment, 700)}"
+        try:
+            response = _send_telegram_text_message(chat_id=requester_tg_id, text=requester_message, parse_mode='HTML')
+            if response.status_code != 200:
+                logging.error("Failed to notify requester about reevaluation decision: %s", _get_telegram_error_text(response))
+        except Exception as exc:
+            logging.error("Failed to send reevaluation decision to requester: %s", exc)
+
+    if requester_role == 'operator' and resolved_ctx.get('supervisor_tg_id') and API_TOKEN:
+        supervisor_message = (
+            "✅ <b>Запрос оператора на переоценку одобрен</b>\n\n"
+            if decision_norm == 'approved'
+            else "ℹ️ <b>Запрос оператора на переоценку отклонён</b>\n\n"
+        )
+        supervisor_message += (
+            f"<b>Оператор:</b> {_escape_telegram_html(resolved_ctx.get('operator_name') or '—', 120)}\n"
+            f"<b>Call ID:</b> <code>{_escape_telegram_html(call_id, 32)}</code>\n"
+            f"<b>Администратор:</b> {_escape_telegram_html(approver_name, 120)}"
+        )
+        if decision_norm == 'approved':
+            supervisor_message += "\n\nМожете выполнить переоценку звонка."
+        elif decision_comment:
+            supervisor_message += f"\n<b>Причина:</b> {_escape_telegram_html(decision_comment, 700)}"
+        try:
+            response = _send_telegram_text_message(chat_id=resolved_ctx['supervisor_tg_id'], text=supervisor_message, parse_mode='HTML')
+            if response.status_code != 200:
+                logging.error("Failed to notify supervisor about reevaluation decision: %s", _get_telegram_error_text(response))
+        except Exception as exc:
+            logging.error("Failed to send reevaluation decision to supervisor: %s", exc)
+
+    return {
+        "decision": decision_norm,
+        "call": resolved_ctx,
+        "approver_name": approver_name
+    }
+
+
 @app.route('/api/call_evaluation/dispute', methods=['POST'])
 @require_api_key
 def dispute_call_evaluation():
     try:
-        data = request.get_json()
-        required_fields = ['operator_id', 'id', 'month', 'dispute_text']
-        if not data or not all(field in data for field in required_fields):
+        data = request.get_json(silent=True) or {}
+        if 'id' not in data or 'dispute_text' not in data:
             return jsonify({"error": "Missing required fields"}), 400
+
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        result = _create_reevaluation_request(
+            call_id=int(data['id']),
+            requester=requester,
+            requester_id=requester_id,
+            comment=data.get('dispute_text')
+        )
+        return jsonify({
+            "status": "success",
+            "message": "Reevaluation request created",
+            "requester_role": result.get("requester_role")
+        }), 200
 
         operator_id = int(data['operator_id'])
         operator = db.get_user(id=operator_id)
@@ -6752,6 +7090,12 @@ def dispute_call_evaluation():
         # --- END NEW ---
 
         return jsonify({"status": "success", "message": "Dispute sent to supervisor and admin"})
+    except PermissionError as exc:
+        return jsonify({"error": str(exc)}), 403
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 409
     except Exception as e:
         logging.error(f"Error processing dispute: {e}")
         return jsonify({"error": f"Internal server error"}), 500
@@ -9336,9 +9680,26 @@ def sv_request_call():
     Заголовки: X-User-Id (JWT/cookie авторизация обязательна)
     """
     try:
-        data = request.get_json()
-        if not data or 'call_id' not in data:
+        data = request.get_json(silent=True) or {}
+        if 'call_id' not in data:
             return jsonify({"error": "Missing call_id"}), 400
+
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        result = _create_reevaluation_request(
+            call_id=int(data['call_id']),
+            requester=requester,
+            requester_id=requester_id,
+            comment=data.get('comment')
+        )
+        return jsonify({
+            "status": "success",
+            "message": "sv_request created",
+            "requester_role": result.get("requester_role")
+        }), 200
 
         call_id = int(data['call_id'])
         comment = data.get('comment', '').strip()
@@ -9414,10 +9775,52 @@ def sv_request_call():
                 logging.error(f"Failed to send telegram sv_request notification: {e}")
 
         return jsonify({"status": "success", "message": "sv_request created"}), 200
-
+    except PermissionError as exc:
+        return jsonify({"error": str(exc)}), 403
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 409
     except Exception as e:
         logging.error(f"Error in sv_request_call: {e}")
         return jsonify({"error": f"Internal server error"}), 500
+
+@app.route('/api/call_evaluation/request_decision', methods=['POST'])
+@require_api_key
+def decide_call_reevaluation_request():
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if not _is_admin_role(requester[3]):
+            return jsonify({"error": "Only admins can decide reevaluation requests"}), 403
+
+        data = request.get_json(silent=True) or {}
+        if 'call_id' not in data or 'decision' not in data:
+            return jsonify({"error": "Missing required fields"}), 400
+
+        result = _resolve_reevaluation_request(
+            call_id=int(data['call_id']),
+            approver_user_id=requester_id,
+            decision=data.get('decision'),
+            comment=data.get('comment')
+        )
+        return jsonify({
+            "status": "success",
+            "message": "Reevaluation request updated",
+            "decision": result.get("decision")
+        }), 200
+    except PermissionError as exc:
+        return jsonify({"error": str(exc)}), 403
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 409
+    except Exception as exc:
+        logging.error("Error deciding reevaluation request: %s", exc, exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
 
 @app.route('/api/call_versions/<int:call_id>', methods=['GET'])
 @require_api_key
@@ -9724,7 +10127,19 @@ def receive_call_evaluation():
                     if prev_id:
                         try:
                             with db._get_cursor() as cursor:
-                                cursor.execute("SELECT sv_request, sv_request_approved, sv_request_by FROM calls WHERE id = %s", (prev_id,))
+                                cursor.execute(
+                                    """
+                                    SELECT
+                                        sv_request,
+                                        sv_request_approved,
+                                        sv_request_by,
+                                        sv_request_by_role,
+                                        operator_id
+                                    FROM calls
+                                    WHERE id = %s
+                                    """,
+                                    (prev_id,)
+                                )
                                 prev = cursor.fetchone()
                         except Exception as e:
                             logging.error(f"Error checking previous call for re-eval permissions: {e}")
@@ -9734,11 +10149,18 @@ def receive_call_evaluation():
                             sv_request_flag = bool(prev[0])
                             sv_request_approved_flag = bool(prev[1])
                             sv_request_by_id = prev[2]
-                            if sv_request_flag and sv_request_approved_flag and sv_request_by_id == requester_id:
-                                allowed = True
+                            sv_request_by_role = _normalize_reevaluation_request_role(prev[3])
+                            prev_operator_id = int(prev[4]) if prev[4] is not None else None
+                            if sv_request_flag and sv_request_approved_flag:
+                                if sv_request_by_role == 'sv' and sv_request_by_id == requester_id:
+                                    allowed = True
+                                elif sv_request_by_role == 'operator' and prev_operator_id:
+                                    prev_operator = db.get_user(id=prev_operator_id)
+                                    if prev_operator and int(prev_operator[6] or 0) == int(requester_id):
+                                        allowed = True
 
             if not allowed:
-                return jsonify({"error": "Only admins or the supervisor who requested and was approved can perform re-evaluations"}), 403
+                return jsonify({"error": "Only admins or the approved supervisor can perform re-evaluations"}), 403
 
 
         audio_path = None
@@ -15260,6 +15682,17 @@ async def _is_admin_user(tg_id):
         logging.exception("Error checking admin: %s", e)
         return False
 
+
+async def _resolve_call_reevaluation_request_for_telegram(call_id, approver_tg_id, decision):
+    loop = asyncio.get_event_loop()
+
+    def _resolve():
+        approver = db.get_user(telegram_id=approver_tg_id)
+        approver_user_id = approver[0] if approver else None
+        return _resolve_reevaluation_request(call_id, approver_user_id, decision)
+
+    return await loop.run_in_executor(None, _resolve)
+
 async def _approve_call_and_get_notify_row(call_id, approver_tg_id):
     """
     Пометить звонок одобренным и вернуть данные для уведомлений:
@@ -15293,6 +15726,11 @@ async def _approve_call_and_get_notify_row(call_id, approver_tg_id):
 
     result = await loop.run_in_executor(None, _update)
     return result  # None или кортеж (sv_request_by, sv_tg, evaluator_id, eval_tg)
+
+async def _approve_call_and_get_notify_row(call_id, approver_tg_id):
+    await _resolve_call_reevaluation_request_for_telegram(call_id, approver_tg_id, 'approved')
+    return None
+
 
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith('approve_reval:'))
 async def handle_approve_reval(callback_query: types.CallbackQuery):
@@ -22983,6 +23421,56 @@ async def run_recruiting_resumes_job_async(triggered_by='scheduler'):
     await loop.run_in_executor(executor_pool, sync_recruiting_resumes_job, triggered_by)
 
 # === Главный запуск =============================================================================================
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('reject_reval:'))
+async def handle_reject_reval(callback_query: types.CallbackQuery):
+    cq = callback_query
+    user = cq.from_user
+    data = cq.data
+
+    try:
+        _, call_id_str = data.split(':', 1)
+        call_id = int(call_id_str)
+    except Exception:
+        await cq.answer("Неверный идентификатор звонка", show_alert=True)
+        return
+
+    try:
+        is_admin = await _is_admin_user(user.id)
+    except Exception as e:
+        logging.exception("Ошибка проверки администратора: %s", e)
+        is_admin = False
+
+    if not is_admin:
+        await cq.answer("Только администратор может отклонять переоценку", show_alert=True)
+        return
+
+    try:
+        await _resolve_call_reevaluation_request_for_telegram(call_id, user.id, 'rejected')
+    except ValueError:
+        await cq.answer("Запрос не найден", show_alert=True)
+        return
+    except RuntimeError:
+        await cq.answer("Запрос уже обработан", show_alert=True)
+        return
+    except Exception as e:
+        logging.exception("Ошибка при отклонении запроса на переоценку: %s", e)
+        await cq.answer("Ошибка сервера при отклонении", show_alert=True)
+        return
+
+    try:
+        await cq.answer("Запрос на переоценку отклонён", show_alert=False)
+    except Exception as e:
+        logging.debug("Не удалось отправить answer для reject_reval: %s", e)
+
+    try:
+        if cq.message:
+            await cq.bot.edit_message_reply_markup(chat_id=cq.message.chat.id, message_id=cq.message.message_id, reply_markup=None)
+    except Exception as e:
+        logging.debug("Не удалось убрать reply_markup для reject_reval: %s", e)
+
+    logging.info("Call %s rejected by tg_user %s", call_id, user.id)
+
+
 if __name__ == '__main__':
     
     # Запускаем Flask в отдельном потоке
