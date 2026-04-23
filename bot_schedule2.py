@@ -6933,7 +6933,7 @@ def _resolve_reevaluation_request(call_id, approver_user_id, decision, comment=N
         except Exception as exc:
             logging.error("Failed to send reevaluation decision to requester: %s", exc)
 
-    if requester_role == 'operator' and resolved_ctx.get('supervisor_tg_id') and API_TOKEN:
+    if requester_role == 'operator' and decision_norm == 'rejected' and resolved_ctx.get('supervisor_tg_id') and API_TOKEN:
         supervisor_message = (
             "✅ <b>Запрос оператора на переоценку одобрен</b>\n\n"
             if decision_norm == 'approved'
@@ -6954,6 +6954,38 @@ def _resolve_reevaluation_request(call_id, approver_user_id, decision, comment=N
                 logging.error("Failed to notify supervisor about reevaluation decision: %s", _get_telegram_error_text(response))
         except Exception as exc:
             logging.error("Failed to send reevaluation decision to supervisor: %s", exc)
+
+    if requester_role == 'operator' and decision_norm == 'approved' and resolved_ctx.get('supervisor_tg_id') and API_TOKEN:
+        operator_name = resolved_ctx.get('operator_name') or '\u2014'
+        approver_display_name = approver[2] if approver and len(approver) > 2 else '\u0410\u0434\u043c\u0438\u043d\u0438\u0441\u0442\u0440\u0430\u0442\u043e\u0440'
+        supervisor_message = (
+            "\U0001f514 <b>\u041d\u0443\u0436\u043d\u043e \u043f\u0435\u0440\u0435\u043e\u0446\u0435\u043d\u0438\u0442\u044c \u0437\u0432\u043e\u043d\u043e\u043a</b>\n\n"
+            f"<b>\u041e\u043f\u0435\u0440\u0430\u0442\u043e\u0440:</b> {_escape_telegram_html(operator_name, 120)}\n"
+            f"<b>Call ID:</b> <code>{_escape_telegram_html(call_id, 32)}</code>\n"
+            f"<b>\u0410\u0434\u043c\u0438\u043d\u0438\u0441\u0442\u0440\u0430\u0442\u043e\u0440:</b> {_escape_telegram_html(approver_display_name, 120)}"
+        )
+        if resolved_ctx.get('sv_request_comment'):
+            supervisor_message += (
+                f"\n<b>\u041a\u043e\u043c\u043c\u0435\u043d\u0442\u0430\u0440\u0438\u0439 \u043a \u0437\u0430\u043f\u0440\u043e\u0441\u0443:</b> "
+                f"{_escape_telegram_html(resolved_ctx.get('sv_request_comment'), 700)}"
+            )
+        supervisor_message += (
+            "\n\n\u0417\u0430\u043f\u0440\u043e\u0441 \u043e\u043f\u0435\u0440\u0430\u0442\u043e\u0440\u0430 \u043e\u0434\u043e\u0431\u0440\u0435\u043d. "
+            "\u041f\u043e\u0436\u0430\u043b\u0443\u0439\u0441\u0442\u0430, \u0432\u044b\u043f\u043e\u043b\u043d\u0438\u0442\u0435 \u043f\u0435\u0440\u0435\u043e\u0446\u0435\u043d\u043a\u0443 \u044d\u0442\u043e\u0433\u043e \u0437\u0432\u043e\u043d\u043a\u0430."
+        )
+        try:
+            response = _send_telegram_text_message(
+                chat_id=resolved_ctx['supervisor_tg_id'],
+                text=supervisor_message,
+                parse_mode='HTML'
+            )
+            if response.status_code != 200:
+                logging.error(
+                    "Failed to send supervisor approval reminder about reevaluation: %s",
+                    _get_telegram_error_text(response)
+                )
+        except Exception as exc:
+            logging.error("Failed to send supervisor approval reminder: %s", exc)
 
     return {
         "decision": decision_norm,
@@ -9819,6 +9851,57 @@ def decide_call_reevaluation_request():
         return jsonify({"error": str(exc)}), 409
     except Exception as exc:
         logging.error("Error deciding reevaluation request: %s", exc, exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/call_evaluation/requests', methods=['GET'])
+@require_api_key
+def get_call_reevaluation_requests():
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        requester_role = _normalize_user_role(requester[3]) if requester else ''
+        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role)):
+            return jsonify({"error": "Only admins or supervisors can view reevaluation requests"}), 403
+
+        month = request.args.get('month') or None
+
+        operator_id_raw = request.args.get('operator_id')
+        operator_id = None
+        if operator_id_raw not in (None, ''):
+            try:
+                operator_id = int(operator_id_raw)
+            except (TypeError, ValueError):
+                return jsonify({"error": "Invalid operator_id"}), 400
+
+        supervisor_id = None
+        if _is_supervisor_role(requester_role):
+            supervisor_id = requester_id
+            if operator_id is not None and not _authorize_operator_scope(requester, requester_id, operator_id):
+                return jsonify({"error": "Unauthorized to view this operator reevaluation requests"}), 403
+        else:
+            supervisor_id_raw = request.args.get('supervisor_id')
+            if supervisor_id_raw not in (None, ''):
+                try:
+                    supervisor_id = int(supervisor_id_raw)
+                except (TypeError, ValueError):
+                    return jsonify({"error": "Invalid supervisor_id"}), 400
+
+        requests_payload = db.get_call_reevaluation_requests(
+            month=month,
+            operator_id=operator_id,
+            supervisor_id=supervisor_id
+        )
+
+        return jsonify({
+            "status": "success",
+            "requests": requests_payload
+        }), 200
+    except Exception as exc:
+        logging.error("Error fetching reevaluation requests: %s", exc, exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 
