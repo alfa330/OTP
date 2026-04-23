@@ -11674,7 +11674,7 @@ function AdminView({
             </button>
           ))}
         </div>
-        {(tab === "analytics" || tab === "employees") && typeof onMonthChange === "function" && (
+        {typeof onMonthChange === "function" && (
           <div className="flex items-center gap-2 bg-slate-100 px-3 py-2 rounded-xl">
             <CalendarDays size={14} className="text-slate-400 shrink-0" />
             <input
