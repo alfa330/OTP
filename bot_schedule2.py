@@ -15911,6 +15911,26 @@ def _lms_to_int(value, default=0):
         return int(default)
 
 
+def _lms_parse_month_range(month_str):
+    """Parse 'YYYY-MM' into (start_dt, end_dt) UTC datetimes, or (None, None)."""
+    if not month_str:
+        return None, None
+    try:
+        parts = str(month_str).strip().split('-')
+        if len(parts) != 2:
+            return None, None
+        year, month = int(parts[0]), int(parts[1])
+        if not (1 <= month <= 12 and 2000 <= year <= 2100):
+            return None, None
+        start = datetime(year, month, 1, tzinfo=timezone.utc)
+        next_year = year + 1 if month == 12 else year
+        next_month = 1 if month == 12 else month + 1
+        end = datetime(next_year, next_month, 1, tzinfo=timezone.utc)
+        return start, end
+    except Exception:
+        return None, None
+
+
 def _lms_normalize_skills(value, limit=30):
     if not isinstance(value, list):
         return []
@@ -21700,6 +21720,10 @@ def lms_admin_progress():
                     return jsonify({"status": "success", "rows": []}), 200
                 where.append("a.user_id = ANY(%s)")
                 params.append(list(visible_ids))
+            month_start, month_end = _lms_parse_month_range(request.args.get('month', ''))
+            if month_start and month_end:
+                where.append("a.updated_at >= %s AND a.updated_at < %s")
+                params.extend([month_start, month_end])
             payload = _lms_admin_assignment_stats_tx(cursor, where, params)
 
         return jsonify({"status": "success", "rows": payload}), 200
@@ -21757,6 +21781,13 @@ def lms_admin_analytics():
             assignment_params.append(visible_list)
             attempt_where.append("ta.user_id = ANY(%s)")
             attempt_params.append(visible_list)
+
+        month_start, month_end = _lms_parse_month_range(request.args.get('month', ''))
+        if month_start and month_end:
+            assignment_where.append("a.updated_at >= %s AND a.updated_at < %s")
+            assignment_params.extend([month_start, month_end])
+            attempt_where.append("ta.started_at >= %s AND ta.started_at < %s")
+            attempt_params.extend([month_start, month_end])
 
         with db._get_cursor() as cursor:
             assignment_rows = _lms_admin_assignment_stats_tx(cursor, assignment_where, assignment_params)
@@ -21986,6 +22017,11 @@ def lms_admin_attempts():
                     return jsonify({"status": "success", "attempts": []}), 200
                 where.append("ta.user_id = ANY(%s)")
                 params.append(list(visible_ids))
+
+            month_start, month_end = _lms_parse_month_range(request.args.get('month', ''))
+            if month_start and month_end:
+                where.append("ta.started_at >= %s AND ta.started_at < %s")
+                params.extend([month_start, month_end])
 
             params.append(limit)
             cursor.execute(f"""
