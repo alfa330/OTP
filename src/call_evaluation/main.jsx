@@ -2040,6 +2040,7 @@ const App = ({ user, initialSelection }) => {
     const [viewMode, setViewMode] = useState('normal');
     const [activeSection, setActiveSection] = useState('journal');
     const [reevaluationRequests, setReevaluationRequests] = useState([]);
+    const [reevaluationSearch, setReevaluationSearch] = useState('');
     const [isRequestsLoading, setIsRequestsLoading] = useState(false);
     const [calibrationRooms, setCalibrationRooms] = useState([]);
     const [isCalibrationLoading, setIsCalibrationLoading] = useState(false);
@@ -2119,10 +2120,7 @@ const App = ({ user, initialSelection }) => {
 
     const getOperatorsCacheKey = useCallback((scopeId) => `${userRole || 'unknown'}:${scopeId || 'none'}`, [userRole]);
     const getCallsCacheKey = useCallback((operatorId, month) => `${operatorId}:${month}`, []);
-    const getReevaluationRequestsCacheKey = useCallback(
-        (month, supervisorId, operatorId) => `${month || 'all'}:${supervisorId || 'all'}:${operatorId || 'all'}`,
-        []
-    );
+    const getReevaluationRequestsCacheKey = useCallback((month, requesterId) => `${requesterId || 'user'}:${month || 'all'}`, []);
     const mapEvaluationToCall = useCallback((ev, operator) => ({
         id: ev.id,
         fileName: `Call ${ev.phone_number}`,
@@ -2403,11 +2401,7 @@ const App = ({ user, initialSelection }) => {
             return;
         }
 
-        const supervisorFilter = isSupervisorRole
-            ? (selectedSupervisor || userId || null)
-            : (selectedSupervisor || null);
-        const operatorFilter = selectedOperator?.id || null;
-        const cacheKey = getReevaluationRequestsCacheKey(selectedMonth, supervisorFilter, operatorFilter);
+        const cacheKey = getReevaluationRequestsCacheKey(selectedMonth, userId);
 
         if (!force && reevaluationRequestsCacheRef.current.has(cacheKey)) {
             setReevaluationRequests(reevaluationRequestsCacheRef.current.get(cacheKey) || []);
@@ -2417,8 +2411,6 @@ const App = ({ user, initialSelection }) => {
         setIsRequestsLoading(true);
         try {
             const params = new URLSearchParams({ month: selectedMonth });
-            if (operatorFilter) params.set('operator_id', String(operatorFilter));
-            if (supervisorFilter) params.set('supervisor_id', String(supervisorFilter));
 
             const r = await authFetch(`${API_BASE_URL}/api/call_evaluation/requests?${params.toString()}`, {
                 headers: { 'X-User-Id': userId }
@@ -2441,8 +2433,6 @@ const App = ({ user, initialSelection }) => {
         isAdminRole,
         isSupervisorRole,
         selectedMonth,
-        selectedSupervisor,
-        selectedOperator,
         getReevaluationRequestsCacheKey
     ]);
 
@@ -2935,7 +2925,24 @@ const App = ({ user, initialSelection }) => {
         : activeSection === 'calibration'
             ? 'Калибровка звонков'
             : 'Журнал оценок';
-    const requestStats = reevaluationRequests.reduce((acc, item) => {
+    const reevaluationSearchNormalized = String(reevaluationSearch || '').trim().toLowerCase();
+    const filteredReevaluationRequests = reevaluationRequests.filter((item) => {
+        if (!reevaluationSearchNormalized) return true;
+        const searchableParts = [
+            item?.id,
+            item?.operator_name,
+            item?.supervisor_name,
+            item?.sv_request_by_name,
+            item?.phone_number,
+            item?.direction?.name,
+            item?.sv_request_comment,
+            item?.sv_request_reject_comment,
+            item?.correction_call_id,
+            item?.correction_evaluator_name
+        ];
+        return searchableParts.some((value) => String(value || '').toLowerCase().includes(reevaluationSearchNormalized));
+    });
+    const requestStats = filteredReevaluationRequests.reduce((acc, item) => {
         acc.total += 1;
         if (item?.correction_call_id) acc.completed += 1;
         else if (item?.sv_request_approved) acc.approved += 1;
@@ -2944,9 +2951,9 @@ const App = ({ user, initialSelection }) => {
         return acc;
     }, { total: 0, pending: 0, approved: 0, completed: 0, rejected: 0 });
     const requestFooterInfo = [
-        `${requestStats.total} записей`,
-        selectedSupervisorObj?.name || (isSupervisorRole ? userName : null),
-        selectedOperator?.name || null,
+        reevaluationSearchNormalized
+            ? `${filteredReevaluationRequests.length} из ${reevaluationRequests.length} записей`
+            : `${requestStats.total} записей`,
         months.find(m => m.value === selectedMonth)?.label || selectedMonth
     ].filter(Boolean).join(' · ');
     const handleRequestsUpdated = useCallback(async () => {
@@ -3189,7 +3196,7 @@ const App = ({ user, initialSelection }) => {
                         <span className="panel-title">{sectionTitle}</span>
                     </div>
                     <div className="filters">
-                        {(isAdminRole || isSupervisorRole) && (
+                        {(isAdminRole || isSupervisorRole) && activeSection !== 'requests' && (
                             <div className="filter-group">
                                 <label className="label">Супервайзер</label>
                                 <select className="select" value={selectedSupervisor||''} style={selectedSupervisorIsFired ? { color:'var(--text-3)' } : undefined} onChange={e => { setSelectedSupervisor(parseInt(e.target.value)||null); setSelectedOperator(null); setCalls([]); setExpandedId(null); }}>
@@ -3200,7 +3207,7 @@ const App = ({ user, initialSelection }) => {
                                 </select>
                             </div>
                         )}
-                        {activeSection !== 'calibration' && (
+                        {activeSection === 'journal' && (
                             <div className="filter-group">
                                 <label className="label">Оператор</label>
                                 <select className="select" value={selectedOperator?.id||''} style={selectedOperatorIsFired ? { color:'var(--text-3)' } : undefined} onChange={e => { const op=operators.find(o=>o.id===parseInt(e.target.value))||null; setSelectedOperator(op); setCalls([]); setExpandedId(null); }}>
@@ -3217,6 +3224,18 @@ const App = ({ user, initialSelection }) => {
                                 {months.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
                             </select>
                         </div>
+                        {activeSection === 'requests' && (
+                            <div className="filter-group" style={{ minWidth: 280 }}>
+                                <label className="label">Поиск</label>
+                                <input
+                                    className="input"
+                                    type="text"
+                                    value={reevaluationSearch}
+                                    onChange={(e) => setReevaluationSearch(e.target.value)}
+                                    placeholder="Call ID, оператор, супервайзер, телефон..."
+                                />
+                            </div>
+                        )}
                         {isAdminRole && activeSection === 'journal' && (() => {
                             const lastDay = new Date(parseInt(selectedMonth.slice(0,4)), parseInt(selectedMonth.slice(5,7)), 0).getDate();
                             return <DateRangePicker minDate={`${selectedMonth}-01`} maxDate={`${selectedMonth}-${String(lastDay).padStart(2,'0')}`} setFromDate={setFromDate} setToDate={setToDate} />;
@@ -3581,11 +3600,15 @@ const App = ({ user, initialSelection }) => {
                                         ))}
                                     </tbody>
                                 </table>
-                            ) : reevaluationRequests.length === 0 ? (
+                            ) : filteredReevaluationRequests.length === 0 ? (
                                 <div className="empty-state">
                                     <div className="empty-state-icon"><FaIcon className="fas fa-clipboard-check" /></div>
-                                    <h3>Нет запросов</h3>
-                                    <p>За выбранный период запросы на переоценку не найдены. Попробуйте сменить фильтры по супервайзеру, оператору или месяцу.</p>
+                                    <h3>{reevaluationSearchNormalized ? 'Ничего не найдено' : 'Нет запросов'}</h3>
+                                    <p>
+                                        {reevaluationSearchNormalized
+                                            ? 'Попробуйте изменить запрос поиска.'
+                                            : 'За выбранный месяц запросы на переоценку не найдены.'}
+                                    </p>
                                 </div>
                             ) : (
                                 <table>
@@ -3601,7 +3624,7 @@ const App = ({ user, initialSelection }) => {
                                         </tr>
                                     </thead>
                                     <tbody>
-                                        {reevaluationRequests.map((requestItem, idx) => {
+                                        {filteredReevaluationRequests.map((requestItem, idx) => {
                                             const statusMeta = getReevaluationRequestStatusMeta(requestItem);
                                             const outcomeMeta = getReevaluationRequestOutcomeMeta(requestItem);
                                             const statusToneStyle = statusMeta.status === 'approved'
@@ -3743,15 +3766,9 @@ const App = ({ user, initialSelection }) => {
 
                         <div className="panel-footer">
                             <span className="panel-footer-info">
-                                {requestFooterInfo || 'Нет данных по выбранным фильтрам'}
+                                {requestFooterInfo || 'Нет данных для отображения'}
                             </span>
-                            <div style={{ display: 'flex', gap: 8 }}>
-                                {selectedOperator ? (
-                                    <button className="btn btn-secondary btn-sm" onClick={() => setSelectedOperator(null)}>
-                                        <FaIcon className="fas fa-filter" /> Все операторы
-                                    </button>
-                                ) : null}
-                            </div>
+                            <div style={{ display: 'flex', gap: 8 }} />
                         </div>
                     </>
                 ) : (
