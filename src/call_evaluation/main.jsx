@@ -705,7 +705,7 @@ const getReevaluationRequestOutcomeMeta = (call) => {
     return getReevaluationRequestStatusMeta(call);
 };
 
-const SvRequestButton = ({ call, userId, userRole, isAdminRole = false, fetchEvaluations, onReevaluate, onUpdated }) => {
+const SvRequestButton = ({ call, userId, userRole, isAdminRole = false, fetchEvaluations, onReevaluate, onUpdated, pendingAdminMode = 'default' }) => {
     const [showModal, setShowModal] = useState(false);
     const [showRejectModal, setShowRejectModal] = useState(false);
     const [comment, setComment] = useState('');
@@ -803,18 +803,27 @@ const SvRequestButton = ({ call, userId, userRole, isAdminRole = false, fetchEva
         if (isAdmin) {
             return (
                 <>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <HoverTooltip text={tooltipText || 'Запрос ожидает решения'}>
-                            <span style={{ fontSize: 13, color: 'var(--amber)', display: 'flex', alignItems: 'center', gap: 4 }}>
-                                <FaIcon className="fas fa-clock" style={{ fontSize: 11 }} /> Ожидает
-                            </span>
-                        </HoverTooltip>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                        {pendingAdminMode !== 'buttons_only' ? (
+                            <HoverTooltip text={tooltipText || 'Запрос ожидает решения'}>
+                                <span style={{ fontSize: 13, color: 'var(--amber)', display: 'flex', alignItems: 'center', gap: 4 }}>
+                                    <FaIcon className="fas fa-clock" style={{ fontSize: 11 }} /> Ожидает
+                                </span>
+                            </HoverTooltip>
+                        ) : null}
                         <button className="btn btn-green btn-sm" onClick={e => { e.stopPropagation(); void decideRequest('approved'); }} disabled={loading}>
                             Принять
                         </button>
                         <button className="btn btn-danger btn-sm" onClick={e => { e.stopPropagation(); setShowRejectModal(true); }} disabled={loading}>
                             Отклонить
                         </button>
+                        {pendingAdminMode === 'buttons_only' && tooltipText ? (
+                            <HoverTooltip text={tooltipText}>
+                                <span style={{ color: 'var(--text-2)', display: 'inline-flex', alignItems: 'center', cursor: 'pointer' }}>
+                                    <FaIcon className="fas fa-info-circle" />
+                                </span>
+                            </HoverTooltip>
+                        ) : null}
                     </div>
                     {showRejectModal && (
                         <div className="modal-backdrop" onClick={e => { e.stopPropagation(); setShowRejectModal(false); }}>
@@ -3341,7 +3350,7 @@ const App = ({ user, initialSelection }) => {
                                             <td>
                                                 <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}}>
                                                     <span style={{fontSize:12,color:'var(--text-2)'}}>{fmtDate(call._rawEvaluation?.evaluation_date||call.date)}</span>
-                                                    <div style={{display:'flex',alignItems:'center',gap:6,flexShrink:0}} onClick={e=>e.stopPropagation()}>
+                                                    <div style={{display:'flex',alignItems:'center',gap:6,flexShrink:0,flexWrap:'wrap',justifyContent:'flex-end'}} onClick={e=>e.stopPropagation()}>
                                                         {call.is_imported ? (
                                                             <>
                                                                 <button className="btn btn-green btn-sm" onClick={() => { setEvalModalMode('journal'); setEditingEval(call); setShowEvalModal(true); }}><FaIcon className="fas fa-star" /> Оценить</button>
@@ -3349,6 +3358,18 @@ const App = ({ user, initialSelection }) => {
                                                             </>
                                                         ) : (
                                                             <>
+                                                                {isAdminRole && !call.isDraft && getReevaluationRequestStatus(call) === 'pending' && (
+                                                                    <SvRequestButton
+                                                                        call={call}
+                                                                        userId={userId}
+                                                                        userRole={isSupervisorRole ? 'sv' : userRole}
+                                                                        isAdminRole={isAdminRole}
+                                                                        fetchEvaluations={fetchEvaluations}
+                                                                        onUpdated={handleRequestsUpdated}
+                                                                        pendingAdminMode="buttons_only"
+                                                                        onReevaluate={() => { setEvalModalMode('journal'); setEditingEval({...call,isReevaluation:true}); setShowEvalModal(true); }}
+                                                                    />
+                                                                )}
                                                                 {(isAdminRole || isSupervisorRole) && !call.isDraft && (
                                                                     <button
                                                                         className={`btn btn-sm ${call.feedback ? 'btn-secondary' : 'btn-primary'}`}
@@ -3361,7 +3382,9 @@ const App = ({ user, initialSelection }) => {
                                                                         {call.feedback ? 'Ред. ОС' : 'ОС'}
                                                                     </button>
                                                                 )}
-                                                                <SvRequestButton call={call} userId={userId} userRole={isSupervisorRole ? 'sv' : userRole} isAdminRole={isAdminRole} fetchEvaluations={fetchEvaluations} onUpdated={handleRequestsUpdated} onReevaluate={() => { setEvalModalMode('journal'); setEditingEval({...call,isReevaluation:true}); setShowEvalModal(true); }} />
+                                                                {!(isAdminRole && !call.isDraft && getReevaluationRequestStatus(call) === 'pending') && (
+                                                                    <SvRequestButton call={call} userId={userId} userRole={isSupervisorRole ? 'sv' : userRole} isAdminRole={isAdminRole} fetchEvaluations={fetchEvaluations} onUpdated={handleRequestsUpdated} onReevaluate={() => { setEvalModalMode('journal'); setEditingEval({...call,isReevaluation:true}); setShowEvalModal(true); }} />
+                                                                )}
                                                                 {isAdminRole && !call.isDraft && (
                                                                     <>
                                                                         <button className="btn btn-secondary btn-sm" onClick={() => { setEvalModalMode('journal'); setEditingEval({...call,isReevaluation:true}); setShowEvalModal(true); }}>
