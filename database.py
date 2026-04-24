@@ -2134,10 +2134,21 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_lms_lesson_progress_assignment ON lms_lesson_progress(assignment_id);
                 CREATE INDEX IF NOT EXISTS idx_lms_lesson_progress_user_lesson ON lms_lesson_progress(user_id, lesson_id);
                 CREATE INDEX IF NOT EXISTS idx_lms_lesson_progress_assignment_user_lesson ON lms_lesson_progress(assignment_id, user_id, lesson_id);
+                CREATE INDEX IF NOT EXISTS idx_lms_lesson_progress_assignment_user_activity_at
+                ON lms_lesson_progress(assignment_id, user_id, (COALESCE(last_heartbeat_at, last_event_at, updated_at)));
                 CREATE INDEX IF NOT EXISTS idx_lms_learning_sessions_lesson_user_active ON lms_learning_sessions(lesson_id, user_id, is_active);
+                CREATE INDEX IF NOT EXISTS idx_lms_learning_sessions_assignment_lesson_user_active_fp
+                ON lms_learning_sessions(assignment_id, lesson_id, user_id, is_active, client_fingerprint);
+                CREATE INDEX IF NOT EXISTS idx_lms_learning_sessions_assignment_user_started
+                ON lms_learning_sessions(assignment_id, user_id, started_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_lms_learning_events_session_created ON lms_learning_events(session_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_lms_learning_events_session_type_created
+                ON lms_learning_events(session_id, event_type, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_lms_learning_events_lesson_user_created
+                ON lms_learning_events(lesson_id, user_id, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_lms_test_attempts_assignment_test ON lms_test_attempts(assignment_id, test_id);
                 CREATE INDEX IF NOT EXISTS idx_lms_test_attempts_assignment_user_test_status_passed ON lms_test_attempts(assignment_id, user_id, test_id, status, passed);
+                CREATE INDEX IF NOT EXISTS idx_lms_test_attempts_assignment_user_started ON lms_test_attempts(assignment_id, user_id, started_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_lms_test_attempts_user_started ON lms_test_attempts(user_id, started_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_lms_attempt_answers_attempt ON lms_test_attempt_answers(attempt_id);
                 CREATE INDEX IF NOT EXISTS idx_lms_certificates_user_status ON lms_certificates(user_id, status);

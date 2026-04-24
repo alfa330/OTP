@@ -1261,6 +1261,144 @@ const formatDurationLabel = (seconds) => {
   return minutes > 0 ? `${hours} ч ${minutes} мин` : `${hours} ч`;
 };
 
+const LMS_CLIENT_SESSION_STORAGE_KEY = "lms:client-session-id";
+
+const createLmsClientSessionKey = () => {
+  if (typeof window !== "undefined" && window.crypto?.randomUUID) {
+    return `lms-${window.crypto.randomUUID()}`;
+  }
+  return `lms-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
+};
+
+const getOrCreateLmsClientSessionKey = () => {
+  if (typeof window === "undefined") return "";
+  try {
+    const existing = window.sessionStorage?.getItem(LMS_CLIENT_SESSION_STORAGE_KEY);
+    if (existing) return String(existing);
+    const next = createLmsClientSessionKey();
+    window.sessionStorage?.setItem(LMS_CLIENT_SESSION_STORAGE_KEY, next);
+    return next;
+  } catch (_) {
+    return "";
+  }
+};
+
+const appendClientSessionKeyToPath = (path, clientSessionKey) => {
+  const normalizedPath = String(path || "").trim();
+  const normalizedKey = String(clientSessionKey || "").trim();
+  if (!normalizedPath || !normalizedKey) return normalizedPath;
+  const separator = normalizedPath.includes("?") ? "&" : "?";
+  return `${normalizedPath}${separator}client_session_key=${encodeURIComponent(normalizedKey)}`;
+};
+
+const resolveLmsHeartbeatIntervalMs = (lessonLike, fallbackSeconds = 5) => {
+  const configuredSeconds = Number(
+    lessonLike?.antiCheat?.heartbeat_seconds
+    ?? lessonLike?.anti_cheat?.heartbeat_seconds
+    ?? fallbackSeconds
+  );
+  const normalizedSeconds = Number.isFinite(configuredSeconds)
+    ? Math.max(3, Math.min(60, configuredSeconds))
+    : fallbackSeconds;
+  return Math.round(normalizedSeconds * 1000);
+};
+
+function useLmsLessonSessionLifecycle({
+  enabled,
+  lessonId,
+  clientSessionKey,
+  lmsRequest,
+  onHidden,
+  onVisible,
+  onBeforeClose,
+}) {
+  const onHiddenRef = useRef(onHidden);
+  const onVisibleRef = useRef(onVisible);
+  const onBeforeCloseRef = useRef(onBeforeClose);
+  const sessionClosedRef = useRef(false);
+
+  useEffect(() => {
+    onHiddenRef.current = onHidden;
+  }, [onHidden]);
+
+  useEffect(() => {
+    onVisibleRef.current = onVisible;
+  }, [onVisible]);
+
+  useEffect(() => {
+    onBeforeCloseRef.current = onBeforeClose;
+  }, [onBeforeClose]);
+
+  useEffect(() => {
+    sessionClosedRef.current = false;
+  }, [lessonId, clientSessionKey]);
+
+  const postLessonEvent = useCallback(async (eventType, payload = {}, options = {}) => {
+    if (!enabled || !lessonId || typeof lmsRequest !== "function") return null;
+    return lmsRequest(`/api/lms/lessons/${lessonId}/event`, {
+      method: "POST",
+      keepalive: options?.keepalive === true,
+      body: {
+        event_type: eventType,
+        payload,
+        client_session_key: clientSessionKey || undefined,
+        client_ts: new Date().toISOString(),
+      },
+    });
+  }, [enabled, lessonId, lmsRequest, clientSessionKey]);
+
+  const sendSessionEnd = useCallback((reason = "client_close", options = {}) => {
+    if (!enabled || !lessonId || sessionClosedRef.current) return;
+    sessionClosedRef.current = true;
+    try {
+      onBeforeCloseRef.current?.(reason);
+    } catch (_) {
+      // ignore non-blocking cleanup errors
+    }
+    void postLessonEvent("session_end", { reason }, options).catch(() => {});
+  }, [enabled, lessonId, postLessonEvent]);
+
+  useEffect(() => {
+    if (!enabled || typeof document === "undefined") return undefined;
+    const handleVisibilityChange = () => {
+      const isVisible = !document.hidden;
+      if (isVisible) {
+        onVisibleRef.current?.();
+        void postLessonEvent("tab_visible").catch(() => {});
+        return;
+      }
+      onHiddenRef.current?.();
+      void postLessonEvent("tab_hidden").catch(() => {});
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [enabled, postLessonEvent]);
+
+  useEffect(() => {
+    if (!enabled || typeof window === "undefined") return undefined;
+    const handlePageHide = () => {
+      sendSessionEnd("pagehide", { keepalive: true });
+    };
+    const handleBeforeUnload = () => {
+      sendSessionEnd("beforeunload", { keepalive: true });
+    };
+    window.addEventListener("pagehide", handlePageHide);
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => {
+      window.removeEventListener("pagehide", handlePageHide);
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+      sendSessionEnd("lesson_unmount");
+    };
+  }, [enabled, sendSessionEnd]);
+
+  return {
+    postLessonEvent,
+    sendSessionEnd,
+  };
+}
+
 const inferLessonType = (lessonLike) => {
   const explicit = String(lessonLike?.lesson_type || lessonLike?.type || "").trim().toLowerCase();
   if (explicit === "quiz") return "quiz";
@@ -1889,6 +2027,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
   const canDeleteCourses = role === "sv" || role === "admin" || role === "super_admin";
   const canGoCatalog = canUseLearnerApi;
   const apiRoot = String(apiBaseUrl || "").trim().replace(/\/+$/, "");
+  const lmsClientSessionKey = useMemo(() => getOrCreateLmsClientSessionKey(), []);
   const routeState = useMemo(() => resolveLmsRouteState(location.pathname), [location.pathname]);
   const view = routeState?.view || (canGoCatalog ? "catalog" : "admin");
   const routeCourseId = routeState?.courseId || null;
@@ -1998,6 +2137,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
       headers: finalHeaders,
       body,
       signal: options?.signal,
+      keepalive: options?.keepalive === true,
       credentials: "include",
     });
 
@@ -2246,6 +2386,22 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
     adminAttempts,
     learners,
   ]);
+
+  const loadAdminLearningSessions = useCallback(async (options = {}) => {
+    if (!apiRoot || !canUseManagerApi) return [];
+    const params = new URLSearchParams();
+    const courseId = Number(options?.courseId || 0);
+    const userId = Number(options?.userId || 0);
+    const assignmentId = Number(options?.assignmentId || 0);
+    const limit = Math.max(1, Math.min(100, Number(options?.limit || 20) || 20));
+    if (courseId > 0) params.set("course_id", String(courseId));
+    if (userId > 0) params.set("user_id", String(userId));
+    if (assignmentId > 0) params.set("assignment_id", String(assignmentId));
+    params.set("limit", String(limit));
+    const query = params.toString();
+    const payload = await lmsRequest(`/api/lms/admin/learning-sessions${query ? `?${query}` : ""}`);
+    return Array.isArray(payload?.sessions) ? payload.sessions : [];
+  }, [apiRoot, canUseManagerApi, lmsRequest]);
 
   const getCourseCacheKey = useCallback((courseId) => {
     const normalizedCourseId = Number(courseId || 0) || 0;
@@ -2546,7 +2702,9 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
         return storeLessonInCache(normalizedCourseId, baseLesson);
       }
 
-      const detail = await lmsRequest(`/api/lms/lessons/${baseLesson.apiLessonId}`);
+      const detail = await lmsRequest(
+        appendClientSessionKeyToPath(`/api/lms/lessons/${baseLesson.apiLessonId}`, lmsClientSessionKey)
+      );
       const nextLesson = hydrateLearnerLessonDetail(baseLesson, detail);
       storeLessonInCache(normalizedCourseId, nextLesson);
 
@@ -2569,6 +2727,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
     getCourseCacheKey,
     getLessonCacheKey,
     hydrateLearnerLessonDetail,
+    lmsClientSessionKey,
     storeLessonInCache,
     lmsRequest,
     mergeLessonIntoCourse,
@@ -3086,7 +3245,12 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
   const handleCompleteLesson = useCallback(async (lesson) => {
     if (!apiRoot || !canUseLearnerApi || !lesson?.apiLessonId) return false;
     try {
-      await lmsRequest(`/api/lms/lessons/${lesson.apiLessonId}/complete`, { method: "POST" });
+      await lmsRequest(`/api/lms/lessons/${lesson.apiLessonId}/complete`, {
+        method: "POST",
+        body: {
+          client_session_key: lmsClientSessionKey || undefined,
+        },
+      });
       emitToast("Урок отмечен как завершенный", "success");
       setSelectedLesson((prev) => (
         prev
@@ -3106,7 +3270,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
       emitToast(`Не удалось завершить урок: ${String(error?.message || "ошибка")}`, "error");
       return false;
     }
-  }, [apiRoot, canUseLearnerApi, lmsRequest, emitToast, refreshSelectedCourse, loadLearnerDashboard]);
+  }, [apiRoot, canUseLearnerApi, lmsRequest, emitToast, refreshSelectedCourse, loadLearnerDashboard, lmsClientSessionKey]);
 
   const handleQuizFinished = useCallback(async () => {
     try {
@@ -3439,6 +3603,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
             canDeleteCourses={canDeleteCourses}
             busyCourseId={busyCourseId}
             isEditorMode={isEditorRole}
+            loadLearningSessions={loadAdminLearningSessions}
           />
         )}
       </main>
@@ -4477,12 +4642,15 @@ function LessonView({
               onQuizFinished={onQuizFinished}
               emitToast={emitToast}
               blockTranscriptCopy={blockTranscriptCopy}
+              clientSessionKey={lmsClientSessionKey}
             />
           ) : isTextLesson ? (
             <TextLesson
               lesson={lesson}
               onCompleteLesson={onCompleteLesson}
               isManagerMode={isManagerMode}
+              lmsRequest={lmsRequest}
+              clientSessionKey={lmsClientSessionKey}
             />
           ) : (
             <VideoLesson
@@ -4493,6 +4661,7 @@ function LessonView({
               onCompleteLesson={onCompleteLesson}
               emitToast={emitToast}
               isManagerMode={isManagerMode}
+              clientSessionKey={lmsClientSessionKey}
             />
           )}
         </div>
@@ -4508,10 +4677,11 @@ function CombinedVideoBlockPlayer({
   completionThreshold = 95,
   allowFastForward = false,
   isManagerMode = false,
-  lmsRequest,
+  postLessonEvent,
   emitToast,
   initialDurationSeconds = 0,
   initialProgress = 0,
+  heartbeatIntervalMs = 5000,
   onProgressChange,
 }) {
   const normalizedThreshold = Math.max(1, Math.min(100, Number(completionThreshold || 95)));
@@ -4549,7 +4719,7 @@ function CombinedVideoBlockPlayer({
   }, [isManagerMode, lessonId, blockMaterialId, blockVideoUrl]);
   const canTrackEvents =
     !isManagerMode
-    && typeof lmsRequest === "function"
+    && typeof postLessonEvent === "function"
     && Number(lessonId || 0) > 0
     && Number(blockMaterialId || 0) > 0;
   const canSeekForward = isManagerMode || Boolean(allowFastForward) || progress >= normalizedThreshold;
@@ -4669,24 +4839,17 @@ function CombinedVideoBlockPlayer({
     const position = Math.max(0, Number(video?.currentTime || displayCurrentSeconds || 0));
     const ratio = clampLmsProgress((position / duration) * 100);
     try {
-      await lmsRequest(`/api/lms/lessons/${lessonId}/event`, {
-        method: "POST",
-        body: {
-          event_type: "combined_video_progress",
-          payload: {
-            material_id: Number(blockMaterialId),
-            progress_ratio: Number(ratio.toFixed(2)),
-            position_seconds: Number(position.toFixed(2)),
-            duration_seconds: Number(duration.toFixed(2)),
-            tab_visible: visibleRef.current,
-          },
-          client_ts: new Date().toISOString(),
-        },
+      await postLessonEvent("combined_video_progress", {
+        material_id: Number(blockMaterialId),
+        progress_ratio: Number(ratio.toFixed(2)),
+        position_seconds: Number(position.toFixed(2)),
+        duration_seconds: Number(duration.toFixed(2)),
+        tab_visible: visibleRef.current,
       });
     } catch (_) {
       // silent: non-blocking telemetry
     }
-  }, [canTrackEvents, lmsRequest, lessonId, blockMaterialId, safeTotalSeconds, displayCurrentSeconds]);
+  }, [canTrackEvents, postLessonEvent, blockMaterialId, safeTotalSeconds, displayCurrentSeconds]);
 
   useEffect(() => {
     if (!playing || !canTrackEvents) {
@@ -4695,27 +4858,12 @@ function CombinedVideoBlockPlayer({
     }
     reportIntervalRef.current = setInterval(() => {
       void reportCombinedProgress();
-    }, 5000);
+    }, heartbeatIntervalMs);
     return () => clearInterval(reportIntervalRef.current);
-  }, [playing, canTrackEvents, reportCombinedProgress]);
+  }, [playing, canTrackEvents, reportCombinedProgress, heartbeatIntervalMs]);
 
   useEffect(() => {
     if (isManagerMode) return undefined;
-    const sendVisibilityEvent = async (isVisible) => {
-      if (!canTrackEvents || !playing) return;
-      try {
-        await lmsRequest(`/api/lms/lessons/${lessonId}/event`, {
-          method: "POST",
-          body: {
-            event_type: "visibility",
-            payload: { is_visible: Boolean(isVisible) },
-            client_ts: new Date().toISOString(),
-          },
-        });
-      } catch (_) {
-        // silent: non-blocking anti-cheat event
-      }
-    };
     const handleVisibilityChange = () => {
       const isVisible = !document.hidden;
       visibleRef.current = isVisible;
@@ -4725,14 +4873,14 @@ function CombinedVideoBlockPlayer({
           videoRef.current.pause();
         }
         persistLocalProgress(true);
+        void reportCombinedProgress();
         setTabHidden(true);
         setTimeout(() => setTabHidden(false), 3000);
       }
-      sendVisibilityEvent(isVisible);
     };
     document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
-  }, [canTrackEvents, lmsRequest, lessonId, playing, isManagerMode, persistLocalProgress]);
+  }, [playing, isManagerMode, persistLocalProgress, reportCombinedProgress]);
 
   const handleLoadedMetadata = useCallback(() => {
     const video = videoRef.current;
@@ -4786,22 +4934,15 @@ function CombinedVideoBlockPlayer({
       progressRatio: 100,
     });
     if (canTrackEvents) {
-      void lmsRequest(`/api/lms/lessons/${lessonId}/event`, {
-        method: "POST",
-        body: {
-          event_type: "combined_video_progress",
-          payload: {
-            material_id: Number(blockMaterialId),
-            progress_ratio: 100,
-            position_seconds: Number(duration.toFixed(2)),
-            duration_seconds: Number(duration.toFixed(2)),
-            tab_visible: visibleRef.current,
-          },
-          client_ts: new Date().toISOString(),
-        },
+      void postLessonEvent("combined_video_progress", {
+        material_id: Number(blockMaterialId),
+        progress_ratio: 100,
+        position_seconds: Number(duration.toFixed(2)),
+        duration_seconds: Number(duration.toFixed(2)),
+        tab_visible: visibleRef.current,
       }).catch(() => {});
     }
-  }, [canTrackEvents, lmsRequest, lessonId, blockMaterialId, persistLocalProgress]);
+  }, [canTrackEvents, postLessonEvent, blockMaterialId, persistLocalProgress]);
 
   const maybeReportProgress = () => {
     if (!canTrackEvents) return;
@@ -5066,6 +5207,7 @@ function CombinedLesson({
   onQuizFinished,
   emitToast,
   blockTranscriptCopy = false,
+  clientSessionKey,
 }) {
   const effectiveBlockTranscriptCopy = !isManagerMode && Boolean(blockTranscriptCopy);
   const handleBlockTranscriptCopyAttempt = useCallback((event) => {
@@ -5085,6 +5227,8 @@ function CombinedLesson({
   const lessonApiId = Number(lesson?.apiLessonId || 0);
   const completionThreshold = Math.max(1, Math.min(100, Number(lesson?.completionThreshold || 95)));
   const allowFastForward = Boolean(lesson?.allowFastForward);
+  const canTrackLesson = !isManagerMode && typeof lmsRequest === "function" && lessonApiId > 0;
+  const heartbeatIntervalMs = resolveLmsHeartbeatIntervalMs(lesson);
   const serverVideoProgressByMaterial = useMemo(() => (
     lesson?.combinedVideoProgress && typeof lesson.combinedVideoProgress === "object"
       ? lesson.combinedVideoProgress
@@ -5151,6 +5295,13 @@ function CombinedLesson({
   useEffect(() => {
     setIsCombinedTestModalOpen(false);
   }, [lesson?.id]);
+
+  const { postLessonEvent } = useLmsLessonSessionLifecycle({
+    enabled: canTrackLesson,
+    lessonId: lessonApiId,
+    clientSessionKey,
+    lmsRequest,
+  });
 
   useEffect(() => {
     if (!isCombinedTestModalOpen || typeof window === "undefined") return undefined;
@@ -5222,10 +5373,11 @@ function CombinedLesson({
                   completionThreshold={completionThreshold}
                   allowFastForward={allowFastForward}
                   isManagerMode={isManagerMode}
-                  lmsRequest={lmsRequest}
+                  postLessonEvent={postLessonEvent}
                   emitToast={emitToast}
                   initialDurationSeconds={Number(blockItem?.metadata?.duration_seconds || 0)}
                   initialProgress={initialProgress}
+                  heartbeatIntervalMs={heartbeatIntervalMs}
                   onProgressChange={(nextProgress) => {
                     setVideoProgressMap((prev) => {
                       const prevProgress = clampLmsProgress(prev?.[blockKey]);
@@ -5443,7 +5595,13 @@ function CombinedLesson({
   );
 }
 
-function TextLesson({ lesson, onCompleteLesson, isManagerMode = false }) {
+function TextLesson({
+  lesson,
+  onCompleteLesson,
+  isManagerMode = false,
+  lmsRequest,
+  clientSessionKey,
+}) {
   const [completing, setCompleting] = useState(false);
   const [completed, setCompleted] = useState(String(lesson?.status || "").toLowerCase() === "completed");
   const materials = Array.isArray(lesson?.materials) ? lesson.materials : [];
@@ -5454,16 +5612,150 @@ function TextLesson({ lesson, onCompleteLesson, isManagerMode = false }) {
     if (type === "text") return false;
     return Boolean(item?.url || item?.signed_url || item?.content_url);
   });
+  const lessonId = Number(lesson?.apiLessonId || 0);
+  const canTrack = !isManagerMode && typeof lmsRequest === "function" && lessonId > 0;
+  const heartbeatIntervalMs = resolveLmsHeartbeatIntervalMs(lesson);
+  const idleTimeoutMs = 60_000;
+  const visibleRef = useRef(typeof document !== "undefined" ? !document.hidden : true);
+  const focusedRef = useRef(typeof document !== "undefined" ? document.hasFocus?.() !== false : true);
+  const confirmedSecondsRef = useRef(Math.max(0, Number(lesson?.apiProgress?.confirmed_seconds || 0)));
+  const lastActivityAtRef = useRef(Date.now());
+  const lastAccumulatedAtRef = useRef(Date.now());
+  const lastActivitySignalAtRef = useRef(0);
+  const heartbeatRef = useRef(null);
 
   useEffect(() => {
     setCompleted(String(lesson?.status || "").toLowerCase() === "completed");
   }, [lesson?.id, lesson?.status]);
+
+  useEffect(() => {
+    confirmedSecondsRef.current = Math.max(0, Number(lesson?.apiProgress?.confirmed_seconds || 0));
+    const nowTs = Date.now();
+    lastActivityAtRef.current = nowTs;
+    lastAccumulatedAtRef.current = nowTs;
+  }, [lesson?.id, lesson?.apiProgress?.confirmed_seconds]);
+
+  const flushTrackedSeconds = useCallback(() => {
+    const nowTs = Date.now();
+    const lastTick = lastAccumulatedAtRef.current || nowTs;
+    const isActiveUser = nowTs - lastActivityAtRef.current <= idleTimeoutMs;
+    if (visibleRef.current && focusedRef.current && isActiveUser) {
+      confirmedSecondsRef.current += Math.max(0, (nowTs - lastTick) / 1000);
+    }
+    lastAccumulatedAtRef.current = nowTs;
+    return confirmedSecondsRef.current;
+  }, [idleTimeoutMs]);
+
+  const sendTextHeartbeat = useCallback(async (options = {}) => {
+    if (!canTrack) return null;
+    const confirmedSeconds = flushTrackedSeconds();
+    const effectiveDuration = Math.max(1, Number(lesson?.durationSeconds || confirmedSeconds || 0));
+    const tabVisible = Boolean(
+      visibleRef.current
+      && focusedRef.current
+      && Date.now() - lastActivityAtRef.current <= idleTimeoutMs
+    );
+    return lmsRequest(`/api/lms/lessons/${lessonId}/heartbeat`, {
+      method: "POST",
+      keepalive: options?.keepalive === true,
+      body: {
+        position_seconds: Number(confirmedSeconds.toFixed(2)),
+        media_duration_seconds: Number(effectiveDuration.toFixed(2)),
+        tab_visible: tabVisible,
+        client_session_key: clientSessionKey || undefined,
+        client_ts: new Date().toISOString(),
+      },
+    });
+  }, [canTrack, flushTrackedSeconds, lesson?.durationSeconds, lessonId, lmsRequest, clientSessionKey, idleTimeoutMs]);
+
+  useLmsLessonSessionLifecycle({
+    enabled: canTrack,
+    lessonId,
+    clientSessionKey,
+    lmsRequest,
+    onHidden: () => {
+      flushTrackedSeconds();
+      visibleRef.current = false;
+      void sendTextHeartbeat().catch(() => {});
+    },
+    onVisible: () => {
+      visibleRef.current = true;
+      const nowTs = Date.now();
+      lastActivityAtRef.current = nowTs;
+      lastAccumulatedAtRef.current = nowTs;
+    },
+    onBeforeClose: () => {
+      flushTrackedSeconds();
+    },
+  });
+
+  useEffect(() => {
+    if (!canTrack || typeof window === "undefined") return undefined;
+    const handleFocus = () => {
+      focusedRef.current = true;
+      const nowTs = Date.now();
+      lastActivityAtRef.current = nowTs;
+      lastAccumulatedAtRef.current = nowTs;
+    };
+    const handleBlur = () => {
+      flushTrackedSeconds();
+      focusedRef.current = false;
+      void sendTextHeartbeat().catch(() => {});
+    };
+    window.addEventListener("focus", handleFocus);
+    window.addEventListener("blur", handleBlur);
+    return () => {
+      window.removeEventListener("focus", handleFocus);
+      window.removeEventListener("blur", handleBlur);
+    };
+  }, [canTrack, flushTrackedSeconds, sendTextHeartbeat]);
+
+  useEffect(() => {
+    if (!canTrack || typeof window === "undefined") return undefined;
+    const markActivity = (event) => {
+      const nowTs = Date.now();
+      if (event?.type === "mousemove" && nowTs - lastActivitySignalAtRef.current < 10_000) return;
+      if (event?.type === "scroll" && nowTs - lastActivitySignalAtRef.current < 2_000) return;
+      lastActivitySignalAtRef.current = nowTs;
+      lastActivityAtRef.current = nowTs;
+    };
+    window.addEventListener("pointerdown", markActivity, { passive: true });
+    window.addEventListener("keydown", markActivity);
+    window.addEventListener("scroll", markActivity, { passive: true });
+    window.addEventListener("touchstart", markActivity, { passive: true });
+    window.addEventListener("mousemove", markActivity, { passive: true });
+    return () => {
+      window.removeEventListener("pointerdown", markActivity);
+      window.removeEventListener("keydown", markActivity);
+      window.removeEventListener("scroll", markActivity);
+      window.removeEventListener("touchstart", markActivity);
+      window.removeEventListener("mousemove", markActivity);
+    };
+  }, [canTrack]);
+
+  useEffect(() => {
+    if (!canTrack) {
+      clearInterval(heartbeatRef.current);
+      return undefined;
+    }
+    heartbeatRef.current = setInterval(() => {
+      void sendTextHeartbeat().catch(() => {});
+    }, heartbeatIntervalMs);
+    return () => clearInterval(heartbeatRef.current);
+  }, [canTrack, sendTextHeartbeat, heartbeatIntervalMs]);
 
   const handleComplete = async () => {
     if (completed || completing) return;
     if (typeof onCompleteLesson !== "function") return;
     setCompleting(true);
     try {
+      if (canTrack) {
+        try {
+          await sendTextHeartbeat();
+        } catch (_) {
+          // non-blocking sync before complete
+        }
+      }
       const ok = await onCompleteLesson(lesson);
       if (ok) setCompleted(true);
     } finally {
@@ -5536,7 +5828,16 @@ function TextLesson({ lesson, onCompleteLesson, isManagerMode = false }) {
 
 // ─── VIDEO LESSON ─────────────────────────────────────────────────────────────
 
-function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest, onCompleteLesson, emitToast, isManagerMode = false }) {
+function VideoLesson({
+  lesson,
+  apiMode,
+  blockTranscriptCopy = false,
+  lmsRequest,
+  onCompleteLesson,
+  emitToast,
+  isManagerMode = false,
+  clientSessionKey,
+}) {
   const [playing, setPlaying] = useState(false);
   const [progress, setProgress] = useState(Math.max(0, Math.min(100, Number(lesson?.completionRatio ?? (String(lesson?.status || "").toLowerCase() === "completed" ? 100 : 0)))));
   const [activeTab, setActiveTab] = useState("transcript");
@@ -5546,7 +5847,9 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
   const [totalSeconds, setTotalSeconds] = useState(Math.max(1, Number(lesson?.durationSeconds || 18 * 60)));
   const [displayCurrentSeconds, setDisplayCurrentSeconds] = useState(0);
   const heartbeatRef = useRef(null);
+  const sendHeartbeatRef = useRef(null);
   const videoRef = useRef(null);
+  const playingRef = useRef(playing);
   const progressRef = useRef(progress);
   const visibleRef = useRef(typeof document !== "undefined" ? !document.hidden : true);
   const maxAllowedSecondsRef = useRef(0);
@@ -5561,6 +5864,7 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
 
   const lessonId = Number(lesson?.apiLessonId || 0);
   const canTrack = !isManagerMode && apiMode && typeof lmsRequest === "function" && lessonId > 0;
+  const heartbeatIntervalMs = resolveLmsHeartbeatIntervalMs(lesson);
   const completionThreshold = Math.max(1, Math.min(100, Number(lesson?.completionThreshold || 95)));
   const canSeekForward = isManagerMode || Boolean(lesson?.allowFastForward) || completed || progress >= completionThreshold;
   const effectiveBlockTranscriptCopy = !isManagerMode && Boolean(blockTranscriptCopy);
@@ -5600,6 +5904,10 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
     displayCurrentSecondsRef.current = displayCurrentSeconds;
   }, [displayCurrentSeconds]);
 
+  useEffect(() => {
+    playingRef.current = playing;
+  }, [playing]);
+
   const persistLocalProgress = useCallback((force = false, override = null) => {
     if (!videoStorageKey) return;
     const nowTs = Date.now();
@@ -5627,6 +5935,35 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
     });
     lastLocalPersistAtRef.current = nowTs;
   }, [videoStorageKey]);
+
+  useLmsLessonSessionLifecycle({
+    enabled: canTrack,
+    lessonId,
+    clientSessionKey,
+    lmsRequest,
+    onHidden: () => {
+      visibleRef.current = false;
+      if (playingRef.current) {
+        setPlaying(false);
+        if (videoRef.current && !videoRef.current.paused) {
+          videoRef.current.pause();
+        }
+      }
+      persistLocalProgress(true);
+      setTabHidden(true);
+      setTimeout(() => setTabHidden(false), 3000);
+      const pendingHeartbeat = sendHeartbeatRef.current?.();
+      if (pendingHeartbeat && typeof pendingHeartbeat.catch === "function") {
+        void pendingHeartbeat.catch(() => {});
+      }
+    },
+    onVisible: () => {
+      visibleRef.current = true;
+    },
+    onBeforeClose: () => {
+      persistLocalProgress(true);
+    },
+  });
 
   // Full hydration — runs only when the lesson identity (or its video
   // source/storage key) changes. Intentionally independent of
@@ -5735,7 +6072,7 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
     progressRef.current = progress;
   }, [progress]);
 
-  const sendHeartbeat = useCallback(async () => {
+  const sendHeartbeat = useCallback(async (options = {}) => {
     if (!canTrack) return null;
     const positionSecondsFromVideo = Number(videoRef.current?.currentTime || 0);
     const mediaDurationSeconds = Number(videoRef.current?.duration || safeTotalSeconds || 0);
@@ -5744,12 +6081,14 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
       : Math.floor((progressRef.current * safeTotalSeconds) / 100);
     const payload = await lmsRequest(`/api/lms/lessons/${lessonId}/heartbeat`, {
       method: "POST",
+      keepalive: options?.keepalive === true,
       body: {
         position_seconds: Math.max(0, Number(localSeconds.toFixed(2))),
         media_duration_seconds: Number.isFinite(mediaDurationSeconds) && mediaDurationSeconds > 0
           ? Number(mediaDurationSeconds.toFixed(2))
           : undefined,
         tab_visible: visibleRef.current,
+        client_session_key: clientSessionKey || undefined,
         client_ts: new Date().toISOString(),
       },
     });
@@ -5775,43 +6114,11 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
       });
     }
     return payload || null;
-  }, [canTrack, lmsRequest, lessonId, safeTotalSeconds, persistLocalProgress]);
+  }, [canTrack, lmsRequest, lessonId, safeTotalSeconds, persistLocalProgress, clientSessionKey]);
 
   useEffect(() => {
-    if (isManagerMode) return undefined;
-    const sendVisibilityEvent = async (isVisible) => {
-      if (!canTrack || !lessonId) return;
-      try {
-        await lmsRequest(`/api/lms/lessons/${lessonId}/event`, {
-          method: "POST",
-          body: {
-            event_type: "visibility",
-            payload: { is_visible: Boolean(isVisible) },
-            client_ts: new Date().toISOString(),
-          },
-        });
-      } catch (_) {
-        // silent: non-blocking anti-cheat event
-      }
-    };
-
-    const handleVisibilityChange = () => {
-      const isVisible = !document.hidden;
-      visibleRef.current = isVisible;
-      if (!isVisible && playing) {
-        setPlaying(false);
-        if (videoRef.current && !videoRef.current.paused) {
-          videoRef.current.pause();
-        }
-        persistLocalProgress(true);
-        setTabHidden(true);
-        setTimeout(() => setTabHidden(false), 3000);
-      }
-      sendVisibilityEvent(isVisible);
-    };
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
-  }, [canTrack, lmsRequest, lessonId, playing, isManagerMode, persistLocalProgress]);
+    sendHeartbeatRef.current = sendHeartbeat;
+  }, [sendHeartbeat]);
 
   useEffect(() => {
     if (!playing || !canTrack || !lessonId) {
@@ -5825,10 +6132,10 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
       } catch (_) {
         // non-fatal
       }
-    }, 5000);
+    }, heartbeatIntervalMs);
 
     return () => clearInterval(heartbeatRef.current);
-  }, [playing, canTrack, lessonId, sendHeartbeat]);
+  }, [playing, canTrack, lessonId, sendHeartbeat, heartbeatIntervalMs]);
 
   const syncHeartbeatBeforeComplete = useCallback(async () => {
     if (!canTrack) return;
@@ -5851,6 +6158,7 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
             position_seconds: Number(duration.toFixed(2)),
             media_duration_seconds: Number(duration.toFixed(2)),
             tab_visible: visibleRef.current,
+            client_session_key: clientSessionKey || undefined,
             client_ts: new Date().toISOString(),
           },
         });
@@ -5860,7 +6168,7 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
       return;
     }
     await sendHeartbeat();
-  }, [canTrack, completionThreshold, lessonId, lmsRequest, sendHeartbeat]);
+  }, [canTrack, completionThreshold, lessonId, lmsRequest, sendHeartbeat, clientSessionKey]);
 
   const handleLoadedMetadata = useCallback(() => {
     const video = videoRef.current;
@@ -5925,11 +6233,12 @@ function VideoLesson({ lesson, apiMode, blockTranscriptCopy = false, lmsRequest,
           position_seconds: Number(duration.toFixed(2)),
           media_duration_seconds: Number(duration.toFixed(2)),
           tab_visible: visibleRef.current,
+          client_session_key: clientSessionKey || undefined,
           client_ts: new Date().toISOString(),
         },
       }).catch(() => {});
     }
-  }, [canTrack, lessonId, lmsRequest, persistLocalProgress]);
+  }, [canTrack, lessonId, lmsRequest, persistLocalProgress, clientSessionKey]);
 
   const handleTimeUpdate = useCallback(() => {
     const video = videoRef.current;
@@ -11082,6 +11391,7 @@ function AdminView({
   canDeleteCourses = true,
   busyCourseId = null,
   isEditorMode = false,
+  loadLearningSessions,
 }) {
   const [deletingCourseId, setDeletingCourseId] = useState(null);
   const [archivingCourseId, setArchivingCourseId] = useState(null);
@@ -11100,6 +11410,8 @@ function AdminView({
   const [employeeCourseDeadlines, setEmployeeCourseDeadlines] = useState({});
   const [assigningCourseId, setAssigningCourseId] = useState(null);
   const [isAssignCourseModalOpen, setIsAssignCourseModalOpen] = useState(false);
+  const [selectedEmployeeLearningSessions, setSelectedEmployeeLearningSessions] = useState([]);
+  const [isLoadingSelectedEmployeeLearningSessions, setIsLoadingSelectedEmployeeLearningSessions] = useState(false);
 
   useEffect(() => {
     if (!isEditorMode) {
@@ -11190,6 +11502,12 @@ function AdminView({
       testTime: "0ч 00м",
       attempts: 0,
       lastStartedAt: null,
+      learningSeconds: 0,
+      activeLearningSeconds: 0,
+      tabHiddenCount: 0,
+      staleGapCount: 0,
+      sessionCount: 0,
+      lastLearningAt: null,
     };
     prev.courses += 1;
     prev.progressSum += progressPercent;
@@ -11197,6 +11515,15 @@ function AdminView({
     if (uiStatus === "overdue") prev.overdue += 1;
     if (startedAt && !Number.isNaN(startedAt.getTime()) && (!prev.lastStartedAt || startedAt > prev.lastStartedAt)) {
       prev.lastStartedAt = startedAt;
+    }
+    prev.learningSeconds += Math.max(0, Number(row?.confirmed_learning_seconds || 0));
+    prev.activeLearningSeconds += Math.max(0, Number(row?.active_learning_seconds || 0));
+    prev.tabHiddenCount += Math.max(0, Number(row?.learning_tab_hidden_count || 0));
+    prev.staleGapCount += Math.max(0, Number(row?.learning_stale_gap_count || 0));
+    prev.sessionCount += Math.max(0, Number(row?.session_count || 0));
+    const lastLearningAt = row?.last_learning_at ? new Date(row.last_learning_at) : null;
+    if (lastLearningAt && !Number.isNaN(lastLearningAt.getTime()) && (!prev.lastLearningAt || lastLearningAt > prev.lastLearningAt)) {
+      prev.lastLearningAt = lastLearningAt;
     }
     employeeMap.set(userId, prev);
   });
@@ -11207,15 +11534,25 @@ function AdminView({
     const totalDuration = agg ? agg.duration : 0;
     const hours = Math.floor(totalDuration / 3600);
     const minutes = Math.floor((totalDuration % 3600) / 60);
+    const learningSeconds = Math.max(0, Number(row.learningSeconds || 0));
+    const latestActivityIso = [
+      agg?.lastAt?.toISOString?.() || null,
+      row.lastLearningAt?.toISOString?.() || null,
+      row.lastStartedAt?.toISOString?.() || null,
+    ].filter(Boolean).sort().pop() || null;
     return {
       ...row,
+      learningTime: formatDurationLabel(learningSeconds),
+      learningSeconds,
+      activeLearningSeconds: Math.max(0, Number(row.activeLearningSeconds || 0)),
+      sessionCount: Math.max(0, Number(row.sessionCount || 0)),
+      tabHiddenCount: Math.max(0, Number(row.tabHiddenCount || 0)),
+      staleGapCount: Math.max(0, Number(row.staleGapCount || 0)),
       progress: row.courses > 0 ? Math.round(row.progressSum / row.courses) : 0,
       avgScore,
       attempts: agg ? agg.count : row.attempts,
       testTime: `${hours}ч ${String(minutes).padStart(2, "0")}м`,
-      lastActive: agg?.lastAt
-        ? toRelativeTime(agg.lastAt.toISOString())
-        : (row.lastStartedAt ? toRelativeTime(row.lastStartedAt.toISOString()) : row.lastActive),
+      lastActive: latestActivityIso ? toRelativeTime(latestActivityIso) : row.lastActive,
     };
   });
   const courseStatMap = new Map();
@@ -11375,12 +11712,19 @@ function AdminView({
       const totalDuration = Math.max(0, Number(row?.test_duration_seconds || 0));
       const hours = Math.floor(totalDuration / 3600);
       const minutes = Math.floor((totalDuration % 3600) / 60);
+      const learningSeconds = Math.max(0, Number(row?.confirmed_learning_seconds || 0));
       return {
         id: Number(row?.id || 0),
         name: String(row?.name || `User #${row?.id || 0}`),
         dept: String(row?.dept || "—"),
         courses: Math.max(0, Number(row?.courses || 0)),
         completed: Math.max(0, Number(row?.completed || 0)),
+        learningTime: formatDurationLabel(learningSeconds),
+        learningSeconds,
+        activeLearningSeconds: Math.max(0, Number(row?.active_learning_seconds || 0)),
+        sessionCount: Math.max(0, Number(row?.session_count || 0)),
+        tabHiddenCount: Math.max(0, Number(row?.tab_hidden_count || 0)),
+        staleGapCount: Math.max(0, Number(row?.stale_gap_count || 0)),
         progress: Math.max(0, Math.min(100, Number(row?.progress || 0))),
         avgScore: Math.max(0, Number(row?.avg_score || 0)),
         overdue: Math.max(0, Number(row?.overdue || 0)),
@@ -11626,6 +11970,8 @@ function AdminView({
         (sum, item) => sum + Math.max(0, Number(item?.duration_seconds || 0)),
         0
       );
+      const confirmedLearningSeconds = Math.max(0, Number(row?.confirmed_learning_seconds || 0));
+      const activeLearningSeconds = Math.max(0, Number(row?.active_learning_seconds || 0));
       const derivedCompletedAt = attemptsForAssignment
         .map((item) => parseLmsDate(item?.finished_at || item?.started_at))
         .filter(Boolean)
@@ -11650,6 +11996,14 @@ function AdminView({
         passedIntermediateTests: Math.max(0, Number(row?.passed_intermediate_tests || 0)),
         totalIntermediateTests: Math.max(0, Number(row?.total_intermediate_tests || 0)),
         testDuration: formatDurationLabel(totalDurationSeconds),
+        learningDuration: formatDurationLabel(confirmedLearningSeconds),
+        learningDurationSeconds: confirmedLearningSeconds,
+        activeLearningDuration: formatDurationLabel(activeLearningSeconds),
+        activeLearningSeconds,
+        tabHiddenCount: Math.max(0, Number(row?.learning_tab_hidden_count || 0)),
+        staleGapCount: Math.max(0, Number(row?.learning_stale_gap_count || 0)),
+        sessionCount: Math.max(0, Number(row?.session_count || 0)),
+        lastLearningAt: row?.last_learning_at || null,
         avgTestScore,
         finalTestScore: finalTest?.bestScore ?? null,
         tests,
@@ -11676,6 +12030,33 @@ function AdminView({
   const selectedEmployeeCourseItem = sortedSelectedEmployeeCourseAnalyticsRows.find(
     (item) => item?.rowKey === selectedEmployeeCourseKey
   );
+  useEffect(() => {
+    let cancelled = false;
+    if (!selectedEmployeeCourseItem || typeof loadLearningSessions !== "function") {
+      setSelectedEmployeeLearningSessions([]);
+      setIsLoadingSelectedEmployeeLearningSessions(false);
+      return undefined;
+    }
+    setIsLoadingSelectedEmployeeLearningSessions(true);
+    loadLearningSessions({
+      courseId: Number(selectedEmployeeCourseItem.courseId || 0),
+      userId: Number(selectedEmployee?.id || 0),
+      assignmentId: Number(selectedEmployeeCourseItem.assignmentId || 0),
+      limit: 20,
+    }).then((sessions) => {
+      if (cancelled) return;
+      setSelectedEmployeeLearningSessions(Array.isArray(sessions) ? sessions : []);
+    }).catch(() => {
+      if (cancelled) return;
+      setSelectedEmployeeLearningSessions([]);
+    }).finally(() => {
+      if (cancelled) return;
+      setIsLoadingSelectedEmployeeLearningSessions(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [loadLearningSessions, selectedEmployee?.id, selectedEmployeeCourseItem]);
   const selectedEmployeeCourseStatus = selectedEmployeeCourseItem
     ? (statusConfig[selectedEmployeeCourseItem.status] || statusConfig.not_started)
     : null;
@@ -11979,6 +12360,7 @@ function AdminView({
                   <div key={e.id} className="flex items-center gap-3">
                     <div className="w-7 h-7 rounded-full bg-gradient-to-br from-indigo-400 to-violet-500 flex items-center justify-center text-white text-[10px] font-semibold flex-shrink-0">{e.name.split(" ").map(w => w[0]).join("").slice(0, 2)}</div>
                     <div className="flex-1 min-w-0"><p className="text-xs font-medium text-slate-800 truncate">{e.name}</p></div>
+                    <div className="flex items-center gap-1.5 text-[10px] text-indigo-600"><Clock size={9} />{e.learningTime}</div>
                     <div className="flex items-center gap-1.5 text-[10px] text-slate-500"><Clock size={9} />{e.testTime}</div>
                     <div className={`flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full ${e.attempts >= 12 ? "bg-red-50 text-red-700" : e.attempts >= 8 ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-600"}`}><RefreshCw size={8} />{e.attempts} поп.</div>
                   </div>
@@ -12004,8 +12386,9 @@ function AdminView({
               {Array.from({ length: 8 }).map((_, idx) => (
                 <div key={`admin-employees-row-skeleton-${idx}`} className="flex items-center gap-4 border-b border-slate-100 pb-3 last:border-b-0 last:pb-0">
                   <SkeletonBlock className="w-9 h-9 rounded-full flex-shrink-0" />
-                  <div className="flex-1 grid grid-cols-8 gap-3 items-center">
+                  <div className="flex-1 grid grid-cols-9 gap-3 items-center">
                     <SkeletonBlock className="col-span-2 h-3.5" />
+                    <SkeletonBlock className="h-3.5" />
                     <SkeletonBlock className="h-3.5" />
                     <SkeletonBlock className="h-3.5" />
                     <SkeletonBlock className="h-3.5" />
@@ -12277,6 +12660,26 @@ function AdminView({
                           <p className="text-sm font-bold text-slate-800">{selectedEmployeeCourseItem.testDuration}</p>
                         </div>
                         <div className="bg-white rounded-xl border border-slate-100 p-4 shadow-sm transition-all hover:border-slate-200">
+                          <p className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5">Learning time</p>
+                          <p className="text-sm font-bold text-slate-800">{selectedEmployeeCourseItem.learningDuration}</p>
+                        </div>
+                        <div className="bg-white rounded-xl border border-slate-100 p-4 shadow-sm transition-all hover:border-slate-200">
+                          <p className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5">Active time</p>
+                          <p className="text-sm font-bold text-slate-800">{selectedEmployeeCourseItem.activeLearningDuration}</p>
+                        </div>
+                        <div className="bg-white rounded-xl border border-slate-100 p-4 shadow-sm transition-all hover:border-slate-200">
+                          <p className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5">Sessions</p>
+                          <p className="text-sm font-bold text-slate-800">{selectedEmployeeCourseItem.sessionCount}</p>
+                        </div>
+                        <div className="bg-white rounded-xl border border-slate-100 p-4 shadow-sm transition-all hover:border-slate-200">
+                          <p className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5">Hidden tabs</p>
+                          <p className="text-sm font-bold text-slate-800">{selectedEmployeeCourseItem.tabHiddenCount}</p>
+                        </div>
+                        <div className="bg-white rounded-xl border border-slate-100 p-4 shadow-sm transition-all hover:border-slate-200">
+                          <p className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5">Stale gaps</p>
+                          <p className="text-sm font-bold text-slate-800">{selectedEmployeeCourseItem.staleGapCount}</p>
+                        </div>
+                        <div className="bg-white rounded-xl border border-slate-100 p-4 shadow-sm transition-all hover:border-slate-200">
                           <p className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5">Ср. балл</p>
                           <p className={`text-sm font-bold ${selectedEmployeeCourseItem.avgTestScore >= 80 ? 'text-emerald-600' : 'text-slate-800'}`}>{selectedEmployeeCourseItem.avgTestScore == null ? "—" : `${selectedEmployeeCourseItem.avgTestScore}%`}</p>
                         </div>
@@ -12284,6 +12687,49 @@ function AdminView({
                           <p className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5">Итоговый тест</p>
                           <p className={`text-sm font-bold ${selectedEmployeeCourseItem.finalTestScore >= 80 ? 'text-emerald-600' : 'text-slate-800'}`}>{selectedEmployeeCourseItem.finalTestScore == null ? "—" : `${selectedEmployeeCourseItem.finalTestScore}%`}</p>
                         </div>
+                      </div>
+
+                      <div>
+                        <h4 className="text-sm font-semibold text-slate-900 mb-3.5 flex items-center gap-2">
+                          <Clock size={15} className="text-indigo-500" />
+                          Learning Sessions
+                        </h4>
+                        {isLoadingSelectedEmployeeLearningSessions ? (
+                          <div className="rounded-xl border border-slate-100 bg-white px-4 py-6 text-sm text-slate-500 shadow-sm">
+                            Loading sessions...
+                          </div>
+                        ) : selectedEmployeeLearningSessions.length === 0 ? (
+                          <div className="rounded-xl border border-slate-100 bg-white px-4 py-6 text-sm text-slate-500 shadow-sm">
+                            No learning sessions recorded yet for this assignment.
+                          </div>
+                        ) : (
+                          <div className="space-y-3 mb-6">
+                            {selectedEmployeeLearningSessions.map((sessionItem) => (
+                              <div key={sessionItem.session_id} className="bg-white rounded-xl border border-slate-100 p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-4 shadow-sm">
+                                <div className="min-w-0">
+                                  <p className="text-sm font-semibold text-slate-900 truncate">{sessionItem.lesson_title || `Lesson #${sessionItem.lesson_id}`}</p>
+                                  <p className="text-xs text-slate-500 mt-1">
+                                    {formatDateTimeLabel(sessionItem.started_at)} {sessionItem.ended_at ? `→ ${formatDateTimeLabel(sessionItem.ended_at)}` : "• active"}
+                                  </p>
+                                </div>
+                                <div className="flex flex-wrap items-center gap-2 lg:justify-end">
+                                  <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-indigo-50 text-indigo-700 border border-indigo-100">
+                                    Confirmed: {formatDurationLabel(sessionItem.confirmed_seconds)}
+                                  </span>
+                                  <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-slate-50 text-slate-700 border border-slate-200">
+                                    Active: {formatDurationLabel(sessionItem.active_seconds)}
+                                  </span>
+                                  <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-amber-50 text-amber-700 border border-amber-100">
+                                    Hidden: {Math.max(0, Number(sessionItem.tab_hidden_count || 0))}
+                                  </span>
+                                  <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-rose-50 text-rose-700 border border-rose-100">
+                                    Gaps: {Math.max(0, Number(sessionItem.stale_gap_count || 0))}
+                                  </span>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
 
                       <div>
