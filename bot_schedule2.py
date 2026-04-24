@@ -16894,7 +16894,7 @@ def _lms_bucket_name():
     )
 
 
-def _lms_signed_url(bucket_name, blob_path, expires_minutes=120):
+def _lms_signed_url(bucket_name, blob_path, expires_minutes=120, response_disposition=None, response_type=None):
     bucket_name = str(bucket_name or '').strip()
     blob_path = str(blob_path or '').strip()
     if not bucket_name or not blob_path:
@@ -16906,7 +16906,9 @@ def _lms_signed_url(bucket_name, blob_path, expires_minutes=120):
         return blob.generate_signed_url(
             version='v4',
             expiration=timedelta(minutes=max(1, int(expires_minutes))),
-            method='GET'
+            method='GET',
+            response_disposition=response_disposition,
+            response_type=response_type
         )
     except Exception:
         return None
@@ -18103,12 +18105,21 @@ def _lms_visible_learner_ids(requester_id, requester_role):
 def _lms_material_row_to_payload(row):
     bucket = row[5]
     blob_path = row[6]
-    signed_url = _lms_signed_url(bucket, blob_path, expires_minutes=240)
+    material_type = row[3]
+    mime_type = row[8]
+    is_video = str(material_type or '').strip().lower() == 'video'
+    signed_url = _lms_signed_url(
+        bucket,
+        blob_path,
+        expires_minutes=240,
+        response_disposition='inline' if is_video else None,
+        response_type=mime_type if is_video and mime_type else None
+    )
     return {
         "id": int(row[0]),
         "lesson_id": int(row[1]),
         "title": row[2],
-        "material_type": row[3],
+        "material_type": material_type,
         "content_text": row[4],
         "url": signed_url or row[7],
         "content_url": row[7],
@@ -18117,7 +18128,7 @@ def _lms_material_row_to_payload(row):
         "blob_path": blob_path,
         "gcs_bucket": bucket,
         "gcs_blob_path": blob_path,
-        "mime_type": row[8],
+        "mime_type": mime_type,
         "metadata": _lms_parse_json(row[9], {}),
         "position": int(row[10] or 1)
     }
@@ -22474,7 +22485,14 @@ def lms_admin_upload_materials():
                 )
                 blob = bucket.blob(blob_path)
                 blob.upload_from_string(content, content_type=content_type)
-                signed_url = _lms_signed_url(bucket_name, blob_path, expires_minutes=240)
+                is_video_material = requested_material_type == 'video'
+                signed_url = _lms_signed_url(
+                    bucket_name,
+                    blob_path,
+                    expires_minutes=240,
+                    response_disposition='inline' if is_video_material else None,
+                    response_type=content_type if is_video_material and content_type else None
+                )
 
                 material_id = None
                 if lesson_id is not None:

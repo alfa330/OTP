@@ -1212,6 +1212,20 @@ const clearLmsVideoPositionFromStorage = (storageKey) => {
   }
 };
 
+const preventLmsVideoAssetAction = (event) => {
+  event.preventDefault();
+};
+
+const LMS_PROTECTED_VIDEO_PROPS = Object.freeze({
+  controlsList: "nodownload noplaybackrate nofullscreen",
+  disablePictureInPicture: true,
+  disableRemotePlayback: true,
+  draggable: false,
+  referrerPolicy: "no-referrer",
+  onContextMenu: preventLmsVideoAssetAction,
+  onDragStart: preventLmsVideoAssetAction,
+});
+
 const isCompletedLmsStatus = (status) => status === "completed" || status === "completed_late";
 
 const mapAdminProgressRowToUiStatus = (row) => {
@@ -2081,6 +2095,8 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
   const homeLoadPromiseRef = useRef(null);
   const homeLoadedRef = useRef(false);
   const adminLoadPromisesRef = useRef(new Map());
+  const adminLearningSessionsCacheRef = useRef(new Map());
+  const adminLearningSessionsPromisesRef = useRef(new Map());
   const adminCacheRef = useRef({
     builderLoaded: false,
     coursesLoaded: false,
@@ -2399,8 +2415,25 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
     if (assignmentId > 0) params.set("assignment_id", String(assignmentId));
     params.set("limit", String(limit));
     const query = params.toString();
-    const payload = await lmsRequest(`/api/lms/admin/learning-sessions${query ? `?${query}` : ""}`);
-    return Array.isArray(payload?.sessions) ? payload.sessions : [];
+    const cacheKey = query || "all";
+    if (adminLearningSessionsCacheRef.current.has(cacheKey)) {
+      return adminLearningSessionsCacheRef.current.get(cacheKey);
+    }
+    const existingPromise = adminLearningSessionsPromisesRef.current.get(cacheKey);
+    if (existingPromise) return existingPromise;
+    const loadPromise = lmsRequest(`/api/lms/admin/learning-sessions${query ? `?${query}` : ""}`)
+      .then((payload) => {
+        const sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
+        adminLearningSessionsCacheRef.current.set(cacheKey, sessions);
+        return sessions;
+      })
+      .finally(() => {
+        if (adminLearningSessionsPromisesRef.current.get(cacheKey) === loadPromise) {
+          adminLearningSessionsPromisesRef.current.delete(cacheKey);
+        }
+      });
+    adminLearningSessionsPromisesRef.current.set(cacheKey, loadPromise);
+    return loadPromise;
   }, [apiRoot, canUseManagerApi, lmsRequest]);
 
   const getCourseCacheKey = useCallback((courseId) => {
@@ -4700,6 +4733,7 @@ function CombinedVideoBlockPlayer({
   const maxAllowedSecondsRef = useRef(0);
   const seekToastAtRef = useRef(0);
   const reportIntervalRef = useRef(null);
+  const reportInFlightRef = useRef(false);
   const lastProgressReportAtRef = useRef(0);
   const lastActiveReportAtRef = useRef(null);
   const lastLocalPersistAtRef = useRef(0);
@@ -4829,6 +4863,7 @@ function CombinedVideoBlockPlayer({
       progress_ratio: mergedProgress,
     });
     lastActiveReportAtRef.current = null;
+    reportInFlightRef.current = false;
     lastLocalPersistAtRef.current = Date.now();
   }, [blockMaterialId, blockVideoUrl, initialDurationSeconds, initialProgress, localStorageKey]);
 
@@ -4855,6 +4890,8 @@ function CombinedVideoBlockPlayer({
 
   const reportCombinedProgress = useCallback(async (options = {}) => {
     if (!canTrackEvents) return;
+    if (reportInFlightRef.current && options?.force !== true) return;
+    reportInFlightRef.current = true;
     const video = videoRef.current;
     const duration = Math.max(1, Number(video?.duration || safeTotalSeconds || 0));
     const position = Math.max(0, Number(video?.currentTime || displayCurrentSeconds || 0));
@@ -4873,6 +4910,8 @@ function CombinedVideoBlockPlayer({
       });
     } catch (_) {
       // silent: non-blocking telemetry
+    } finally {
+      reportInFlightRef.current = false;
     }
   }, [canTrackEvents, postLessonEvent, blockMaterialId, safeTotalSeconds, displayCurrentSeconds, takePlaybackActiveDeltaSeconds]);
 
@@ -4899,7 +4938,7 @@ function CombinedVideoBlockPlayer({
           videoRef.current.pause();
         }
         persistLocalProgress(true);
-        void reportCombinedProgress({ activeDeltaSeconds });
+        void reportCombinedProgress({ activeDeltaSeconds, force: true });
         setTabHidden(true);
         setTimeout(() => setTabHidden(false), 3000);
       }
@@ -4975,7 +5014,8 @@ function CombinedVideoBlockPlayer({
   const maybeReportProgress = () => {
     if (!canTrackEvents) return;
     const nowTs = Date.now();
-    if (nowTs - lastProgressReportAtRef.current < 2500) return;
+    const minIntervalMs = Math.max(heartbeatIntervalMs, 5000);
+    if (nowTs - lastProgressReportAtRef.current < minIntervalMs) return;
     lastProgressReportAtRef.current = nowTs;
     void reportCombinedProgress();
   };
@@ -5000,8 +5040,7 @@ function CombinedVideoBlockPlayer({
       durationSeconds: safeDuration,
       progressRatio: nextProgress,
     });
-    maybeReportProgress();
-  }, [safeTotalSeconds, totalSeconds, canTrackEvents, reportCombinedProgress, persistLocalProgress]);
+  }, [safeTotalSeconds, totalSeconds, persistLocalProgress]);
 
   const notifySeekBlocked = () => {
     const nowTs = Date.now();
@@ -5166,8 +5205,7 @@ function CombinedVideoBlockPlayer({
               controls={false}
               playsInline
               preload="metadata"
-              disablePictureInPicture
-              controlsList="nodownload noplaybackrate nofullscreen"
+              {...LMS_PROTECTED_VIDEO_PROPS}
               onClick={togglePlayback}
               onLoadedMetadata={handleLoadedMetadata}
               onTimeUpdate={handleTimeUpdate}
@@ -5877,6 +5915,7 @@ function VideoLesson({
   const [totalSeconds, setTotalSeconds] = useState(Math.max(1, Number(lesson?.durationSeconds || 18 * 60)));
   const [displayCurrentSeconds, setDisplayCurrentSeconds] = useState(0);
   const heartbeatRef = useRef(null);
+  const heartbeatInFlightRef = useRef(false);
   const sendHeartbeatRef = useRef(null);
   const videoRef = useRef(null);
   const playingRef = useRef(playing);
@@ -6087,6 +6126,7 @@ function VideoLesson({
       lastLocalPersistAtRef.current = Date.now();
     }
     lastActiveHeartbeatAtRef.current = null;
+    heartbeatInFlightRef.current = false;
     autoCompleteTriggeredRef.current = false;
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [videoStorageKey]);
@@ -6185,12 +6225,16 @@ function VideoLesson({
       return undefined;
     }
 
-    heartbeatRef.current = setInterval(async () => {
-      try {
-        await sendHeartbeat();
-      } catch (_) {
-        // non-fatal
-      }
+    heartbeatRef.current = setInterval(() => {
+      if (heartbeatInFlightRef.current) return;
+      heartbeatInFlightRef.current = true;
+      void sendHeartbeat()
+        .catch(() => {
+          // non-fatal
+        })
+        .finally(() => {
+          heartbeatInFlightRef.current = false;
+        });
     }, heartbeatIntervalMs);
 
     return () => clearInterval(heartbeatRef.current);
@@ -6525,8 +6569,7 @@ function VideoLesson({
               controls={false}
               playsInline
               preload="metadata"
-              disablePictureInPicture
-              controlsList="nodownload noplaybackrate nofullscreen"
+              {...LMS_PROTECTED_VIDEO_PROPS}
               onClick={togglePlayback}
               onLoadedMetadata={handleLoadedMetadata}
               onTimeUpdate={handleTimeUpdate}
@@ -9619,6 +9662,8 @@ function CourseBuilder({
                         src={selectedLessonVideoUrl}
                         controls
                         preload="metadata"
+                        playsInline
+                        {...LMS_PROTECTED_VIDEO_PROPS}
                         className="w-full max-h-80 bg-black rounded-lg"
                       />
                     ) : (
@@ -10583,6 +10628,8 @@ function CourseBuilder({
                                             src={blockVideoUrl}
                                             controls
                                             preload="metadata"
+                                            playsInline
+                                            {...LMS_PROTECTED_VIDEO_PROPS}
                                             className="w-full max-h-60 rounded-xl bg-slate-950"
                                           />
                                         ) : (
@@ -10964,6 +11011,8 @@ function CourseBuilder({
                                       src={selectedLessonVideoUrl}
                                       controls
                                       preload="metadata"
+                                      playsInline
+                                      {...LMS_PROTECTED_VIDEO_PROPS}
                                       className="w-full max-h-72 bg-black"
                                     />
                                   ) : (
@@ -12097,18 +12146,36 @@ function AdminView({
   const selectedEmployeeCourseItem = sortedSelectedEmployeeCourseAnalyticsRows.find(
     (item) => item?.rowKey === selectedEmployeeCourseKey
   );
+  const selectedEmployeeCourseSessionRequest = useMemo(() => {
+    if (!selectedEmployeeCourseItem) return null;
+    const courseId = Number(selectedEmployeeCourseItem.courseId || 0);
+    const userId = Number(selectedEmployee?.id || 0);
+    const assignmentId = Number(selectedEmployeeCourseItem.assignmentId || 0);
+    if (!courseId || !userId || !assignmentId) return null;
+    return {
+      courseId,
+      userId,
+      assignmentId,
+      requestKey: `${userId}:${assignmentId}:${courseId}`,
+    };
+  }, [
+    selectedEmployee?.id,
+    selectedEmployeeCourseItem?.assignmentId,
+    selectedEmployeeCourseItem?.courseId,
+  ]);
+
   useEffect(() => {
     let cancelled = false;
-    if (!selectedEmployeeCourseItem || typeof loadLearningSessions !== "function") {
+    if (!selectedEmployeeCourseSessionRequest || typeof loadLearningSessions !== "function") {
       setSelectedEmployeeLearningSessions([]);
       setIsLoadingSelectedEmployeeLearningSessions(false);
       return undefined;
     }
     setIsLoadingSelectedEmployeeLearningSessions(true);
     loadLearningSessions({
-      courseId: Number(selectedEmployeeCourseItem.courseId || 0),
-      userId: Number(selectedEmployee?.id || 0),
-      assignmentId: Number(selectedEmployeeCourseItem.assignmentId || 0),
+      courseId: selectedEmployeeCourseSessionRequest.courseId,
+      userId: selectedEmployeeCourseSessionRequest.userId,
+      assignmentId: selectedEmployeeCourseSessionRequest.assignmentId,
       limit: 20,
     }).then((sessions) => {
       if (cancelled) return;
@@ -12123,7 +12190,7 @@ function AdminView({
     return () => {
       cancelled = true;
     };
-  }, [loadLearningSessions, selectedEmployee?.id, selectedEmployeeCourseItem]);
+  }, [loadLearningSessions, selectedEmployeeCourseSessionRequest]);
   const selectedEmployeeCourseStatus = selectedEmployeeCourseItem
     ? (statusConfig[selectedEmployeeCourseItem.status] || statusConfig.not_started)
     : null;
