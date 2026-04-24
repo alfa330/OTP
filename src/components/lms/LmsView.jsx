@@ -10983,25 +10983,25 @@ function MonthPicker({ value = "", onChange }) {
       <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl select-none">
         <button
           onClick={() => step(-1)}
-          className="flex items-center justify-center w-8 h-8 rounded-lg text-slate-500 hover:text-slate-800 hover:bg-white hover:shadow-sm transition-all"
+          className="flex items-center justify-center w-10 h-10 rounded-lg text-slate-500 hover:text-slate-800 hover:bg-white hover:shadow-sm transition-all"
           title="Предыдущий месяц"
         >
           <ChevronLeft size={14} />
         </button>
         <div 
           onClick={() => setIsOpen(!isOpen)}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white shadow-sm min-w-[148px] justify-center cursor-pointer hover:bg-slate-50 transition-colors"
+          className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-white shadow-sm min-w-[148px] justify-center cursor-pointer hover:bg-slate-50 transition-colors"
           title="Выбрать месяц"
         >
-          <CalendarDays size={13} className="text-indigo-500 shrink-0" />
-          <span className="text-sm font-semibold text-slate-800 whitespace-nowrap select-none">
+          <CalendarDays size={14} className="text-indigo-500 shrink-0" />
+          <span className="text-sm font-medium text-slate-800 whitespace-nowrap select-none">
             {MONTH_NAMES_RU[parsed.month - 1]} {parsed.year}
           </span>
         </div>
         <button
           onClick={() => step(1)}
           disabled={isCurrentMonth}
-          className={`flex items-center justify-center w-8 h-8 rounded-lg transition-all ${isCurrentMonth ? "text-slate-300 cursor-not-allowed" : "text-slate-500 hover:text-slate-800 hover:bg-white hover:shadow-sm"}`}
+          className={`flex items-center justify-center w-10 h-10 rounded-lg transition-all ${isCurrentMonth ? "text-slate-300 cursor-not-allowed" : "text-slate-500 hover:text-slate-800 hover:bg-white hover:shadow-sm"}`}
           title="Следующий месяц"
         >
           <ChevronRight size={14} />
@@ -11799,7 +11799,6 @@ function AdminView({
         <div>
           <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Панель администратора</h1>
           <p className="text-sm text-slate-500 mt-0.5">Управление курсами и прогрессом сотрудников</p>
-          {loading && <p className="text-xs text-indigo-600 mt-1">Обновление данных...</p>}
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -11821,11 +11820,14 @@ function AdminView({
           ))}
         </div>
         {typeof onMonthChange === "function" && (
-          <div className="flex items-center">
+          <div className="flex items-center gap-3">
             <MonthPicker
               value={selectedMonth}
               onChange={onMonthChange}
             />
+            {loading && (
+              <RefreshCw size={18} className="text-indigo-500 animate-spin shrink-0" />
+            )}
           </div>
         )}
       </div>
