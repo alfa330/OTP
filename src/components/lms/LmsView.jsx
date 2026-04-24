@@ -10923,6 +10923,9 @@ const MONTH_NAMES_RU = [
 ];
 
 function MonthPicker({ value = "", onChange }) {
+  const [isOpen, setIsOpen] = useState(false);
+  const dropdownRef = useRef(null);
+
   const parsed = (() => {
     const parts = String(value || "").split("-");
     if (parts.length === 2) {
@@ -10933,6 +10936,28 @@ function MonthPicker({ value = "", onChange }) {
     const now = new Date();
     return { year: now.getFullYear(), month: now.getMonth() + 1 };
   })();
+
+  const [viewYear, setViewYear] = useState(parsed.year);
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    function handleClickOutside(event) {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
+        setIsOpen(false);
+      }
+    }
+    if (isOpen) {
+      document.addEventListener("mousedown", handleClickOutside);
+    }
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [isOpen]);
+
+  // Sync view year when popup opens
+  useEffect(() => {
+    if (isOpen) {
+      setViewYear(parsed.year);
+    }
+  }, [isOpen, parsed.year]);
 
   const toValue = (year, month) =>
     `${year}-${String(month).padStart(2, "0")}`;
@@ -10945,32 +10970,93 @@ function MonthPicker({ value = "", onChange }) {
     onChange?.(toValue(year, month));
   };
 
+  const handleSelectMonth = (m) => {
+    onChange?.(toValue(viewYear, m));
+    setIsOpen(false);
+  };
+
   const now = new Date();
   const isCurrentMonth = parsed.year === now.getFullYear() && parsed.month === now.getMonth() + 1;
 
   return (
-    <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl select-none">
-      <button
-        onClick={() => step(-1)}
-        className="flex items-center justify-center w-8 h-8 rounded-lg text-slate-500 hover:text-slate-800 hover:bg-white hover:shadow-sm transition-all"
-        title="Предыдущий месяц"
-      >
-        <ChevronLeft size={14} />
-      </button>
-      <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white shadow-sm min-w-[148px] justify-center">
-        <CalendarDays size={13} className="text-indigo-500 shrink-0" />
-        <span className="text-sm font-semibold text-slate-800 whitespace-nowrap">
-          {MONTH_NAMES_RU[parsed.month - 1]} {parsed.year}
-        </span>
+    <div className="relative" ref={dropdownRef}>
+      <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl select-none">
+        <button
+          onClick={() => step(-1)}
+          className="flex items-center justify-center w-8 h-8 rounded-lg text-slate-500 hover:text-slate-800 hover:bg-white hover:shadow-sm transition-all"
+          title="Предыдущий месяц"
+        >
+          <ChevronLeft size={14} />
+        </button>
+        <div 
+          onClick={() => setIsOpen(!isOpen)}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white shadow-sm min-w-[148px] justify-center cursor-pointer hover:bg-slate-50 transition-colors"
+          title="Выбрать месяц"
+        >
+          <CalendarDays size={13} className="text-indigo-500 shrink-0" />
+          <span className="text-sm font-semibold text-slate-800 whitespace-nowrap select-none">
+            {MONTH_NAMES_RU[parsed.month - 1]} {parsed.year}
+          </span>
+        </div>
+        <button
+          onClick={() => step(1)}
+          disabled={isCurrentMonth}
+          className={`flex items-center justify-center w-8 h-8 rounded-lg transition-all ${isCurrentMonth ? "text-slate-300 cursor-not-allowed" : "text-slate-500 hover:text-slate-800 hover:bg-white hover:shadow-sm"}`}
+          title="Следующий месяц"
+        >
+          <ChevronRight size={14} />
+        </button>
       </div>
-      <button
-        onClick={() => step(1)}
-        disabled={isCurrentMonth}
-        className={`flex items-center justify-center w-8 h-8 rounded-lg transition-all ${isCurrentMonth ? "text-slate-300 cursor-not-allowed" : "text-slate-500 hover:text-slate-800 hover:bg-white hover:shadow-sm"}`}
-        title="Следующий месяц"
-      >
-        <ChevronRight size={14} />
-      </button>
+
+      {isOpen && (
+        <div className="absolute top-full left-1/2 -translate-x-1/2 mt-2 w-64 bg-white rounded-2xl shadow-xl border border-slate-200 p-4 z-50 animate-in fade-in zoom-in-95 duration-200">
+          {/* Year selector */}
+          <div className="flex items-center justify-between mb-4">
+            <button 
+              onClick={() => setViewYear(y => y - 1)}
+              className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors"
+            >
+              <ChevronLeft size={16} />
+            </button>
+            <span className="text-sm font-bold text-slate-800">{viewYear}</span>
+            <button 
+              onClick={() => setViewYear(y => Math.min(now.getFullYear(), y + 1))}
+              disabled={viewYear >= now.getFullYear()}
+              className={`p-1.5 rounded-lg transition-colors ${viewYear >= now.getFullYear() ? "text-slate-200 cursor-not-allowed" : "text-slate-400 hover:text-indigo-600 hover:bg-indigo-50"}`}
+            >
+              <ChevronRight size={16} />
+            </button>
+          </div>
+          
+          {/* Months grid */}
+          <div className="grid grid-cols-3 gap-2">
+            {MONTH_NAMES_RU.map((monthName, idx) => {
+              const monthNum = idx + 1;
+              const isSelected = parsed.year === viewYear && parsed.month === monthNum;
+              const isFuture = viewYear === now.getFullYear() && monthNum > now.getMonth() + 1;
+              
+              return (
+                <button
+                  key={monthName}
+                  onClick={() => !isFuture && handleSelectMonth(monthNum)}
+                  disabled={isFuture}
+                  className={`
+                    py-2 rounded-xl text-xs font-medium transition-all
+                    ${isSelected 
+                      ? "bg-indigo-600 text-white shadow-md shadow-indigo-200" 
+                      : isFuture
+                        ? "text-slate-300 cursor-not-allowed"
+                        : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+                    }
+                  `}
+                >
+                  {monthName.slice(0, 3)}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
