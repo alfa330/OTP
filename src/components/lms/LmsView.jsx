@@ -4896,6 +4896,7 @@ function CombinedVideoBlockPlayer({
   onProgressChange,
 }) {
   const normalizedThreshold = Math.max(1, Math.min(100, Number(completionThreshold || 95)));
+  const progressReportIntervalMs = Math.max(30_000, Number(heartbeatIntervalMs || 0) || 0);
   const [playing, setPlaying] = useState(false);
   const [progress, setProgress] = useState(clampLmsProgress(initialProgress));
   const [tabHidden, setTabHidden] = useState(false);
@@ -4912,6 +4913,7 @@ function CombinedVideoBlockPlayer({
   const reportInFlightRef = useRef(false);
   const lastProgressReportAtRef = useRef(0);
   const lastActiveReportAtRef = useRef(null);
+  const thresholdReportedRef = useRef(clampLmsProgress(initialProgress) >= normalizedThreshold);
   const lastLocalPersistAtRef = useRef(0);
   const restoredPositionRef = useRef(0);
   const totalSecondsRef = useRef(totalSeconds);
@@ -4950,9 +4952,9 @@ function CombinedVideoBlockPlayer({
     const lastTs = lastActiveReportAtRef.current;
     lastActiveReportAtRef.current = isActivelyPlaying ? nowTs : null;
     if (!isActivelyPlaying || !lastTs) return 0;
-    const capSeconds = Math.max(1, Math.min(60, (Number(heartbeatIntervalMs || 5000) / 1000) * 2));
+    const capSeconds = Math.max(1, Math.min(60, (Number(progressReportIntervalMs || 30000) / 1000) * 2));
     return Math.max(0, Math.min((nowTs - lastTs) / 1000, capSeconds));
-  }, [heartbeatIntervalMs]);
+  }, [progressReportIntervalMs]);
 
   useEffect(() => {
     totalSecondsRef.current = totalSeconds;
@@ -5040,8 +5042,9 @@ function CombinedVideoBlockPlayer({
     });
     lastActiveReportAtRef.current = null;
     reportInFlightRef.current = false;
+    thresholdReportedRef.current = mergedProgress >= normalizedThreshold;
     lastLocalPersistAtRef.current = Date.now();
-  }, [blockMaterialId, blockVideoUrl, initialDurationSeconds, initialProgress, localStorageKey]);
+  }, [blockMaterialId, blockVideoUrl, initialDurationSeconds, initialProgress, localStorageKey, normalizedThreshold]);
 
   useEffect(() => {
     if (!localStorageKey || typeof window === "undefined") return undefined;
@@ -5070,12 +5073,13 @@ function CombinedVideoBlockPlayer({
     reportInFlightRef.current = true;
     const video = videoRef.current;
     const duration = Math.max(1, Number(video?.duration || safeTotalSeconds || 0));
-    const position = Math.max(0, Number(video?.currentTime || displayCurrentSeconds || 0));
+    const position = Math.max(0, Number(video?.currentTime || displayCurrentSecondsRef.current || 0));
     const ratio = clampLmsProgress((position / duration) * 100);
     const activeDeltaSeconds = options?.activeDeltaSeconds != null
       ? Math.max(0, Number(options.activeDeltaSeconds) || 0)
       : takePlaybackActiveDeltaSeconds();
     try {
+      lastProgressReportAtRef.current = Date.now();
       await postLessonEvent("combined_video_progress", {
         material_id: Number(blockMaterialId),
         progress_ratio: Number(ratio.toFixed(2)),
@@ -5089,7 +5093,7 @@ function CombinedVideoBlockPlayer({
     } finally {
       reportInFlightRef.current = false;
     }
-  }, [canTrackEvents, postLessonEvent, blockMaterialId, safeTotalSeconds, displayCurrentSeconds, takePlaybackActiveDeltaSeconds]);
+  }, [canTrackEvents, postLessonEvent, blockMaterialId, safeTotalSeconds, takePlaybackActiveDeltaSeconds]);
 
   useEffect(() => {
     if (!playing || !canTrackEvents) {
@@ -5098,9 +5102,9 @@ function CombinedVideoBlockPlayer({
     }
     reportIntervalRef.current = setInterval(() => {
       void reportCombinedProgress();
-    }, heartbeatIntervalMs);
+    }, progressReportIntervalMs);
     return () => clearInterval(reportIntervalRef.current);
-  }, [playing, canTrackEvents, reportCombinedProgress, heartbeatIntervalMs]);
+  }, [playing, canTrackEvents, reportCombinedProgress, progressReportIntervalMs]);
 
   useEffect(() => {
     if (isManagerMode) return undefined;
@@ -5176,6 +5180,7 @@ function CombinedVideoBlockPlayer({
     });
     if (canTrackEvents) {
       const activeDeltaSeconds = takePlaybackActiveDeltaSeconds({ includeCurrent: true });
+      thresholdReportedRef.current = true;
       void postLessonEvent("combined_video_progress", {
         material_id: Number(blockMaterialId),
         progress_ratio: 100,
@@ -5190,7 +5195,7 @@ function CombinedVideoBlockPlayer({
   const maybeReportProgress = () => {
     if (!canTrackEvents) return;
     const nowTs = Date.now();
-    const minIntervalMs = Math.max(heartbeatIntervalMs, 5000);
+    const minIntervalMs = progressReportIntervalMs;
     if (nowTs - lastProgressReportAtRef.current < minIntervalMs) return;
     lastProgressReportAtRef.current = nowTs;
     void reportCombinedProgress();
@@ -5208,6 +5213,7 @@ function CombinedVideoBlockPlayer({
     }
     maxAllowedSecondsRef.current = Math.max(maxAllowedSecondsRef.current, currentTime);
     setDisplayCurrentSeconds(currentTime);
+    const prevProgress = clampLmsProgress(progressRef.current);
     const nextProgress = clampLmsProgress((currentTime / safeDuration) * 100);
     setProgress(nextProgress);
     progressRef.current = nextProgress;
@@ -5216,7 +5222,11 @@ function CombinedVideoBlockPlayer({
       durationSeconds: safeDuration,
       progressRatio: nextProgress,
     });
-  }, [safeTotalSeconds, totalSeconds, persistLocalProgress]);
+    if (!thresholdReportedRef.current && prevProgress < normalizedThreshold && nextProgress >= normalizedThreshold) {
+      thresholdReportedRef.current = true;
+      void reportCombinedProgress({ force: true });
+    }
+  }, [safeTotalSeconds, totalSeconds, persistLocalProgress, normalizedThreshold, reportCombinedProgress]);
 
   const notifySeekBlocked = () => {
     const nowTs = Date.now();
@@ -12520,6 +12530,39 @@ function AdminView({
       tone: selectedEmployeeCourseItem.staleGapCount > 0 ? "text-rose-600 bg-rose-50" : "text-slate-600 bg-slate-50",
     },
   ] : [];
+  const selectedEmployeeCourseMetricByLabel = new Map(
+    selectedEmployeeCourseMetricCards.map((metric) => [metric.label, metric])
+  );
+  const selectedEmployeeCourseOverviewGroups = selectedEmployeeCourseItem ? [
+    {
+      title: "Прогресс",
+      description: "Что уже пройдено по структуре курса.",
+      metrics: ["Прогресс курса", "Завершено уроков", "Все тесты", "Промежуточные тесты"]
+        .map((label) => selectedEmployeeCourseMetricByLabel.get(label))
+        .filter(Boolean),
+    },
+    {
+      title: "Результаты",
+      description: "Качество усвоения по контрольным точкам.",
+      metrics: ["Средний балл", "Итоговый тест"]
+        .map((label) => selectedEmployeeCourseMetricByLabel.get(label))
+        .filter(Boolean),
+    },
+    {
+      title: "Время обучения",
+      description: "Сколько сотрудник реально работал с материалами.",
+      metrics: ["Активное обучение", "Подтверждённый контент", "Учебные сессии"]
+        .map((label) => selectedEmployeeCourseMetricByLabel.get(label))
+        .filter(Boolean),
+    },
+    {
+      title: "Поведение",
+      description: "Сигналы отвлечений и разрывов активности.",
+      metrics: ["Смена вкладок", "Долгие паузы"]
+        .map((label) => selectedEmployeeCourseMetricByLabel.get(label))
+        .filter(Boolean),
+    },
+  ].filter((groupItem) => groupItem.metrics.length > 0) : [];
   const selectedEmployeeCourseDetailTabs = selectedEmployeeCourseItem ? [
     {
       id: "overview",
@@ -13152,24 +13195,34 @@ function AdminView({
                             </div>
                           )}
 
-                          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
-                            {selectedEmployeeCourseMetricCards.map((metric) => {
-                              const MetricIcon = metric.icon;
-                              return (
-                                <div key={metric.label} className="bg-white rounded-xl border border-slate-100 p-4 shadow-sm transition-all hover:border-slate-200">
-                                  <div className="flex items-start justify-between gap-3">
-                                    <div className="min-w-0">
-                                      <p className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5 leading-tight">{metric.label}</p>
-                                      <p className="text-lg font-bold text-slate-900 leading-tight">{metric.value}</p>
-                                    </div>
-                                    <span className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${metric.tone}`}>
-                                      <MetricIcon size={15} />
-                                    </span>
-                                  </div>
-                                  <p className="text-[11px] text-slate-500 mt-2 leading-snug">{metric.detail}</p>
+                          <div className="space-y-4">
+                            {selectedEmployeeCourseOverviewGroups.map((groupItem) => (
+                              <section key={groupItem.title} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+                                <div className="mb-3">
+                                  <h4 className="text-sm font-bold text-slate-900">{groupItem.title}</h4>
+                                  <p className="text-xs text-slate-500 mt-0.5">{groupItem.description}</p>
                                 </div>
-                              );
-                            })}
+                                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
+                                  {groupItem.metrics.map((metric) => {
+                                    const MetricIcon = metric.icon;
+                                    return (
+                                      <div key={metric.label} className="rounded-xl border border-slate-100 bg-slate-50/60 p-4 transition-all hover:bg-white hover:border-slate-200">
+                                        <div className="flex items-start justify-between gap-3">
+                                          <div className="min-w-0">
+                                            <p className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5 leading-tight">{metric.label}</p>
+                                            <p className="text-lg font-bold text-slate-900 leading-tight">{metric.value}</p>
+                                          </div>
+                                          <span className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${metric.tone}`}>
+                                            <MetricIcon size={15} />
+                                          </span>
+                                        </div>
+                                        <p className="text-[11px] text-slate-500 mt-2 leading-snug">{metric.detail}</p>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              </section>
+                            ))}
                           </div>
                         </div>
                       )}
