@@ -16,7 +16,187 @@ import {
 import "react-quill/dist/quill.snow.css";
 import "./LmsRichText.css";
 
-const SkeletonBlock = ({ className = "", delay }) => {
+const CurriculumSkeleton = ({ modules = 3, lessonsPerModule = 4 }) => (
+  <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden" aria-busy="true">
+    <div className="px-6 py-5 border-b border-slate-100">
+      <SkeletonBlock className="w-40 h-5" />
+      <SkeletonBlock className="w-28 h-3 mt-2" />
+    </div>
+    {Array.from({ length: modules }).map((_, moduleIndex) => (
+      <div key={`curriculum-module-skeleton-${moduleIndex}`} className="border-b border-slate-100 last:border-0">
+        <div className="px-6 py-4 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3 flex-1">
+            <SkeletonBlock className="w-7 h-7 rounded-lg flex-shrink-0" />
+            <SkeletonBlock className="w-5/12 h-4" />
+            <SkeletonBlock className="w-20 h-3" />
+          </div>
+          <SkeletonBlock className="w-4 h-4 rounded-md" />
+        </div>
+        <div className="px-6 pb-4 space-y-2">
+          {Array.from({ length: lessonsPerModule }).map((__, lessonIndex) => (
+            <div key={`curriculum-lesson-skeleton-${moduleIndex}-${lessonIndex}`} className="flex items-center gap-3 p-3">
+              <SkeletonBlock className="w-8 h-8 rounded-lg flex-shrink-0" />
+              <div className="flex-1 space-y-2">
+                <SkeletonBlock className="w-8/12 h-3.5" />
+                <SkeletonBlock className="w-4/12 h-2.5" />
+              </div>
+              <SkeletonBlock className="w-12 h-5 rounded-full" />
+            </div>
+          ))}
+        </div>
+      </div>
+    ))}
+  </div>
+);
+
+const CourseDetailSkeleton = () => (
+  <div className="lms-shell py-8" aria-busy="true">
+    <div className="rounded-3xl bg-slate-200 p-8 mb-8 relative overflow-hidden">
+      <SkeletonBlock className="absolute right-8 top-8 w-28 h-28 rounded-3xl opacity-60" />
+      <div className="relative z-10 max-w-2xl 2xl:max-w-3xl space-y-5">
+        <div className="flex items-center gap-2">
+          <SkeletonBlock className="w-24 h-3" />
+          <SkeletonBlock className="w-28 h-6 rounded-full" />
+        </div>
+        <div className="space-y-3">
+          <SkeletonBlock className="w-11/12 h-8" />
+          <SkeletonBlock className="w-8/12 h-8" />
+        </div>
+        <div className="space-y-2">
+          <SkeletonBlock className="w-full h-3.5" />
+          <SkeletonBlock className="w-9/12 h-3.5" />
+        </div>
+        <div className="flex flex-wrap gap-4">
+          {Array.from({ length: 4 }).map((_, idx) => (
+            <SkeletonBlock key={`course-meta-skeleton-${idx}`} className="w-24 h-4" />
+          ))}
+        </div>
+        <SkeletonBlock className="w-44 h-11 rounded-xl" />
+      </div>
+    </div>
+
+    <div className="grid grid-cols-1 xl:grid-cols-12 gap-8 2xl:gap-10">
+      <div className="xl:col-span-8 2xl:col-span-9 space-y-6">
+        <div className="bg-white rounded-2xl border border-slate-200 p-6">
+          <SkeletonBlock className="w-40 h-5 mb-4" />
+          <div className="flex flex-wrap gap-2">
+            {Array.from({ length: 5 }).map((_, idx) => (
+              <SkeletonBlock key={`skill-skeleton-${idx}`} className="w-28 h-7 rounded-full" />
+            ))}
+          </div>
+        </div>
+        <CurriculumSkeleton />
+      </div>
+
+      <div className="xl:col-span-4 2xl:col-span-3 space-y-4">
+        <div className="bg-white rounded-2xl border border-slate-200 p-5">
+          <SkeletonBlock className="w-36 h-4 mb-5" />
+          <div className="space-y-4">
+            {Array.from({ length: 4 }).map((_, idx) => (
+              <div key={`course-param-skeleton-${idx}`} className="flex items-center justify-between gap-4">
+                <SkeletonBlock className="w-28 h-3.5" />
+                <SkeletonBlock className="w-16 h-3.5" />
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+);
+
+const LessonContentSkeleton = () => (
+  <div className="space-y-6" aria-busy="true">
+    <div className="bg-slate-900 rounded-2xl overflow-hidden relative aspect-video">
+      <SkeletonBlock className="absolute inset-0 w-full h-full rounded-none opacity-30" />
+      <div className="absolute inset-x-0 bottom-0 p-4 space-y-3">
+        <SkeletonBlock className="w-full h-2 rounded-full opacity-40" />
+        <div className="flex items-center gap-3">
+          <SkeletonBlock className="w-16 h-8 rounded-md opacity-40" />
+          <SkeletonBlock className="flex-1 h-2 rounded-full opacity-40" />
+          <SkeletonBlock className="w-24 h-4 opacity-40" />
+        </div>
+      </div>
+    </div>
+    <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+      <div className="flex gap-4 border-b border-slate-100 px-5 py-4">
+        {Array.from({ length: 3 }).map((_, idx) => (
+          <SkeletonBlock key={`lesson-tab-skeleton-${idx}`} className="w-24 h-4" />
+        ))}
+      </div>
+      <div className="p-5 space-y-3">
+        <SkeletonBlock className="w-full h-3.5" />
+        <SkeletonBlock className="w-11/12 h-3.5" />
+        <SkeletonBlock className="w-10/12 h-3.5" />
+        <SkeletonBlock className="w-7/12 h-3.5" />
+      </div>
+    </div>
+  </div>
+);
+
+const LessonViewSkeleton = () => (
+  <div className="flex h-[calc(100vh-4rem)] min-h-[560px] overflow-hidden" aria-busy="true">
+    <div className="w-80 2xl:w-96 flex h-full min-h-0 flex-shrink-0 flex-col bg-white border-r border-slate-200">
+      <div className="p-4 border-b border-slate-100 space-y-3">
+        <SkeletonBlock className="w-36 h-3" />
+        <SkeletonBlock className="w-10/12 h-4" />
+        <SkeletonBlock className="w-full h-1.5 rounded-full" />
+      </div>
+      <div className="flex-1 min-h-0 overflow-hidden">
+        {Array.from({ length: 3 }).map((_, moduleIndex) => (
+          <div key={`lesson-sidebar-module-skeleton-${moduleIndex}`}>
+            <div className="px-4 py-3 bg-slate-50 border-b border-slate-100">
+              <SkeletonBlock className="w-7/12 h-3.5" />
+            </div>
+            {Array.from({ length: 4 }).map((__, lessonIndex) => (
+              <div key={`lesson-sidebar-row-skeleton-${moduleIndex}-${lessonIndex}`} className="flex items-start gap-3 px-4 py-3 border-b border-slate-50">
+                <SkeletonBlock className="w-7 h-7 rounded-lg flex-shrink-0" />
+                <div className="flex-1 space-y-2">
+                  <SkeletonBlock className="w-10/12 h-3" />
+                  <SkeletonBlock className="w-5/12 h-2.5" />
+                </div>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+    </div>
+
+    <div className="flex-1 min-h-0 overflow-hidden bg-slate-50">
+      <div className="bg-white border-b border-slate-200 px-6 py-3 flex items-center gap-3">
+        <SkeletonBlock className="w-8 h-8 rounded-lg" />
+        <div className="flex-1 space-y-2">
+          <SkeletonBlock className="w-32 h-3" />
+          <SkeletonBlock className="w-7/12 h-4" />
+        </div>
+        <SkeletonBlock className="w-24 h-4" />
+      </div>
+      <div className="max-w-6xl 2xl:max-w-7xl mx-auto px-8 2xl:px-10 py-8">
+        <LessonContentSkeleton />
+      </div>
+    </div>
+  </div>
+);
+
+const LearningSessionsSkeleton = ({ count = 3 }) => (
+  <div className="space-y-3 mb-6" aria-busy="true">
+    {Array.from({ length: count }).map((_, idx) => (
+      <div key={`learning-session-skeleton-${idx}`} className="bg-white rounded-xl border border-slate-100 p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-4 shadow-sm">
+        <div className="min-w-0 flex-1 space-y-2">
+          <SkeletonBlock className="w-7/12 h-4" />
+          <SkeletonBlock className="w-9/12 h-3" />
+        </div>
+        <div className="flex flex-wrap items-center gap-2 lg:justify-end">
+          {Array.from({ length: 4 }).map((__, chipIndex) => (
+            <SkeletonBlock key={`learning-session-chip-skeleton-${idx}-${chipIndex}`} className="w-24 h-6 rounded-md" />
+          ))}
+        </div>
+      </div>
+    ))}
+  </div>
+);
+
+function SkeletonBlock({ className = "", delay }) {
   const normalizedClassName = String(className || "").trim();
   const hasRoundedToken = /(^|\s)rounded(?:-[^\s]+)?(?=\s|$)/.test(normalizedClassName);
   const softenedRoundedClassName = normalizedClassName.replace(
@@ -39,7 +219,7 @@ const SkeletonBlock = ({ className = "", delay }) => {
       style={{ "--lms-skeleton-delay": `${resolvedDelay}ms` }}
     />
   );
-};
+}
 
 // ─── MOCK DATA ────────────────────────────────────────────────────────────────
 
@@ -3532,19 +3712,11 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
         )}
 
         {view === "course" && !selectedCourse && (
-          <div className="lms-shell py-10">
-            <div className="rounded-2xl border border-slate-200 bg-white px-6 py-10 text-sm text-slate-500">
-              Загрузка курса...
-            </div>
-          </div>
+          <CourseDetailSkeleton />
         )}
 
         {view === "lesson" && (!selectedLesson || !selectedCourse) && (
-          <div className="lms-shell py-10">
-            <div className="rounded-2xl border border-slate-200 bg-white px-6 py-10 text-sm text-slate-500">
-              Загрузка урока...
-            </div>
-          </div>
+          <LessonViewSkeleton />
         )}
 
         {view === "catalog" && (
@@ -3597,6 +3769,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
             isManagerMode={canUseManagerApi}
             courseAnalytics={selectedCourseAnalytics}
             clientSessionKey={lmsClientSessionKey}
+            loadingDetail={Boolean(apiMode && canUseLearnerApi && selectedLesson?.apiLessonId && selectedLesson?.type !== "quiz" && !selectedLesson?.__detailLoaded)}
           />
         )}
         {view === "builder" && (
@@ -4543,6 +4716,7 @@ function LessonView({
   isManagerMode = false,
   courseAnalytics = null,
   clientSessionKey,
+  loadingDetail = false,
 }) {
   const isQuiz = lesson.type === "quiz";
   const isTextLesson = lesson.type === "text";
@@ -4639,7 +4813,9 @@ function LessonView({
         </div>
 
         <div className="max-w-6xl 2xl:max-w-7xl mx-auto px-8 2xl:px-10 py-8">
-          {isQuiz ? (
+          {loadingDetail ? (
+            <LessonContentSkeleton />
+          ) : isQuiz ? (
             isManagerMode ? (
               <ManagerQuizPreviewSection lesson={lesson} course={course} courseAnalytics={courseAnalytics} />
             ) : apiMode && Number(lesson?.apiTestId) > 0 ? (
@@ -12829,9 +13005,7 @@ function AdminView({
                           Learning Sessions
                         </h4>
                         {isLoadingSelectedEmployeeLearningSessions ? (
-                          <div className="rounded-xl border border-slate-100 bg-white px-4 py-6 text-sm text-slate-500 shadow-sm">
-                            Loading sessions...
-                          </div>
+                          <LearningSessionsSkeleton />
                         ) : selectedEmployeeLearningSessions.length === 0 ? (
                           <div className="rounded-xl border border-slate-100 bg-white px-4 py-6 text-sm text-slate-500 shadow-sm">
                             No learning sessions recorded yet for this assignment.
