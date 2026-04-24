@@ -71,24 +71,24 @@ import FaIcon from '../common/FaIcon';
             new Intl.NumberFormat("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(num(v));
 
         return (
-            <div className="mt-6 p-6 bg-gray-50 rounded-lg shadow-sm border border-gray-200">
+            <div className="mt-6 p-4 sm:p-6 bg-gray-50 rounded-lg shadow-sm border border-gray-200 overflow-hidden">
             {/* Header */}
-            <div className="flex items-start justify-between gap-4">
+            <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
                 <div>
-                <h3 className="text-xl font-semibold mb-1 text-gray-800">Результат расчёта</h3>
+                <h3 className="text-lg sm:text-xl font-semibold mb-1 text-gray-800">Результат расчёта</h3>
                 <p className="text-sm text-gray-500">Сводка по KPI и выплатам</p>
                 </div>
 
-                <div className="flex items-center gap-3">
+                <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 w-full sm:w-auto">
                 <button
                     onClick={handleCopyTotal}
-                    className="inline-flex items-center gap-2 px-3 py-1.5 bg-blue-600 text-white rounded hover:bg-blue-700 transition text-sm"
+                    className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-3 py-2 sm:py-1.5 bg-blue-600 text-white rounded hover:bg-blue-700 transition text-sm"
                     title="Скопировать итоговую сумму"
                 >
                     <FaIcon className="fas fa-copy" />
                     Копировать итого
                 </button>
-                <div className="text-sm text-green-600 font-medium min-w-[90px] text-right">
+                <div className="text-sm text-green-600 font-medium min-w-[90px] text-left sm:text-right">
                     {copyMsg ? copyMsg : ""}
                 </div>
                 </div>
@@ -115,7 +115,7 @@ import FaIcon from '../common/FaIcon';
                         {/* Tooltip i для коэффициента премии */}
                         <div className="relative group inline-block">
                         <span className="inline-flex items-center justify-center w-5 h-5 text-xs rounded-full bg-gray-200 text-gray-700">i</span>
-                        <div className="pointer-events-none opacity-0 group-hover:opacity-100 group-focus:opacity-100 transition-all duration-150 absolute right-0 top-full mt-2 w-64 z-50">
+                            <div className="pointer-events-none opacity-0 group-hover:opacity-100 group-focus:opacity-100 transition-all duration-150 absolute right-0 top-full mt-2 w-64 max-w-[calc(100vw-3rem)] z-50">
                             <div className="bg-white border rounded shadow p-3 text-sm text-gray-700">
                             <div className="font-medium mb-1">Коэффициент премии</div>
                             <div className="text-xs text-gray-600">
@@ -146,7 +146,7 @@ import FaIcon from '../common/FaIcon';
                         <div className="ml-2">
                         <div className="relative group inline-block">
                             <span className="inline-flex items-center justify-center w-5 h-5 text-xs rounded-full bg-gray-200 text-gray-700">i</span>
-                            <div className="pointer-events-none opacity-0 group-hover:opacity-100 transition-all duration-150 absolute -right-1 top-full mt-2 w-72 z-50">
+                            <div className="pointer-events-none opacity-0 group-hover:opacity-100 transition-all duration-150 absolute -right-1 top-full mt-2 w-72 max-w-[calc(100vw-3rem)] z-50">
                             <div className="bg-white border rounded shadow p-3 text-sm text-gray-700">
                                 <div className="font-medium mb-1">Формула</div>
                                 <div className="text-xs text-gray-600 mb-2">Оклад = отработанные часы × 700</div>
@@ -178,7 +178,7 @@ import FaIcon from '../common/FaIcon';
                         <div className="ml-2">
                         <div className="relative group inline-block">
                             <span className="inline-flex items-center justify-center w-5 h-5 text-xs rounded-full bg-gray-200 text-gray-700">i</span>
-                            <div className="pointer-events-none opacity-0 group-hover:opacity-100 transition-all duration-150 absolute -right-1 top-full mt-2 w-80 z-50">
+                            <div className="pointer-events-none opacity-0 group-hover:opacity-100 transition-all duration-150 absolute -right-1 top-full mt-2 w-80 max-w-[calc(100vw-3rem)] z-50">
                             <div className="bg-white border rounded shadow p-3 text-sm text-gray-700">
                                 <div className="font-medium mb-1">Формула</div>
                                 <div className="text-xs text-gray-600 mb-2">Премия = Оклад × Баллы KPI × Коэффициент премии</div>
@@ -205,15 +205,15 @@ import FaIcon from '../common/FaIcon';
                 </div>
 
                 {/* Big clear total */}
-                <div className="bg-white p-4 rounded border-l-4 border-l-green-500 flex items-center justify-between">
+                <div className="bg-white p-4 rounded border-l-4 border-l-green-500 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                 <div>
                     <div className="text-sm text-gray-600">Итого к выплате</div>
-                    <div className="text-2xl font-bold text-green-600 mt-1">{money(finalSalary)}</div>
+                    <div className="text-xl sm:text-2xl font-bold text-green-600 mt-1 break-words">{money(finalSalary)}</div>
                 </div>
 
-                <div className="text-sm text-gray-600 text-right">
-                    <div>Норма часов: <span className="font-medium text-gray-800 ml-1">{isNaN(hoursNorm) ? "-" : hoursNorm.toFixed(2)}</span></div>
-                    <div className="mt-1">Выполнение нормы: <span className="font-medium text-gray-800 ml-1">{hoursPercentage.toFixed(2)}%</span></div>
+                <div className="text-sm text-gray-600 text-left sm:text-right">
+                    <div>Норма часов: <span className="font-medium text-gray-800 sm:ml-1">{isNaN(hoursNorm) ? "-" : hoursNorm.toFixed(2)}</span></div>
+                    <div className="mt-1">Выполнение нормы: <span className="font-medium text-gray-800 sm:ml-1">{hoursPercentage.toFixed(2)}%</span></div>
                 </div>
                 </div>
 
@@ -225,17 +225,17 @@ import FaIcon from '../common/FaIcon';
                 <div className="mb-3">
                     <div className="text-xs text-gray-500 font-medium mb-2">Часы & KPI</div>
                     <div className="divide-y divide-gray-100 rounded-lg overflow-hidden border">
-                    <div className="flex items-center justify-between px-4 py-2 bg-white">
+                    <div className="flex items-center justify-between gap-3 px-3 sm:px-4 py-2 bg-white">
                         <div className="text-sm text-gray-600">Норма часов</div>
-                        <div className="font-medium text-gray-800">{isNaN(hoursNorm) ? "-" : hoursNorm.toFixed(2)}</div>
+                        <div className="font-medium text-gray-800 text-right">{isNaN(hoursNorm) ? "-" : hoursNorm.toFixed(2)}</div>
                     </div>
-                    <div className="flex items-center justify-between px-4 py-2 bg-gray-50">
+                    <div className="flex items-center justify-between gap-3 px-3 sm:px-4 py-2 bg-gray-50">
                         <div className="text-sm text-gray-600">Выполнение нормы</div>
-                        <div className="font-medium text-gray-800">{hoursPercentage.toFixed(2)}%</div>
+                        <div className="font-medium text-gray-800 text-right">{hoursPercentage.toFixed(2)}%</div>
                     </div>
-                    <div className="flex items-center justify-between px-4 py-2 bg-white">
+                    <div className="flex items-center justify-between gap-3 px-3 sm:px-4 py-2 bg-white">
                         <div className="text-sm text-gray-600">Баллы KPI</div>
-                        <div className="font-medium text-gray-800">{simple(pointsRaw)}</div>
+                        <div className="font-medium text-gray-800 text-right">{simple(pointsRaw)}</div>
                     </div>
                     </div>
                 </div>
@@ -244,17 +244,17 @@ import FaIcon from '../common/FaIcon';
                 <div className="mb-3">
                     <div className="text-xs text-gray-500 font-medium mb-2">Компоненты выплаты</div>
                     <div className="divide-y divide-gray-100 rounded-lg overflow-hidden border">
-                    <div className="flex items-center justify-between px-4 py-2 bg-white">
+                    <div className="flex items-center justify-between gap-3 px-3 sm:px-4 py-2 bg-white">
                         <div className="text-sm text-gray-600">Базовый оклад</div>
-                        <div className="font-medium text-gray-800">{money(baseForPremium)}</div>
+                        <div className="font-medium text-gray-800 text-right">{money(baseForPremium)}</div>
                     </div>
-                    <div className="flex items-center justify-between px-4 py-2 bg-gray-50">
+                    <div className="flex items-center justify-between gap-3 px-3 sm:px-4 py-2 bg-gray-50">
                         <div className="text-sm text-gray-600">Премия</div>
-                        <div className="font-medium text-gray-800">{money(premiumCalc)}</div>
+                        <div className="font-medium text-gray-800 text-right">{money(premiumCalc)}</div>
                     </div>
-                    <div className="flex items-center justify-between px-4 py-2 bg-white">
+                    <div className="flex items-center justify-between gap-3 px-3 sm:px-4 py-2 bg-white">
                         <div className="text-sm text-gray-600">Бонусы</div>
-                        <div className="font-medium text-gray-800">{money(bonuses)}</div>
+                        <div className="font-medium text-gray-800 text-right">{money(bonuses)}</div>
                     </div>
                     </div>
                 </div>

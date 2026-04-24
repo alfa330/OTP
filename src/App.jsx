@@ -35996,26 +35996,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             </>
                         )}
                                         {user.role !== 'trainer' && view === 'salary' && (
-                                            <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
-                                                <h2 className="text-3xl font-bold mb-8 text-gray-900 flex items-center gap-2">
+                                            <div className="bg-white p-4 sm:p-6 lg:p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg overflow-hidden">
+                                                <h2 className="text-xl sm:text-3xl font-bold mb-4 sm:mb-8 text-gray-900 flex items-center gap-2">
                                                     <FaIcon className="fas fa-calculator text-blue-600"></FaIcon>
                                                     <span className="text-blue-600">Калькулятор зарплаты</span>
                                                 </h2>
-                                                <div className="flex mb-4">
+                                                <div className="grid grid-cols-3 gap-2 mb-4 sm:flex sm:flex-wrap">
                                                     <button
-                                                        className={`px-4 py-2 mr-2 rounded ${calculatorType === 'call' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
+                                                        className={`w-full sm:w-auto px-3 sm:px-4 py-2 rounded text-sm font-medium ${calculatorType === 'call' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
                                                         onClick={() => setCalculatorType('call')}
                                                     >
                                                         Линия
                                                     </button>
                                                     <button
-                                                        className={`px-4 py-2 mr-2 rounded ${calculatorType === 'chat' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
+                                                        className={`w-full sm:w-auto px-3 sm:px-4 py-2 rounded text-sm font-medium ${calculatorType === 'chat' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
                                                         onClick={() => setCalculatorType('chat')}
                                                     >
                                                         Чат
                                                     </button>
                                                     <button
-                                                        className={`px-4 py-2 rounded ${calculatorType === 'converter' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
+                                                        className={`w-full sm:w-auto px-3 sm:px-4 py-2 rounded text-sm font-medium ${calculatorType === 'converter' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
                                                         onClick={() => setCalculatorType('converter')}
                                                       >
                                                         Конвертер
@@ -36023,8 +36023,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </div>
                                                 {calculatorType === 'call' ? (
                                                     <>
-                                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                                                            <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
+                                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6 lg:gap-8">
+                                                            <div className="p-4 sm:p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
                                                                 <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
                                                                     <FaIcon className="fas fa-user-clock text-blue-500"></FaIcon>
                                                                     Стаж работы (месяцы):
@@ -36042,7 +36042,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     <option value="16+">≥16 месяцев</option>
                                                                 </select>
                                                             </div>
-                                                            <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
+                                                            <div className="p-4 sm:p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
                                                                 <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
                                                                     <FaIcon className="fas fa-star text-yellow-500"></FaIcon>
                                                                     Качество (%):
@@ -36058,7 +36058,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     disabled={isLoading}
                                                                 />
                                                             </div>
-                                                            <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
+                                                            <div className="p-4 sm:p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
                                                                 <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
                                                                     <FaIcon className="fas fa-phone-alt text-green-500"></FaIcon>
                                                                     Кол-во звонков в час:
@@ -36074,7 +36074,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     disabled={isLoading}
                                                                 />
                                                             </div>
-                                                            <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
+                                                            <div className="p-4 sm:p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
                                                                 <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
                                                                     <FaIcon className="fas fa-bullseye text-purple-500"></FaIcon>
                                                                     Норма часов:
@@ -36090,7 +36090,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     disabled={isLoading}
                                                                 />
                                                             </div>
-                                                            <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
+                                                            <div className="p-4 sm:p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
                                                                 <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
                                                                     <FaIcon className="fas fa-briefcase text-indigo-500"></FaIcon>
                                                                     Отработанные часы:
@@ -36106,31 +36106,31 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     disabled={isLoading}
                                                                 />
                                                             </div>
-                                                            <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
+                                                            <div className="p-4 sm:p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
                                                                 <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
                                                                     <FaIcon className="fas fa-gift text-pink-500"></FaIcon>
                                                                     Бонусы:
                                                                 </label>
                                                                 <div className="space-y-4 mt-2">
-                                                                    <div className="flex items-center gap-4">
+                                                                    <div className="flex items-start gap-3">
                                                                         <input
                                                                             type="checkbox"
                                                                             checked={salaryData.bonusTraining}
                                                                             onChange={(e) => setSalaryData({ ...salaryData, bonusTraining: e.target.checked })}
-                                                                            className="w-5 h-5"
+                                                                            className="w-5 h-5 mt-0.5 shrink-0"
                                                                             disabled={isLoading}
                                                                         />
-                                                                        <label className="text-sm font-medium text-blue-700">Стажировка (6000 ТГ)</label>
+                                                                        <label className="text-sm font-medium text-blue-700 leading-6">Стажировка (6000 ТГ)</label>
                                                                     </div>
-                                                                    <div className="flex items-center gap-4">
+                                                                    <div className="flex flex-wrap items-start gap-3">
                                                                         <input
                                                                             type="checkbox"
                                                                             checked={salaryData.bonusRefer}
                                                                             onChange={(e) => setSalaryData({ ...salaryData, bonusRefer: e.target.checked })}
-                                                                            className="w-5 h-5"
+                                                                            className="w-5 h-5 mt-0.5 shrink-0"
                                                                             disabled={isLoading}
                                                                         />
-                                                                        <label className="text-sm font-medium text-green-700">Пригласи друга (5000 ТГ за друга)</label>
+                                                                        <label className="text-sm font-medium text-green-700 leading-6 flex-1 min-w-0">Пригласи друга (5000 ТГ за друга)</label>
                                                                         {salaryData.bonusRefer && (
                                                                             <input
                                                                                 type="number"
@@ -36139,20 +36139,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                 min="1"
                                                                                 step="1"
                                                                                 placeholder="Кол-во"
-                                                                                className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                                                className="w-full sm:w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                                                 disabled={isLoading}
                                                                             />
                                                                         )}
                                                                     </div>
-                                                                    <div className="flex items-center gap-4">
+                                                                    <div className="flex flex-wrap items-start gap-3">
                                                                         <input
                                                                             type="checkbox"
                                                                             checked={salaryData.bonusFilming}
                                                                             onChange={(e) => setSalaryData({ ...salaryData, bonusFilming: e.target.checked })}
-                                                                            className="w-5 h-5"
+                                                                            className="w-5 h-5 mt-0.5 shrink-0"
                                                                             disabled={isLoading}
                                                                         />
-                                                                        <label className="text-sm font-medium text-purple-700">Съемки (5000 ТГ)</label>
+                                                                        <label className="text-sm font-medium text-purple-700 leading-6 flex-1 min-w-0">Съемки (5000 ТГ)</label>
                                                                         {salaryData.bonusFilming && (
                                                                             <input
                                                                                 type="number"
@@ -36161,7 +36161,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                 min="1"
                                                                                 step="1"
                                                                                 placeholder="Кол-во"
-                                                                                className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                                                className="w-full sm:w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                                                 disabled={isLoading}
                                                                             />
                                                                         )}
@@ -36169,10 +36169,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 </div>
                                                             </div>
                                                         </div>
-                                                        <div className="flex justify-center gap-4 mt-8">
+                                                        <div className="flex flex-col sm:flex-row justify-center gap-3 sm:gap-4 mt-6 sm:mt-8">
                                                             <button
                                                                 onClick={calculateSalary}
-                                                                className={`px-8 py-4 rounded-xl font-bold text-lg bg-green-500 text-white hover:bg-green-600 shadow transition-all duration-200 ${
+                                                                className={`w-full sm:w-auto px-4 sm:px-8 py-3 sm:py-4 rounded-xl font-bold text-sm sm:text-lg bg-green-500 text-white hover:bg-green-600 shadow transition-all duration-200 ${
                                                                     isLoading ||
                                                                     !salaryData.experience ||
                                                                     !salaryData.quality ||
@@ -36199,7 +36199,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             </button>
                                                             <button
                                                                 onClick={() => setShowPointsTable(!showPointsTable)}
-                                                                className={`px-8 py-4 rounded-xl font-bold text-lg bg-purple-500 text-white hover:bg-purple-600 shadow transition-all duration-200 ${
+                                                                className={`w-full sm:w-auto px-4 sm:px-8 py-3 sm:py-4 rounded-xl font-bold text-sm sm:text-lg bg-purple-500 text-white hover:bg-purple-600 shadow transition-all duration-200 ${
                                                                     !salaryResult ? 'opacity-50 cursor-not-allowed' : ''
                                                                 }`}
                                                                 disabled={!salaryResult}
@@ -36208,7 +36208,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             </button>
                                                             <button
                                                                 onClick={clearSalaryForm}
-                                                                className={`px-8 py-4 rounded-xl font-bold text-lg bg-red-500 text-white hover:bg-red-600 shadow transition-all duration-200 ${
+                                                                className={`w-full sm:w-auto px-4 sm:px-8 py-3 sm:py-4 rounded-xl font-bold text-sm sm:text-lg bg-red-500 text-white hover:bg-red-600 shadow transition-all duration-200 ${
                                                                     !salaryData.experience &&
                                                                     !salaryData.quality &&
                                                                     !salaryData.callsPerHour &&
@@ -36238,7 +36238,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         <div className="mt-8">
                                                             <SalaryCalculationResult salaryResult={salaryResult} />
                                                         </div>
-                                                        <div className={`mt-8 ${showPointsTable ? '' : 'hidden'}`}>
+                                                        <div className={`mt-8 overflow-x-auto ${showPointsTable ? '' : 'hidden'}`}>
                                                             {generatePointsTable()}
                                                         </div>
                                                     </>
@@ -36247,7 +36247,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         <SalaryCalculatorChat />
                                                     </Suspense>
                                                 ):(
-                                                    <div className="grid grid-cols-1 gap-6">
+                                                    <div className="grid grid-cols-1 gap-4 sm:gap-6">
                                                             <div className="form-group">
                                                               <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
                                                                 Целевая сумма (ТГ)
@@ -36255,7 +36255,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                   <span className="w-4 h-4 flex items-center justify-center rounded-full bg-gray-300 text-xs font-bold cursor-pointer group">
                                                                     i
                                                                     {/* Tooltip */}
-                                                                    <span className="absolute left-6 top-1/2 -translate-y-1/2 w-64 p-2 text-sm text-white bg-gray-800 rounded-lg shadow-lg opacity-0 pointer-events-none group-hover:opacity-100 transition">
+                                                                    <span className="absolute right-0 top-full mt-2 w-64 max-w-[calc(100vw-3rem)] p-2 text-sm text-white bg-gray-800 rounded-lg shadow-lg opacity-0 pointer-events-none group-hover:opacity-100 transition z-20">
                                                                       Введите сумму и KPI (макс. 2.5). Расчёт: часы = сумма / (KPI * 700).
                                                                       Ниже показаны часы для разных KPI.
                                                                     </span>
@@ -36273,7 +36273,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 }
                                                                 min="0"
                                                                 step="1"
-                                                                className="w-1/2 p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                                className="w-full sm:max-w-xs p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                               />
                                                             </div>
                                                             <div className="form-group">
@@ -36289,13 +36289,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 min="0"
                                                                 max="2.5"
                                                                 step="0.01"
-                                                                className="w-1/2 p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                                className="w-full sm:max-w-xs p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                               />
                                                             </div>
                                                     
                                                             {/* Результат */}
                                                             {converterData.amount && converterData.kpi ? (
-                                                              <div className="w-1/2bg-blue-50 p-4 rounded-lg shadow-inner text-gray-800">
+                                                              <div className="w-full sm:max-w-xs bg-blue-50 p-4 rounded-lg shadow-inner text-gray-800">
                                                                 <p className="font-semibold">Необходимые часы:</p>
                                                                 <p className="text-lg font-bold">
                                                                   {(converterData.amount / (converterData.kpi * 700)).toFixed(2)} ч.
@@ -36305,9 +36305,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     
                                                             {/* Таблица для разных KPI */}
                                                             {converterData.amount ? (
-                                                              <div className="w-1/2 mt-6">
+                                                              <div className="w-full mt-6 overflow-x-auto">
                                                                 <h3 className="text-lg font-semibold mb-2">Часы при разных KPI</h3>
-                                                                <table className="w-full border border-gray-300 rounded-lg overflow-hidden">
+                                                                <table className="w-full min-w-[280px] border border-gray-300 rounded-lg overflow-hidden">
                                                                   <thead className="bg-gray-100">
                                                                     <tr>
                                                                       <th className="p-3 text-left border-b">KPI</th>

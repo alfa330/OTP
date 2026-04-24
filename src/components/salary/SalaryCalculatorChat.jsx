@@ -276,8 +276,8 @@ const SalaryCalculatorChat = () => {
     
   return (
         <div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6 lg:gap-8">
+                <div className="p-4 sm:p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
                     <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
                         <FaIcon className="fas fa-user-clock text-blue-500"></FaIcon>
                         Стаж работы (месяцев):
@@ -296,7 +296,7 @@ const SalaryCalculatorChat = () => {
         <option value="18+">≥18 месяцев</option>
       </select>
     </div>
-                <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
+                <div className="p-4 sm:p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
                     <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
                         <FaIcon className="fas fa-star text-yellow-500"></FaIcon>
                         Качество %):
@@ -311,7 +311,7 @@ const SalaryCalculatorChat = () => {
         className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
       />
     </div>
-                <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
+                <div className="p-4 sm:p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
                     <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
                         <FaIcon className="fas fa-chart-line text-green-500"></FaIcon>
                         Средний балл по чатам:
@@ -326,7 +326,7 @@ const SalaryCalculatorChat = () => {
         className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
       />
     </div>
-                <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
+                <div className="p-4 sm:p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
                     <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
                         <FaIcon className="fas fa-clock text-purple-500"></FaIcon>
                         Среднее время ответа (минуты):
@@ -341,7 +341,7 @@ const SalaryCalculatorChat = () => {
         className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
       />
     </div>
-                <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
+                <div className="p-4 sm:p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
                     <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
                         <FaIcon className="fas fa-comments text-blue-500"></FaIcon>
                         Кол-во чатов в час:
@@ -356,7 +356,7 @@ const SalaryCalculatorChat = () => {
         className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
       />
     </div>
-                <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
+                <div className="p-4 sm:p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
                     <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
                         <FaIcon className="fas fa-bullseye text-indigo-500"></FaIcon>
                         Норма часов:
@@ -371,7 +371,7 @@ const SalaryCalculatorChat = () => {
         className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
       />
     </div>
-                <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
+                <div className="p-4 sm:p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
                     <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
                         <FaIcon className="fas fa-briefcase text-pink-500"></FaIcon>
                         Отработанные часы:
@@ -386,29 +386,29 @@ const SalaryCalculatorChat = () => {
         className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
       />
     </div>
-                <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
+                <div className="p-4 sm:p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
                     <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
                         <FaIcon className="fas fa-gift text-red-500"></FaIcon>
                         Бонусы:
                     </label>
                     <div className="space-y-4 mt-2">
-                        <div className="flex items-center gap-4">
+                        <div className="flex items-start gap-3">
                             <input
                                 type="checkbox"
                                 checked={bonusTraining}
                                 onChange={(e) => setBonusTraining(e.target.checked)}
-                                className="w-5 h-5"
+                                className="w-5 h-5 mt-0.5 shrink-0"
                             />
-                            <label className="text-sm font-medium text-blue-700">Тренинг (6000 ТГ)</label>
+                            <label className="text-sm font-medium text-blue-700 leading-6">Тренинг (6000 ТГ)</label>
                         </div>
-                        <div className="flex items-center gap-4">
+                        <div className="flex flex-wrap items-start gap-3">
                             <input
                                 type="checkbox"
                                 checked={bonusRefer}
                                 onChange={(e) => setBonusRefer(e.target.checked)}
-                                className="w-5 h-5"
+                                className="w-5 h-5 mt-0.5 shrink-0"
                             />
-                            <label className="text-sm font-medium text-green-700">Пригласи друга (5000 ТГ за друга)</label>
+                            <label className="text-sm font-medium text-green-700 leading-6 flex-1 min-w-0">Пригласи друга (5000 ТГ за друга)</label>
                             {bonusRefer && (
                                 <input
                                     type="number"
@@ -417,18 +417,18 @@ const SalaryCalculatorChat = () => {
                                     min="1"
                                     step="1"
                                     placeholder="Кол-во"
-                                    className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    className="w-full sm:w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                 />
                             )}
                         </div>
-                        <div className="flex items-center gap-4">
+                        <div className="flex flex-wrap items-start gap-3">
                             <input
                                 type="checkbox"
                                 checked={bonusFilming}
                                 onChange={(e) => setBonusFilming(e.target.checked)}
-                                className="w-5 h-5"
+                                className="w-5 h-5 mt-0.5 shrink-0"
                             />
-                            <label className="text-sm font-medium text-purple-700">Съемки (5000 ТГ)</label>
+                            <label className="text-sm font-medium text-purple-700 leading-6 flex-1 min-w-0">Съемки (5000 ТГ)</label>
                             {bonusFilming && (
                                 <input
                                     type="number"
@@ -437,17 +437,17 @@ const SalaryCalculatorChat = () => {
                                     min="1"
                                     step="1"
                                     placeholder="Кол-во"
-                                    className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    className="w-full sm:w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                 />
                             )}
                         </div>
       </div>
     </div>
   </div>
-            <div className="flex justify-center gap-4 mt-8">
+            <div className="flex flex-col sm:flex-row justify-center gap-3 sm:gap-4 mt-6 sm:mt-8">
                 <button
                     onClick={calculateSalary}
-                    className={`px-8 py-4 rounded-xl font-bold text-lg bg-green-500 text-white hover:bg-green-600 shadow transition-all duration-200 ${
+                    className={`w-full sm:w-auto px-4 sm:px-8 py-3 sm:py-4 rounded-xl font-bold text-sm sm:text-lg bg-green-500 text-white hover:bg-green-600 shadow transition-all duration-200 ${
                         !validateForm() ? 'opacity-50 cursor-not-allowed' : ''
                     }`}
                     disabled={!validateForm()}
@@ -456,7 +456,7 @@ const SalaryCalculatorChat = () => {
                 </button>
                 <button
                     onClick={togglePointsTable}
-                    className={`px-8 py-4 rounded-xl font-bold text-lg bg-purple-500 text-white hover:bg-purple-600 shadow transition-all duration-200 ${
+                    className={`w-full sm:w-auto px-4 sm:px-8 py-3 sm:py-4 rounded-xl font-bold text-sm sm:text-lg bg-purple-500 text-white hover:bg-purple-600 shadow transition-all duration-200 ${
                         !result ? 'opacity-50 cursor-not-allowed' : ''
                     }`}
                     disabled={!result}
@@ -465,7 +465,7 @@ const SalaryCalculatorChat = () => {
                 </button>
                 <button
                     onClick={clearForm}
-                    className={`px-8 py-4 rounded-xl font-bold text-lg bg-red-500 text-white hover:bg-red-600 shadow transition-all duration-200 ${
+                    className={`w-full sm:w-auto px-4 sm:px-8 py-3 sm:py-4 rounded-xl font-bold text-sm sm:text-lg bg-red-500 text-white hover:bg-red-600 shadow transition-all duration-200 ${
                         !hasInput() ? 'opacity-50 cursor-not-allowed' : ''
                     }`}
                     disabled={!hasInput()}
@@ -476,7 +476,7 @@ const SalaryCalculatorChat = () => {
             <div className="mt-8">
                 <SalaryCalculationResult salaryResult={result} />
             </div>
-            <div className={`mt-8 ${showTable ? '' : 'hidden'}`}> 
+            <div className={`mt-8 overflow-x-auto ${showTable ? '' : 'hidden'}`}> 
                 {result && generatePointsTable(result.tableData)}
             </div>
         </div>
