@@ -11696,6 +11696,7 @@ function AdminView({
   const [courseGridView, setCourseGridView] = useState(true);
   const [selectedEmployeeId, setSelectedEmployeeId] = useState(null);
   const [selectedEmployeeCourseKey, setSelectedEmployeeCourseKey] = useState(null);
+  const [selectedEmployeeCourseDetailTab, setSelectedEmployeeCourseDetailTab] = useState("overview");
   const [employeeAssignedCourseSortBy, setEmployeeAssignedCourseSortBy] = useState("deadline_asc");
   const [employeeCourseDeadlines, setEmployeeCourseDeadlines] = useState({});
   const [assigningCourseId, setAssigningCourseId] = useState(null);
@@ -12312,6 +12313,10 @@ function AdminView({
   }, [selectedEmployee?.id]);
 
   useEffect(() => {
+    setSelectedEmployeeCourseDetailTab("overview");
+  }, [selectedEmployeeCourseKey]);
+
+  useEffect(() => {
     if (!selectedEmployeeCourseKey) return;
     const exists = sortedSelectedEmployeeCourseAnalyticsRows.some((item) => item?.rowKey === selectedEmployeeCourseKey);
     if (!exists) {
@@ -12513,6 +12518,26 @@ function AdminView({
       detail: "разрывы активности в сессиях",
       icon: Zap,
       tone: selectedEmployeeCourseItem.staleGapCount > 0 ? "text-rose-600 bg-rose-50" : "text-slate-600 bg-slate-50",
+    },
+  ] : [];
+  const selectedEmployeeCourseDetailTabs = selectedEmployeeCourseItem ? [
+    {
+      id: "overview",
+      label: "Обзор",
+      value: selectedEmployeeCourseItem.progress == null ? "—" : `${selectedEmployeeCourseItem.progress}%`,
+      icon: BarChart2,
+    },
+    {
+      id: "sessions",
+      label: "Сессии",
+      value: selectedEmployeeCourseItem.sessionCount,
+      icon: Clock,
+    },
+    {
+      id: "tests",
+      label: "Тесты",
+      value: selectedEmployeeCourseItem.tests.length,
+      icon: HelpCircle,
     },
   ] : [];
 
@@ -13086,130 +13111,164 @@ function AdminView({
                     </div>
 
                     <div className="p-6 space-y-6 bg-slate-50/50 flex-1 overflow-y-auto custom-scrollbar">
-                      {selectedEmployeeCourseRisk && (
-                        <div className={`rounded-xl border px-4 py-3 ${selectedEmployeeCourseRisk.className}`}>
-                          <div className="flex items-start gap-3">
-                            <AlertTriangle size={17} className="mt-0.5 flex-shrink-0" />
-                            <div>
-                              <p className="text-sm font-bold">{selectedEmployeeCourseRisk.label}</p>
-                              <p className="text-xs mt-0.5 leading-relaxed opacity-90">{selectedEmployeeCourseRisk.caption}</p>
+                      <div className="rounded-xl border border-slate-200 bg-white p-1.5 shadow-sm">
+                        <div className="grid grid-cols-3 gap-1" role="tablist" aria-label="Детализация курса сотрудника">
+                          {selectedEmployeeCourseDetailTabs.map((detailTab) => {
+                            const DetailTabIcon = detailTab.icon;
+                            const isActiveDetailTab = selectedEmployeeCourseDetailTab === detailTab.id;
+                            return (
+                              <button
+                                key={detailTab.id}
+                                type="button"
+                                role="tab"
+                                aria-selected={isActiveDetailTab}
+                                onClick={() => setSelectedEmployeeCourseDetailTab(detailTab.id)}
+                                className={`min-w-0 rounded-lg px-3 py-2.5 text-left transition-all ${isActiveDetailTab ? "bg-indigo-600 text-white shadow-sm shadow-indigo-100" : "text-slate-500 hover:bg-slate-50 hover:text-slate-800"}`}
+                              >
+                                <span className="flex items-center gap-2">
+                                  <DetailTabIcon size={14} className="flex-shrink-0" />
+                                  <span className="min-w-0">
+                                    <span className="block truncate text-xs font-bold">{detailTab.label}</span>
+                                    <span className={`block text-[10px] font-semibold ${isActiveDetailTab ? "text-indigo-100" : "text-slate-400"}`}>{detailTab.value}</span>
+                                  </span>
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      {selectedEmployeeCourseDetailTab === "overview" && (
+                        <div className="space-y-6">
+                          {selectedEmployeeCourseRisk && (
+                            <div className={`rounded-xl border px-4 py-3 ${selectedEmployeeCourseRisk.className}`}>
+                              <div className="flex items-start gap-3">
+                                <AlertTriangle size={17} className="mt-0.5 flex-shrink-0" />
+                                <div>
+                                  <p className="text-sm font-bold">{selectedEmployeeCourseRisk.label}</p>
+                                  <p className="text-xs mt-0.5 leading-relaxed opacity-90">{selectedEmployeeCourseRisk.caption}</p>
+                                </div>
+                              </div>
                             </div>
+                          )}
+
+                          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
+                            {selectedEmployeeCourseMetricCards.map((metric) => {
+                              const MetricIcon = metric.icon;
+                              return (
+                                <div key={metric.label} className="bg-white rounded-xl border border-slate-100 p-4 shadow-sm transition-all hover:border-slate-200">
+                                  <div className="flex items-start justify-between gap-3">
+                                    <div className="min-w-0">
+                                      <p className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5 leading-tight">{metric.label}</p>
+                                      <p className="text-lg font-bold text-slate-900 leading-tight">{metric.value}</p>
+                                    </div>
+                                    <span className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${metric.tone}`}>
+                                      <MetricIcon size={15} />
+                                    </span>
+                                  </div>
+                                  <p className="text-[11px] text-slate-500 mt-2 leading-snug">{metric.detail}</p>
+                                </div>
+                              );
+                            })}
                           </div>
                         </div>
                       )}
 
-                      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
-                        {selectedEmployeeCourseMetricCards.map((metric) => {
-                          const MetricIcon = metric.icon;
-                          return (
-                            <div key={metric.label} className="bg-white rounded-xl border border-slate-100 p-4 shadow-sm transition-all hover:border-slate-200">
-                              <div className="flex items-start justify-between gap-3">
-                                <div className="min-w-0">
-                                  <p className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5 leading-tight">{metric.label}</p>
-                                  <p className="text-lg font-bold text-slate-900 leading-tight">{metric.value}</p>
-                                </div>
-                                <span className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${metric.tone}`}>
-                                  <MetricIcon size={15} />
-                                </span>
-                              </div>
-                              <p className="text-[11px] text-slate-500 mt-2 leading-snug">{metric.detail}</p>
+                      {selectedEmployeeCourseDetailTab === "sessions" && (
+                        <div>
+                          <h4 className="text-sm font-semibold text-slate-900 mb-3.5 flex items-center gap-2">
+                            <Clock size={15} className="text-indigo-500" />
+                            Учебные сессии
+                          </h4>
+                          {isLoadingSelectedEmployeeLearningSessions ? (
+                            <LearningSessionsSkeleton />
+                          ) : selectedEmployeeLearningSessions.length === 0 ? (
+                            <div className="rounded-xl border border-slate-100 bg-white px-4 py-6 text-sm text-slate-500 shadow-sm">
+                              По этому назначению пока нет записанных учебных сессий.
                             </div>
-                          );
-                        })}
-                      </div>
-
-                      <div>
-                        <h4 className="text-sm font-semibold text-slate-900 mb-3.5 flex items-center gap-2">
-                          <Clock size={15} className="text-indigo-500" />
-                          Учебные сессии
-                        </h4>
-                        {isLoadingSelectedEmployeeLearningSessions ? (
-                          <LearningSessionsSkeleton />
-                        ) : selectedEmployeeLearningSessions.length === 0 ? (
-                          <div className="rounded-xl border border-slate-100 bg-white px-4 py-6 text-sm text-slate-500 shadow-sm">
-                            По этому назначению пока нет записанных учебных сессий.
-                          </div>
-                        ) : (
-                          <div className="space-y-3 mb-6">
-                            {selectedEmployeeLearningSessions.map((sessionItem) => (
-                              <div key={sessionItem.session_id} className="bg-white rounded-xl border border-slate-100 p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-4 shadow-sm">
-                                <div className="min-w-0">
-                                  <p className="text-sm font-semibold text-slate-900 truncate">{sessionItem.lesson_title || `Урок #${sessionItem.lesson_id}`}</p>
-                                  <p className="text-xs text-slate-500 mt-1">
-                                    {formatDateTimeLabel(sessionItem.started_at)} {sessionItem.ended_at ? `→ ${formatDateTimeLabel(sessionItem.ended_at)}` : "• активна"}
-                                  </p>
-                                </div>
-                                <div className="flex flex-wrap items-center gap-2 lg:justify-end">
-                                  <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-indigo-50 text-indigo-700 border border-indigo-100">
-                                    Подтверждено: {formatDurationLabel(sessionItem.confirmed_seconds)}
-                                  </span>
-                                  <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-slate-50 text-slate-700 border border-slate-200">
-                                    Активно: {formatDurationLabel(sessionItem.active_seconds)}
-                                  </span>
-                                  <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-amber-50 text-amber-700 border border-amber-100">
-                                    Смена вкладок: {Math.max(0, Number(sessionItem.tab_hidden_count || 0))}
-                                  </span>
-                                  <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-rose-50 text-rose-700 border border-rose-100">
-                                    Паузы: {Math.max(0, Number(sessionItem.stale_gap_count || 0))}
-                                  </span>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-
-                      <div>
-                        <h4 className="text-sm font-semibold text-slate-900 mb-3.5 flex items-center gap-2">
-                          <HelpCircle size={15} className="text-indigo-500" />
-                          История прохождения тестов
-                        </h4>
-                        {selectedEmployeeCourseItem.tests.length === 0 ? (
-                          <div className="rounded-xl border border-slate-100 bg-white px-4 py-8 text-center text-sm text-slate-500 shadow-sm">
-                            Сотрудник пока не приступал к тестам в этом курсе
-                          </div>
-                        ) : (
-                          <div className="space-y-3">
-                            {[...selectedEmployeeCourseItem.tests].reverse().map((testItem) => (
-                              <div key={testItem.key} className="bg-white rounded-xl border border-slate-100 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-sm overflow-hidden relative">
-                                {testItem.passed && <div className="absolute top-0 left-0 w-1 h-full bg-emerald-500"></div>}
-                                {!testItem.passed && testItem.attempts > 0 && <div className="absolute top-0 left-0 w-1 h-full bg-amber-500"></div>}
-                                
-                                <div className="flex-1 min-w-0 pl-1">
-                                  <div className="flex items-center gap-2 mb-1.5">
-                                    <p className="text-sm font-semibold text-slate-900 truncate">{testItem.title}</p>
-                                    {testItem.isFinal && <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-violet-100 text-violet-700 uppercase tracking-widest flex-shrink-0">Итоговый</span>}
+                          ) : (
+                            <div className="space-y-3">
+                              {selectedEmployeeLearningSessions.map((sessionItem) => (
+                                <div key={sessionItem.session_id} className="bg-white rounded-xl border border-slate-100 p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-4 shadow-sm">
+                                  <div className="min-w-0">
+                                    <p className="text-sm font-semibold text-slate-900 truncate">{sessionItem.lesson_title || `Урок #${sessionItem.lesson_id}`}</p>
+                                    <p className="text-xs text-slate-500 mt-1">
+                                      {formatDateTimeLabel(sessionItem.started_at)} {sessionItem.ended_at ? `→ ${formatDateTimeLabel(sessionItem.ended_at)}` : "• активна"}
+                                    </p>
                                   </div>
-                                  <div className="flex items-center gap-3 text-xs">
-                                    <span className="text-slate-500">Попыток: <strong className="text-slate-700">{testItem.attempts}</strong></span>
-                                    <span className="text-slate-300">•</span>
-                                    <span className={testItem.passed ? "text-emerald-600 font-semibold" : "text-amber-600 font-semibold"}>
-                                      {testItem.passed ? "Пройден" : "Не пройден"}
+                                  <div className="flex flex-wrap items-center gap-2 lg:justify-end">
+                                    <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-indigo-50 text-indigo-700 border border-indigo-100">
+                                      Подтверждено: {formatDurationLabel(sessionItem.confirmed_seconds)}
+                                    </span>
+                                    <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-slate-50 text-slate-700 border border-slate-200">
+                                      Активно: {formatDurationLabel(sessionItem.active_seconds)}
+                                    </span>
+                                    <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-amber-50 text-amber-700 border border-amber-100">
+                                      Смена вкладок: {Math.max(0, Number(sessionItem.tab_hidden_count || 0))}
+                                    </span>
+                                    <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-rose-50 text-rose-700 border border-rose-100">
+                                      Паузы: {Math.max(0, Number(sessionItem.stale_gap_count || 0))}
                                     </span>
                                   </div>
                                 </div>
-                                <div className="flex items-center gap-5 bg-slate-50 rounded-lg px-4 py-2.5 border border-slate-100">
-                                  <div>
-                                    <p className="text-[10px] text-slate-400 mb-0.5 uppercase tracking-wider">Последний</p>
-                                    <p className="text-sm font-semibold text-slate-800">{testItem.lastScore == null ? "—" : `${testItem.lastScore}%`}</p>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {selectedEmployeeCourseDetailTab === "tests" && (
+                        <div>
+                          <h4 className="text-sm font-semibold text-slate-900 mb-3.5 flex items-center gap-2">
+                            <HelpCircle size={15} className="text-indigo-500" />
+                            История прохождения тестов
+                          </h4>
+                          {selectedEmployeeCourseItem.tests.length === 0 ? (
+                            <div className="rounded-xl border border-slate-100 bg-white px-4 py-8 text-center text-sm text-slate-500 shadow-sm">
+                              Сотрудник пока не приступал к тестам в этом курсе
+                            </div>
+                          ) : (
+                            <div className="space-y-3">
+                              {[...selectedEmployeeCourseItem.tests].reverse().map((testItem) => (
+                                <div key={testItem.key} className="bg-white rounded-xl border border-slate-100 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-sm overflow-hidden relative">
+                                  {testItem.passed && <div className="absolute top-0 left-0 w-1 h-full bg-emerald-500"></div>}
+                                  {!testItem.passed && testItem.attempts > 0 && <div className="absolute top-0 left-0 w-1 h-full bg-amber-500"></div>}
+
+                                  <div className="flex-1 min-w-0 pl-1">
+                                    <div className="flex items-center gap-2 mb-1.5">
+                                      <p className="text-sm font-semibold text-slate-900 truncate">{testItem.title}</p>
+                                      {testItem.isFinal && <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-violet-100 text-violet-700 uppercase tracking-widest flex-shrink-0">Итоговый</span>}
+                                    </div>
+                                    <div className="flex items-center gap-3 text-xs">
+                                      <span className="text-slate-500">Попыток: <strong className="text-slate-700">{testItem.attempts}</strong></span>
+                                      <span className="text-slate-300">•</span>
+                                      <span className={testItem.passed ? "text-emerald-600 font-semibold" : "text-amber-600 font-semibold"}>
+                                        {testItem.passed ? "Пройден" : "Не пройден"}
+                                      </span>
+                                    </div>
                                   </div>
-                                  <div className="h-7 w-px bg-slate-200"></div>
-                                  <div>
-                                    <p className="text-[10px] text-slate-400 mb-0.5 uppercase tracking-wider">Лучший</p>
-                                    <p className="text-sm font-bold text-indigo-600">{testItem.bestScore == null ? "—" : `${testItem.bestScore}%`}</p>
+                                  <div className="flex items-center gap-5 bg-slate-50 rounded-lg px-4 py-2.5 border border-slate-100">
+                                    <div>
+                                      <p className="text-[10px] text-slate-400 mb-0.5 uppercase tracking-wider">Последний</p>
+                                      <p className="text-sm font-semibold text-slate-800">{testItem.lastScore == null ? "—" : `${testItem.lastScore}%`}</p>
+                                    </div>
+                                    <div className="h-7 w-px bg-slate-200"></div>
+                                    <div>
+                                      <p className="text-[10px] text-slate-400 mb-0.5 uppercase tracking-wider">Лучший</p>
+                                      <p className="text-sm font-bold text-indigo-600">{testItem.bestScore == null ? "—" : `${testItem.bestScore}%`}</p>
+                                    </div>
                                   </div>
                                 </div>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
                   )}
                 </div>
               </div>
-
 
             {isAssignCourseModalOpen && (
               <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm transition-all duration-200" onClick={() => setIsAssignCourseModalOpen(false)}>
