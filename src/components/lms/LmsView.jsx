@@ -4701,6 +4701,7 @@ function CombinedVideoBlockPlayer({
   const seekToastAtRef = useRef(0);
   const reportIntervalRef = useRef(null);
   const lastProgressReportAtRef = useRef(0);
+  const lastActiveReportAtRef = useRef(null);
   const lastLocalPersistAtRef = useRef(0);
   const restoredPositionRef = useRef(0);
   const totalSecondsRef = useRef(totalSeconds);
@@ -4725,6 +4726,23 @@ function CombinedVideoBlockPlayer({
     && Number(lessonId || 0) > 0
     && Number(blockMaterialId || 0) > 0;
   const canSeekForward = isManagerMode || Boolean(allowFastForward) || progress >= normalizedThreshold;
+
+  const takePlaybackActiveDeltaSeconds = useCallback((options = {}) => {
+    const nowTs = Date.now();
+    const video = videoRef.current;
+    const includeCurrent = options?.includeCurrent === true;
+    const isActivelyPlaying = Boolean(
+      visibleRef.current
+      && video
+      && !video.ended
+      && (includeCurrent || !video.paused)
+    );
+    const lastTs = lastActiveReportAtRef.current;
+    lastActiveReportAtRef.current = isActivelyPlaying ? nowTs : null;
+    if (!isActivelyPlaying || !lastTs) return 0;
+    const capSeconds = Math.max(1, Math.min(60, (Number(heartbeatIntervalMs || 5000) / 1000) * 2));
+    return Math.max(0, Math.min((nowTs - lastTs) / 1000, capSeconds));
+  }, [heartbeatIntervalMs]);
 
   useEffect(() => {
     totalSecondsRef.current = totalSeconds;
@@ -4810,6 +4828,7 @@ function CombinedVideoBlockPlayer({
       duration_seconds: mergedDuration,
       progress_ratio: mergedProgress,
     });
+    lastActiveReportAtRef.current = null;
     lastLocalPersistAtRef.current = Date.now();
   }, [blockMaterialId, blockVideoUrl, initialDurationSeconds, initialProgress, localStorageKey]);
 
@@ -4834,24 +4853,28 @@ function CombinedVideoBlockPlayer({
     }
   }, [progress, onProgressChange]);
 
-  const reportCombinedProgress = useCallback(async () => {
+  const reportCombinedProgress = useCallback(async (options = {}) => {
     if (!canTrackEvents) return;
     const video = videoRef.current;
     const duration = Math.max(1, Number(video?.duration || safeTotalSeconds || 0));
     const position = Math.max(0, Number(video?.currentTime || displayCurrentSeconds || 0));
     const ratio = clampLmsProgress((position / duration) * 100);
+    const activeDeltaSeconds = options?.activeDeltaSeconds != null
+      ? Math.max(0, Number(options.activeDeltaSeconds) || 0)
+      : takePlaybackActiveDeltaSeconds();
     try {
       await postLessonEvent("combined_video_progress", {
         material_id: Number(blockMaterialId),
         progress_ratio: Number(ratio.toFixed(2)),
         position_seconds: Number(position.toFixed(2)),
         duration_seconds: Number(duration.toFixed(2)),
+        active_delta_seconds: Number(activeDeltaSeconds.toFixed(2)),
         tab_visible: visibleRef.current,
       });
     } catch (_) {
       // silent: non-blocking telemetry
     }
-  }, [canTrackEvents, postLessonEvent, blockMaterialId, safeTotalSeconds, displayCurrentSeconds]);
+  }, [canTrackEvents, postLessonEvent, blockMaterialId, safeTotalSeconds, displayCurrentSeconds, takePlaybackActiveDeltaSeconds]);
 
   useEffect(() => {
     if (!playing || !canTrackEvents) {
@@ -4868,6 +4891,7 @@ function CombinedVideoBlockPlayer({
     if (isManagerMode) return undefined;
     const handleVisibilityChange = () => {
       const isVisible = !document.hidden;
+      const activeDeltaSeconds = takePlaybackActiveDeltaSeconds({ includeCurrent: true });
       visibleRef.current = isVisible;
       if (!isVisible && playing) {
         setPlaying(false);
@@ -4875,14 +4899,14 @@ function CombinedVideoBlockPlayer({
           videoRef.current.pause();
         }
         persistLocalProgress(true);
-        void reportCombinedProgress();
+        void reportCombinedProgress({ activeDeltaSeconds });
         setTabHidden(true);
         setTimeout(() => setTabHidden(false), 3000);
       }
     };
     document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
-  }, [playing, isManagerMode, persistLocalProgress, reportCombinedProgress]);
+  }, [playing, isManagerMode, persistLocalProgress, reportCombinedProgress, takePlaybackActiveDeltaSeconds]);
 
   const handleLoadedMetadata = useCallback(() => {
     const video = videoRef.current;
@@ -4936,15 +4960,17 @@ function CombinedVideoBlockPlayer({
       progressRatio: 100,
     });
     if (canTrackEvents) {
+      const activeDeltaSeconds = takePlaybackActiveDeltaSeconds({ includeCurrent: true });
       void postLessonEvent("combined_video_progress", {
         material_id: Number(blockMaterialId),
         progress_ratio: 100,
         position_seconds: Number(duration.toFixed(2)),
         duration_seconds: Number(duration.toFixed(2)),
+        active_delta_seconds: Number(activeDeltaSeconds.toFixed(2)),
         tab_visible: visibleRef.current,
       }).catch(() => {});
     }
-  }, [canTrackEvents, postLessonEvent, blockMaterialId, persistLocalProgress]);
+  }, [canTrackEvents, postLessonEvent, blockMaterialId, persistLocalProgress, takePlaybackActiveDeltaSeconds]);
 
   const maybeReportProgress = () => {
     if (!canTrackEvents) return;
@@ -5054,13 +5080,15 @@ function CombinedVideoBlockPlayer({
   };
 
   const handleVideoPlay = () => {
+    lastActiveReportAtRef.current = Date.now();
     setPlaying(true);
   };
 
   const handleVideoPause = () => {
+    const activeDeltaSeconds = takePlaybackActiveDeltaSeconds({ includeCurrent: true });
     setPlaying(false);
     persistLocalProgress(true);
-    void reportCombinedProgress();
+    void reportCombinedProgress({ activeDeltaSeconds });
   };
 
   const togglePlayback = () => {
@@ -5857,6 +5885,7 @@ function VideoLesson({
   const maxAllowedSecondsRef = useRef(0);
   const seekToastAtRef = useRef(0);
   const autoCompleteTriggeredRef = useRef(false);
+  const lastActiveHeartbeatAtRef = useRef(null);
   const lastLocalPersistAtRef = useRef(0);
   const restoredPositionRef = useRef(0);
   const totalSecondsRef = useRef(totalSeconds);
@@ -5897,6 +5926,23 @@ function VideoLesson({
     if (type === "video") return false;
     return Boolean(item?.url || item?.signed_url || item?.content_url);
   });
+
+  const takePlaybackActiveDeltaSeconds = useCallback((options = {}) => {
+    const nowTs = Date.now();
+    const video = videoRef.current;
+    const includeCurrent = options?.includeCurrent === true;
+    const isActivelyPlaying = Boolean(
+      visibleRef.current
+      && video
+      && !video.ended
+      && (includeCurrent || !video.paused)
+    );
+    const lastTs = lastActiveHeartbeatAtRef.current;
+    lastActiveHeartbeatAtRef.current = isActivelyPlaying ? nowTs : null;
+    if (!isActivelyPlaying || !lastTs) return 0;
+    const capSeconds = Math.max(1, Math.min(60, (Number(heartbeatIntervalMs || 5000) / 1000) * 2));
+    return Math.max(0, Math.min((nowTs - lastTs) / 1000, capSeconds));
+  }, [heartbeatIntervalMs]);
 
   useEffect(() => {
     totalSecondsRef.current = totalSeconds;
@@ -5944,6 +5990,7 @@ function VideoLesson({
     clientSessionKey,
     lmsRequest,
     onHidden: () => {
+      const activeDeltaSeconds = takePlaybackActiveDeltaSeconds({ includeCurrent: true });
       visibleRef.current = false;
       if (playingRef.current) {
         setPlaying(false);
@@ -5954,7 +6001,7 @@ function VideoLesson({
       persistLocalProgress(true);
       setTabHidden(true);
       setTimeout(() => setTabHidden(false), 3000);
-      const pendingHeartbeat = sendHeartbeatRef.current?.();
+      const pendingHeartbeat = sendHeartbeatRef.current?.({ activeDeltaSeconds });
       if (pendingHeartbeat && typeof pendingHeartbeat.catch === "function") {
         void pendingHeartbeat.catch(() => {});
       }
@@ -5963,7 +6010,12 @@ function VideoLesson({
       visibleRef.current = true;
     },
     onBeforeClose: () => {
+      const activeDeltaSeconds = takePlaybackActiveDeltaSeconds({ includeCurrent: true });
       persistLocalProgress(true);
+      const pendingHeartbeat = sendHeartbeatRef.current?.({ keepalive: true, activeDeltaSeconds });
+      if (pendingHeartbeat && typeof pendingHeartbeat.catch === "function") {
+        void pendingHeartbeat.catch(() => {});
+      }
     },
   });
 
@@ -6034,6 +6086,7 @@ function VideoLesson({
       });
       lastLocalPersistAtRef.current = Date.now();
     }
+    lastActiveHeartbeatAtRef.current = null;
     autoCompleteTriggeredRef.current = false;
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [videoStorageKey]);
@@ -6081,6 +6134,9 @@ function VideoLesson({
     const localSeconds = Number.isFinite(positionSecondsFromVideo) && positionSecondsFromVideo >= 0
       ? positionSecondsFromVideo
       : Math.floor((progressRef.current * safeTotalSeconds) / 100);
+    const activeDeltaSeconds = options?.activeDeltaSeconds != null
+      ? Math.max(0, Number(options.activeDeltaSeconds) || 0)
+      : takePlaybackActiveDeltaSeconds();
     const payload = await lmsRequest(`/api/lms/lessons/${lessonId}/heartbeat`, {
       method: "POST",
       keepalive: options?.keepalive === true,
@@ -6090,6 +6146,7 @@ function VideoLesson({
           ? Number(mediaDurationSeconds.toFixed(2))
           : undefined,
         tab_visible: visibleRef.current,
+        active_delta_seconds: Number(activeDeltaSeconds.toFixed(2)),
         client_session_key: clientSessionKey || undefined,
         client_ts: new Date().toISOString(),
       },
@@ -6116,7 +6173,7 @@ function VideoLesson({
       });
     }
     return payload || null;
-  }, [canTrack, lmsRequest, lessonId, safeTotalSeconds, persistLocalProgress, clientSessionKey]);
+  }, [canTrack, lmsRequest, lessonId, safeTotalSeconds, persistLocalProgress, clientSessionKey, takePlaybackActiveDeltaSeconds]);
 
   useEffect(() => {
     sendHeartbeatRef.current = sendHeartbeat;
@@ -6153,6 +6210,7 @@ function VideoLesson({
         : Number(totalSecondsRef.current || 0)
     );
     if (currentProgress >= completionThreshold && lessonId) {
+      const activeDeltaSeconds = takePlaybackActiveDeltaSeconds({ includeCurrent: true });
       try {
         await lmsRequest(`/api/lms/lessons/${lessonId}/heartbeat`, {
           method: "POST",
@@ -6160,6 +6218,7 @@ function VideoLesson({
             position_seconds: Number(duration.toFixed(2)),
             media_duration_seconds: Number(duration.toFixed(2)),
             tab_visible: visibleRef.current,
+            active_delta_seconds: Number(activeDeltaSeconds.toFixed(2)),
             client_session_key: clientSessionKey || undefined,
             client_ts: new Date().toISOString(),
           },
@@ -6170,7 +6229,7 @@ function VideoLesson({
       return;
     }
     await sendHeartbeat();
-  }, [canTrack, completionThreshold, lessonId, lmsRequest, sendHeartbeat, clientSessionKey]);
+  }, [canTrack, completionThreshold, lessonId, lmsRequest, sendHeartbeat, clientSessionKey, takePlaybackActiveDeltaSeconds]);
 
   const handleLoadedMetadata = useCallback(() => {
     const video = videoRef.current;
@@ -6220,6 +6279,7 @@ function VideoLesson({
     progressRef.current = 100;
     setDisplayCurrentSeconds(duration);
     maxAllowedSecondsRef.current = Math.max(maxAllowedSecondsRef.current, duration);
+    const activeDeltaSeconds = takePlaybackActiveDeltaSeconds({ includeCurrent: true });
     persistLocalProgress(true, {
       positionSeconds: duration,
       durationSeconds: duration,
@@ -6235,12 +6295,13 @@ function VideoLesson({
           position_seconds: Number(duration.toFixed(2)),
           media_duration_seconds: Number(duration.toFixed(2)),
           tab_visible: visibleRef.current,
+          active_delta_seconds: Number(activeDeltaSeconds.toFixed(2)),
           client_session_key: clientSessionKey || undefined,
           client_ts: new Date().toISOString(),
         },
       }).catch(() => {});
     }
-  }, [canTrack, lessonId, lmsRequest, persistLocalProgress, clientSessionKey]);
+  }, [canTrack, lessonId, lmsRequest, persistLocalProgress, clientSessionKey, takePlaybackActiveDeltaSeconds]);
 
   const handleTimeUpdate = useCallback(() => {
     const video = videoRef.current;
@@ -6340,13 +6401,15 @@ function VideoLesson({
   };
 
   const handleVideoPlay = () => {
+    lastActiveHeartbeatAtRef.current = Date.now();
     setPlaying(true);
   };
 
   const handleVideoPause = () => {
+    const activeDeltaSeconds = takePlaybackActiveDeltaSeconds({ includeCurrent: true });
     setPlaying(false);
     persistLocalProgress(true);
-    void sendHeartbeat().catch(() => {});
+    void sendHeartbeat({ activeDeltaSeconds }).catch(() => {});
   };
 
   const togglePlayback = () => {
@@ -11518,7 +11581,7 @@ function AdminView({
     if (startedAt && !Number.isNaN(startedAt.getTime()) && (!prev.lastStartedAt || startedAt > prev.lastStartedAt)) {
       prev.lastStartedAt = startedAt;
     }
-    prev.learningSeconds += Math.max(0, Number(row?.confirmed_learning_seconds || 0));
+    prev.learningSeconds += Math.max(0, Number(row?.active_learning_seconds || 0));
     prev.activeLearningSeconds += Math.max(0, Number(row?.active_learning_seconds || 0));
     prev.tabHiddenCount += Math.max(0, Number(row?.learning_tab_hidden_count || 0));
     prev.staleGapCount += Math.max(0, Number(row?.learning_stale_gap_count || 0));
@@ -11714,7 +11777,7 @@ function AdminView({
       const totalDuration = Math.max(0, Number(row?.test_duration_seconds || 0));
       const hours = Math.floor(totalDuration / 3600);
       const minutes = Math.floor((totalDuration % 3600) / 60);
-      const learningSeconds = Math.max(0, Number(row?.confirmed_learning_seconds || 0));
+      const learningSeconds = Math.max(0, Number(row?.active_learning_seconds || 0));
       return {
         id: Number(row?.id || 0),
         name: String(row?.name || `User #${row?.id || 0}`),
@@ -11972,8 +12035,8 @@ function AdminView({
         (sum, item) => sum + Math.max(0, Number(item?.duration_seconds || 0)),
         0
       );
-      const confirmedLearningSeconds = Math.max(0, Number(row?.confirmed_learning_seconds || 0));
       const activeLearningSeconds = Math.max(0, Number(row?.active_learning_seconds || 0));
+      const confirmedLearningSeconds = Math.max(0, Number(row?.confirmed_learning_seconds || 0));
       const derivedCompletedAt = attemptsForAssignment
         .map((item) => parseLmsDate(item?.finished_at || item?.started_at))
         .filter(Boolean)
@@ -11998,10 +12061,12 @@ function AdminView({
         passedIntermediateTests: Math.max(0, Number(row?.passed_intermediate_tests || 0)),
         totalIntermediateTests: Math.max(0, Number(row?.total_intermediate_tests || 0)),
         testDuration: formatDurationLabel(totalDurationSeconds),
-        learningDuration: formatDurationLabel(confirmedLearningSeconds),
-        learningDurationSeconds: confirmedLearningSeconds,
+        learningDuration: formatDurationLabel(activeLearningSeconds),
+        learningDurationSeconds: activeLearningSeconds,
         activeLearningDuration: formatDurationLabel(activeLearningSeconds),
         activeLearningSeconds,
+        confirmedLearningDuration: formatDurationLabel(confirmedLearningSeconds),
+        confirmedLearningSeconds,
         tabHiddenCount: Math.max(0, Number(row?.learning_tab_hidden_count || 0)),
         staleGapCount: Math.max(0, Number(row?.learning_stale_gap_count || 0)),
         sessionCount: Math.max(0, Number(row?.session_count || 0)),
@@ -12662,12 +12727,12 @@ function AdminView({
                           <p className="text-sm font-bold text-slate-800">{selectedEmployeeCourseItem.testDuration}</p>
                         </div>
                         <div className="bg-white rounded-xl border border-slate-100 p-4 shadow-sm transition-all hover:border-slate-200">
-                          <p className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5">Learning time</p>
+                          <p className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5">Real learning time</p>
                           <p className="text-sm font-bold text-slate-800">{selectedEmployeeCourseItem.learningDuration}</p>
                         </div>
                         <div className="bg-white rounded-xl border border-slate-100 p-4 shadow-sm transition-all hover:border-slate-200">
-                          <p className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5">Active time</p>
-                          <p className="text-sm font-bold text-slate-800">{selectedEmployeeCourseItem.activeLearningDuration}</p>
+                          <p className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5">Confirmed content</p>
+                          <p className="text-sm font-bold text-slate-800">{selectedEmployeeCourseItem.confirmedLearningDuration}</p>
                         </div>
                         <div className="bg-white rounded-xl border border-slate-100 p-4 shadow-sm transition-all hover:border-slate-200">
                           <p className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5">Sessions</p>

@@ -16601,6 +16601,22 @@ def _lms_resolve_client_session_key(data=None):
     return _lms_normalize_client_session_key(direct)
 
 
+def _lms_resolve_active_increment_seconds(data_or_payload, gap_seconds=None, tab_visible=True, stale_gap=False):
+    payload = data_or_payload if isinstance(data_or_payload, dict) else {}
+    raw_delta = payload.get('active_delta_seconds')
+    if raw_delta is not None:
+        client_delta = max(0.0, _lms_to_float(raw_delta, default=0.0))
+        if client_delta <= 0.0 or stale_gap:
+            return 0
+        return int(round(min(client_delta, float(LMS_STALE_GAP_SECONDS))))
+
+    if not tab_visible or stale_gap:
+        return 0
+    if gap_seconds is not None:
+        return int(round(min(max(0.0, gap_seconds), float(LMS_STALE_GAP_SECONDS))))
+    return int(LMS_HEARTBEAT_SECONDS)
+
+
 def _lms_deadline_status(due_at, completed_at):
     effective_due_at = due_at
     if isinstance(due_at, datetime):
@@ -20363,10 +20379,12 @@ def lms_lesson_event(lesson_id):
                     gap_seconds = max(0.0, (now - last_heartbeat).total_seconds())
                     stale_gap = gap_seconds > float(LMS_STALE_GAP_SECONDS)
 
-                if tab_visible and not stale_gap:
-                    active_increment = int(min(gap_seconds, float(LMS_STALE_GAP_SECONDS))) if gap_seconds is not None else int(LMS_HEARTBEAT_SECONDS)
-                else:
-                    active_increment = 0
+                active_increment = _lms_resolve_active_increment_seconds(
+                    payload,
+                    gap_seconds=gap_seconds,
+                    tab_visible=tab_visible,
+                    stale_gap=stale_gap
+                )
                 next_confirmed = progress_confirmed + active_increment
                 if lesson_duration > 0.0:
                     next_confirmed = min(lesson_duration, next_confirmed)
@@ -20542,10 +20560,12 @@ def lms_lesson_heartbeat(lesson_id):
 
             if tab_visible and not stale_gap:
                 next_confirmed = max(next_confirmed, effective_position)
-                if gap_seconds is not None:
-                    active_increment = int(min(gap_seconds, float(LMS_STALE_GAP_SECONDS)))
-                else:
-                    active_increment = int(LMS_HEARTBEAT_SECONDS)
+            active_increment = _lms_resolve_active_increment_seconds(
+                data,
+                gap_seconds=gap_seconds,
+                tab_visible=tab_visible,
+                stale_gap=stale_gap
+            )
 
             next_active = progress_active + active_increment
             next_tab_hidden = progress_tab_hidden + (0 if tab_visible else 1)
@@ -20618,6 +20638,7 @@ def lms_lesson_heartbeat(lesson_id):
                     "effective_duration_seconds": lesson_duration,
                     "media_duration_seconds": media_duration,
                     "tab_visible": tab_visible,
+                    "active_delta_seconds": data.get('active_delta_seconds'),
                     "stale_gap": stale_gap,
                     "blocked_forward_seek": blocked_forward_seek,
                     "client_session_key": client_session_key
@@ -22895,14 +22916,15 @@ def lms_admin_analytics():
         employee_rows = []
         avg_score_sum = 0
         overdue_count = 0
-        total_learning_seconds = 0.0
+        total_learning_seconds = 0
         for employee in sorted(employee_map.values(), key=lambda item: (str(item.get("name") or "").lower(), int(item.get("id") or 0))):
             agg = attempt_agg_by_user.get(int(employee["id"])) or {}
             avg_score = int(agg.get("avg_score") or 0)
             avg_score_sum += avg_score
             overdue_count += int(employee.get("overdue") or 0)
             confirmed_learning_seconds = max(0.0, float(employee.get("confirmed_learning_seconds") or 0.0))
-            total_learning_seconds += confirmed_learning_seconds
+            active_learning_seconds = max(0, int(employee.get("active_learning_seconds") or 0))
+            total_learning_seconds += active_learning_seconds
             employee_rows.append({
                 "id": int(employee["id"]),
                 "name": employee.get("name") or f"User #{employee['id']}",
@@ -22915,7 +22937,7 @@ def lms_admin_analytics():
                 "attempts": int(agg.get("attempts") or 0),
                 "test_duration_seconds": int(agg.get("test_duration_seconds") or 0),
                 "confirmed_learning_seconds": round(confirmed_learning_seconds, 2),
-                "active_learning_seconds": max(0, int(employee.get("active_learning_seconds") or 0)),
+                "active_learning_seconds": active_learning_seconds,
                 "tab_hidden_count": max(0, int(employee.get("tab_hidden_count") or 0)),
                 "stale_gap_count": max(0, int(employee.get("stale_gap_count") or 0)),
                 "session_count": max(0, int(employee.get("session_count") or 0)),
