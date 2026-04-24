@@ -34803,97 +34803,153 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             const callsPerHour = effectiveCallHours > 0
                                                 ? (safeNum(totalCalls) / effectiveCallHours)
                                                 : 0;
+                                            const completionPct = safeNum(norm) > 0 ? (safeNum(regular) / safeNum(norm)) * 100 : 0;
+                                            const clampedCompletionPct = Math.max(0, Math.min(100, completionPct));
+                                            const hoursDelta = safeNum(regular) - safeNum(norm);
+                                            const remainingHours = Math.max(0, -hoursDelta);
+                                            const overtimeHours = Math.max(0, hoursDelta);
+                                            const netAdjustments = safeNum(bonuses) - safeNum(fines);
+                                            const progressStatus = safeNum(norm) <= 0
+                                                ? { label: 'Норма не задана', className: 'bg-gray-100 text-gray-700 border-gray-200' }
+                                                : completionPct >= 100
+                                                    ? { label: 'Норма выполнена', className: 'bg-green-100 text-green-700 border-green-200' }
+                                                    : completionPct >= 85
+                                                        ? { label: 'Близко к норме', className: 'bg-blue-100 text-blue-700 border-blue-200' }
+                                                        : { label: 'Нужно добрать', className: 'bg-amber-100 text-amber-700 border-amber-200' };
+                                            const hourBreakdownItems = [
+                                                { label: 'База', value: regularBase, icon: 'fas fa-briefcase', color: 'text-gray-700', bg: 'bg-gray-100' },
+                                                { label: 'Тренинг', value: trainingHours, icon: 'fas fa-chalkboard-teacher', color: 'text-blue-700', bg: 'bg-blue-50' },
+                                                { label: 'Тех. сбои', value: technicalIssueHours, icon: 'fas fa-tools', color: 'text-violet-700', bg: 'bg-violet-50' },
+                                                { label: 'Офлайн', value: offlineActivityHours, icon: 'fas fa-user-clock', color: 'text-emerald-700', bg: 'bg-emerald-50' },
+                                            ];
 
                                             // --- отображаем ---
                                             return (
                                             <div className="workhours-main-grid grid grid-cols-1 md:grid-cols-3 gap-6">
                                                 {/* Левая часть с карточками */}
-                                                <div className="workhours-left col-span-1 md:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-6">
-                                                {/* Отработанные часы (база + зачтённые тренинги + техсбои + оффлайн) */}
-                                                <div className="p-5 workhours-card bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
-                                                    <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
-                                                    <FaIcon className="fas fa-briefcase text-gray-400"></FaIcon> Отработанные часы
-                                                    </p>
-                                                    <p className={`text-xl font-bold ${getHoursPerformanceColor(regular, norm)}`}>
-                                                    {safeNum(regular).toFixed(2)} <span className="text-sm font-medium text-gray-500">час</span>
-                                                    </p>
+                                                <div className="workhours-left col-span-1 md:col-span-2 space-y-5">
+                                                <div className="workhours-card bg-gray-50 rounded-xl border border-gray-200 p-5 shadow-sm">
+                                                    <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-5">
+                                                    <div className="min-w-0 flex-1">
+                                                        <div className="flex flex-wrap items-center gap-2 mb-3">
+                                                        <span className="inline-flex items-center gap-2 text-xs uppercase tracking-wide text-gray-500 font-semibold">
+                                                            <FaIcon className="fas fa-bullseye text-blue-500"></FaIcon>
+                                                            Выполнение нормы
+                                                        </span>
+                                                        <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-medium ${progressStatus.className}`}>
+                                                            {progressStatus.label}
+                                                        </span>
+                                                        </div>
+                                                        <div className="flex flex-col sm:flex-row sm:items-end gap-2 sm:gap-4">
+                                                        <div className={`text-3xl sm:text-4xl font-bold leading-none ${getHoursPerformanceColor(regular, norm)}`}>
+                                                            {safeNum(regular).toFixed(2)}
+                                                            <span className="ml-1 text-base font-medium text-gray-500">ч</span>
+                                                        </div>
+                                                        <div className="text-sm text-gray-600 pb-1">
+                                                            из {safeNum(norm).toFixed(2)} ч нормы
+                                                        </div>
+                                                        </div>
+                                                        <div className="mt-4 h-3 w-full overflow-hidden rounded-full bg-gray-200">
+                                                        <div
+                                                            className={`h-full rounded-full transition-all duration-500 ${completionPct >= 100 ? 'bg-green-500' : completionPct >= 85 ? 'bg-blue-500' : 'bg-amber-500'}`}
+                                                            style={{ width: `${clampedCompletionPct}%` }}
+                                                        />
+                                                        </div>
+                                                        <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-gray-500">
+                                                        <span>{safeNum(completionPct).toFixed(2)}%</span>
+                                                        <span>
+                                                            {safeNum(norm) <= 0
+                                                            ? 'Добавьте норму часов'
+                                                            : remainingHours > 0
+                                                                ? `Осталось ${remainingHours.toFixed(2)} ч`
+                                                                : `Сверх нормы ${overtimeHours.toFixed(2)} ч`}
+                                                        </span>
+                                                        </div>
+                                                    </div>
+                                                    <div className="flex justify-center lg:w-44 lg:justify-end">
+                                                        <SemiCircleProgress
+                                                        percentage={completionPct}
+                                                        label="Норма"
+                                                        width={150}
+                                                        height={88}
+                                                        />
+                                                    </div>
+                                                    </div>
                                                 </div>
 
-                                                {/* Норма часов */}
-                                                <div className="p-5 workhours-card bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
-                                                    <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
-                                                    <FaIcon className="fas fa-bullseye text-gray-400"></FaIcon> Норма часов
-                                                    </p>
-                                                    <p className="text-xl font-bold text-gray-900">
-                                                    {safeNum(norm).toFixed(2)} <span className="text-sm font-medium text-gray-500">час</span>
-                                                    </p>
-                                                </div>
+                                                <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                                                    <div className="workhours-card bg-gray-50 rounded-xl border border-gray-200 p-5 shadow-sm">
+                                                    <div className="flex items-center justify-between gap-3 mb-4">
+                                                        <h3 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
+                                                        <FaIcon className="fas fa-layer-group text-blue-500"></FaIcon>
+                                                        Из чего сложились часы
+                                                        </h3>
+                                                        <span className="text-xs text-gray-500">Итого {safeNum(regular).toFixed(2)} ч</span>
+                                                    </div>
+                                                    <div className="grid grid-cols-2 gap-3">
+                                                        {hourBreakdownItems.map((item) => (
+                                                        <div key={item.label} className="rounded-lg bg-white border border-gray-200 p-3">
+                                                            <div className="flex items-center gap-2 text-xs text-gray-500 mb-2">
+                                                            <span className={`w-7 h-7 rounded-lg ${item.bg} ${item.color} flex items-center justify-center`}>
+                                                                <FaIcon className={item.icon}></FaIcon>
+                                                            </span>
+                                                            <span className="font-medium">{item.label}</span>
+                                                            </div>
+                                                            <div className={`text-lg font-bold ${item.color}`}>
+                                                            {safeNum(item.value).toFixed(2)}
+                                                            <span className="ml-1 text-xs font-medium text-gray-500">ч</span>
+                                                            </div>
+                                                        </div>
+                                                        ))}
+                                                    </div>
+                                                    </div>
 
-                                                {/* Часы тренинга (только те, что count_in_hours === true) */}
-                                                <div className="p-5 workhours-card bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
-                                                    <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
-                                                    <FaIcon className="fas fa-chalkboard-teacher text-gray-400"></FaIcon> Часы тренинга
-                                                    </p>
-                                                    <p className="text-xl font-bold text-blue-700">
-                                                    {safeNum(trainingHours).toFixed(2)} <span className="text-sm font-medium text-gray-500">час</span>
-                                                    </p>
-                                                </div>
-
-                                                {/* Штрафы */}
-                                                <div className="p-5 workhours-card bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
-                                                    <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
-                                                    <FaIcon className="fas fa-exclamation-triangle text-gray-400"></FaIcon> Штрафы
-                                                    </p>
-                                                    <p className="text-xl font-bold text-red-600">
-                                                    {safeNum(fines).toFixed(2)}
-                                                    </p>
-                                                </div>
-
-                                                <div className="p-5 workhours-card bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
-                                                    <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
-                                                    <FaIcon className="fas fa-gift text-gray-400"></FaIcon> Бонусы
-                                                    </p>
-                                                    <p className="text-xl font-bold text-green-600">
-                                                    {safeNum(bonuses).toFixed(2)}
-                                                    </p>
-                                                </div>
-
-                                                <div className="p-5 workhours-card bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
-                                                    <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
-                                                    <FaIcon className="fas fa-tools text-gray-400"></FaIcon> Тех. сбои
-                                                    </p>
-                                                    <p className="text-xl font-bold text-violet-700">
-                                                    {safeNum(technicalIssueHours).toFixed(2)} <span className="text-sm font-medium text-gray-500">час</span>
-                                                    </p>
-                                                </div>
-
-                                                <div className="p-5 workhours-card bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
-                                                    <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
-                                                    <FaIcon className="fas fa-user-clock text-gray-400"></FaIcon> Офлайн активность
-                                                    </p>
-                                                    <p className="text-xl font-bold text-emerald-700">
-                                                    {safeNum(offlineActivityHours).toFixed(2)} <span className="text-sm font-medium text-gray-500">час</span>
-                                                    </p>
-                                                </div>
-
-                                                {/* Звонки в час */}
-                                                <div className="p-5 workhours-card bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
-                                                    <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
-                                                    <FaIcon className="fas fa-phone-alt text-gray-400"></FaIcon> Звонки в час
-                                                    </p>
-                                                    <p className={`text-xl font-bold ${getCallsPerHourColor(callsPerHour)}`}>
-                                                    {safeNum(callsPerHour).toFixed(1)}
-                                                    </p>
-                                                </div>
-
-                                                {/* Полукруговая диаграмма выполнения нормы */}
-                                                <div className="p-5 workhours-card bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition flex justify-center">
-                                                    <SemiCircleProgress
-                                                    percentage={(safeNum(regular) / (safeNum(norm) || 1)) * 100}
-                                                    label="Выполнение нормы"
-                                                    width={140}
-                                                    height={80}
-                                                    />
+                                                    <div className="workhours-card bg-gray-50 rounded-xl border border-gray-200 p-5 shadow-sm">
+                                                    <h3 className="text-sm font-semibold text-gray-800 flex items-center gap-2 mb-4">
+                                                        <FaIcon className="fas fa-chart-line text-blue-500"></FaIcon>
+                                                        Интенсивность и корректировки
+                                                    </h3>
+                                                    <div className="space-y-3">
+                                                        <div className="flex items-center justify-between rounded-lg bg-white border border-gray-200 px-3 py-2.5">
+                                                        <span className="text-sm text-gray-600 flex items-center gap-2">
+                                                            <FaIcon className="fas fa-phone-alt text-gray-400"></FaIcon>
+                                                            Звонки в час
+                                                        </span>
+                                                        <span className={`text-lg font-bold ${getCallsPerHourColor(callsPerHour)}`}>
+                                                            {safeNum(callsPerHour).toFixed(2)}
+                                                        </span>
+                                                        </div>
+                                                        <div className="flex items-center justify-between rounded-lg bg-white border border-gray-200 px-3 py-2.5">
+                                                        <span className="text-sm text-gray-600 flex items-center gap-2">
+                                                            <FaIcon className="fas fa-phone text-gray-400"></FaIcon>
+                                                            Всего звонков
+                                                        </span>
+                                                        <span className="text-lg font-bold text-gray-900">{safeNum(totalCalls).toFixed(0)}</span>
+                                                        </div>
+                                                        <div className="grid grid-cols-2 gap-3">
+                                                        <div className="rounded-lg bg-white border border-gray-200 p-3">
+                                                            <div className="text-xs text-gray-500 flex items-center gap-2 mb-1">
+                                                            <FaIcon className="fas fa-gift text-green-500"></FaIcon>
+                                                            Бонусы
+                                                            </div>
+                                                            <div className="text-lg font-bold text-green-600">{safeNum(bonuses).toFixed(2)}</div>
+                                                        </div>
+                                                        <div className="rounded-lg bg-white border border-gray-200 p-3">
+                                                            <div className="text-xs text-gray-500 flex items-center gap-2 mb-1">
+                                                            <FaIcon className="fas fa-exclamation-triangle text-red-500"></FaIcon>
+                                                            Штрафы
+                                                            </div>
+                                                            <div className="text-lg font-bold text-red-600">{safeNum(fines).toFixed(2)}</div>
+                                                        </div>
+                                                        </div>
+                                                        <div className="flex items-center justify-between rounded-lg bg-white border border-gray-200 px-3 py-2.5">
+                                                        <span className="text-sm text-gray-600">Баланс начислений</span>
+                                                        <span className={`text-lg font-bold ${netAdjustments >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                                            {netAdjustments >= 0 ? '+' : ''}{netAdjustments.toFixed(2)}
+                                                        </span>
+                                                        </div>
+                                                    </div>
+                                                    </div>
                                                 </div>
                                                 </div>
 
