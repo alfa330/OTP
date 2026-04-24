@@ -126,6 +126,7 @@ const TOKEN_TO_ICON = {
     'fa-angle-left': 'ChevronLeft',
     'fa-angle-right': 'ChevronRight',
     'fa-arrow-down': 'ArrowDown',
+    'fa-arrow-right': 'ChevronRight',
     'fa-arrows-rotate': 'RefreshCw',
     'fa-award': 'Award',
     'fa-birthday-cake': 'Gift',
