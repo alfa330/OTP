@@ -3563,6 +3563,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
             emitToast={emitToast}
             isManagerMode={canUseManagerApi}
             courseAnalytics={selectedCourseAnalytics}
+            clientSessionKey={lmsClientSessionKey}
           />
         )}
         {view === "builder" && (
@@ -4508,6 +4509,7 @@ function LessonView({
   emitToast,
   isManagerMode = false,
   courseAnalytics = null,
+  clientSessionKey,
 }) {
   const isQuiz = lesson.type === "quiz";
   const isTextLesson = lesson.type === "text";
@@ -4642,7 +4644,7 @@ function LessonView({
               onQuizFinished={onQuizFinished}
               emitToast={emitToast}
               blockTranscriptCopy={blockTranscriptCopy}
-              clientSessionKey={lmsClientSessionKey}
+              clientSessionKey={clientSessionKey}
             />
           ) : isTextLesson ? (
             <TextLesson
@@ -4650,7 +4652,7 @@ function LessonView({
               onCompleteLesson={onCompleteLesson}
               isManagerMode={isManagerMode}
               lmsRequest={lmsRequest}
-              clientSessionKey={lmsClientSessionKey}
+              clientSessionKey={clientSessionKey}
             />
           ) : (
             <VideoLesson
@@ -4661,7 +4663,7 @@ function LessonView({
               onCompleteLesson={onCompleteLesson}
               emitToast={emitToast}
               isManagerMode={isManagerMode}
-              clientSessionKey={lmsClientSessionKey}
+              clientSessionKey={clientSessionKey}
             />
           )}
         </div>
