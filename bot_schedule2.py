@@ -16481,6 +16481,32 @@ def _lms_parse_month_range(month_str):
         return None, None
 
 
+def _lms_append_assignment_activity_month_filter(where_clauses, params, month_start, month_end):
+    if not month_start or not month_end:
+        return
+    where_clauses.append("""
+        (
+            EXISTS (
+                SELECT 1
+                FROM lms_lesson_progress lp
+                WHERE lp.assignment_id = a.id
+                  AND lp.user_id = a.user_id
+                  AND COALESCE(lp.last_heartbeat_at, lp.last_event_at, lp.updated_at) >= %s
+                  AND COALESCE(lp.last_heartbeat_at, lp.last_event_at, lp.updated_at) < %s
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM lms_test_attempts ta_month
+                WHERE ta_month.assignment_id = a.id
+                  AND ta_month.user_id = a.user_id
+                  AND ta_month.started_at >= %s
+                  AND ta_month.started_at < %s
+            )
+        )
+    """)
+    params.extend([month_start, month_end, month_start, month_end])
+
+
 def _lms_normalize_skills(value, limit=30):
     if not isinstance(value, list):
         return []
@@ -16550,6 +16576,29 @@ def _lms_parse_datetime(value):
         return parsed
     except Exception:
         return None
+
+
+def _lms_normalize_client_session_key(value, limit=255):
+    raw = str(value or '').strip()
+    if not raw:
+        return None
+    normalized = re.sub(r'[^0-9A-Za-z:_-]+', '-', raw)
+    normalized = re.sub(r'-{2,}', '-', normalized).strip('-:_')
+    if not normalized:
+        return None
+    if len(normalized) > limit:
+        normalized = normalized[:limit].rstrip('-:_')
+    return normalized or None
+
+
+def _lms_resolve_client_session_key(data=None):
+    payload = data if isinstance(data, dict) else {}
+    direct = (
+        payload.get('client_session_key')
+        or request.args.get('client_session_key')
+        or request.headers.get('X-LMS-Client-Session')
+    )
+    return _lms_normalize_client_session_key(direct)
 
 
 def _lms_deadline_status(due_at, completed_at):
@@ -16651,6 +16700,32 @@ def _lms_admin_assignment_stats_tx(cursor, where_clauses=None, params=None):
              AND tp.user_id = fa.user_id
              AND tp.test_id = t.id
             GROUP BY fa.id
+        ),
+        learning_stats AS (
+            SELECT
+                fa.id AS assignment_id,
+                COALESCE(SUM(p.confirmed_seconds), 0) AS confirmed_learning_seconds,
+                COALESCE(SUM(p.active_seconds), 0) AS active_learning_seconds,
+                COALESCE(SUM(p.tab_hidden_count), 0) AS learning_tab_hidden_count,
+                COALESCE(SUM(p.stale_gap_count), 0) AS learning_stale_gap_count,
+                MAX(COALESCE(p.last_heartbeat_at, p.last_event_at, p.updated_at)) AS last_learning_at
+            FROM filtered_assignments fa
+            LEFT JOIN lms_lesson_progress p
+              ON p.assignment_id = fa.id
+             AND p.user_id = fa.user_id
+            GROUP BY fa.id
+        ),
+        session_stats AS (
+            SELECT
+                fa.id AS assignment_id,
+                COUNT(ls.id) AS session_count,
+                COUNT(ls.id) FILTER (WHERE COALESCE(ls.is_active, FALSE)) AS active_session_count,
+                MAX(COALESCE(ls.last_heartbeat_at, ls.ended_at, ls.started_at)) AS last_session_activity_at
+            FROM filtered_assignments fa
+            LEFT JOIN lms_learning_sessions ls
+              ON ls.assignment_id = fa.id
+             AND ls.user_id = fa.user_id
+            GROUP BY fa.id
         )
         SELECT
             fa.id,
@@ -16671,12 +16746,27 @@ def _lms_admin_assignment_stats_tx(cursor, where_clauses=None, params=None):
             COALESCE(ts.passed_tests, 0) AS passed_tests,
             COALESCE(ts.total_intermediate_tests, 0) AS total_intermediate_tests,
             COALESCE(ts.passed_intermediate_tests, 0) AS passed_intermediate_tests,
-            fa.assigned_at
+            fa.assigned_at,
+            COALESCE(lls.confirmed_learning_seconds, 0) AS confirmed_learning_seconds,
+            COALESCE(lls.active_learning_seconds, 0) AS active_learning_seconds,
+            COALESCE(lls.learning_tab_hidden_count, 0) AS learning_tab_hidden_count,
+            COALESCE(lls.learning_stale_gap_count, 0) AS learning_stale_gap_count,
+            COALESCE(
+                GREATEST(lls.last_learning_at, ss.last_session_activity_at),
+                lls.last_learning_at,
+                ss.last_session_activity_at
+            ) AS last_learning_at,
+            COALESCE(ss.session_count, 0) AS session_count,
+            COALESCE(ss.active_session_count, 0) AS active_session_count
         FROM filtered_assignments fa
         LEFT JOIN lesson_stats ls
           ON ls.assignment_id = fa.id
         LEFT JOIN test_stats ts
           ON ts.assignment_id = fa.id
+        LEFT JOIN learning_stats lls
+          ON lls.assignment_id = fa.id
+        LEFT JOIN session_stats ss
+          ON ss.assignment_id = fa.id
         ORDER BY fa.updated_at DESC, fa.id DESC
     """, query_params)
     rows = cursor.fetchall()
@@ -16698,6 +16788,13 @@ def _lms_admin_assignment_stats_tx(cursor, where_clauses=None, params=None):
         passed_tests = int(row[15] or 0)
         total_intermediate_tests = int(row[16] or 0)
         passed_intermediate_tests = int(row[17] or 0)
+        confirmed_learning_seconds = max(0.0, float(row[19] or 0.0))
+        active_learning_seconds = max(0, int(row[20] or 0))
+        learning_tab_hidden_count = max(0, int(row[21] or 0))
+        learning_stale_gap_count = max(0, int(row[22] or 0))
+        last_learning_at = row[23].isoformat() if row[23] else None
+        session_count = max(0, int(row[24] or 0))
+        active_session_count = max(0, int(row[25] or 0))
         progress_total_items = total_lessons + total_tests
         progress_completed_items = completed_lessons + passed_tests
         progress_percent = 0.0
@@ -16725,7 +16822,14 @@ def _lms_admin_assignment_stats_tx(cursor, where_clauses=None, params=None):
             "passed_tests": passed_tests,
             "total_intermediate_tests": total_intermediate_tests,
             "passed_intermediate_tests": passed_intermediate_tests,
-            "assigned_at": row[18].isoformat() if row[18] else None
+            "assigned_at": row[18].isoformat() if row[18] else None,
+            "confirmed_learning_seconds": round(confirmed_learning_seconds, 2),
+            "active_learning_seconds": active_learning_seconds,
+            "learning_tab_hidden_count": learning_tab_hidden_count,
+            "learning_stale_gap_count": learning_stale_gap_count,
+            "last_learning_at": last_learning_at,
+            "session_count": session_count,
+            "active_session_count": active_session_count,
         })
     return payload
 
@@ -18051,8 +18155,46 @@ def _lms_resolve_lesson_type(raw_lesson_type, materials=None, has_video=None, ha
     return 'video'
 
 
-def _lms_ensure_progress_and_session_tx(cursor, assignment_id, lesson_id, user_id):
+def _lms_close_learning_session_tx(cursor, session_id, ended_at=None):
+    resolved_ended_at = ended_at if isinstance(ended_at, datetime) else _lms_now()
+    cursor.execute("""
+        UPDATE lms_learning_sessions
+        SET is_active = FALSE,
+            ended_at = COALESCE(ended_at, %s)
+        WHERE id = %s
+          AND COALESCE(is_active, FALSE) = TRUE
+        RETURNING id
+    """, (resolved_ended_at, session_id))
+    return cursor.fetchone()
+
+
+def _lms_close_stale_learning_sessions_tx(cursor, assignment_id, lesson_id, user_id, except_session_id=None, stale_before=None):
+    params = [assignment_id, lesson_id, user_id]
+    where_parts = [
+        "assignment_id = %s",
+        "lesson_id = %s",
+        "user_id = %s",
+        "COALESCE(is_active, FALSE) = TRUE",
+    ]
+    if except_session_id:
+        where_parts.append("id <> %s")
+        params.append(except_session_id)
+    if isinstance(stale_before, datetime):
+        where_parts.append("COALESCE(last_heartbeat_at, started_at) < %s")
+        params.append(stale_before)
+    cursor.execute(f"""
+        UPDATE lms_learning_sessions
+        SET is_active = FALSE,
+            ended_at = COALESCE(ended_at, %s)
+        WHERE {" AND ".join(where_parts)}
+        RETURNING id
+    """, [_lms_now(), *params])
+    return [int(row[0]) for row in cursor.fetchall() if row and row[0] is not None]
+
+
+def _lms_ensure_progress_and_session_tx(cursor, assignment_id, lesson_id, user_id, client_session_key=None):
     now = _lms_now()
+    client_session_key = _lms_normalize_client_session_key(client_session_key)
     cursor.execute("""
         SELECT
             id, status, max_position_seconds, confirmed_seconds, completion_ratio,
@@ -18086,32 +18228,52 @@ def _lms_ensure_progress_and_session_tx(cursor, assignment_id, lesson_id, user_i
         """, (now, now, progress[0]))
         progress = cursor.fetchone()
 
-    cursor.execute("""
+    session_where = [
+        "assignment_id = %s",
+        "lesson_id = %s",
+        "user_id = %s",
+        "is_active = TRUE",
+    ]
+    session_params = [assignment_id, lesson_id, user_id]
+    if client_session_key:
+        session_where.append("client_fingerprint = %s")
+        session_params.append(client_session_key)
+    else:
+        session_where.append("client_fingerprint IS NULL")
+    cursor.execute(f"""
         SELECT
             id, started_at, ended_at, last_heartbeat_at, is_active, max_position_seconds,
             confirmed_seconds, active_seconds, tab_hidden_count, stale_gap_count
         FROM lms_learning_sessions
-        WHERE assignment_id = %s AND lesson_id = %s AND user_id = %s AND is_active = TRUE
+        WHERE {" AND ".join(session_where)}
         ORDER BY id DESC
         LIMIT 1
-    """, (assignment_id, lesson_id, user_id))
+    """, session_params)
     session = cursor.fetchone()
     if not session:
+        stale_before = now - timedelta(seconds=max(int(LMS_STALE_GAP_SECONDS or 0) * 2, int(LMS_HEARTBEAT_SECONDS or 0) * 3, 90))
+        _lms_close_stale_learning_sessions_tx(
+            cursor,
+            assignment_id=assignment_id,
+            lesson_id=lesson_id,
+            user_id=user_id,
+            stale_before=stale_before
+        )
         cursor.execute("""
             INSERT INTO lms_learning_sessions (
-                assignment_id, lesson_id, user_id, started_at, last_heartbeat_at, last_visible_at, is_active
+                assignment_id, lesson_id, user_id, started_at, last_heartbeat_at, last_visible_at, is_active, client_fingerprint
             )
-            VALUES (%s, %s, %s, %s, %s, %s, TRUE)
+            VALUES (%s, %s, %s, %s, %s, %s, TRUE, %s)
             RETURNING
                 id, started_at, ended_at, last_heartbeat_at, is_active, max_position_seconds,
                 confirmed_seconds, active_seconds, tab_hidden_count, stale_gap_count
-        """, (assignment_id, lesson_id, user_id, now, now, now))
+        """, (assignment_id, lesson_id, user_id, now, now, now, client_session_key))
         session = cursor.fetchone()
 
     return progress, session
 
 
-def _lms_get_lesson_context_tx(cursor, user_id, lesson_id):
+def _lms_get_lesson_context_tx(cursor, user_id, lesson_id, client_session_key=None):
     cursor.execute("""
         SELECT
             a.id as assignment_id,
@@ -18180,7 +18342,13 @@ def _lms_get_lesson_context_tx(cursor, user_id, lesson_id):
         video_duration_seconds = max(0.0, _lms_to_float(video_metadata.get("duration_seconds"), 0.0))
         if video_duration_seconds > 0:
             lesson_duration_seconds = video_duration_seconds
-    progress, session = _lms_ensure_progress_and_session_tx(cursor, assignment_id, lesson_id, int(user_id))
+    progress, session = _lms_ensure_progress_and_session_tx(
+        cursor,
+        assignment_id,
+        lesson_id,
+        int(user_id),
+        client_session_key=client_session_key
+    )
     return {
         "assignment_id": assignment_id,
         "course_id": int(row[1]),
@@ -19973,8 +20141,14 @@ def lms_lesson_detail(lesson_id):
         return error_response, status_code
 
     try:
+        client_session_key = _lms_resolve_client_session_key()
         with db._get_cursor() as cursor:
-            context = _lms_get_lesson_context_tx(cursor, requester_id, lesson_id)
+            context = _lms_get_lesson_context_tx(
+                cursor,
+                requester_id,
+                lesson_id,
+                client_session_key=client_session_key
+            )
             if not context:
                 return jsonify({"error": "Lesson is not available for learner"}), 404
 
@@ -20095,10 +20269,16 @@ def lms_lesson_event(lesson_id):
     event_type = str(data.get('event_type') or '').strip().lower() or 'unknown'
     payload = data.get('payload') if isinstance(data.get('payload'), dict) else {}
     client_ts = _lms_parse_datetime(data.get('client_ts'))
+    client_session_key = _lms_resolve_client_session_key(data)
 
     try:
         with db._get_cursor() as cursor:
-            context = _lms_get_lesson_context_tx(cursor, requester_id, lesson_id)
+            context = _lms_get_lesson_context_tx(
+                cursor,
+                requester_id,
+                lesson_id,
+                client_session_key=client_session_key
+            )
             if not context:
                 return jsonify({"error": "Lesson is not available for learner"}), 404
 
@@ -20108,6 +20288,7 @@ def lms_lesson_event(lesson_id):
             session_id = int(session[0])
             allow_fast_forward = bool(context["allow_fast_forward"])
             progress_max = float(progress[2] or 0.0)
+            now = _lms_now()
 
             blocked_seek = False
             allowed_position = None
@@ -20133,21 +20314,128 @@ def lms_lesson_event(lesson_id):
                     if to_seconds > allowed_position:
                         blocked_seek = True
 
-            if event_type == 'visibility':
-                is_visible = _lms_parse_bool(payload.get('is_visible') if isinstance(payload, dict) else None, True)
-                if not is_visible:
+            if event_type in ('visibility', 'tab_hidden', 'tab_visible'):
+                if event_type == 'tab_hidden':
+                    is_visible = False
+                elif event_type == 'tab_visible':
+                    is_visible = True
+                else:
+                    is_visible = _lms_parse_bool(payload.get('is_visible') if isinstance(payload, dict) else None, True)
+                payload = {**(payload or {}), "is_visible": bool(is_visible)}
+                event_type = 'tab_visible' if is_visible else 'tab_hidden'
+                if is_visible:
+                    cursor.execute("""
+                        UPDATE lms_lesson_progress
+                        SET last_event_at = %s,
+                            updated_at = %s
+                        WHERE id = %s
+                    """, (now, now, progress_id))
+                    cursor.execute("""
+                        UPDATE lms_learning_sessions
+                        SET last_visible_at = %s
+                        WHERE id = %s
+                    """, (now, session_id))
+                else:
                     cursor.execute("""
                         UPDATE lms_lesson_progress
                         SET tab_hidden_count = COALESCE(tab_hidden_count, 0) + 1,
                             last_event_at = %s,
                             updated_at = %s
                         WHERE id = %s
-                    """, (_lms_now(), _lms_now(), progress_id))
+                    """, (now, now, progress_id))
                     cursor.execute("""
                         UPDATE lms_learning_sessions
                         SET tab_hidden_count = COALESCE(tab_hidden_count, 0) + 1
                         WHERE id = %s
                     """, (session_id,))
+
+            if event_type == 'combined_video_progress':
+                lesson_duration = max(0.0, float(context["duration_seconds"] or 0.0))
+                progress_confirmed = float(progress[3] or 0.0)
+                progress_active = int(progress[5] or 0)
+                progress_tab_hidden = int(progress[7] or 0)
+                progress_stale = int(progress[8] or 0)
+                tab_visible = _lms_parse_bool(payload.get('tab_visible') if isinstance(payload, dict) else None, True)
+                last_heartbeat = session[3] or progress[6]
+                gap_seconds = None
+                stale_gap = False
+                if isinstance(last_heartbeat, datetime):
+                    gap_seconds = max(0.0, (now - last_heartbeat).total_seconds())
+                    stale_gap = gap_seconds > float(LMS_STALE_GAP_SECONDS)
+
+                if tab_visible and not stale_gap:
+                    active_increment = int(min(gap_seconds, float(LMS_STALE_GAP_SECONDS))) if gap_seconds is not None else int(LMS_HEARTBEAT_SECONDS)
+                else:
+                    active_increment = 0
+                next_confirmed = progress_confirmed + active_increment
+                if lesson_duration > 0.0:
+                    next_confirmed = min(lesson_duration, next_confirmed)
+                    next_completion_ratio = min(100.0, round((next_confirmed / lesson_duration) * 100.0, 2))
+                else:
+                    next_completion_ratio = float(progress[4] or 0.0)
+                next_active = progress_active + active_increment
+                next_tab_hidden = progress_tab_hidden + (0 if tab_visible else 1)
+                next_stale = progress_stale + (1 if stale_gap else 0)
+                payload = {
+                    **(payload or {}),
+                    "tab_visible": tab_visible,
+                    "stale_gap": stale_gap,
+                    "active_increment_seconds": active_increment
+                }
+                cursor.execute("""
+                    UPDATE lms_lesson_progress
+                    SET status = CASE WHEN status = 'not_started' THEN 'in_progress' ELSE status END,
+                        confirmed_seconds = %s,
+                        completion_ratio = %s,
+                        active_seconds = %s,
+                        last_heartbeat_at = %s,
+                        last_event_at = %s,
+                        tab_hidden_count = %s,
+                        stale_gap_count = %s,
+                        started_at = COALESCE(started_at, %s),
+                        updated_at = %s
+                    WHERE id = %s
+                """, (
+                    next_confirmed,
+                    next_completion_ratio,
+                    next_active,
+                    now,
+                    now,
+                    next_tab_hidden,
+                    next_stale,
+                    now,
+                    now,
+                    progress_id
+                ))
+                cursor.execute("""
+                    UPDATE lms_learning_sessions
+                    SET last_heartbeat_at = %s,
+                        last_visible_at = CASE WHEN %s THEN %s ELSE last_visible_at END,
+                        confirmed_seconds = GREATEST(confirmed_seconds, %s),
+                        active_seconds = COALESCE(active_seconds, 0) + %s,
+                        tab_hidden_count = %s,
+                        stale_gap_count = %s
+                    WHERE id = %s
+                """, (
+                    now,
+                    tab_visible,
+                    now,
+                    next_confirmed,
+                    active_increment,
+                    int(session[8] or 0) + (0 if tab_visible else 1),
+                    int(session[9] or 0) + (1 if stale_gap else 0),
+                    session_id
+                ))
+
+            if event_type == 'session_end':
+                reason = str(payload.get('reason') if isinstance(payload, dict) else '' or '').strip().lower() or 'client_close'
+                payload = {**(payload or {}), "reason": reason}
+                cursor.execute("""
+                    UPDATE lms_lesson_progress
+                    SET last_event_at = %s,
+                        updated_at = %s
+                    WHERE id = %s
+                """, (now, now, progress_id))
 
             if blocked_seek:
                 payload = {**(payload or {}), "blocked": True, "allowed_position": allowed_position}
@@ -20167,8 +20455,11 @@ def lms_lesson_event(lesson_id):
                 event_name,
                 json.dumps(payload or {}, ensure_ascii=False),
                 client_ts,
-                _lms_now()
+                now
             ))
+
+            if event_name == 'session_end':
+                _lms_close_learning_session_tx(cursor, session_id, ended_at=now)
 
             if blocked_seek:
                 return jsonify({
@@ -20194,10 +20485,16 @@ def lms_lesson_heartbeat(lesson_id):
     raw_position = data.get('position_seconds')
     raw_media_duration = data.get('media_duration_seconds')
     tab_visible = _lms_parse_bool(data.get('tab_visible'), True)
+    client_session_key = _lms_resolve_client_session_key(data)
 
     try:
         with db._get_cursor() as cursor:
-            context = _lms_get_lesson_context_tx(cursor, requester_id, lesson_id)
+            context = _lms_get_lesson_context_tx(
+                cursor,
+                requester_id,
+                lesson_id,
+                client_session_key=client_session_key
+            )
             if not context:
                 return jsonify({"error": "Lesson is not available for learner"}), 404
 
@@ -20322,7 +20619,8 @@ def lms_lesson_heartbeat(lesson_id):
                     "media_duration_seconds": media_duration,
                     "tab_visible": tab_visible,
                     "stale_gap": stale_gap,
-                    "blocked_forward_seek": blocked_forward_seek
+                    "blocked_forward_seek": blocked_forward_seek,
+                    "client_session_key": client_session_key
                 }, ensure_ascii=False),
                 _lms_parse_datetime(data.get('client_ts')),
                 now
@@ -20351,8 +20649,15 @@ def lms_lesson_complete(lesson_id):
         return error_response, status_code
 
     try:
+        data = request.get_json(silent=True) or {}
+        client_session_key = _lms_resolve_client_session_key(data)
         with db._get_cursor() as cursor:
-            context = _lms_get_lesson_context_tx(cursor, requester_id, lesson_id)
+            context = _lms_get_lesson_context_tx(
+                cursor,
+                requester_id,
+                lesson_id,
+                client_session_key=client_session_key
+            )
             if not context:
                 return jsonify({"error": "Lesson is not available for learner"}), 404
 
@@ -22272,13 +22577,112 @@ def lms_admin_progress():
                 params.append(list(visible_ids))
             month_start, month_end = _lms_parse_month_range(request.args.get('month', ''))
             if month_start and month_end:
-                where.append("a.updated_at >= %s AND a.updated_at < %s")
-                params.extend([month_start, month_end])
+                _lms_append_assignment_activity_month_filter(where, params, month_start, month_end)
             payload = _lms_admin_assignment_stats_tx(cursor, where, params)
 
         return jsonify({"status": "success", "rows": payload}), 200
     except Exception as e:
         logging.exception("Error in /api/lms/admin/progress")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/lms/admin/learning-sessions', methods=['GET'])
+@require_api_key
+def lms_admin_learning_sessions():
+    requester_id, _, requester_role, error_response, status_code = _lms_resolve_request('manager')
+    if error_response:
+        return error_response, status_code
+
+    try:
+        course_id_filter = _lms_to_int(request.args.get('course_id'), default=0)
+        user_id_filter = _lms_to_int(request.args.get('user_id'), default=0)
+        assignment_id_filter = _lms_to_int(request.args.get('assignment_id'), default=0)
+        limit = min(max(_lms_to_int(request.args.get('limit'), default=20), 1), 200)
+        visible_ids = None
+        if requester_role in ('sv', 'trainer'):
+            visible_ids = set(_lms_visible_learner_ids(requester_id, requester_role))
+
+        with db._get_cursor() as cursor:
+            params = []
+            where = ["1=1"]
+            if course_id_filter > 0:
+                where.append("a.course_id = %s")
+                params.append(course_id_filter)
+            if user_id_filter > 0:
+                where.append("ls.user_id = %s")
+                params.append(user_id_filter)
+            if assignment_id_filter > 0:
+                where.append("ls.assignment_id = %s")
+                params.append(assignment_id_filter)
+            if visible_ids is not None:
+                if not visible_ids:
+                    return jsonify({"status": "success", "sessions": []}), 200
+                where.append("ls.user_id = ANY(%s)")
+                params.append(list(visible_ids))
+
+            cursor.execute(f"""
+                SELECT
+                    ls.id,
+                    ls.assignment_id,
+                    a.course_id,
+                    c.title AS course_title,
+                    ls.lesson_id,
+                    l.title AS lesson_title,
+                    ls.user_id,
+                    u.name AS user_name,
+                    ls.started_at,
+                    ls.ended_at,
+                    ls.last_heartbeat_at,
+                    COALESCE(ls.is_active, FALSE),
+                    COALESCE(ls.confirmed_seconds, 0),
+                    COALESCE(ls.active_seconds, 0),
+                    COALESCE(ls.tab_hidden_count, 0),
+                    COALESCE(ls.stale_gap_count, 0),
+                    ls.client_fingerprint
+                FROM lms_learning_sessions ls
+                JOIN lms_course_assignments a ON a.id = ls.assignment_id
+                JOIN lms_courses c ON c.id = a.course_id
+                LEFT JOIN lms_lessons l ON l.id = ls.lesson_id
+                JOIN users u ON u.id = ls.user_id
+                WHERE {" AND ".join(where)}
+                ORDER BY COALESCE(ls.last_heartbeat_at, ls.ended_at, ls.started_at) DESC, ls.id DESC
+                LIMIT %s
+            """, params + [limit])
+            rows = cursor.fetchall()
+
+        sessions = []
+        for row in rows:
+            started_at = row[8]
+            ended_at = row[9]
+            duration_seconds = None
+            if isinstance(started_at, datetime):
+                session_end = ended_at if isinstance(ended_at, datetime) else (row[10] if isinstance(row[10], datetime) else None)
+                if isinstance(session_end, datetime):
+                    duration_seconds = max(0, int((session_end - started_at).total_seconds()))
+            sessions.append({
+                "session_id": int(row[0]),
+                "assignment_id": int(row[1]),
+                "course_id": int(row[2]),
+                "course_title": row[3],
+                "lesson_id": int(row[4]),
+                "lesson_title": row[5],
+                "user_id": int(row[6]),
+                "user_name": row[7],
+                "started_at": started_at.isoformat() if started_at else None,
+                "ended_at": ended_at.isoformat() if ended_at else None,
+                "last_heartbeat_at": row[10].isoformat() if row[10] else None,
+                "is_active": bool(row[11]),
+                "confirmed_seconds": round(float(row[12] or 0.0), 2),
+                "active_seconds": int(row[13] or 0),
+                "tab_hidden_count": int(row[14] or 0),
+                "stale_gap_count": int(row[15] or 0),
+                "client_session_key": row[16],
+                "duration_seconds": duration_seconds,
+            })
+
+        return jsonify({"status": "success", "sessions": sessions}), 200
+    except Exception as e:
+        logging.exception("Error in /api/lms/admin/learning-sessions")
         return jsonify({"error": "Internal server error"}), 500
 
 
@@ -22319,7 +22723,9 @@ def lms_admin_analytics():
                         "employee_count": 0,
                         "overall_progress": 0,
                         "avg_score": 0,
-                        "overdue_count": 0
+                        "overdue_count": 0,
+                        "total_learning_seconds": 0,
+                        "avg_learning_seconds": 0
                     },
                     "employee_rows": [],
                     "course_stats": [],
@@ -22334,8 +22740,7 @@ def lms_admin_analytics():
 
         month_start, month_end = _lms_parse_month_range(request.args.get('month', ''))
         if month_start and month_end:
-            assignment_where.append("a.updated_at >= %s AND a.updated_at < %s")
-            assignment_params.extend([month_start, month_end])
+            _lms_append_assignment_activity_month_filter(assignment_where, assignment_params, month_start, month_end)
             attempt_where.append("ta.started_at >= %s AND ta.started_at < %s")
             attempt_params.extend([month_start, month_end])
 
@@ -22382,6 +22787,12 @@ def lms_admin_analytics():
                 "last_active_at": row[4].isoformat() if row[4] else None
             }
 
+        def _pick_latest_iso(*values):
+            items = [str(value) for value in values if value]
+            if not items:
+                return None
+            return max(items)
+
         employee_map = {}
         course_map = {}
         assignment_status_counts = {
@@ -22417,6 +22828,12 @@ def lms_admin_analytics():
                     "progress_sum": 0.0,
                     "overdue": 0,
                     "last_started_at": None,
+                    "confirmed_learning_seconds": 0.0,
+                    "active_learning_seconds": 0,
+                    "tab_hidden_count": 0,
+                    "stale_gap_count": 0,
+                    "session_count": 0,
+                    "last_learning_at": None,
                 }
                 employee["courses"] += 1
                 employee["progress_sum"] += progress_percent
@@ -22427,6 +22844,12 @@ def lms_admin_analytics():
                 started_at = row.get("started_at")
                 if started_at and (not employee["last_started_at"] or started_at > employee["last_started_at"]):
                     employee["last_started_at"] = started_at
+                employee["confirmed_learning_seconds"] += max(0.0, float(row.get("confirmed_learning_seconds") or 0.0))
+                employee["active_learning_seconds"] += max(0, int(row.get("active_learning_seconds") or 0))
+                employee["tab_hidden_count"] += max(0, int(row.get("learning_tab_hidden_count") or 0))
+                employee["stale_gap_count"] += max(0, int(row.get("learning_stale_gap_count") or 0))
+                employee["session_count"] += max(0, int(row.get("session_count") or 0))
+                employee["last_learning_at"] = _pick_latest_iso(employee.get("last_learning_at"), row.get("last_learning_at"))
                 employee_map[user_id] = employee
 
             course_id = int(row.get("course_id") or 0)
@@ -22441,6 +22864,12 @@ def lms_admin_analytics():
                     "not_started": 0,
                     "overdue": 0,
                     "lessons": 0,
+                    "confirmed_learning_seconds": 0.0,
+                    "active_learning_seconds": 0,
+                    "tab_hidden_count": 0,
+                    "stale_gap_count": 0,
+                    "session_count": 0,
+                    "last_learning_at": None,
                 }
                 course_stat["progress_sum"] += progress_percent
                 course_stat["total"] += 1
@@ -22455,16 +22884,25 @@ def lms_admin_analytics():
                 else:
                     course_stat["not_started"] += 1
                 course_stat["lessons"] = max(course_stat["lessons"], int(row.get("total_lessons") or 0))
+                course_stat["confirmed_learning_seconds"] += max(0.0, float(row.get("confirmed_learning_seconds") or 0.0))
+                course_stat["active_learning_seconds"] += max(0, int(row.get("active_learning_seconds") or 0))
+                course_stat["tab_hidden_count"] += max(0, int(row.get("learning_tab_hidden_count") or 0))
+                course_stat["stale_gap_count"] += max(0, int(row.get("learning_stale_gap_count") or 0))
+                course_stat["session_count"] += max(0, int(row.get("session_count") or 0))
+                course_stat["last_learning_at"] = _pick_latest_iso(course_stat.get("last_learning_at"), row.get("last_learning_at"))
                 course_map[course_id] = course_stat
 
         employee_rows = []
         avg_score_sum = 0
         overdue_count = 0
+        total_learning_seconds = 0.0
         for employee in sorted(employee_map.values(), key=lambda item: (str(item.get("name") or "").lower(), int(item.get("id") or 0))):
             agg = attempt_agg_by_user.get(int(employee["id"])) or {}
             avg_score = int(agg.get("avg_score") or 0)
             avg_score_sum += avg_score
             overdue_count += int(employee.get("overdue") or 0)
+            confirmed_learning_seconds = max(0.0, float(employee.get("confirmed_learning_seconds") or 0.0))
+            total_learning_seconds += confirmed_learning_seconds
             employee_rows.append({
                 "id": int(employee["id"]),
                 "name": employee.get("name") or f"User #{employee['id']}",
@@ -22476,7 +22914,16 @@ def lms_admin_analytics():
                 "overdue": int(employee.get("overdue") or 0),
                 "attempts": int(agg.get("attempts") or 0),
                 "test_duration_seconds": int(agg.get("test_duration_seconds") or 0),
-                "last_active_at": agg.get("last_active_at") or employee.get("last_started_at"),
+                "confirmed_learning_seconds": round(confirmed_learning_seconds, 2),
+                "active_learning_seconds": max(0, int(employee.get("active_learning_seconds") or 0)),
+                "tab_hidden_count": max(0, int(employee.get("tab_hidden_count") or 0)),
+                "stale_gap_count": max(0, int(employee.get("stale_gap_count") or 0)),
+                "session_count": max(0, int(employee.get("session_count") or 0)),
+                "last_active_at": _pick_latest_iso(
+                    agg.get("last_active_at"),
+                    employee.get("last_learning_at"),
+                    employee.get("last_started_at")
+                ),
             })
 
         course_stats = []
@@ -22487,6 +22934,12 @@ def lms_admin_analytics():
                 "progress": progress,
                 "status": _lms_admin_course_aggregate_status(course_stat),
                 "lessons": int(course_stat.get("lessons") or 0),
+                "confirmed_learning_seconds": round(float(course_stat.get("confirmed_learning_seconds") or 0.0), 2),
+                "active_learning_seconds": max(0, int(course_stat.get("active_learning_seconds") or 0)),
+                "tab_hidden_count": max(0, int(course_stat.get("tab_hidden_count") or 0)),
+                "stale_gap_count": max(0, int(course_stat.get("stale_gap_count") or 0)),
+                "session_count": max(0, int(course_stat.get("session_count") or 0)),
+                "last_learning_at": course_stat.get("last_learning_at"),
             })
 
         course_status_total = max(1, sum(int(value or 0) for value in assignment_status_counts.values()))
@@ -22519,7 +22972,9 @@ def lms_admin_analytics():
             "employee_count": len(employee_rows),
             "overall_progress": int(round(overall_progress_sum / len(assignment_rows))) if assignment_rows else 0,
             "avg_score": int(round(avg_score_sum / len(employee_rows))) if employee_rows else 0,
-            "overdue_count": overdue_count
+            "overdue_count": overdue_count,
+            "total_learning_seconds": int(round(total_learning_seconds)),
+            "avg_learning_seconds": int(round(total_learning_seconds / len(employee_rows))) if employee_rows else 0
         }
 
         return jsonify({
