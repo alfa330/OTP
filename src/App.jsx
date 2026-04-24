@@ -27763,28 +27763,28 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 const metrics = [
                                     {
                                     key: "break_time",
-                                    label: "Break",
+                                    label: "Перерыв",
                                     icon: "fas fa-coffee",
                                     value: fmtTimeLike(normalize("break_time")),
                                     hint: "Перерывы",
                                     },
                                     {
                                     key: "total_calls",
-                                    label: "Calls",
+                                    label: "Звонки",
                                     icon: "fas fa-phone",
                                     value: fmtNumber(normalize("calls"), 0),
                                     hint: "Всего звонков",
                                     },
                                     {
                                     key: "efficiency",
-                                    label: "Efficiency",
+                                    label: "Эффективность",
                                     icon: "fas fa-tachometer-alt",
                                     value: effPercent,
                                     hint: "Эффективность (отн. рабочего времени)",
                                     },
                                     {
                                     key: "talk_time",
-                                    label: "Talk",
+                                    label: "Разговор",
                                     icon: "fas fa-comments",
                                     value: fmtTimeLike(normalize("talk_time")),
                                     hint: "Время в разговоре",
@@ -27903,7 +27903,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 {hours.toFixed(2)} ч
                                                 {source !== "time" && (
                                                     <div className="text-xs text-gray-500 mt-1">
-                                                    {source === "field" ? "По полю длительности" : "По умолчанию (fallback)"}
+                                                    {source === "field" ? "По полю длительности" : "По умолчанию"}
                                                     </div>
                                                 )}
                                                 </div>
@@ -29459,33 +29459,99 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             };        
 
+            const parseSalaryHireDate = (value) => {
+                if (!value) return null;
+                const raw = String(value).trim();
+                if (!raw) return null;
+
+                const direct = new Date(raw);
+                if (!Number.isNaN(direct.getTime())) return direct;
+
+                const parts = raw.split(/[-/. ]/).filter(Boolean);
+                if (parts.length === 3) {
+                    const [a, b, c] = parts.map((part) => Number(part));
+                    if ([a, b, c].every(Number.isFinite)) {
+                        const normalized = String(parts[0]).length === 4
+                            ? new Date(a, b - 1, c)
+                            : new Date(c, b - 1, a);
+                        if (!Number.isNaN(normalized.getTime())) return normalized;
+                    }
+                }
+
+                return null;
+            };
+
+            const resolveSalaryExperienceRange = (hireDateValue) => {
+                const hireDate = parseSalaryHireDate(hireDateValue);
+                if (!hireDate) return '';
+
+                const now = new Date();
+                let months = (now.getFullYear() - hireDate.getFullYear()) * 12 + (now.getMonth() - hireDate.getMonth());
+                if (now.getDate() < hireDate.getDate()) months -= 1;
+                months = Math.max(0, months);
+
+                if (months <= 3) return '0-3';
+                if (months <= 9) return '4-9';
+                if (months <= 15) return '10-15';
+                return '16+';
+            };
+
+            const calculateSalaryByFormula = ({
+                hoursNorm = 0,
+                totalHours = 0,
+                quality = 0,
+                callsPerHour = 0,
+                experience = '',
+                bonuses = 0,
+            } = {}) => {
+                const normalizedHoursNorm = parseFloat(hoursNorm) || 0;
+                const normalizedTotalHours = parseFloat(totalHours) || 0;
+                const normalizedQuality = parseFloat(quality) || 0;
+                const normalizedCallsPerHour = parseFloat(callsPerHour) || 0;
+                const normalizedBonuses = parseFloat(bonuses) || 0;
+
+                let points = 0;
+
+                if (experience === '16+') points += 50;
+                else if (experience === '10-15') points += 35;
+                else if (experience === '4-9') points += 25;
+                else if (experience === '0-3') points += 15;
+
+                if (normalizedQuality >= 99 && normalizedQuality <= 100) points += 50;
+                else if (normalizedQuality >= 95 && normalizedQuality < 99) points += 30;
+                else if (normalizedQuality >= 90 && normalizedQuality < 95) points += 25;
+                else if (normalizedQuality >= 85 && normalizedQuality < 90) points += 20;
+
+                if (normalizedCallsPerHour >= 20) points += 50;
+                else if (normalizedCallsPerHour >= 15) points += 30;
+                else if (normalizedCallsPerHour >= 10) points += 25;
+                else if (normalizedCallsPerHour >= 5) points += 20;
+
+                const hoursPercentage = normalizedHoursNorm > 0 ? (normalizedTotalHours / normalizedHoursNorm) * 100 : 0;
+                const premiumCoefficient = hoursPercentage >= 90 ? 1 : 0.75;
+                const baseSalary = 700 * normalizedTotalHours;
+                const premiumPart = baseSalary * (points / 100) * premiumCoefficient;
+                const finalSalary = baseSalary + premiumPart + normalizedBonuses;
+
+                return {
+                    points,
+                    premiumCoefficient,
+                    hoursNorm: normalizedHoursNorm,
+                    hoursWorked: normalizedTotalHours,
+                    hoursPercentage,
+                    baseSalary,
+                    premiumPart,
+                    bonuses: normalizedBonuses,
+                    finalSalary,
+                };
+            };
+
             const calculateSalary = () => {
                 const hoursNorm = parseFloat(salaryData.hoursNorm) || 0;
                 const totalHours = parseFloat(salaryData.totalHours) || 0;
                 const quality = parseFloat(salaryData.quality) || 0;
                 const callsPerHour = parseFloat(salaryData.callsPerHour) || 0;
                 const experience = salaryData.experience;
-            
-                // Рассчитываем очки
-                let points = 0;
-            
-                // Очки за опыт
-                if (experience === '16+') points += 50;
-                else if (experience === '10-15') points += 35;
-                else if (experience === '4-9') points += 25;
-                else if (experience === '0-3') points += 15;
-            
-                // Очки за качество
-                if (quality >= 99 && quality <= 100) points += 50;
-                else if (quality >= 95 && quality < 99) points += 30;
-                else if (quality >= 90 && quality < 95) points += 25;
-                else if (quality >= 85 && quality < 90) points += 20;
-            
-                // Очки за звонки в час
-                if (callsPerHour >= 20) points += 50;
-                else if (callsPerHour >= 15) points += 30;
-                else if (callsPerHour >= 10) points += 25;
-                else if (callsPerHour >= 5) points += 20;
             
                 // Бонусы
                 let bonuses = 0;
@@ -29498,28 +29564,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const quantity = parseInt(salaryData.bonusFilmingQuantity) || 0;
                     bonuses += 5000 * quantity;
                 }
-            
-                // Коэффициент премии
-                const hoursPercentage = hoursNorm > 0 ? (totalHours / hoursNorm) * 100 : 0;
-                const premiumCoefficient = hoursPercentage >= 90 ? 1 : 0.75;
-            
-                // Расчет зарплаты
-                const baseSalary = 700 * totalHours;
-                const pointsCoefficient = points / 100;
-                const premiumPart = baseSalary * pointsCoefficient * premiumCoefficient;
-                const finalSalary = baseSalary + premiumPart + bonuses;
-            
-                // Обновляем состояние с новым объектом
-                setSalaryResult({ ...{
-                    points,
-                    premiumCoefficient,
+
+                setSalaryResult(calculateSalaryByFormula({
                     hoursNorm,
-                    hoursPercentage,
-                    baseSalary,
-                    premiumPart,
+                    totalHours,
+                    quality,
+                    callsPerHour,
+                    experience,
                     bonuses,
-                    finalSalary,
-                } });
+                }));
                 
                 // Сбрасываем таблицу очков
                 setShowPointsTable(false);
@@ -34808,7 +34861,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             const hoursDelta = safeNum(regular) - safeNum(norm);
                                             const remainingHours = Math.max(0, -hoursDelta);
                                             const overtimeHours = Math.max(0, hoursDelta);
-                                            const netAdjustments = safeNum(bonuses) - safeNum(fines);
                                             const progressStatus = safeNum(norm) <= 0
                                                 ? { label: 'Норма не задана', className: 'bg-gray-100 text-gray-700 border-gray-200' }
                                                 : completionPct >= 100
@@ -34822,6 +34874,54 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 { label: 'Тех. сбои', value: technicalIssueHours, icon: 'fas fa-tools', color: 'text-violet-700', bg: 'bg-violet-50' },
                                                 { label: 'Офлайн', value: offlineActivityHours, icon: 'fas fa-user-clock', color: 'text-emerald-700', bg: 'bg-emerald-50' },
                                             ];
+                                            const operatorUserRowForSalary = Array.isArray(users)
+                                                ? users.find((item) => Number(item?.id ?? item?.operator_id) === Number(user?.id))
+                                                : null;
+                                            const salaryExperience = resolveSalaryExperienceRange(
+                                                profileData?.hire_date ||
+                                                user?.hire_date ||
+                                                user?.hireDate ||
+                                                operatorUserRowForSalary?.hire_date ||
+                                                operatorUserRowForSalary?.hireDate
+                                            );
+                                            const salaryEvaluations = Array.isArray(operatorData?.evaluations)
+                                                ? operatorData.evaluations.filter((ev) => !(ev?.call?.is_imported === true || ev?.is_imported === true))
+                                                : [];
+                                            const salaryQuality = salaryEvaluations.length > 0
+                                                ? salaryEvaluations.reduce((sum, ev) => sum + safeNum(ev?.score), 0) / salaryEvaluations.length
+                                                : 0;
+                                            const estimatedSalary = calculateSalaryByFormula({
+                                                hoursNorm: norm,
+                                                totalHours: regular,
+                                                quality: salaryQuality,
+                                                callsPerHour,
+                                                experience: salaryExperience,
+                                                bonuses,
+                                            });
+                                            const missingSalaryInputs = [
+                                                !salaryExperience ? 'стаж' : null,
+                                                salaryEvaluations.length === 0 ? 'качество' : null,
+                                                safeNum(norm) <= 0 ? 'норма' : null,
+                                            ].filter(Boolean);
+                                            const openSalaryCalculatorWithHours = () => {
+                                                const nextSalaryData = {
+                                                    experience: salaryExperience,
+                                                    quality: salaryEvaluations.length > 0 ? salaryQuality.toFixed(2) : '',
+                                                    callsPerHour: safeNum(callsPerHour).toFixed(2),
+                                                    hoursNorm: safeNum(norm).toFixed(2),
+                                                    totalHours: safeNum(regular).toFixed(2),
+                                                    bonusTraining: false,
+                                                    bonusRefer: false,
+                                                    bonusReferQuantity: '',
+                                                    bonusFilming: false,
+                                                    bonusFilmingQuantity: '',
+                                                };
+                                                setSalaryData(nextSalaryData);
+                                                setSalaryResult(estimatedSalary);
+                                                setShowPointsTable(false);
+                                                setCalculatorType('call');
+                                                navigateToView('salary');
+                                            };
 
                                             // --- отображаем ---
                                             return (
@@ -34942,11 +35042,32 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             <div className="text-lg font-bold text-red-600">{safeNum(fines).toFixed(2)}</div>
                                                         </div>
                                                         </div>
-                                                        <div className="flex items-center justify-between rounded-lg bg-white border border-gray-200 px-3 py-2.5">
-                                                        <span className="text-sm text-gray-600">Баланс начислений</span>
-                                                        <span className={`text-lg font-bold ${netAdjustments >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                                                            {netAdjustments >= 0 ? '+' : ''}{netAdjustments.toFixed(2)}
-                                                        </span>
+                                                        <div className="rounded-lg bg-white border border-gray-200 px-3 py-3">
+                                                        <div className="flex items-start justify-between gap-3">
+                                                            <div>
+                                                            <span className="text-sm text-gray-600 flex items-center gap-2">
+                                                                <FaIcon className="fas fa-calculator text-gray-400"></FaIcon>
+                                                                Примерная зарплата
+                                                            </span>
+                                                            <div className="mt-1 text-xs text-gray-500">
+                                                                По формуле калькулятора{missingSalaryInputs.length > 0 ? `, не хватает: ${missingSalaryInputs.join(', ')}` : ''}
+                                                            </div>
+                                                            <div className="mt-1 text-[11px] text-gray-400">
+                                                                Штрафы в формуле калькулятора не вычитаются.
+                                                            </div>
+                                                            </div>
+                                                            <span className="text-lg font-bold text-green-600 whitespace-nowrap">
+                                                            {formatMoney(estimatedSalary.finalSalary)}
+                                                            </span>
+                                                        </div>
+                                                        <button
+                                                            type="button"
+                                                            onClick={openSalaryCalculatorWithHours}
+                                                            className="mt-3 w-full inline-flex items-center justify-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-100 transition"
+                                                        >
+                                                            <FaIcon className="fas fa-arrow-right"></FaIcon>
+                                                            Открыть в калькуляторе
+                                                        </button>
                                                         </div>
                                                     </div>
                                                     </div>
