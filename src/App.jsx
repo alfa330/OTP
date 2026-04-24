@@ -27243,6 +27243,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const [isSending, setIsSending] = useState(false);
                 const [showModal, setShowModal] = useState(false);
                 const [showLegend, setShowLegend] = useState(false);
+                const REQUEST_MESSAGE_MAX_LENGTH = 500;
+
+                const formatFixed2 = (value) => {
+                    const n = Number(value);
+                    return Number.isFinite(n) ? n.toFixed(2) : "—";
+                };
+
+                const roundToFixed2 = (value) => {
+                    const n = Number(value);
+                    return Number.isFinite(n) ? Math.round(n * 100) / 100 : 0;
+                };
+
+                const handleRequestMessageChange = (event) => {
+                    setRequestMessage(event.target.value.slice(0, REQUEST_MESSAGE_MAX_LENGTH));
+                };
 
                 const today = new Date();
                 const fallbackMonth = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}`;
@@ -27479,14 +27494,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return;
                     }
 
+                    if (requestMessage.length > REQUEST_MESSAGE_MAX_LENGTH) {
+                    showToast(`Текст запроса не должен превышать ${REQUEST_MESSAGE_MAX_LENGTH} символов`, 'warning');
+                    return;
+                    }
+
                     setIsSending(true);
                     try {
                     const response = await axios.post(
                         `${API_BASE_URL}/api/hours/send_request`,
                         {
                         date: selectedDay.dateStr,
-                        hours: selectedDay.hours,
-                        message: requestMessage
+                        hours: roundToFixed2(selectedDay.hours),
+                        message: requestMessage.trim()
                         },
                         {
                         headers: {
@@ -27681,14 +27701,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <span className="font-semibold">Дата:</span> {selectedDay.dateStr}
                                     </p>
                                     <p className="text-sm text-gray-700">
-                                    <span className="font-semibold">Выполненные часы:</span> {selectedDay.hours ?? "—"}
+                                    <span className="font-semibold">Выполненные часы:</span> {formatFixed2(selectedDay.hours)}
                                     </p>
                                     {(Number(selectedDay.trainingHours || 0) > 0 || Number(selectedDay.technicalHours || 0) > 0 || Number(selectedDay.offlineHours || 0) > 0) && (
                                     <p className="text-xs text-gray-600">
-                                        База: {Number(selectedDay.baseHours || 0).toFixed(2)} ч
-                                        {` + `}Тренинг: {Number(selectedDay.trainingHours || 0).toFixed(2)} ч
-                                        {` + `}Тех. сбой: {Number(selectedDay.technicalHours || 0).toFixed(2)} ч
-                                        {` + `}Оффлайн: {Number(selectedDay.offlineHours || 0).toFixed(2)} ч
+                                        База: {formatFixed2(selectedDay.baseHours)} ч
+                                        {` + `}Тренинг: {formatFixed2(selectedDay.trainingHours)} ч
+                                        {` + `}Тех. сбой: {formatFixed2(selectedDay.technicalHours)} ч
+                                        {` + `}Оффлайн: {formatFixed2(selectedDay.offlineHours)} ч
                                     </p>
                                     )}
                                 </div>
@@ -27696,7 +27716,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {/* Крупный бейдж с общими часами (если нужно) */}
                                 <div className="text-right">
                                     <div className="text-xs text-gray-500">Итого за день</div>
-                                    <div className="text-lg font-semibold text-gray-800">{selectedDay.hours ?? "—"} ч</div>
+                                    <div className="text-lg font-semibold text-gray-800">{formatFixed2(selectedDay.hours)} ч</div>
                                 </div>
                                 </div>
 
@@ -27712,7 +27732,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 const fmtNumber = (v, digits = 2) => {
                                     if (v === null || v === undefined || v === "") return "—";
                                     const n = Number(v);
-                                    return Number.isFinite(n) ? n.toFixed(digits).replace(/\.00$/, "") : String(v);
+                                    return Number.isFinite(n) ? n.toFixed(digits) : String(v);
                                 };
 
                                 const fmtTimeLike = (v) => {
@@ -27729,7 +27749,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         return `${hh}:${String(mm).padStart(2, "0")}`;
                                     } else {
                                         // малые числа — часы
-                                        return `${n} ч`;
+                                        return `${n.toFixed(2)} ч`;
                                     }
                                     }
                                     return String(v);
@@ -27738,7 +27758,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 const eff = Number(normalize("efficiency") ?? 0);
                                 const work = Number(normalize("work_time") ?? 0);
                                 const effPercent =
-                                    work > 0 && Number.isFinite(eff) ? ((eff / work) * 100).toFixed(1) + "%" : "—";
+                                    work > 0 && Number.isFinite(eff) ? ((eff / work) * 100).toFixed(2) + "%" : "—";
 
                                 const metrics = [
                                     {
@@ -28065,12 +28085,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 </label>
                                 <textarea
                                     value={requestMessage}
-                                    onChange={(e) => setRequestMessage(e.target.value)}
+                                    onChange={handleRequestMessageChange}
+                                    maxLength={REQUEST_MESSAGE_MAX_LENGTH}
                                     placeholder="Введите текст запроса..."
                                     className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm resize-none"
                                     rows={3}
                                     disabled={isSending}
                                 />
+                                <div className="mt-1 text-right text-xs text-gray-500">
+                                    {requestMessage.length} / {REQUEST_MESSAGE_MAX_LENGTH}
+                                </div>
                             </div>
                             </div>
 
@@ -29394,6 +29418,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     showToast('Введите комментарий к запросу', 'error');
                     return;
                 }
+
+                const trimmedDisputeText = disputeText.trim();
+                if (trimmedDisputeText.length > 500) {
+                    showToast('Комментарий не должен превышать 500 символов', 'error');
+                    return;
+                }
                 
                 setDisputeLoading(true);
                 try {
@@ -29403,7 +29433,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             operator_id: user.id,
                             id: selectedEvaluation.id,
                             month: selectedEvaluation.month,
-                            dispute_text: disputeText
+                            dispute_text: trimmedDisputeText
                         },
                         {
                             headers: {
