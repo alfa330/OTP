@@ -12381,6 +12381,140 @@ function AdminView({
   const selectedEmployeeCourseDeadlineInfo = selectedEmployeeCourseItem?.deadline
     ? formatDeadlineForStatus(selectedEmployeeCourseItem.deadline, selectedEmployeeCourseItem.status)
     : null;
+  const selectedEmployeeCourseLessonRate = selectedEmployeeCourseItem
+    ? (selectedEmployeeCourseItem.totalLessons > 0
+      ? Math.round((selectedEmployeeCourseItem.completedLessons / selectedEmployeeCourseItem.totalLessons) * 100)
+      : selectedEmployeeCourseItem.progress)
+    : 0;
+  const selectedEmployeeCourseTestRate = selectedEmployeeCourseItem?.totalTests > 0
+    ? Math.round((selectedEmployeeCourseItem.passedTests / selectedEmployeeCourseItem.totalTests) * 100)
+    : null;
+  const selectedEmployeeCourseIntermediateRate = selectedEmployeeCourseItem?.totalIntermediateTests > 0
+    ? Math.round((selectedEmployeeCourseItem.passedIntermediateTests / selectedEmployeeCourseItem.totalIntermediateTests) * 100)
+    : null;
+  const selectedEmployeeCourseFocusEvents = selectedEmployeeCourseItem
+    ? Number(selectedEmployeeCourseItem.tabHiddenCount || 0) + Number(selectedEmployeeCourseItem.staleGapCount || 0)
+    : 0;
+  const selectedEmployeeCourseConfirmedRate = selectedEmployeeCourseItem?.activeLearningSeconds > 0
+    ? Math.round((Number(selectedEmployeeCourseItem.confirmedLearningSeconds || 0) / Number(selectedEmployeeCourseItem.activeLearningSeconds || 1)) * 100)
+    : null;
+  const selectedEmployeeCourseRisk = (() => {
+    if (!selectedEmployeeCourseItem) return null;
+    const isDone = isCompletedLmsStatus(selectedEmployeeCourseItem.status);
+    const score = selectedEmployeeCourseItem.avgTestScore;
+    if (selectedEmployeeCourseDeadlineInfo?.overdue || selectedEmployeeCourseItem.status === "test_failed") {
+      return {
+        label: "Высокий риск",
+        caption: "Нужна реакция: просрочка или непройденный тест блокируют завершение.",
+        className: "bg-red-50 text-red-700 border-red-100",
+      };
+    }
+    if ((selectedEmployeeCourseDeadlineInfo?.urgent && !isDone) || (score != null && score < 80) || selectedEmployeeCourseFocusEvents >= 5) {
+      return {
+        label: "Требует внимания",
+        caption: "Есть признаки риска: близкий дедлайн, низкий балл или частые перерывы.",
+        className: "bg-amber-50 text-amber-800 border-amber-100",
+      };
+    }
+    if (isDone) {
+      return {
+        label: "Усвоение подтверждено",
+        caption: "Курс завершён, результаты тестов можно учитывать в отчётности.",
+        className: "bg-emerald-50 text-emerald-700 border-emerald-100",
+      };
+    }
+    if (selectedEmployeeCourseItem.progress > 0) {
+      return {
+        label: "Проходит штатно",
+        caption: "Есть активность по урокам и тестам, критичных отклонений нет.",
+        className: "bg-blue-50 text-blue-700 border-blue-100",
+      };
+    }
+    return {
+      label: "Ожидает старта",
+      caption: "Сотрудник ещё не приступал к курсу, стоит проконтролировать старт.",
+      className: "bg-slate-50 text-slate-700 border-slate-200",
+    };
+  })();
+  const selectedEmployeeCourseMetricCards = selectedEmployeeCourseItem ? [
+    {
+      label: "Прогресс курса",
+      value: `${selectedEmployeeCourseItem.progress}%`,
+      detail: `${selectedEmployeeCourseItem.completedLessons}/${selectedEmployeeCourseItem.totalLessons} уроков`,
+      icon: Percent,
+      tone: "text-indigo-600 bg-indigo-50",
+    },
+    {
+      label: "Завершено уроков",
+      value: `${selectedEmployeeCourseLessonRate}%`,
+      detail: `${selectedEmployeeCourseItem.completedLessons} из ${selectedEmployeeCourseItem.totalLessons || 0}`,
+      icon: BookOpen,
+      tone: "text-blue-600 bg-blue-50",
+    },
+    {
+      label: "Все тесты",
+      value: selectedEmployeeCourseTestRate == null ? "—" : `${selectedEmployeeCourseTestRate}%`,
+      detail: `${selectedEmployeeCourseItem.passedTests}/${selectedEmployeeCourseItem.totalTests} пройдено`,
+      icon: CheckSquare,
+      tone: "text-emerald-600 bg-emerald-50",
+    },
+    {
+      label: "Промежуточные тесты",
+      value: selectedEmployeeCourseIntermediateRate == null ? "—" : `${selectedEmployeeCourseIntermediateRate}%`,
+      detail: `${selectedEmployeeCourseItem.passedIntermediateTests}/${selectedEmployeeCourseItem.totalIntermediateTests} пройдено`,
+      icon: ClipboardList,
+      tone: "text-violet-600 bg-violet-50",
+    },
+    {
+      label: "Средний балл",
+      value: selectedEmployeeCourseItem.avgTestScore == null ? "—" : `${selectedEmployeeCourseItem.avgTestScore}%`,
+      detail: "по лучшим результатам тестов",
+      icon: Target,
+      tone: selectedEmployeeCourseItem.avgTestScore >= 80 ? "text-emerald-600 bg-emerald-50" : "text-amber-600 bg-amber-50",
+    },
+    {
+      label: "Итоговый тест",
+      value: selectedEmployeeCourseItem.finalTestScore == null ? "—" : `${selectedEmployeeCourseItem.finalTestScore}%`,
+      detail: "ключевая проверка курса",
+      icon: Award,
+      tone: selectedEmployeeCourseItem.finalTestScore >= 80 ? "text-emerald-600 bg-emerald-50" : "text-slate-600 bg-slate-50",
+    },
+    {
+      label: "Активное обучение",
+      value: selectedEmployeeCourseItem.learningDuration,
+      detail: "время в уроках и материалах",
+      icon: Clock,
+      tone: "text-sky-600 bg-sky-50",
+    },
+    {
+      label: "Подтверждённый контент",
+      value: selectedEmployeeCourseItem.confirmedLearningDuration,
+      detail: selectedEmployeeCourseConfirmedRate == null ? "нет данных по активности" : `${selectedEmployeeCourseConfirmedRate}% активного времени`,
+      icon: FileCheck,
+      tone: "text-cyan-600 bg-cyan-50",
+    },
+    {
+      label: "Учебные сессии",
+      value: selectedEmployeeCourseItem.sessionCount,
+      detail: selectedEmployeeCourseItem.lastLearningAt ? `последняя: ${formatDateTimeLabel(selectedEmployeeCourseItem.lastLearningAt)}` : "сессии не зафиксированы",
+      icon: PlayCircle,
+      tone: "text-indigo-600 bg-indigo-50",
+    },
+    {
+      label: "Смена вкладок",
+      value: selectedEmployeeCourseItem.tabHiddenCount,
+      detail: "сигнал отвлечения во время уроков",
+      icon: Eye,
+      tone: selectedEmployeeCourseItem.tabHiddenCount > 0 ? "text-amber-600 bg-amber-50" : "text-slate-600 bg-slate-50",
+    },
+    {
+      label: "Долгие паузы",
+      value: selectedEmployeeCourseItem.staleGapCount,
+      detail: "разрывы активности в сессиях",
+      icon: Zap,
+      tone: selectedEmployeeCourseItem.staleGapCount > 0 ? "text-rose-600 bg-rose-50" : "text-slate-600 bg-slate-50",
+    },
+  ] : [];
 
   const getEmployeeCourseDeadline = (courseId, assignmentRow) => {
     const employeeId = Number(selectedEmployee?.id || 0);
@@ -12952,86 +13086,71 @@ function AdminView({
                     </div>
 
                     <div className="p-6 space-y-6 bg-slate-50/50 flex-1 overflow-y-auto custom-scrollbar">
-                      <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
-                        <div className="bg-white rounded-xl border border-slate-100 p-4 shadow-sm transition-all hover:border-slate-200">
-                          <p className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5">Уроки курса</p>
-                          <p className="text-sm font-bold text-slate-800">{selectedEmployeeCourseItem.completedLessons} <span className="text-slate-400 font-medium text-xs">/ {selectedEmployeeCourseItem.totalLessons} зав.</span></p>
+                      {selectedEmployeeCourseRisk && (
+                        <div className={`rounded-xl border px-4 py-3 ${selectedEmployeeCourseRisk.className}`}>
+                          <div className="flex items-start gap-3">
+                            <AlertTriangle size={17} className="mt-0.5 flex-shrink-0" />
+                            <div>
+                              <p className="text-sm font-bold">{selectedEmployeeCourseRisk.label}</p>
+                              <p className="text-xs mt-0.5 leading-relaxed opacity-90">{selectedEmployeeCourseRisk.caption}</p>
+                            </div>
+                          </div>
                         </div>
-                        <div className="bg-white rounded-xl border border-slate-100 p-4 shadow-sm transition-all hover:border-slate-200">
-                          <p className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5">Все тесты</p>
-                          <p className="text-sm font-bold text-slate-800">{selectedEmployeeCourseItem.passedTests} <span className="text-slate-400 font-medium text-xs">/ {selectedEmployeeCourseItem.totalTests} пройд.</span></p>
-                        </div>
-                        <div className="bg-white rounded-xl border border-slate-100 p-4 shadow-sm transition-all hover:border-slate-200">
-                          <p className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5">Промежуточные</p>
-                          <p className="text-sm font-bold text-slate-800">{selectedEmployeeCourseItem.passedIntermediateTests} <span className="text-slate-400 font-medium text-xs">/ {selectedEmployeeCourseItem.totalIntermediateTests} пройд.</span></p>
-                        </div>
-                        <div className="bg-white rounded-xl border border-slate-100 p-4 shadow-sm transition-all hover:border-slate-200">
-                          <p className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5">Время на тесты</p>
-                          <p className="text-sm font-bold text-slate-800">{selectedEmployeeCourseItem.testDuration}</p>
-                        </div>
-                        <div className="bg-white rounded-xl border border-slate-100 p-4 shadow-sm transition-all hover:border-slate-200">
-                          <p className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5">Real learning time</p>
-                          <p className="text-sm font-bold text-slate-800">{selectedEmployeeCourseItem.learningDuration}</p>
-                        </div>
-                        <div className="bg-white rounded-xl border border-slate-100 p-4 shadow-sm transition-all hover:border-slate-200">
-                          <p className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5">Confirmed content</p>
-                          <p className="text-sm font-bold text-slate-800">{selectedEmployeeCourseItem.confirmedLearningDuration}</p>
-                        </div>
-                        <div className="bg-white rounded-xl border border-slate-100 p-4 shadow-sm transition-all hover:border-slate-200">
-                          <p className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5">Sessions</p>
-                          <p className="text-sm font-bold text-slate-800">{selectedEmployeeCourseItem.sessionCount}</p>
-                        </div>
-                        <div className="bg-white rounded-xl border border-slate-100 p-4 shadow-sm transition-all hover:border-slate-200">
-                          <p className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5">Hidden tabs</p>
-                          <p className="text-sm font-bold text-slate-800">{selectedEmployeeCourseItem.tabHiddenCount}</p>
-                        </div>
-                        <div className="bg-white rounded-xl border border-slate-100 p-4 shadow-sm transition-all hover:border-slate-200">
-                          <p className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5">Stale gaps</p>
-                          <p className="text-sm font-bold text-slate-800">{selectedEmployeeCourseItem.staleGapCount}</p>
-                        </div>
-                        <div className="bg-white rounded-xl border border-slate-100 p-4 shadow-sm transition-all hover:border-slate-200">
-                          <p className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5">Ср. балл</p>
-                          <p className={`text-sm font-bold ${selectedEmployeeCourseItem.avgTestScore >= 80 ? 'text-emerald-600' : 'text-slate-800'}`}>{selectedEmployeeCourseItem.avgTestScore == null ? "—" : `${selectedEmployeeCourseItem.avgTestScore}%`}</p>
-                        </div>
-                        <div className="bg-white rounded-xl border border-slate-100 p-4 shadow-sm transition-all hover:border-slate-200">
-                          <p className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5">Итоговый тест</p>
-                          <p className={`text-sm font-bold ${selectedEmployeeCourseItem.finalTestScore >= 80 ? 'text-emerald-600' : 'text-slate-800'}`}>{selectedEmployeeCourseItem.finalTestScore == null ? "—" : `${selectedEmployeeCourseItem.finalTestScore}%`}</p>
-                        </div>
+                      )}
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
+                        {selectedEmployeeCourseMetricCards.map((metric) => {
+                          const MetricIcon = metric.icon;
+                          return (
+                            <div key={metric.label} className="bg-white rounded-xl border border-slate-100 p-4 shadow-sm transition-all hover:border-slate-200">
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                  <p className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5 leading-tight">{metric.label}</p>
+                                  <p className="text-lg font-bold text-slate-900 leading-tight">{metric.value}</p>
+                                </div>
+                                <span className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${metric.tone}`}>
+                                  <MetricIcon size={15} />
+                                </span>
+                              </div>
+                              <p className="text-[11px] text-slate-500 mt-2 leading-snug">{metric.detail}</p>
+                            </div>
+                          );
+                        })}
                       </div>
 
                       <div>
                         <h4 className="text-sm font-semibold text-slate-900 mb-3.5 flex items-center gap-2">
                           <Clock size={15} className="text-indigo-500" />
-                          Learning Sessions
+                          Учебные сессии
                         </h4>
                         {isLoadingSelectedEmployeeLearningSessions ? (
                           <LearningSessionsSkeleton />
                         ) : selectedEmployeeLearningSessions.length === 0 ? (
                           <div className="rounded-xl border border-slate-100 bg-white px-4 py-6 text-sm text-slate-500 shadow-sm">
-                            No learning sessions recorded yet for this assignment.
+                            По этому назначению пока нет записанных учебных сессий.
                           </div>
                         ) : (
                           <div className="space-y-3 mb-6">
                             {selectedEmployeeLearningSessions.map((sessionItem) => (
                               <div key={sessionItem.session_id} className="bg-white rounded-xl border border-slate-100 p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-4 shadow-sm">
                                 <div className="min-w-0">
-                                  <p className="text-sm font-semibold text-slate-900 truncate">{sessionItem.lesson_title || `Lesson #${sessionItem.lesson_id}`}</p>
+                                  <p className="text-sm font-semibold text-slate-900 truncate">{sessionItem.lesson_title || `Урок #${sessionItem.lesson_id}`}</p>
                                   <p className="text-xs text-slate-500 mt-1">
-                                    {formatDateTimeLabel(sessionItem.started_at)} {sessionItem.ended_at ? `→ ${formatDateTimeLabel(sessionItem.ended_at)}` : "• active"}
+                                    {formatDateTimeLabel(sessionItem.started_at)} {sessionItem.ended_at ? `→ ${formatDateTimeLabel(sessionItem.ended_at)}` : "• активна"}
                                   </p>
                                 </div>
                                 <div className="flex flex-wrap items-center gap-2 lg:justify-end">
                                   <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-indigo-50 text-indigo-700 border border-indigo-100">
-                                    Confirmed: {formatDurationLabel(sessionItem.confirmed_seconds)}
+                                    Подтверждено: {formatDurationLabel(sessionItem.confirmed_seconds)}
                                   </span>
                                   <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-slate-50 text-slate-700 border border-slate-200">
-                                    Active: {formatDurationLabel(sessionItem.active_seconds)}
+                                    Активно: {formatDurationLabel(sessionItem.active_seconds)}
                                   </span>
                                   <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-amber-50 text-amber-700 border border-amber-100">
-                                    Hidden: {Math.max(0, Number(sessionItem.tab_hidden_count || 0))}
+                                    Смена вкладок: {Math.max(0, Number(sessionItem.tab_hidden_count || 0))}
                                   </span>
                                   <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-rose-50 text-rose-700 border border-rose-100">
-                                    Gaps: {Math.max(0, Number(sessionItem.stale_gap_count || 0))}
+                                    Паузы: {Math.max(0, Number(sessionItem.stale_gap_count || 0))}
                                   </span>
                                 </div>
                               </div>
