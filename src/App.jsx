@@ -34898,6 +34898,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 experience: salaryExperience,
                                                 bonuses,
                                             });
+                                            const formatEstimatedSalaryMoney = (value) => {
+                                                const n = Number(value);
+                                                if (!Number.isFinite(n)) return '0 ₸';
+                                                return n.toLocaleString('ru-RU', {
+                                                    minimumFractionDigits: 0,
+                                                    maximumFractionDigits: 0,
+                                                }) + ' ₸';
+                                            };
                                             const missingSalaryInputs = [
                                                 !salaryExperience ? 'стаж' : null,
                                                 salaryEvaluations.length === 0 ? 'качество' : null,
@@ -35057,7 +35065,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             </div>
                                                             </div>
                                                             <span className="text-lg font-bold text-green-600 whitespace-nowrap">
-                                                            {formatMoney(estimatedSalary.finalSalary)}
+                                                            {formatEstimatedSalaryMoney(estimatedSalary.finalSalary)}
                                                             </span>
                                                         </div>
                                                         <button
