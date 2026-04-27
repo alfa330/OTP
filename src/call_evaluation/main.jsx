@@ -2081,7 +2081,7 @@ const App = ({ user, initialSelection }) => {
     const [fromDate, setFromDate] = useState(null);
     const [toDate, setToDate] = useState(null);
     const [viewMode, setViewMode] = useState('normal');
-    const [activeSection, setActiveSection] = useState('journal');
+    const [activeSection, setActiveSection] = useState(canUseAnalytics ? 'analytics' : 'journal');
     const [reevaluationRequests, setReevaluationRequests] = useState([]);
     const [reevaluationSearch, setReevaluationSearch] = useState('');
     const [isRequestsLoading, setIsRequestsLoading] = useState(false);
@@ -2360,7 +2360,9 @@ const App = ({ user, initialSelection }) => {
 
     useEffect(() => {
         if (operatorFromToken && operators.length > 0) {
-            setSelectedOperator(operators.find(op=>op.id===operatorFromToken.id) || null);
+            const matchedOperator = operators.find(op => Number(op.id) === Number(operatorFromToken.id)) || null;
+            if (!matchedOperator) return;
+            setSelectedOperator(matchedOperator);
             setOperatorFromToken(null);
         }
     }, [operators, operatorFromToken]);
@@ -2445,7 +2447,7 @@ const App = ({ user, initialSelection }) => {
     // Evaluations fetch
     const fetchEvaluations = useCallback(async ({ force = false } = {}) => {
         if (!selectedOperator || !userId) { setCalls([]); setEvaluationTarget(null); return; }
-        const isOperatorFromLoadedList = operators.some(op => op.id === selectedOperator.id);
+        const isOperatorFromLoadedList = operators.some(op => Number(op.id) === Number(selectedOperator.id));
         if (!isOperatorFromLoadedList) { setCalls([]); setEvaluationTarget(null); return; }
         const cacheKey = getCallsCacheKey(selectedOperator.id, selectedMonth);
         if (!force && callsCacheRef.current.has(cacheKey)) {
@@ -3436,12 +3438,6 @@ const App = ({ user, initialSelection }) => {
                 <div className="header-right">
                     {canUseCalibration && (
                         <div className="section-switch">
-                            <button
-                                className={`btn btn-sm ${activeSection === 'journal' ? 'btn-primary' : 'btn-secondary'}`}
-                                onClick={() => setActiveSection('journal')}
-                            >
-                                Журнал
-                            </button>
                             {canUseAnalytics && (
                             <button
                                 className={`btn btn-sm ${activeSection === 'analytics' ? 'btn-primary' : 'btn-secondary'}`}
@@ -3450,6 +3446,12 @@ const App = ({ user, initialSelection }) => {
                                 Аналитика
                             </button>
                             )}
+                            <button
+                                className={`btn btn-sm ${activeSection === 'journal' ? 'btn-primary' : 'btn-secondary'}`}
+                                onClick={() => setActiveSection('journal')}
+                            >
+                                Журнал
+                            </button>
                             <button
                                 className={`btn btn-sm ${activeSection === 'requests' ? 'btn-primary' : 'btn-secondary'}`}
                                 onClick={() => setActiveSection('requests')}

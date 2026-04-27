@@ -7731,62 +7731,45 @@ def get_sv_data():
             "operators": []
         }
 
-        # For supervisors keep legacy access to the full operators list.
-        try:
-            if requester_role == 'sv':
-                operators = db.get_all_operators_with_details() or []
-            else:
-                operators = db.get_operators_by_supervisor(user_id) or []
-        except Exception:
-            operators = []
-
         target_user_role = ''
         if isinstance(user, dict):
             target_user_role = _normalize_user_role(user.get("role"))
         elif isinstance(user, (list, tuple)) and len(user) > 3:
             target_user_role = _normalize_user_role(user[3])
 
+        if target_user_role not in ('sv', 'supervisor'):
+            return jsonify({"error": "Selected user is not a supervisor"}), 400
+
+        # Return only operators that belong to the selected supervisor. Older
+        # supervisor analytics used the full operator list here; that leaked
+        # unrelated operators and made the selector ineffective.
+        try:
+            operators = db.get_operators_by_supervisor(user_id) or []
+        except Exception:
+            operators = []
+
         supervisor_rows = []
         try:
             with db._get_cursor() as cursor:
-                if requester_role == 'sv':
-                    cursor.execute("""
-                        SELECT
-                            u.id,
-                            u.name,
-                            u.direction_id,
-                            u.hire_date,
-                            u.scores_table_url,
-                            u.status,
-                            u.rate,
-                            u.gender,
-                            u.birth_date,
-                            u.avatar_bucket,
-                            u.avatar_blob_path
-                        FROM users u
-                        WHERE LOWER(COALESCE(u.role, '')) IN ('sv', 'supervisor')
-                    """)
-                    supervisor_rows = cursor.fetchall()
-                elif target_user_role == 'sv':
-                    cursor.execute("""
-                        SELECT
-                            u.id,
-                            u.name,
-                            u.direction_id,
-                            u.hire_date,
-                            u.scores_table_url,
-                            u.status,
-                            u.rate,
-                            u.gender,
-                            u.birth_date,
-                            u.avatar_bucket,
-                            u.avatar_blob_path
-                        FROM users u
-                        WHERE u.id = %s
-                          AND LOWER(COALESCE(u.role, '')) IN ('sv', 'supervisor')
-                        LIMIT 1
-                    """, (user_id,))
-                    supervisor_rows = cursor.fetchall()
+                cursor.execute("""
+                    SELECT
+                        u.id,
+                        u.name,
+                        u.direction_id,
+                        u.hire_date,
+                        u.scores_table_url,
+                        u.status,
+                        u.rate,
+                        u.gender,
+                        u.birth_date,
+                        u.avatar_bucket,
+                        u.avatar_blob_path
+                    FROM users u
+                    WHERE u.id = %s
+                      AND LOWER(COALESCE(u.role, '')) IN ('sv', 'supervisor')
+                    LIMIT 1
+                """, (user_id,))
+                supervisor_rows = cursor.fetchall()
         except Exception:
             supervisor_rows = []
 
