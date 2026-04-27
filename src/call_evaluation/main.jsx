@@ -3274,13 +3274,6 @@ const App = ({ user, initialSelection }) => {
                 borderColor: '#bbf7d0'
             };
         }
-        if (value >= 75) {
-            return {
-                background: 'var(--accent-light)',
-                color: 'var(--accent)',
-                borderColor: '#bfdbfe'
-            };
-        }
         if (value >= 50) {
             return {
                 background: 'var(--amber-light)',
@@ -4746,8 +4739,8 @@ const App = ({ user, initialSelection }) => {
                             const getBarColor = (pct) => getAnalyticsNormTone(pct).color;
 
                             return (
-                                <div style={{ overflowX: 'auto', borderRadius: 8, border: '1px solid var(--border)' }}>
-                                    <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 600 }}>
+                                <div style={{ borderRadius: 8, border: '1px solid var(--border)' }}>
+                                    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                                         <thead style={{ background: 'var(--surface-2)' }}>
                                             <tr>
                                                 <th style={thStyle} onClick={() => handleAnalyticsSort('name')}>Оператор {getAnalyticsSortIcon('name')}</th>
