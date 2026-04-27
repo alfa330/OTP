@@ -3205,14 +3205,53 @@ const App = ({ user, initialSelection }) => {
         };
     };
 
+    const getAnalyticsNormTone = (pct) => {
+        const value = Number(pct);
+        if (!Number.isFinite(value)) {
+            return {
+                background: 'var(--surface-2)',
+                color: 'var(--text-2)',
+                borderColor: 'var(--border)'
+            };
+        }
+        if (value >= 95) {
+            return {
+                background: 'var(--green-light)',
+                color: 'var(--green)',
+                borderColor: '#bbf7d0'
+            };
+        }
+        if (value >= 75) {
+            return {
+                background: 'var(--accent-light)',
+                color: 'var(--accent)',
+                borderColor: '#bfdbfe'
+            };
+        }
+        if (value >= 50) {
+            return {
+                background: 'var(--amber-light)',
+                color: 'var(--amber)',
+                borderColor: '#fde68a'
+            };
+        }
+        return {
+            background: 'var(--red-light)',
+            color: 'var(--red)',
+            borderColor: '#fecaca'
+        };
+    };
+
     const renderAnalyticsPlanContent = (op, callCount) => {
         const meta = getAnalyticsEvaluationPlanMeta(op);
-        if (!meta) return <span>{callCount}</span>;
+        if (!meta) return <span className="analytics-plan-chip">{callCount}</span>;
+        const pct = meta.requiredCalls > 0 ? (Number(callCount || 0) / meta.requiredCalls) * 100 : 100;
+        const tone = getAnalyticsNormTone(pct);
         const formula = `Расчет: (${meta.workedHoursUsed.toFixed(2)} ч / ${meta.normHours.toFixed(2)} ч полной ставки) × ${meta.baseCallTarget} = ${meta.requiredCallsRaw.toFixed(2)}, итог ${meta.requiredCalls}`;
         return (
-            <div className="group relative inline-flex">
-                <div className="font-medium cursor-help underline decoration-dotted underline-offset-2 decoration-gray-400">{callCount} / {meta.requiredCalls}</div>
-                <div className="pointer-events-none absolute left-1/2 top-full z-20 mt-2 w-max max-w-xs -translate-x-1/2 rounded-lg border border-gray-200 bg-gray-900 px-3 py-2 text-xs text-white opacity-0 shadow-lg transition-opacity group-hover:opacity-100">{formula}</div>
+            <div className="analytics-plan">
+                <div className="analytics-plan-chip" style={tone}>{callCount} / {meta.requiredCalls}</div>
+                <div className="analytics-plan-tooltip">{formula}</div>
             </div>
         );
     };
@@ -4655,7 +4694,7 @@ const App = ({ user, initialSelection }) => {
                             const tdStyle = { padding: '10px 12px', fontSize: 13, color: 'var(--text)', borderTop: '1px solid var(--border)' };
 
                             const getScoreColor = (score) => { if (!score) return 'var(--text-2)'; if (score >= 90) return 'var(--green)'; if (score >= 60) return 'var(--amber)'; return 'var(--red)'; };
-                            const getBarColor = (pct) => pct >= 95 ? 'var(--green)' : pct >= 50 ? 'var(--amber)' : 'var(--red)';
+                            const getBarColor = (pct) => getAnalyticsNormTone(pct).color;
 
                             return (
                                 <div style={{ overflowX: 'auto', borderRadius: 8, border: '1px solid var(--border)' }}>
@@ -4704,12 +4743,13 @@ const App = ({ user, initialSelection }) => {
                                                             <span style={{ fontWeight: 500, color: Number(op.feedback_overdue_count) > 0 ? 'var(--red)' : 'var(--text-2)' }}>{Number(op.feedback_overdue_count) || 0}</span>
                                                         </td>
                                                         <td style={{ ...tdStyle, whiteSpace: 'nowrap' }}>
-                                                            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                                                            <div className="analytics-actions">
                                                                 {hasIssue && (
                                                                     <button className="btn btn-sm" style={{ background: 'var(--amber-light,#fffbeb)', color: 'var(--amber,#d97706)', borderColor: 'var(--amber,#d97706)' }} onClick={() => analyticsNotifySv(analyticsEffectiveSvId, op.name, callCount, displayTarget)} disabled={analyticsLoading}>
                                                                         ⚠ Уведомить
                                                                     </button>
                                                                 )}
+                                                                {!hasIssue && <span className="analytics-action-placeholder" aria-hidden="true" />}
                                                                 <button className="btn btn-sm btn-primary" onClick={() => {
                                                                     const nextSupervisorId = Number(op?.supervisor_id ?? op?.sv_id ?? analyticsEffectiveSvId) || null;
                                                                     if (nextSupervisorId) setSelectedSupervisor(nextSupervisorId);
