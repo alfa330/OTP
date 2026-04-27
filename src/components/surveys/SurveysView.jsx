@@ -21,7 +21,7 @@ const parseWeeksInput = (value) => {
     return Math.max(0, Math.floor(number));
 };
 const SkeletonBlock = ({ className = '' }) => (
-    <div className={`bg-gray-200 rounded animate-pulse ${className}`} />
+    <div className={`sk-shimmer ${className}`} />
 );
 
 const SurveysListSkeleton = ({ count = 4 }) => (

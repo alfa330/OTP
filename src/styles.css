@@ -2,6 +2,17 @@
 @tailwind components;
 @tailwind utilities;
 
+@keyframes sk-shimmer {
+    0%   { background-position: -400px 0; }
+    100% { background-position:  400px 0; }
+}
+.sk-shimmer {
+    background: linear-gradient(90deg, #e8e8e8 25%, #f5f5f5 50%, #e8e8e8 75%);
+    background-size: 800px 100%;
+    animation: sk-shimmer 1.4s ease-in-out infinite;
+    border-radius: 6px;
+}
+
      body {
        background-image: url("https://iili.io/KfVwgf4.png");
        background-repeat: no-repeat;

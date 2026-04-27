@@ -24185,13 +24185,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         // ─── OPERATOR SKELETON COMPONENTS ────────────────────────────────────
         const _SkPulse = ({ className = '' }) => (
-            <div className={`bg-gray-200 rounded animate-pulse ${className}`} />
+            <div className={`sk-shimmer ${className}`} />
         );
 
         const ProfilePageSkeleton = () => (
             <div className="space-y-6">
                 <div className="flex flex-col sm:flex-row items-center gap-4 pb-4 sm:pb-6 border-b border-gray-200">
-                    <div className="w-20 h-20 sm:w-24 sm:h-24 rounded-full bg-gray-200 animate-pulse shrink-0" />
+                    <div className="w-20 h-20 sm:w-24 sm:h-24 rounded-full sk-shimmer shrink-0" style={{borderRadius:'9999px'}} />
                     <div className="space-y-2 text-center sm:text-left w-full max-w-xs">
                         <_SkPulse className="h-6 w-36 mx-auto sm:mx-0" />
                         <div className="flex gap-2 justify-center sm:justify-start">
@@ -24212,7 +24212,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
                     {[0,1,2].map(i => (
                         <div key={i} className="bg-gray-50 p-4 rounded-xl flex items-center gap-3">
-                            <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-full bg-gray-200 animate-pulse shrink-0" />
+                            <div className="w-10 h-10 sm:w-12 sm:h-12 sk-shimmer shrink-0" style={{borderRadius:'9999px'}} />
                             <div className="space-y-2 flex-1 min-w-0">
                                 <_SkPulse className="h-3 w-20" />
                                 <_SkPulse className="h-4 w-28" />
