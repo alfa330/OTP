@@ -24416,6 +24416,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [selectedReportMonth, setSelectedReportMonth] = useState(() => getStoredValue('selectedReportMonth', currentMonth));
             const [callEvaluationContext, setCallEvaluationContext] = useState(null);
             const [callEvaluationFrameReady, setCallEvaluationFrameReady] = useState(false);
+            const [callEvalActiveTab, setCallEvalActiveTab] = useState('journal');
             const [expandedEvaluation, setExpandedEvaluation] = useState(null);  
             const [audioUrl, setAudioUrl] = useState(null);
             const [loadingAudioId, setLoadingAudioId] = useState(null);
@@ -30001,6 +30002,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
                 setView('call_evaluation');
                 setMobileMenuOpen(false);
+                setCallEvalActiveTab('journal');
             };
 
             const handleChangePassword = async () => {
@@ -31726,11 +31728,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         <hr className="border-t border-white-700 my-2 opacity-40" />
 
                                         <li>
-                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'view_scores')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'view_scores' ? 'bg-blue-700' : ''}`}>
-                                                <FaIcon className="fas fa-chart-bar"></FaIcon> <span className="sidebar-text">Оценки операторов</span>
-                                            </button>
-                                        </li>
-                                        <li>
                                             <button
                                                 onClick={(e) => openCallEvaluationSection({
                                                     supervisorId: selectedSvId || null,
@@ -32040,14 +32037,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     <div
                         className={`main-content w-full ${
                             isCallEvaluationView
-                                ? 'p-0 h-screen overflow-hidden'
+                                ? (callEvalActiveTab === 'analytics' ? 'p-0 min-h-screen overflow-y-auto bg-gray-50' : 'p-0 h-screen overflow-hidden')
                                 : (canAccessLmsSection && view === 'lms')
                                     ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
                                     : (view === 'tasks' || view === 'work_schedules')
                                         ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
                                     : 'p-8 bg-gray-50 min-h-screen overflow-y-auto'
                         } ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}
-                        style={isCallEvaluationView ? { backgroundColor: '#f7f7f5' } : undefined}
+                        style={isCallEvaluationView && callEvalActiveTab !== 'analytics' ? { backgroundColor: '#f7f7f5' } : undefined}
                     >
                         {birthdayBannerVisible && (
                         <div className="relative overflow-hidden rounded-2xl border border-amber-200/70 bg-gradient-to-r from-amber-50 via-yellow-50 to-rose-50 px-4 py-4 mb-6 shadow-lg">
@@ -32090,14 +32087,34 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             />
                         )}
                         {canSeeCallEvaluation && (
-                        <div className="w-full h-full px-2 md:px-3 py-3" style={{ backgroundColor: '#f7f7f5', display: isCallEvaluationView ? undefined : 'none' }}>
-                            <iframe
-                                ref={callEvaluationFrameRef}
-                                title="Оценки операторов"
-                                src={callEvaluationIframeUrl}
-                                className="block w-full"
-                                style={{ height: 'calc(100vh - 24px)', border: 'none', backgroundColor: '#f7f7f5' }}
-                            />
+                        <div className="w-full" style={{ display: isCallEvaluationView ? undefined : 'none' }}>
+                            {/* Tab bar */}
+                            <div className="flex items-center gap-1.5 px-4 pt-3 pb-2" style={{ backgroundColor: callEvalActiveTab === 'journal' ? '#f7f7f5' : undefined }}>
+                                <button
+                                    className={`inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg transition-colors ${callEvalActiveTab === 'journal' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700 hover:bg-white/60'}`}
+                                    onClick={() => setCallEvalActiveTab('journal')}
+                                >
+                                    <FaIcon className="fas fa-clipboard-check" /> Журнал
+                                </button>
+                                {isAdminLikeRole && (
+                                <button
+                                    className={`inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg transition-colors ${callEvalActiveTab === 'analytics' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700 hover:bg-white/60'}`}
+                                    onClick={() => setCallEvalActiveTab('analytics')}
+                                >
+                                    <FaIcon className="fas fa-chart-bar" /> Аналитика
+                                </button>
+                                )}
+                            </div>
+                            {/* Journal tab - iframe */}
+                            <div className="px-2 md:px-3 pb-3" style={{ backgroundColor: '#f7f7f5', display: callEvalActiveTab === 'journal' ? undefined : 'none' }}>
+                                <iframe
+                                    ref={callEvaluationFrameRef}
+                                    title="Журнал оценок"
+                                    src={callEvaluationIframeUrl}
+                                    className="block w-full"
+                                    style={{ height: 'calc(100vh - 64px)', border: 'none', backgroundColor: '#f7f7f5' }}
+                                />
+                            </div>
                         </div>
                         )}
                         {isAdminLikeRole && (
@@ -32569,8 +32586,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 />
                                 )}
 
-                                {view === 'view_scores' && (
-                                    <div className="bg-white p-6 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
+                                {view === 'call_evaluation' && callEvalActiveTab === 'analytics' && (
+                                    <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200 mx-4 mt-1 mb-4">
                                         {/* Header: title + month + report */}
                                         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-6">
                                         <h2 className="text-2xl font-semibold text-gray-800">Оценки операторов</h2>
