@@ -27111,11 +27111,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             useEffect(() => {
                 const onMessage = (event) => {
                     if (event.origin !== window.location.origin) return;
-                    if (event.data?.type !== 'CALL_EVALUATION_READY') return;
-                    setCallEvaluationFrameReady(true);
-                    const frameWindow = callEvaluationFrameRef.current?.contentWindow;
-                    if (!frameWindow) return;
-                    frameWindow.postMessage(callEvaluationInitPayload, window.location.origin);
+                    if (event.data?.type === 'CALL_EVALUATION_READY') {
+                        setCallEvaluationFrameReady(true);
+                        const frameWindow = callEvaluationFrameRef.current?.contentWindow;
+                        if (!frameWindow) return;
+                        frameWindow.postMessage(callEvaluationInitPayload, window.location.origin);
+                    } else if (event.data?.type === 'CALL_EVALUATION_SWITCH_ANALYTICS') {
+                        setCallEvalActiveTab('analytics');
+                    }
                 };
 
                 window.addEventListener('message', onMessage);
@@ -32087,34 +32090,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             />
                         )}
                         {canSeeCallEvaluation && (
-                        <div className="w-full" style={{ display: isCallEvaluationView ? undefined : 'none' }}>
-                            {/* Tab bar */}
-                            <div className="flex items-center gap-1.5 px-4 pt-3 pb-2" style={{ backgroundColor: callEvalActiveTab === 'journal' ? '#f7f7f5' : undefined }}>
-                                <button
-                                    className={`inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg transition-colors ${callEvalActiveTab === 'journal' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700 hover:bg-white/60'}`}
-                                    onClick={() => setCallEvalActiveTab('journal')}
-                                >
-                                    <FaIcon className="fas fa-clipboard-check" /> Журнал
-                                </button>
-                                {isAdminLikeRole && (
-                                <button
-                                    className={`inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg transition-colors ${callEvalActiveTab === 'analytics' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700 hover:bg-white/60'}`}
-                                    onClick={() => setCallEvalActiveTab('analytics')}
-                                >
-                                    <FaIcon className="fas fa-chart-bar" /> Аналитика
-                                </button>
-                                )}
-                            </div>
-                            {/* Journal tab - iframe */}
-                            <div className="px-2 md:px-3 pb-3" style={{ backgroundColor: '#f7f7f5', display: callEvalActiveTab === 'journal' ? undefined : 'none' }}>
-                                <iframe
-                                    ref={callEvaluationFrameRef}
-                                    title="Журнал оценок"
-                                    src={callEvaluationIframeUrl}
-                                    className="block w-full"
-                                    style={{ height: 'calc(100vh - 64px)', border: 'none', backgroundColor: '#f7f7f5' }}
-                                />
-                            </div>
+                        <div className="w-full h-full px-2 md:px-3 py-3" style={{ backgroundColor: '#f7f7f5', display: isCallEvaluationView && callEvalActiveTab === 'journal' ? undefined : 'none' }}>
+                            <iframe
+                                ref={callEvaluationFrameRef}
+                                title="Журнал оценок"
+                                src={callEvaluationIframeUrl}
+                                className="block w-full"
+                                style={{ height: 'calc(100vh - 24px)', border: 'none', backgroundColor: '#f7f7f5' }}
+                            />
                         </div>
                         )}
                         {isAdminLikeRole && (
@@ -32587,92 +32570,61 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 )}
 
                                 {view === 'call_evaluation' && callEvalActiveTab === 'analytics' && (
-                                    <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200 mx-4 mt-1 mb-4">
-                                        {/* Header: title + month + report */}
-                                        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-6">
-                                        <h2 className="text-2xl font-semibold text-gray-800">Оценки операторов</h2>
-
-                                        <div className="flex items-center gap-3">
-                                            {/* Month select */}
-                                            <select
-                                            value={selectedReportMonth}
-                                            onChange={(e) => setSelectedReportMonth(e.target.value)}
-                                            className="p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                            disabled={isAdminDataLoading}
-                                            >
-                                            {getMonthOptions()}
-                                            </select>
-
-                                            {/* Генерация отчёта */}
-                                            <button
-                                            onClick={generateMonthlyReport}
-                                            disabled={isLoading}
-                                            className={`inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium transition ${isLoading ? 'bg-green-600 opacity-60 cursor-not-allowed text-white' : 'bg-green-600 text-white hover:bg-green-700'}`}
-                                            title="Скачать отчет по прослушанным звонкам за выбранный месяц"
-                                            >
-                                            <FaIcon className="fas fa-file-excel mr-2" />
-                                            <span>{isLoading ? 'Загрузка...' : 'Скачать отчёт'}</span>
-                                            </button>
-
-                                            <button
-                                            onClick={() => {
-                                                if (!selectedSvId) {
-                                                showToast('Выберите супервайзера', 'error');
-                                                return;
-                                                }
-                                                fetchSelectedSvData(selectedSvId, selectedReportMonth || selectedMonth);
-                                            }}
-                                            disabled={isAdminDataLoading || isLoading || !selectedSvId}
-                                            className={`inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium transition ${isAdminDataLoading || isLoading || !selectedSvId ? 'bg-blue-300 text-blue-600 opacity-60 cursor-not-allowed' : 'bg-blue-600 text-white hover:bg-blue-700'}`}
-                                            title="Обновить данные по оценкам для выбранного супервайзера"
-                                            >
-                                            <FaIcon className="fas fa-sync-alt" />
-                                            <span>{isAdminDataLoading ? 'Обновление...' : 'Обновить'}</span>
-                                            </button>
+                                <div style={{ maxWidth: 1280, margin: '0 auto', padding: '20px 20px 28px' }}>
+                                    {/* Header matching call_evaluation */}
+                                    <header style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: '#fff', padding: '14px 20px', border: '1px solid #e5e5e2', boxShadow: '0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04)', borderRadius: 12, marginBottom: 20, flexWrap: 'wrap', gap: 12 }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                            <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#2563eb' }} />
+                                            <h1 style={{ fontSize: 15, fontWeight: 600, letterSpacing: '-0.01em', color: '#1a1a18', margin: 0 }}>Журнал Оценок</h1>
                                         </div>
+                                        <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                                            {[{ key: 'journal', label: 'Журнал' }, { key: 'requests', label: 'Журнал запросов' }, { key: 'calibration', label: 'Калибровка' }, { key: 'analytics', label: 'Аналитика' }].map(tab => (
+                                                <button key={tab.key} onClick={() => { if (tab.key === 'analytics') return; setCallEvalActiveTab('journal'); const f = callEvaluationFrameRef.current?.contentWindow; if (f) f.postMessage({ type: 'CALL_EVALUATION_SWITCH_SECTION', section: tab.key }, '*'); }} style={{ padding: '5px 10px', fontSize: 12, borderRadius: 8, border: `1px solid ${tab.key === 'analytics' ? '#2563eb' : '#d0d0cc'}`, background: tab.key === 'analytics' ? '#2563eb' : '#fff', color: tab.key === 'analytics' ? '#fff' : '#1a1a18', cursor: tab.key === 'analytics' ? 'default' : 'pointer', fontWeight: 500, fontFamily: 'inherit', transition: '150ms ease' }}>
+                                                    {tab.label}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </header>
+
+                                    {/* Main panel */}
+                                    <div style={{ background: '#fff', border: '1px solid #e5e5e2', borderRadius: 12 }}>
+                                        {/* Panel header */}
+                                        <div style={{ padding: '16px 24px', borderBottom: '1px solid #e5e5e2', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                                                <span style={{ fontSize: 14, fontWeight: 600, color: '#1a1a18' }}>Аналитика</span>
+                                                <select value={selectedSvId} onChange={(e) => setSelectedSvId(e.target.value)} style={{ fontSize: 13, border: '1px solid #e5e5e2', borderRadius: 8, padding: '6px 10px', background: '#fff', color: '#1a1a18', outline: 'none' }} disabled={isLoading || isAdminDataLoading}>
+                                                    <option value="">Выберите супервайзера</option>
+                                                    {(() => { const all = svList || []; return all.filter(sv => sv.status === 'working' || sv.status === 'unpaid_leave' || !sv.status).map(sv => (<option key={sv.id} value={sv.id}>{sv.name}</option>)); })()}
+                                                </select>
+                                            </div>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                                                <select value={selectedReportMonth} onChange={(e) => setSelectedReportMonth(e.target.value)} style={{ fontSize: 13, border: '1px solid #e5e5e2', borderRadius: 8, padding: '6px 10px', background: '#fff', color: '#1a1a18', outline: 'none' }} disabled={isAdminDataLoading}>
+                                                    {getMonthOptions()}
+                                                </select>
+                                                <button onClick={generateMonthlyReport} disabled={isLoading} style={{ padding: '5px 10px', fontSize: 12, borderRadius: 8, border: '1px solid #86efac', background: '#f0fdf4', color: '#16a34a', fontWeight: 500, cursor: isLoading ? 'not-allowed' : 'pointer', opacity: isLoading ? 0.5 : 1, display: 'inline-flex', alignItems: 'center', gap: 6, fontFamily: 'inherit', transition: '150ms ease' }} title="Скачать отчет по прослушанным звонкам за выбранный месяц">
+                                                    <FaIcon className="fas fa-file-excel" /> {isLoading ? 'Загрузка...' : 'Скачать отчёт'}
+                                                </button>
+                                                <button onClick={() => { if (!selectedSvId) { showToast('Выберите супервайзера', 'error'); return; } fetchSelectedSvData(selectedSvId, selectedReportMonth || selectedMonth); }} disabled={isAdminDataLoading || isLoading || !selectedSvId} style={{ padding: '5px 10px', fontSize: 12, borderRadius: 8, border: '1px solid #2563eb', background: '#2563eb', color: '#fff', fontWeight: 500, cursor: (isAdminDataLoading || isLoading || !selectedSvId) ? 'not-allowed' : 'pointer', opacity: (isAdminDataLoading || isLoading || !selectedSvId) ? 0.4 : 1, display: 'inline-flex', alignItems: 'center', gap: 6, fontFamily: 'inherit', transition: '150ms ease' }} title="Обновить данные по оценкам">
+                                                    <FaIcon className="fas fa-sync-alt" /> {isAdminDataLoading ? 'Обновление...' : 'Обновить'}
+                                                </button>
+                                            </div>
                                         </div>
 
-                                        {/* Select supervisor */}
-                                        <select
-                                        value={selectedSvId}
-                                        onChange={(e) => setSelectedSvId(e.target.value)}
-                                        className="w-1/4 p-3 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
-                                        disabled={isLoading || isAdminDataLoading}
-                                        >
-                                        <option value="">Выберите супервайзера</option>
-                                        {(() => {
-                                            const all = svList || [];
-                                            const active = all.filter(sv => sv.status === 'working' || sv.status === 'unpaid_leave' || !sv.status);
-                                            const fired = all.filter(sv => sv.status === 'fired');
-                                            return (
-                                                <>
-                                                {active.map(sv => (
-                                                <option key={sv.id} value={sv.id}>{sv.name}</option>
-                                                ))}
-                                                </>
-                                            );
-                                        })()}
-                                        </select>
-
+                                        {/* Panel body */}
+                                        <div style={{ padding: '20px 24px' }}>
                                         {/* Tabs: Активные / Уволенные */}
-                                        <div className="flex items-center space-x-3 mb-4">
+                                        <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center', marginBottom: 16 }}>
                                         {(() => {
                                             const all = selectedSvData?.operators ?? [];
                                             const activeCount = all.filter(op => op.status === 'working' || op.status === 'unpaid_leave' || !op.status).length;
                                             const firedCount = all.filter(op => op.status === 'fired').length;
                                             return (
                                             <>
-                                                <button
-                                                onClick={() => setActiveOperatorsTab('active')}
-                                                className={`px-4 py-2 rounded-lg font-medium text-sm focus:outline-none ${activeOperatorsTab === 'active' ? 'bg-green-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
-                                                >
-                                                Активные <span className="ml-2 inline-flex items-center justify-center px-2 py-0.5 text-xs rounded bg-white text-gray-700 font-medium">{activeCount}</span>
+                                                <button onClick={() => setActiveOperatorsTab('active')} style={{ padding: '5px 10px', fontSize: 12, borderRadius: 8, border: `1px solid ${activeOperatorsTab === 'active' ? '#16a34a' : '#d0d0cc'}`, background: activeOperatorsTab === 'active' ? '#16a34a' : '#fff', color: activeOperatorsTab === 'active' ? '#fff' : '#1a1a18', fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit', transition: '150ms ease' }}>
+                                                    Активные ({activeCount})
                                                 </button>
-                                                <button
-                                                onClick={() => setActiveOperatorsTab('fired')}
-                                                className={`px-4 py-2 rounded-lg font-medium text-sm focus:outline-none ${activeOperatorsTab === 'fired' ? 'bg-red-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
-                                                >
-                                                Уволенные <span className="ml-2 inline-flex items-center justify-center px-2 py-0.5 text-xs rounded bg-white text-gray-700 font-medium">{firedCount}</span>
+                                                <button onClick={() => setActiveOperatorsTab('fired')} style={{ padding: '5px 10px', fontSize: 12, borderRadius: 8, border: `1px solid ${activeOperatorsTab === 'fired' ? '#dc2626' : '#d0d0cc'}`, background: activeOperatorsTab === 'fired' ? '#dc2626' : '#fff', color: activeOperatorsTab === 'fired' ? '#fff' : '#1a1a18', fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit', transition: '150ms ease' }}>
+                                                    Уволенные ({firedCount})
                                                 </button>
                                             </>
                                             );
@@ -32907,10 +32859,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             );
                                         })()
                                         ) : selectedSvId ? (
-                                        <p className="text-center text-gray-600">Операторы не найдены для этого супервайзера.</p>
+                                        <p style={{ textAlign: 'center', color: '#6b6b67', padding: '32px 0', fontSize: 13 }}>Операторы не найдены для этого супервайзера.</p>
                                         ) : null}
+                                        </div>
                                     </div>
-                                    )}
+                                </div>
+                                )}
                                 {showAiMonthlyFeedbackModal && (
                                 <MonthlyFeedbackModal
                                     title={aiMonthlyFeedbackTitle}

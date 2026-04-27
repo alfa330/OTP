@@ -2560,6 +2560,11 @@ const App = ({ user, initialSelection }) => {
     }, [activeSection, fetchReevaluationRequests]);
 
     useEffect(() => {
+        window.__callEvaluationSetSection = (section) => {
+            if (['journal', 'requests', 'calibration'].includes(section)) {
+                setActiveSection(section);
+            }
+        };
         window.__callEvaluationFocus = () => {
             callsCacheRef.current.clear();
             evaluationTargetCacheRef.current.clear();
@@ -2573,7 +2578,7 @@ const App = ({ user, initialSelection }) => {
                 fetchCalibrationRooms();
             }
         };
-        return () => { window.__callEvaluationFocus = null; };
+        return () => { window.__callEvaluationFocus = null; window.__callEvaluationSetSection = null; };
     }, [fetchEvaluations, fetchReevaluationRequests, fetchCalibrationRooms, activeSection]);
 
     const handleOpenCalibrationRoom = useCallback(async (room, callId = null) => {
@@ -3161,6 +3166,16 @@ const App = ({ user, initialSelection }) => {
                             >
                                 Калибровка
                             </button>
+                            {isAdminRole && (
+                            <button
+                                className="btn btn-sm btn-secondary"
+                                onClick={() => {
+                                    try { window.parent.postMessage({ type: 'CALL_EVALUATION_SWITCH_ANALYTICS' }, '*'); } catch(e) {}
+                                }}
+                            >
+                                Аналитика
+                            </button>
+                            )}
                         </div>
                     )}
                     {isAdminRole && activeSection === 'journal' && (
@@ -4395,6 +4410,10 @@ if (isEmbedded) {
         } else if (data.type === 'CALL_EVALUATION_FOCUS') {
             if (typeof window.__callEvaluationFocus === 'function') {
                 window.__callEvaluationFocus();
+            }
+        } else if (data.type === 'CALL_EVALUATION_SWITCH_SECTION') {
+            if (typeof window.__callEvaluationSetSection === 'function') {
+                window.__callEvaluationSetSection(data.section);
             }
         }
     };
