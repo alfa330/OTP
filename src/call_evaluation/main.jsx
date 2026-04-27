@@ -2315,7 +2315,11 @@ const App = ({ user, initialSelection }) => {
             setSelectedMonth(initialSelection.month);
             setAnalyticsMonth(initialSelection.month);
         }
-        if (initialSelection.supervisorId != null) setSelectedSupervisor(Number(initialSelection.supervisorId) || null);
+        if (initialSelection.supervisorId != null) {
+            const nextSupervisorId = Number(initialSelection.supervisorId) || null;
+            setSelectedSupervisor(nextSupervisorId);
+            if (nextSupervisorId) setAnalyticsSelectedSvId(String(nextSupervisorId));
+        }
     }, [initialSelection, canUseAnalytics, canUseCalibration]);
 
     useEffect(() => {
@@ -2328,6 +2332,17 @@ const App = ({ user, initialSelection }) => {
             : (Number(supervisors?.[0]?.id) || null);
         if (fallbackSupervisorId) setSelectedSupervisor(fallbackSupervisorId);
     }, [isSupervisorRole, userId, supervisors, selectedSupervisor]);
+
+    useEffect(() => {
+        if (activeSection !== 'analytics' || analyticsSelectedSvId) return;
+        if (selectedSupervisor) {
+            setAnalyticsSelectedSvId(String(selectedSupervisor));
+            return;
+        }
+        if (isSupervisorRole && userId) {
+            setAnalyticsSelectedSvId(String(userId));
+        }
+    }, [activeSection, analyticsSelectedSvId, selectedSupervisor, isSupervisorRole, userId]);
 
     useEffect(() => {
         if (!userId) return;
@@ -2994,6 +3009,11 @@ const App = ({ user, initialSelection }) => {
         : 100;
     const orderedSupervisors = sortByFiredAndName(supervisors);
     const orderedOperators = sortByFiredAndName(operators);
+    const analyticsSupervisorOptions = (() => {
+        const list = orderedSupervisors.filter(sv => sv.status === 'working' || sv.status === 'unpaid_leave' || !sv.status);
+        if (!isSupervisorRole || !userId || list.some(sv => Number(sv.id) === Number(userId))) return list;
+        return [{ id: userId, name: userName || 'Мои операторы', status: 'working' }, ...list];
+    })();
     const selectedSupervisorObj = selectedSupervisor ? supervisors.find(sv => sv.id === selectedSupervisor) : null;
     const selectedSupervisorIsFired = isFiredStatus(selectedSupervisorObj?.status);
     const selectedOperatorIsFired = isFiredStatus(selectedOperator?.status);
@@ -3377,7 +3397,7 @@ const App = ({ user, initialSelection }) => {
         } catch (e) { setAnalyticsAiModal(prev => ({ ...prev, loading: false, error: e.message || 'Ошибка запроса' })); }
     }, [userId]);
 
-    const analyticsEffectiveSvId = isSupervisorRole ? String(userId || '') : analyticsSelectedSvId;
+    const analyticsEffectiveSvId = analyticsSelectedSvId;
 
     useEffect(() => {
         if (activeSection === 'analytics' && analyticsEffectiveSvId) {
@@ -4641,21 +4661,17 @@ const App = ({ user, initialSelection }) => {
                     <div className="panel-header">
                         <div className="panel-title-wrap">
                             <span className="panel-title">Аналитика</span>
-                            {isAdminRole ? (
-                                <select
-                                    value={analyticsSelectedSvId}
-                                    onChange={(e) => setAnalyticsSelectedSvId(e.target.value)}
-                                    className="select"
-                                    disabled={analyticsLoading}
-                                >
-                                    <option value="">Выберите супервайзера</option>
-                                    {supervisors.filter(sv => sv.status === 'working' || sv.status === 'unpaid_leave' || !sv.status).map(sv => (
-                                        <option key={sv.id} value={sv.id}>{sv.name}</option>
-                                    ))}
-                                </select>
-                            ) : (
-                                <span style={{ fontSize: 12, color: 'var(--text-2)' }}>{userName || 'Мои операторы'}</span>
-                            )}
+                            <select
+                                value={analyticsSelectedSvId}
+                                onChange={(e) => setAnalyticsSelectedSvId(e.target.value)}
+                                className="select"
+                                disabled={analyticsLoading}
+                            >
+                                <option value="">Выберите супервайзера</option>
+                                {analyticsSupervisorOptions.map(sv => (
+                                    <option key={sv.id} value={sv.id}>{sv.name}</option>
+                                ))}
+                            </select>
                         </div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                             <select
@@ -4775,13 +4791,13 @@ const App = ({ user, initialSelection }) => {
                                                             <span style={{ fontWeight: 500, color: Number(op.feedback_overdue_count) > 0 ? 'var(--red)' : 'var(--text-2)' }}>{Number(op.feedback_overdue_count) || 0}</span>
                                                         </td>
                                                         <td style={{ ...tdStyle, whiteSpace: 'nowrap' }}>
-                                                            <div className="analytics-actions">
-                                                                {hasIssue && (
+                                                            <div className={`analytics-actions ${isAdminRole ? 'analytics-actions-admin' : 'analytics-actions-compact'}`}>
+                                                                {isAdminRole && hasIssue && (
                                                                     <button className="btn btn-sm" style={{ background: 'var(--amber-light,#fffbeb)', color: 'var(--amber,#d97706)', borderColor: 'var(--amber,#d97706)' }} onClick={() => analyticsNotifySv(analyticsEffectiveSvId, op.name, callCount, displayTarget)} disabled={analyticsLoading}>
                                                                         ⚠ Уведомить
                                                                     </button>
                                                                 )}
-                                                                {!hasIssue && <span className="analytics-action-placeholder" aria-hidden="true" />}
+                                                                {isAdminRole && !hasIssue && <span className="analytics-action-placeholder" aria-hidden="true" />}
                                                                 <button className="btn btn-sm btn-primary" onClick={() => {
                                                                     const nextSupervisorId = Number(op?.supervisor_id ?? op?.sv_id ?? analyticsEffectiveSvId) || null;
                                                                     if (nextSupervisorId) setSelectedSupervisor(nextSupervisorId);
@@ -4792,9 +4808,11 @@ const App = ({ user, initialSelection }) => {
                                                                 }}>
                                                                     Оценки
                                                                 </button>
-                                                                <button className="btn btn-sm" style={{ background: 'var(--accent-light)', color: 'var(--accent)', borderColor: 'var(--accent)' }} onClick={() => analyticsOpenAiFeedback(op.id, op.name, analyticsMonth)} disabled={analyticsAiModal.loading}>
-                                                                    ОС от ИИ
-                                                                </button>
+                                                                {isAdminRole && (
+                                                                    <button className="btn btn-sm" style={{ background: 'var(--accent-light)', color: 'var(--accent)', borderColor: 'var(--accent)' }} onClick={() => analyticsOpenAiFeedback(op.id, op.name, analyticsMonth)} disabled={analyticsAiModal.loading}>
+                                                                        ОС от ИИ
+                                                                    </button>
+                                                                )}
                                                             </div>
                                                         </td>
                                                     </tr>

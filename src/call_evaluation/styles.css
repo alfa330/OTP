@@ -264,9 +264,14 @@
         }
         .analytics-actions {
             display: grid;
-            grid-template-columns: 112px 74px 86px;
             gap: 6px;
             align-items: center;
+        }
+        .analytics-actions-admin {
+            grid-template-columns: 112px 74px 86px;
+        }
+        .analytics-actions-compact {
+            grid-template-columns: 74px;
         }
         .analytics-actions .btn,
         .analytics-action-placeholder {
