@@ -29968,13 +29968,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 operatorName = '',
                 supervisorId = null,
                 month = (selectedReportMonth || selectedMonth),
+                section = 'journal',
                 openInNewTab = false
             } = {}) => {
                 const nextSelection = {
                     operatorId,
                     operatorName,
                     supervisorId,
-                    month
+                    month,
+                    section
                 };
 
                 if (openInNewTab) {
@@ -30003,8 +30005,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
                 setView('call_evaluation');
                 setMobileMenuOpen(false);
-                setCallEvalActiveTab('journal');
+                setCallEvalActiveTab(section);
             };
+
+            useEffect(() => {
+                if (view !== 'operators') return;
+                openCallEvaluationSection({
+                    month: selectedReportMonth || selectedMonth,
+                    section: 'analytics'
+                });
+            }, [view, selectedReportMonth, selectedMonth]);
 
             const handleChangePassword = async () => {
                 if (!passwordData.new_password || !passwordData.confirm_password) {
@@ -31809,11 +31819,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 )}
                                 {(user.role === 'sv' || user.role === 'supervisor') && (
                                     <>
-                                        <li>
-                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'operators')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'operators' ? 'bg-blue-700' : ''}`}>
-                                                <FaIcon className="fas fa-users-cog"></FaIcon> <span className="sidebar-text">Оценки операторов</span>
-                                            </button>
-                                        </li>
                                         <li>
                                             <button
                                                 onClick={(e) => openCallEvaluationSection({

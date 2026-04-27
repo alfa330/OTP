@@ -2027,6 +2027,7 @@ const App = ({ user, initialSelection }) => {
     const isSupervisorRole = canonicalRole === 'sv';
     const canUseCalibration = isAdminRole || isSupervisorRole;
     const canManageCalibrationRooms = isAdminRole || isSupervisorRole;
+    const canUseAnalytics = isAdminRole || isSupervisorRole;
     const [calls, setCalls] = useState([]);
     const [directions, setDirections] = useState([]);
     const [operators, setOperators] = useState([]);
@@ -2263,6 +2264,15 @@ const App = ({ user, initialSelection }) => {
 
     useEffect(() => {
         if (!initialSelection) return;
+        const requestedSection = String(initialSelection.section || '').trim().toLowerCase();
+        if (
+            requestedSection === 'journal' ||
+            requestedSection === 'requests' ||
+            (requestedSection === 'calibration' && canUseCalibration) ||
+            (requestedSection === 'analytics' && canUseAnalytics)
+        ) {
+            setActiveSection(requestedSection);
+        }
         const id = Number(initialSelection.operatorId);
         if (id) {
             setOperatorFromToken({
@@ -2270,9 +2280,12 @@ const App = ({ user, initialSelection }) => {
                 name: initialSelection.operatorName || ''
             });
         }
-        if (initialSelection.month) setSelectedMonth(initialSelection.month);
+        if (initialSelection.month) {
+            setSelectedMonth(initialSelection.month);
+            setAnalyticsMonth(initialSelection.month);
+        }
         if (initialSelection.supervisorId != null) setSelectedSupervisor(Number(initialSelection.supervisorId) || null);
-    }, [initialSelection]);
+    }, [initialSelection, canUseAnalytics, canUseCalibration]);
 
     useEffect(() => {
         if (!isSupervisorRole || !userId || !Array.isArray(supervisors) || supervisors.length === 0) return;
@@ -2293,10 +2306,11 @@ const App = ({ user, initialSelection }) => {
                 operatorId: selectedOperator?.id || null,
                 operatorName: selectedOperator?.name || '',
                 supervisorId: selectedSupervisor || null,
-                month: selectedMonth
+                month: selectedMonth,
+                section: activeSection
             }
         });
-    }, [userId, userRole, userName, selectedOperator, selectedSupervisor, selectedMonth]);
+    }, [userId, userRole, userName, selectedOperator, selectedSupervisor, selectedMonth, activeSection]);
 
     useEffect(() => {
         if (operatorFromToken && operators.length > 0) {
@@ -2573,8 +2587,14 @@ const App = ({ user, initialSelection }) => {
 
     useEffect(() => {
         window.__callEvaluationSetSection = (section) => {
-            if (['journal', 'requests', 'calibration', 'analytics'].includes(section)) {
-                setActiveSection(section);
+            const normalizedSection = String(section || '').trim().toLowerCase();
+            if (
+                normalizedSection === 'journal' ||
+                normalizedSection === 'requests' ||
+                (normalizedSection === 'calibration' && canUseCalibration) ||
+                (normalizedSection === 'analytics' && canUseAnalytics)
+            ) {
+                setActiveSection(normalizedSection);
             }
         };
         window.__callEvaluationFocus = () => {
@@ -2591,7 +2611,7 @@ const App = ({ user, initialSelection }) => {
             }
         };
         return () => { window.__callEvaluationFocus = null; window.__callEvaluationSetSection = null; };
-    }, [fetchEvaluations, fetchReevaluationRequests, fetchCalibrationRooms, activeSection]);
+    }, [fetchEvaluations, fetchReevaluationRequests, fetchCalibrationRooms, activeSection, canUseAnalytics, canUseCalibration]);
 
     const handleOpenCalibrationRoom = useCallback(async (room, callId = null) => {
         if (!room?.id || !userId) return;
@@ -3298,19 +3318,21 @@ const App = ({ user, initialSelection }) => {
         } catch (e) { setAnalyticsAiModal(prev => ({ ...prev, loading: false, error: e.message || 'Ошибка запроса' })); }
     }, [userId]);
 
+    const analyticsEffectiveSvId = isSupervisorRole ? String(userId || '') : analyticsSelectedSvId;
+
     useEffect(() => {
         if (activeSection === 'analytics' && isAdminRole && analyticsSvList.length === 0 && !analyticsSvLoading) {
             fetchAnalyticsSvList();
         }
-    }, [activeSection, isAdminRole]);
+    }, [activeSection, isAdminRole, analyticsSvList.length, analyticsSvLoading, fetchAnalyticsSvList]);
 
     useEffect(() => {
-        if (activeSection === 'analytics' && analyticsSelectedSvId) {
-            fetchAnalyticsSvData(analyticsSelectedSvId, analyticsMonth);
-        } else if (activeSection === 'analytics' && !analyticsSelectedSvId) {
+        if (activeSection === 'analytics' && analyticsEffectiveSvId) {
+            fetchAnalyticsSvData(analyticsEffectiveSvId, analyticsMonth);
+        } else if (activeSection === 'analytics' && !analyticsEffectiveSvId) {
             setAnalyticsSelectedSvData(null);
         }
-    }, [analyticsSelectedSvId, analyticsMonth, activeSection]);
+    }, [analyticsEffectiveSvId, analyticsMonth, activeSection, fetchAnalyticsSvData]);
 
     return (
         <div className="app">
@@ -3329,19 +3351,7 @@ const App = ({ user, initialSelection }) => {
                             >
                                 Журнал
                             </button>
-                            <button
-                                className={`btn btn-sm ${activeSection === 'requests' ? 'btn-primary' : 'btn-secondary'}`}
-                                onClick={() => setActiveSection('requests')}
-                            >
-                                Журнал запросов
-                            </button>
-                            <button
-                                className={`btn btn-sm ${activeSection === 'calibration' ? 'btn-primary' : 'btn-secondary'}`}
-                                onClick={() => setActiveSection('calibration')}
-                            >
-                                Калибровка
-                            </button>
-                            {isAdminRole && (
+                            {canUseAnalytics && (
                             <button
                                 className={`btn btn-sm ${activeSection === 'analytics' ? 'btn-primary' : 'btn-secondary'}`}
                                 onClick={() => setActiveSection('analytics')}
@@ -3349,7 +3359,21 @@ const App = ({ user, initialSelection }) => {
                                 Аналитика
                             </button>
                             )}
+                            <button
+                                className={`btn btn-sm ${activeSection === 'requests' ? 'btn-primary' : 'btn-secondary'}`}
+                                onClick={() => setActiveSection('requests')}
+                            >
+                                Журнал запросов
+                            </button>
                         </div>
+                    )}
+                    {canUseCalibration && (
+                        <button
+                            className={`btn btn-sm ${activeSection === 'calibration' ? 'btn-primary' : 'btn-secondary'}`}
+                            onClick={() => setActiveSection('calibration')}
+                        >
+                            Калибровка
+                        </button>
                     )}
                     {isAdminRole && activeSection === 'journal' && (
                         <label
@@ -3386,6 +3410,7 @@ const App = ({ user, initialSelection }) => {
             </header>
 
             {/* Main panel */}
+            {activeSection !== 'analytics' && (
             <div className="main-panel">
                 {/* Panel header with filters */}
                 <div className="panel-header">
@@ -4440,6 +4465,7 @@ const App = ({ user, initialSelection }) => {
                     </>
                 )}
             </div>
+            )}
 
             {/* Modals */}
             <EvaluationModal
@@ -4557,22 +4583,26 @@ const App = ({ user, initialSelection }) => {
             )}
 
             {/* ── Analytics section ── */}
-            {activeSection === 'analytics' && isAdminRole && (
+            {activeSection === 'analytics' && canUseAnalytics && (
                 <div className="main-panel" style={{ margin: '0 0 16px' }}>
                     <div className="panel-header">
                         <div className="panel-title-wrap">
                             <span className="panel-title">Аналитика</span>
-                            <select
-                                value={analyticsSelectedSvId}
-                                onChange={(e) => setAnalyticsSelectedSvId(e.target.value)}
-                                className="select"
-                                disabled={analyticsLoading || analyticsSvLoading}
-                            >
-                                <option value="">Выберите супервайзера</option>
-                                {analyticsSvList.filter(sv => sv.status === 'working' || sv.status === 'unpaid_leave' || !sv.status).map(sv => (
-                                    <option key={sv.id} value={sv.id}>{sv.name}</option>
-                                ))}
-                            </select>
+                            {isAdminRole ? (
+                                <select
+                                    value={analyticsSelectedSvId}
+                                    onChange={(e) => setAnalyticsSelectedSvId(e.target.value)}
+                                    className="select"
+                                    disabled={analyticsLoading || analyticsSvLoading}
+                                >
+                                    <option value="">Выберите супервайзера</option>
+                                    {analyticsSvList.filter(sv => sv.status === 'working' || sv.status === 'unpaid_leave' || !sv.status).map(sv => (
+                                        <option key={sv.id} value={sv.id}>{sv.name}</option>
+                                    ))}
+                                </select>
+                            ) : (
+                                <span style={{ fontSize: 12, color: 'var(--text-2)' }}>{userName || 'Мои операторы'}</span>
+                            )}
                         </div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                             <select
@@ -4594,8 +4624,8 @@ const App = ({ user, initialSelection }) => {
                             </button>
                             <button
                                 className="btn btn-sm btn-primary"
-                                onClick={() => { if (!analyticsSelectedSvId) { emitCallEvaluationToast('Выберите супервайзера', 'error'); return; } fetchAnalyticsSvData(analyticsSelectedSvId, analyticsMonth); }}
-                                disabled={analyticsLoading || analyticsSvLoading || !analyticsSelectedSvId}
+                                onClick={() => { if (!analyticsEffectiveSvId) { emitCallEvaluationToast('Выберите супервайзера', 'error'); return; } fetchAnalyticsSvData(analyticsEffectiveSvId, analyticsMonth); }}
+                                disabled={analyticsLoading || analyticsSvLoading || !analyticsEffectiveSvId}
                             >
                                 <FaIcon className="fas fa-sync-alt" /> {analyticsLoading ? 'Обновление...' : 'Обновить'}
                             </button>
@@ -4695,11 +4725,18 @@ const App = ({ user, initialSelection }) => {
                                                         <td style={{ ...tdStyle, whiteSpace: 'nowrap' }}>
                                                             <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                                                                 {hasIssue && (
-                                                                    <button className="btn btn-sm" style={{ background: 'var(--amber-light,#fffbeb)', color: 'var(--amber,#d97706)', borderColor: 'var(--amber,#d97706)' }} onClick={() => analyticsNotifySv(analyticsSelectedSvId, op.name, callCount, displayTarget)} disabled={analyticsLoading}>
+                                                                    <button className="btn btn-sm" style={{ background: 'var(--amber-light,#fffbeb)', color: 'var(--amber,#d97706)', borderColor: 'var(--amber,#d97706)' }} onClick={() => analyticsNotifySv(analyticsEffectiveSvId, op.name, callCount, displayTarget)} disabled={analyticsLoading}>
                                                                         ⚠ Уведомить
                                                                     </button>
                                                                 )}
-                                                                <button className="btn btn-sm btn-primary" onClick={() => { setActiveSection('journal'); }}>
+                                                                <button className="btn btn-sm btn-primary" onClick={() => {
+                                                                    const nextSupervisorId = Number(op?.supervisor_id ?? op?.sv_id ?? analyticsEffectiveSvId) || null;
+                                                                    if (nextSupervisorId) setSelectedSupervisor(nextSupervisorId);
+                                                                    setOperatorFromToken({ id: Number(op.id), name: op.name || '' });
+                                                                    setSelectedMonth(analyticsMonth);
+                                                                    setExpandedId(null);
+                                                                    setActiveSection('journal');
+                                                                }}>
                                                                     Оценки
                                                                 </button>
                                                                 <button className="btn btn-sm" style={{ background: 'var(--accent-light)', color: 'var(--accent)', borderColor: 'var(--accent)' }} onClick={() => analyticsOpenAiFeedback(op.id, op.name, analyticsMonth)} disabled={analyticsAiModal.loading}>
@@ -4737,7 +4774,7 @@ const App = ({ user, initialSelection }) => {
                                     </table>
                                 </div>
                             );
-                        })() : analyticsSelectedSvId ? (
+                        })() : analyticsEffectiveSvId ? (
                             <p style={{ textAlign: 'center', color: 'var(--text-2)', padding: '32px 0', fontSize: 13 }}>Операторы не найдены для этого супервайзера.</p>
                         ) : (
                             <p style={{ textAlign: 'center', color: 'var(--text-2)', padding: '32px 0', fontSize: 13 }}>Выберите супервайзера для просмотра аналитики.</p>
