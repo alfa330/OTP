@@ -24183,6 +24183,149 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         );
         };
 
+        // ─── OPERATOR SKELETON COMPONENTS ────────────────────────────────────
+        const _SkPulse = ({ className = '' }) => (
+            <div className={`bg-gray-200 rounded animate-pulse ${className}`} />
+        );
+
+        const ProfilePageSkeleton = () => (
+            <div className="space-y-6">
+                <div className="flex flex-col sm:flex-row items-center gap-4 pb-4 sm:pb-6 border-b border-gray-200">
+                    <div className="w-20 h-20 sm:w-24 sm:h-24 rounded-full bg-gray-200 animate-pulse shrink-0" />
+                    <div className="space-y-2 text-center sm:text-left w-full max-w-xs">
+                        <_SkPulse className="h-6 w-36 mx-auto sm:mx-0" />
+                        <div className="flex gap-2 justify-center sm:justify-start">
+                            <_SkPulse className="h-5 w-20 rounded-full" />
+                            <_SkPulse className="h-5 w-24 rounded-full" />
+                        </div>
+                    </div>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
+                    {[0,1,2,3].map(i => (
+                        <div key={i} className="rounded-xl bg-gray-50 p-3 sm:p-4 text-center space-y-2">
+                            <_SkPulse className="h-8 w-16 mx-auto" />
+                            <_SkPulse className="h-3 w-20 mx-auto" />
+                            <_SkPulse className="h-3 w-20 mx-auto" />
+                        </div>
+                    ))}
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
+                    {[0,1,2].map(i => (
+                        <div key={i} className="bg-gray-50 p-4 rounded-xl flex items-center gap-3">
+                            <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-full bg-gray-200 animate-pulse shrink-0" />
+                            <div className="space-y-2 flex-1 min-w-0">
+                                <_SkPulse className="h-3 w-20" />
+                                <_SkPulse className="h-4 w-28" />
+                            </div>
+                        </div>
+                    ))}
+                </div>
+                <div className="pt-4 border-t border-gray-200 space-y-3">
+                    <_SkPulse className="h-3 w-28" />
+                    <div className="flex gap-2">
+                        <_SkPulse className="h-9 w-28 rounded-lg" />
+                        <_SkPulse className="h-9 w-28 rounded-lg" />
+                    </div>
+                </div>
+            </div>
+        );
+
+        const HoursPageSkeleton = () => (
+            <div className="workhours-main-grid grid grid-cols-1 md:grid-cols-3 gap-6">
+                <div className="col-span-1 md:col-span-2 space-y-5">
+                    <div className="bg-gray-50 rounded-xl border border-gray-200 p-5">
+                        <div className="flex flex-col lg:flex-row lg:items-start gap-5">
+                            <div className="flex-1 space-y-3">
+                                <div className="flex gap-2 items-center">
+                                    <_SkPulse className="h-4 w-32" />
+                                    <_SkPulse className="h-5 w-24 rounded-full" />
+                                </div>
+                                <_SkPulse className="h-10 w-28" />
+                                <_SkPulse className="h-3 w-full rounded-full" />
+                                <div className="flex justify-between">
+                                    <_SkPulse className="h-3 w-12" />
+                                    <_SkPulse className="h-3 w-24" />
+                                </div>
+                            </div>
+                            <_SkPulse className="w-[150px] h-[88px] rounded-xl self-center shrink-0" />
+                        </div>
+                    </div>
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                        <div className="bg-gray-50 rounded-xl border border-gray-200 p-5 space-y-4">
+                            <div className="flex justify-between">
+                                <_SkPulse className="h-4 w-36" />
+                                <_SkPulse className="h-4 w-20" />
+                            </div>
+                            <div className="grid grid-cols-2 gap-3">
+                                {[0,1,2,3].map(i => (
+                                    <div key={i} className="rounded-lg bg-white border border-gray-200 p-3 space-y-2">
+                                        <div className="flex items-center gap-2">
+                                            <_SkPulse className="w-7 h-7 rounded-lg" />
+                                            <_SkPulse className="h-3 w-16" />
+                                        </div>
+                                        <_SkPulse className="h-6 w-16" />
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                        <div className="bg-gray-50 rounded-xl border border-gray-200 p-5 space-y-3">
+                            <_SkPulse className="h-4 w-44" />
+                            {[0,1].map(i => (
+                                <div key={i} className="flex items-center justify-between rounded-lg bg-white border border-gray-200 px-3 py-2.5">
+                                    <_SkPulse className="h-4 w-28" />
+                                    <_SkPulse className="h-6 w-12" />
+                                </div>
+                            ))}
+                            <div className="grid grid-cols-2 gap-3">
+                                {[0,1].map(i => (
+                                    <div key={i} className="rounded-lg bg-white border border-gray-200 p-3 space-y-2">
+                                        <_SkPulse className="h-3 w-16" />
+                                        <_SkPulse className="h-6 w-12" />
+                                    </div>
+                                ))}
+                            </div>
+                            <div className="rounded-lg bg-white border border-gray-200 px-3 py-3 space-y-2">
+                                <div className="flex justify-between">
+                                    <_SkPulse className="h-4 w-36" />
+                                    <_SkPulse className="h-6 w-20" />
+                                </div>
+                                <_SkPulse className="h-8 w-full rounded-lg" />
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div className="col-span-1">
+                    <_SkPulse className="h-96 w-full rounded-xl" />
+                </div>
+            </div>
+        );
+
+        const EvaluationPageSkeleton = () => (
+            <div className="space-y-6">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    {[0,1,2,3].map(i => (
+                        <div key={i} className="bg-gray-50 rounded-xl p-4 text-center space-y-2">
+                            <_SkPulse className="h-8 w-16 mx-auto" />
+                            <_SkPulse className="h-3 w-20 mx-auto" />
+                        </div>
+                    ))}
+                </div>
+                <div className="bg-gray-50 rounded-xl overflow-hidden border border-gray-200">
+                    <div className="p-4 border-b border-gray-100">
+                        <_SkPulse className="h-4 w-40" />
+                    </div>
+                    {[0,1,2,3,4].map(i => (
+                        <div key={i} className="flex items-center gap-4 px-4 py-3 border-b border-gray-100">
+                            <_SkPulse className="h-4 w-10 shrink-0" />
+                            <_SkPulse className="h-4 flex-1" />
+                            <_SkPulse className="h-6 w-14 rounded-full shrink-0" />
+                            <_SkPulse className="h-4 w-24 shrink-0" />
+                        </div>
+                    ))}
+                </div>
+            </div>
+        );
+
         // Main App
         const App = () => {
             const location = useLocation();
@@ -34495,10 +34638,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </h2>
                             
                                     {isLoading ? (
-                                      <p className="text-center text-gray-600 flex items-center justify-center">
-                                        <FaIcon className="fas fa-spinner fa-spin mr-2 text-gray-500"></FaIcon>
-                                        <span className="italic">Загрузка данных...</span>
-                                      </p>
+                                      <ProfilePageSkeleton />
                                     ) : profileData ? (
                                       <div className="space-y-6">
                                         {/* Profile header - avatar and name */}
@@ -34714,10 +34854,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </h2>
 
                                         {isLoading ? (
-                                        <p className="text-center text-gray-600 flex items-center justify-center">
-                                            <FaIcon className="fas fa-spinner fa-spin mr-2 text-gray-500"></FaIcon>
-                                            <span className="italic">Загрузка рабочих часов...</span>
-                                        </p>
+                                        <HoursPageSkeleton />
                                         ) : hoursData && Array.isArray(hoursData.operators) && hoursData.operators.length > 0 ? (
                                         (() => {
                                             // На входе ожидаем стабильный формат от бекенда:
@@ -35159,7 +35296,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </div>
                                         )}
 
-                                        {(() => {
+                                        {isLoading ? (
+                                        <EvaluationPageSkeleton />
+                                        ) : (() => {
                                         // prepare filtered lists: exclude evaluations whose call is imported
                                         const allEvals = operatorData?.evaluations ?? [];
                                         const canAccessSensitiveCallData = !!operatorData?.sensitive_access?.granted;
