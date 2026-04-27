@@ -8016,9 +8016,9 @@ def notify_supervisor():
 
         sv_id = int(data['sv_id'])
         operator_name = data['operator_name']
-        
-        current_week = get_current_week_of_month()
-        expected_calls = get_expected_calls(current_week)
+        call_count = int(data.get('call_count', 0) or 0)
+        target_calls = int(data.get('target_calls', 0) or 0)
+        percent = round((call_count / target_calls) * 100, 1) if target_calls > 0 else 0
         
         user = db.get_user(id=sv_id)
         if not user or user[3] != 'sv':
@@ -8027,8 +8027,7 @@ def notify_supervisor():
         notification_text = (
             f"⚠️ <b>Требуется внимание!</b>\n\n"
             f"У оператора <b>{operator_name}</b> недостаточно прослушанных звонков.\n"
-            f"Текущая неделя: {current_week}\n"
-            f"Ожидается: {expected_calls} звонков (по 5 в неделю)\n\n"
+            f"Оценено: {call_count} из {target_calls} ({percent}% от нормы)\n\n"
             f"Пожалуйста, проверьте и прослушайте недостающие звонки."
         )
         

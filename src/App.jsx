@@ -30978,13 +30978,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setAiMonthlyFeedbackError('');
             };
 
-            const notifySupervisor = async (svId, operatorName) => {
+            const notifySupervisor = async (svId, operatorName, callCount, targetCalls) => {
                 setIsLoading(true);
                 
                 try {
                     const response = await axios.post(`${API_BASE_URL}/api/admin/notify_sv`, {
                         sv_id: svId,
-                        operator_name: operatorName
+                        operator_name: operatorName,
+                        call_count: callCount,
+                        target_calls: targetCalls
                     }, {
                         headers: { }
                     });
@@ -32751,7 +32753,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         const callCount = parseInt(op.call_count) || 0;
                                                         const planMeta = getEvaluationPlanMeta(op);
                                                         const displayTargetCalls = planMeta?.requiredCalls ?? expectedCalls;
-                                                        const hasIssue = callCount < expectedCalls;
+                                                        const hasIssue = displayTargetCalls > 0 && (callCount / displayTargetCalls) * 100 < 95;
 
                                                         return (
                                                             <tr key={op.id ?? `${dirName}-${index}`} className="hover:bg-gray-50 transition-colors duration-200">
@@ -32787,7 +32789,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             <td className="px-6 py-4 whitespace-nowrap space-x-2">
                                                                 {hasIssue && (
                                                                 <button
-                                                                    onClick={() => notifySupervisor(selectedSvId, op.name)}
+                                                                    onClick={() => notifySupervisor(selectedSvId, op.name, callCount, displayTargetCalls)}
                                                                     className="bg-yellow-500 text-white px-3 py-1 rounded-lg hover:bg-yellow-600 text-sm"
                                                                     disabled={isLoading}
                                                                 >
