@@ -24764,6 +24764,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return (faValue - fbValue) * dir;
             }
 
+            if (field === 'percent') {
+                const getOpPct = (op) => {
+                    const meta = getEvaluationPlanMeta(op);
+                    const target = meta?.requiredCalls ?? getExpectedCalls(getCurrentWeekOfMonth());
+                    return target > 0 ? ((parseInt(op.call_count) || 0) / target) * 100 : 0;
+                };
+                const pa = getOpPct(a);
+                const pb = getOpPct(b);
+                if (pa === pb) return nameA.localeCompare(nameB, 'ru', { sensitivity: 'base' });
+                return (pa - pb) * dir;
+            }
+
             // default: string compare on field then by name
             const fa = (a[field] || '').toString();
             const fb = (b[field] || '').toString();
@@ -32711,29 +32723,35 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <tr>
                                                     <th
                                                         onClick={() => handleViewScoresSort('name')}
-                                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer w-1/5"
+                                                        className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer w-[22%]"
                                                     >
-                                                        Имя {getViewScoresSortIcon('name')}
+                                                        Оператор {getViewScoresSortIcon('name')}
                                                     </th>
                                                     <th
                                                         onClick={() => handleViewScoresSort('listened')}
-                                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer w-1/5"
+                                                        className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer w-[15%]"
                                                     >
                                                         Оценено / план {getViewScoresSortIcon('listened')}
                                                     </th>
                                                     <th
-                                                        onClick={() => handleViewScoresSort('avg_score')}
-                                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer w-1/5"
+                                                        onClick={() => handleViewScoresSort('percent')}
+                                                        className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer w-[15%]"
                                                     >
-                                                        Средний балл {getViewScoresSortIcon('avg_score')}
+                                                        % нормы {getViewScoresSortIcon('percent')}
+                                                    </th>
+                                                    <th
+                                                        onClick={() => handleViewScoresSort('avg_score')}
+                                                        className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer w-[12%]"
+                                                    >
+                                                        Ср. балл {getViewScoresSortIcon('avg_score')}
                                                     </th>
                                                     <th
                                                         onClick={() => handleViewScoresSort('feedback')}
-                                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer w-1/5"
+                                                        className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer w-[13%]"
                                                     >
                                                         ОС / просрочки {getViewScoresSortIcon('feedback')}
                                                     </th>
-                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase w-1/5">Действия</th>
+                                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase w-[23%]">Действия</th>
                                                     </tr>
                                                 </thead>
 
@@ -32741,9 +32759,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     {sortedDirectionNames.map((dirName) => (
                                                     <React.Fragment key={dirName}>
                                                         {/* Заголовок группы направления */}
-                                                        <tr className="bg-gray-100">
-                                                        <td colSpan={5} className="px-6 py-3 text-sm font-semibold text-gray-700">
-                                                            {dirName} <span className="ml-2 text-xs text-gray-500">({grouped[dirName].length})</span>
+                                                        <tr className="bg-gray-50/80">
+                                                        <td colSpan={6} className="px-4 py-2.5 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                                                            {dirName} <span className="ml-1.5 font-normal normal-case text-gray-400">({grouped[dirName].length})</span>
                                                         </td>
                                                         </tr>
 
@@ -32753,67 +32771,84 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         const callCount = parseInt(op.call_count) || 0;
                                                         const planMeta = getEvaluationPlanMeta(op);
                                                         const displayTargetCalls = planMeta?.requiredCalls ?? expectedCalls;
+                                                        const pct = displayTargetCalls > 0 ? Math.round((callCount / displayTargetCalls) * 100) : 0;
                                                         const hasIssue = displayTargetCalls > 0 && (callCount / displayTargetCalls) * 100 < 95;
+                                                        const dotColor = pct >= 95 ? 'bg-emerald-500' : pct >= 50 ? 'bg-amber-400' : 'bg-red-500';
+                                                        const barColor = pct >= 95 ? 'bg-emerald-500' : pct >= 50 ? 'bg-amber-400' : 'bg-red-500';
+                                                        const pctTextColor = pct >= 95 ? 'text-emerald-600' : pct >= 50 ? 'text-amber-600' : 'text-red-600';
 
                                                         return (
-                                                            <tr key={op.id ?? `${dirName}-${index}`} className="hover:bg-gray-50 transition-colors duration-200">
-                                                            <td className="px-6 py-4">
+                                                            <tr key={op.id ?? `${dirName}-${index}`} className="hover:bg-gray-50 transition-colors duration-150">
+                                                            <td className="px-4 py-3">
                                                                 <div className="flex items-center gap-3 min-w-0">
-                                                                    <div className="h-9 w-9 rounded-full overflow-hidden border border-slate-200 bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-xs font-semibold text-white shrink-0">
-                                                                        {op.avatar_url ? (
-                                                                            <AvatarImage src={op.avatar_url} alt={op.name || 'avatar'} className="h-full w-full object-cover" />
-                                                                        ) : (
-                                                                            (op.name || 'U').charAt(0).toUpperCase()
-                                                                        )}
+                                                                    <div className="relative shrink-0">
+                                                                        <div className="h-9 w-9 rounded-full overflow-hidden border border-slate-200 bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-xs font-semibold text-white">
+                                                                            {op.avatar_url ? (
+                                                                                <AvatarImage src={op.avatar_url} alt={op.name || 'avatar'} className="h-full w-full object-cover" />
+                                                                            ) : (
+                                                                                (op.name || 'U').charAt(0).toUpperCase()
+                                                                            )}
+                                                                        </div>
+                                                                        <span className={`absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-white ${dotColor}`} />
                                                                     </div>
-                                                                    <span className="truncate">{op.name}</span>
+                                                                    <span className="truncate text-sm font-medium text-gray-900">{op.name}</span>
                                                                 </div>
                                                             </td>
-                                                            <td className={`px-6 py-4 whitespace-nowrap ${getCallCountColor(callCount, displayTargetCalls)}`}>
+                                                            <td className={`px-4 py-3 whitespace-nowrap text-sm ${getCallCountColor(callCount, displayTargetCalls)}`}>
                                                                 {renderEvaluationPlanContent(op, callCount)}
                                                             </td>
-                                                            <td className="px-6 py-4 whitespace-nowrap">
+                                                            <td className="px-4 py-3 whitespace-nowrap">
+                                                                <div className="flex items-center gap-2">
+                                                                    <div className="h-1.5 w-20 bg-gray-100 rounded-full overflow-hidden shrink-0">
+                                                                        <div className={`h-full rounded-full transition-all duration-500 ${barColor}`} style={{ width: `${Math.min(pct, 100)}%` }} />
+                                                                    </div>
+                                                                    <span className={`text-xs font-semibold tabular-nums ${pctTextColor}`}>{pct}%</span>
+                                                                </div>
+                                                            </td>
+                                                            <td className="px-4 py-3 whitespace-nowrap text-sm">
                                                                 <span className={getScoreColor(op.avg_score)}>
-                                                                {op.avg_score ? Number(op.avg_score).toFixed(2) : '-'}
+                                                                {op.avg_score ? Number(op.avg_score).toFixed(2) : '—'}
                                                                 </span>
                                                             </td>
-                                                            <td className="px-6 py-4 whitespace-nowrap">
-                                                                <span className="font-medium">
-                                                                    {Number(op.feedback_count) || 0}
-                                                                </span>
-                                                                <span className="text-gray-500"> / </span>
-                                                                <span className="font-medium text-red-600">
+                                                            <td className="px-4 py-3 whitespace-nowrap text-sm">
+                                                                <span className="font-medium text-gray-700">{Number(op.feedback_count) || 0}</span>
+                                                                <span className="text-gray-300 mx-0.5">/</span>
+                                                                <span className={`font-medium ${Number(op.feedback_overdue_count) > 0 ? 'text-red-600' : 'text-gray-400'}`}>
                                                                     {Number(op.feedback_overdue_count) || 0}
                                                                 </span>
                                                             </td>
-                                                            <td className="px-6 py-4 whitespace-nowrap space-x-2">
-                                                                {hasIssue && (
-                                                                <button
-                                                                    onClick={() => notifySupervisor(selectedSvId, op.name, callCount, displayTargetCalls)}
-                                                                    className="bg-yellow-500 text-white px-3 py-1 rounded-lg hover:bg-yellow-600 text-sm"
-                                                                    disabled={isLoading}
-                                                                >
-                                                                    Уведомить
-                                                                </button>
-                                                                )}
-                                                                <button
-                                                                onClick={() => openCallEvaluationSection({
-                                                                    operatorId: op.id,
-                                                                    operatorName: op.name,
-                                                                    supervisorId: selectedSvId,
-                                                                    month: selectedReportMonth || selectedMonth
-                                                                })}
-                                                                className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm"
-                                                                >
-                                                                Оценки
-                                                                </button>
-                                                                <button
-                                                                onClick={() => openAiMonthlyFeedback(op.id, op.name, selectedReportMonth || selectedMonth)}
-                                                                className="bg-indigo-600 text-white px-3 py-1 rounded-lg hover:bg-indigo-700 text-sm"
-                                                                disabled={aiMonthlyFeedbackLoading}
-                                                                >
-                                                                ОС от ИИ
-                                                                </button>
+                                                            <td className="px-4 py-3 whitespace-nowrap">
+                                                                <div className="flex items-center gap-1.5">
+                                                                    <div className="w-[86px] shrink-0">
+                                                                        {hasIssue && (
+                                                                        <button
+                                                                            onClick={() => notifySupervisor(selectedSvId, op.name, callCount, displayTargetCalls)}
+                                                                            className="w-full bg-amber-500 hover:bg-amber-600 text-white px-2 py-1.5 rounded-md text-xs font-medium transition-colors disabled:opacity-50"
+                                                                            disabled={isLoading}
+                                                                        >
+                                                                            ⚠ Уведомить
+                                                                        </button>
+                                                                        )}
+                                                                    </div>
+                                                                    <button
+                                                                    onClick={() => openCallEvaluationSection({
+                                                                        operatorId: op.id,
+                                                                        operatorName: op.name,
+                                                                        supervisorId: selectedSvId,
+                                                                        month: selectedReportMonth || selectedMonth
+                                                                    })}
+                                                                    className="bg-blue-600 hover:bg-blue-700 text-white px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors"
+                                                                    >
+                                                                    Оценки
+                                                                    </button>
+                                                                    <button
+                                                                    onClick={() => openAiMonthlyFeedback(op.id, op.name, selectedReportMonth || selectedMonth)}
+                                                                    className="bg-indigo-600 hover:bg-indigo-700 text-white px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors disabled:opacity-50"
+                                                                    disabled={aiMonthlyFeedbackLoading}
+                                                                    >
+                                                                    ОС от ИИ
+                                                                    </button>
+                                                                </div>
                                                             </td>
                                                             </tr>
                                                         );
@@ -32822,19 +32857,32 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     ))}
                                                 </tbody>
 
-                                                <tfoot className="bg-gray-50">
+                                                <tfoot className="bg-gray-50 border-t border-gray-200">
                                                     <tr>
-                                                    <td className="px-6 py-3 font-medium">Итого</td>
-                                                    <td className="px-6 py-3 font-medium">{totalPlanCalls > 0 ? `${totalCalls} / ${totalPlanCalls}` : totalCalls}</td>
-                                                    <td className="px-6 py-3 font-medium">{avgByScored == null ? '-' : avgByScored.toFixed(2)}</td>
-                                                    <td className="px-6 py-3 font-medium">
+                                                    <td className="px-4 py-3 font-semibold text-sm text-gray-700">Итого</td>
+                                                    <td className="px-4 py-3 font-medium text-sm">{totalPlanCalls > 0 ? `${totalCalls} / ${totalPlanCalls}` : totalCalls}</td>
+                                                    <td className="px-4 py-3">
+                                                        {(() => {
+                                                        const wk = getCurrentWeekOfMonth();
+                                                        const exp = getExpectedCalls(wk);
+                                                        const withT = filteredOperators.filter(o => (getEvaluationPlanMeta(o)?.requiredCalls ?? exp) > 0);
+                                                        if (!withT.length) return <span className="text-gray-400 text-sm">—</span>;
+                                                        const ap = Math.round(withT.reduce((s, o) => {
+                                                            const t = getEvaluationPlanMeta(o)?.requiredCalls ?? exp;
+                                                            return s + ((parseInt(o.call_count) || 0) / t) * 100;
+                                                        }, 0) / withT.length);
+                                                        return <span className={`font-semibold text-sm ${ap >= 95 ? 'text-emerald-600' : ap >= 50 ? 'text-amber-600' : 'text-red-600'}`}>{ap}%</span>;
+                                                        })()}
+                                                    </td>
+                                                    <td className="px-4 py-3 font-medium text-sm">{avgByScored == null ? '—' : avgByScored.toFixed(2)}</td>
+                                                    <td className="px-4 py-3 font-medium text-sm">
                                                         {filteredOperators.reduce((sum, o) => sum + (Number(o.feedback_count) || 0), 0)}
-                                                        <span className="text-gray-500"> / </span>
-                                                        <span className="text-red-600">
+                                                        <span className="text-gray-300 mx-0.5">/</span>
+                                                        <span className={filteredOperators.reduce((sum, o) => sum + (Number(o.feedback_overdue_count) || 0), 0) > 0 ? 'text-red-600 font-medium' : 'text-gray-400'}>
                                                             {filteredOperators.reduce((sum, o) => sum + (Number(o.feedback_overdue_count) || 0), 0)}
                                                         </span>
                                                     </td>
-                                                    <td className="px-6 py-3" />
+                                                    <td className="px-4 py-3" />
                                                     </tr>
                                                 </tfoot>
                                                 </table>
