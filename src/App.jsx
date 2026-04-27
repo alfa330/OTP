@@ -31707,7 +31707,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             <ul ref={sidebarMenuScrollRef} className={`space-y-2 flex-1 min-h-0 sidebar-menu-scroll`}>
                                 {canAccessLmsSection && (
                                     <>
-                                        {renderSidebarDivider()}
                                         <li>
                                             <button
                                                 onClick={(e) => handleSidebarViewNavigation(e, 'lms')}
@@ -31720,7 +31719,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 )}
                                 {isAdminLikeRole && (
                                     <>
-                                        {renderSidebarDivider()}
+                                        {canAccessLmsSection && renderSidebarDivider()}
                                         <li className="relative" ref={sidebarEmployeesRef}>
                                             <button
                                                 onClick={handleToggleEmployeesDropdown}
@@ -31882,6 +31881,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 )}
                                 {currentUserRole === 'sv' && (
                                     <>
+                                        {canAccessLmsSection && renderSidebarDivider()}
+                                        <li>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'manage_operators')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_operators' ? 'bg-blue-700' : ''}`}>
+                                                <FaIcon className="fas fa-user-edit"></FaIcon> <span className="sidebar-text">Сотрудники</span>
+                                            </button>
+                                        </li>
+                                        <li>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'qr_access')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'qr_access' ? 'bg-blue-700' : ''}`}>
+                                                <FaIcon className="fas fa-qrcode"></FaIcon> <span className="sidebar-text">QR доступ</span>
+                                            </button>
+                                        </li>
                                         {renderSidebarDivider()}
                                         <li>
                                             <button
@@ -31895,45 +31905,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </button>
                                         </li>
                                         <li>
-                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'qr_access')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'qr_access' ? 'bg-blue-700' : ''}`}>
-                                                <FaIcon className="fas fa-qrcode"></FaIcon> <span className="sidebar-text">QR доступ</span>
-                                            </button>
-                                        </li>
-                                        <li>
-                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'manage_operators')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_operators' ? 'bg-blue-700' : ''}`}>
-                                                <FaIcon className="fas fa-user-edit"></FaIcon> <span className="sidebar-text">Сотрудники</span>
-                                            </button>
-                                        </li>
-                                        {renderSidebarDivider()}
-                                        <li>
-                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'trainings')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'trainings' ? 'bg-blue-700' : ''}`}>
-                                                <FaIcon className="fas fa-book"></FaIcon> <span className="sidebar-text">Учет тренингов</span>
-                                            </button>
-                                        </li>
-                                        <li>
-                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'technical_issues')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'technical_issues' ? 'bg-blue-700' : ''}`}>
-                                                <FaIcon className="fas fa-tools"></FaIcon> <span className="sidebar-text">Тех причины</span>
-                                            </button>
-                                        </li>
-                                        <li>
-                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'tasks')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'tasks' ? 'bg-blue-700' : ''}`}>
-                                                <FaIcon className="fas fa-tasks"></FaIcon> <span className="sidebar-text">Задачи</span>
-                                            </button>
-                                        </li>
-                                        <li>
-                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'surveys')} className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
-                                                <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarCompactBadge()} {renderSurveysSidebarLabel()}
-                                            </button>
-                                        </li>
-                                        {renderSidebarDivider()}
-                                        <li>
                                             <button
-                                                onClick={(e) => handleSidebarViewNavigation(e, 'sv_hours')}
-                                                className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sv_hours' ? 'bg-blue-700' : ''}`}
+                                                onClick={(e) => handleSidebarViewNavigation(e, 'call_division')}
+                                                className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'call_division' ? 'bg-blue-700' : ''}`}
                                             >
-                                                <FaIcon className="fas fa-clock" /> <span className="sidebar-text">Учет часов</span>
+                                                <FaIcon className="fas fa-random" /> <span className="sidebar-text">Деление звонков</span>
                                             </button>
                                         </li>
+                                        {renderSidebarDivider()}
                                         <li>
                                             <button
                                                 onClick={(e) => handleSidebarViewNavigation(e, 'work_schedules')}
@@ -31944,10 +31923,31 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </li>
                                         <li>
                                             <button
-                                                onClick={(e) => handleSidebarViewNavigation(e, 'call_division')}
-                                                className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'call_division' ? 'bg-blue-700' : ''}`}
+                                                onClick={(e) => handleSidebarViewNavigation(e, 'sv_hours')}
+                                                className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sv_hours' ? 'bg-blue-700' : ''}`}
                                             >
-                                                <FaIcon className="fas fa-random" /> <span className="sidebar-text">Деление звонков</span>
+                                                <FaIcon className="fas fa-clock" /> <span className="sidebar-text">Учет часов</span>
+                                            </button>
+                                        </li>
+                                        <li>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'trainings')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'trainings' ? 'bg-blue-700' : ''}`}>
+                                                <FaIcon className="fas fa-book"></FaIcon> <span className="sidebar-text">Учет тренингов</span>
+                                            </button>
+                                        </li>
+                                        <li>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'technical_issues')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'technical_issues' ? 'bg-blue-700' : ''}`}>
+                                                <FaIcon className="fas fa-tools"></FaIcon> <span className="sidebar-text">Тех причины</span>
+                                            </button>
+                                        </li>
+                                        {renderSidebarDivider()}
+                                        <li>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'surveys')} className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
+                                                <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarCompactBadge()} {renderSurveysSidebarLabel()}
+                                            </button>
+                                        </li>
+                                        <li>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'tasks')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'tasks' ? 'bg-blue-700' : ''}`}>
+                                                <FaIcon className="fas fa-tasks"></FaIcon> <span className="sidebar-text">Задачи</span>
                                             </button>
                                         </li>
                                         <li>
@@ -31955,11 +31955,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <FaIcon className="fas fa-award"></FaIcon> <span className="sidebar-text">Конкурсы</span>
                                             </button>
                                         </li>
+                                        <li>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'salary')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'salary' ? 'bg-blue-700' : ''}`}>
+                                                <FaIcon className="fas fa-calculator"></FaIcon> <span className="sidebar-text">Калькулятор зарплаты</span>
+                                            </button>
+                                        </li>
                                     </>
                                 )}
                                 {currentUserRole === 'trainer' && (
                                     <>
-                                        {renderSidebarDivider()}
+                                        {canAccessLmsSection && renderSidebarDivider()}
                                         <li>
                                             <button onClick={(e) => handleSidebarViewNavigation(e, 'manage_operators')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_operators' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-user-edit"></FaIcon> <span className="sidebar-text">Сотрудники</span>
@@ -31975,7 +31980,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 )}
                                 {currentUserRole === 'operator' && (
                                     <>
-                                        {renderSidebarDivider()}
+                                        {canAccessLmsSection && renderSidebarDivider()}
                                         <li>
                                             <button onClick={(e) => handleSidebarViewNavigation(e, 'profile')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'profile' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-user-circle"></FaIcon> <span className="sidebar-text">Профиль</span>
@@ -32007,15 +32012,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarCompactBadge()} {renderSurveysSidebarLabel()}
                                             </button>
                                         </li>
-                                        {renderSidebarDivider()}
                                         <li>
                                             <button onClick={(e) => handleSidebarViewNavigation(e, 'contests')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'contests' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-award"></FaIcon> <span className="sidebar-text">Конкурсы</span>
                                             </button>
                                         </li>
+                                        <li>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'salary')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'salary' ? 'bg-blue-700' : ''}`}>
+                                                <FaIcon className="fas fa-calculator"></FaIcon> <span className="sidebar-text">Калькулятор зарплаты</span>
+                                            </button>
+                                        </li>
                                     </>
                                 )}
-                                {!isAdminLikeRole && currentUserRole !== 'trainer' && currentUserRole !== 'trainee' && (
+                                {!isAdminLikeRole && currentUserRole !== 'sv' && currentUserRole !== 'operator' && currentUserRole !== 'trainer' && currentUserRole !== 'trainee' && (
                                     <>
                                         {renderSidebarDivider()}
                                         <li>
