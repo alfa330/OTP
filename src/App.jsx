@@ -24597,6 +24597,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 };
             }, [showToast]);
             const [openMenuId, setOpenMenuId] = useState(null);
+            const [rowActionMenuPos, setRowActionMenuPos] = useState({ top: 0, left: 0, width: 208 });
             const [selectedManageUsersIds, setSelectedManageUsersIds] = useState(new Set());
             const [bulkManageUsersChanges, setBulkManageUsersChanges] = useState({
                 supervisor_id: '',
@@ -24630,6 +24631,52 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [activeTrainerTab, setActiveTrainerTab] = useState("active");
             const [dismissingAdminId, setDismissingAdminId] = useState(null);
             const [employeeTableSection, setEmployeeTableSection] = useState('general');
+            const openRowActionMenu = useCallback((event, menuId, options = {}) => {
+                event?.stopPropagation?.();
+
+                const width = Number(options.width) || 208;
+                const estimatedHeight = Number(options.height) || 128;
+                const gap = 8;
+                const viewportMargin = 8;
+                const rect = event?.currentTarget?.getBoundingClientRect?.();
+
+                if (openMenuId === menuId) {
+                    setOpenMenuId(null);
+                    return;
+                }
+
+                if (!rect || typeof window === 'undefined') {
+                    setOpenMenuId(menuId);
+                    return;
+                }
+
+                const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+                const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+                const left = Math.max(
+                    viewportMargin,
+                    Math.min(rect.right - width, viewportWidth - width - viewportMargin)
+                );
+                const shouldOpenUp = rect.bottom + gap + estimatedHeight > viewportHeight - viewportMargin;
+                const top = shouldOpenUp
+                    ? Math.max(viewportMargin, rect.top - estimatedHeight - gap)
+                    : Math.min(rect.bottom + gap, viewportHeight - viewportMargin);
+
+                setRowActionMenuPos({ top, left, width });
+                setOpenMenuId(menuId);
+            }, [openMenuId]);
+
+            useEffect(() => {
+                if (openMenuId == null) return undefined;
+
+                const closeRowActionMenu = () => setOpenMenuId(null);
+                window.addEventListener('resize', closeRowActionMenu);
+                window.addEventListener('scroll', closeRowActionMenu, true);
+
+                return () => {
+                    window.removeEventListener('resize', closeRowActionMenu);
+                    window.removeEventListener('scroll', closeRowActionMenu, true);
+                };
+            }, [openMenuId]);
             const EMPLOYEE_TABLE_SECTIONS = [
                 { key: 'general', label: 'Общее', icon: 'fa-solid fa-layer-group' },
                 { key: 'data', label: 'Данные', icon: 'fa-solid fa-id-card' },
@@ -33041,8 +33088,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 <div className="relative inline-block text-left">
                                                                 <button
                                                                     onClick={(e) => {
-                                                                        e.stopPropagation();
-                                                                        setOpenMenuId(openMenuId === u.id ? null : u.id);
+                                                                        openRowActionMenu(e, u.id, { width: 208, height: 132 });
                                                                     }}
                                                                     className="p-2 rounded-full hover:bg-gray-100"
                                                                 >
@@ -33050,7 +33096,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 </button>
 
                                                                 {openMenuId === u.id && (
-                                                                    <div className="absolute right-0 mt-2 w-52 bg-white border rounded-lg shadow-lg z-50">
+                                                                    <div
+                                                                        className="fixed bg-white border rounded-lg shadow-lg"
+                                                                        style={{
+                                                                            top: `${rowActionMenuPos.top}px`,
+                                                                            left: `${rowActionMenuPos.left}px`,
+                                                                            width: `${rowActionMenuPos.width}px`,
+                                                                            zIndex: 10000
+                                                                        }}
+                                                                    >
                                                                     <button
                                                                         onClick={() => {
                                                                         setUserToEdit(u);
