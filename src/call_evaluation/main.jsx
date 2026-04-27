@@ -2089,6 +2089,7 @@ const App = ({ user, initialSelection }) => {
     const calibrationJoinInFlightRef = useRef(new Map());
     const calibrationDetailInFlightRef = useRef(new Map());
     const calibrationDetailCacheRef = useRef(new Map());
+    const analyticsSvListRequestedRef = useRef(false);
     const DEFAULT_MAX_EVALS = 20;
 
     // Analytics section state
@@ -3248,6 +3249,7 @@ const App = ({ user, initialSelection }) => {
 
     // ─── Analytics API ───────────────────────────────────────────────────────
     const fetchAnalyticsSvList = useCallback(async () => {
+        analyticsSvListRequestedRef.current = true;
         setAnalyticsSvLoading(true);
         try {
             const r = await authFetch(`${API_BASE_URL}/api/admin/sv_list`, { headers: { 'X-User-Id': userId } });
@@ -3321,10 +3323,14 @@ const App = ({ user, initialSelection }) => {
     const analyticsEffectiveSvId = isSupervisorRole ? String(userId || '') : analyticsSelectedSvId;
 
     useEffect(() => {
-        if (activeSection === 'analytics' && isAdminRole && analyticsSvList.length === 0 && !analyticsSvLoading) {
+        analyticsSvListRequestedRef.current = false;
+    }, [userId]);
+
+    useEffect(() => {
+        if (activeSection === 'analytics' && isAdminRole && !analyticsSvListRequestedRef.current && !analyticsSvLoading) {
             fetchAnalyticsSvList();
         }
-    }, [activeSection, isAdminRole, analyticsSvList.length, analyticsSvLoading, fetchAnalyticsSvList]);
+    }, [activeSection, isAdminRole, analyticsSvLoading, fetchAnalyticsSvList]);
 
     useEffect(() => {
         if (activeSection === 'analytics' && analyticsEffectiveSvId) {
