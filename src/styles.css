@@ -190,38 +190,6 @@
       -ms-overflow-style: none;
       scrollbar-width: none;
     }
-    .sidebar-group-heading {
-      margin: 0.85rem 0.5rem 0.25rem;
-      padding: 0 0.5rem;
-      font-size: 10px;
-      line-height: 1;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.12em;
-      color: rgba(191, 219, 254, 0.78);
-    }
-    .sidebar-menu-scroll > .sidebar-group-heading:first-child {
-      margin-top: 0;
-    }
-    .sidebar.collapsed .sidebar-group-heading {
-      height: 0;
-      margin: 0;
-      padding: 0;
-      opacity: 0;
-      overflow: hidden;
-    }
-    .sidebar.collapsed:hover .sidebar-group-heading,
-    .sidebar.mobile-open .sidebar-group-heading {
-      height: auto;
-      margin: 0.85rem 0.5rem 0.25rem;
-      padding: 0 0.5rem;
-      opacity: 1;
-      overflow: visible;
-    }
-    .sidebar.collapsed:hover .sidebar-menu-scroll > .sidebar-group-heading:first-child,
-    .sidebar.mobile-open .sidebar-menu-scroll > .sidebar-group-heading:first-child {
-      margin-top: 0;
-    }
     .sidebar-footer-menu {
       position: relative;
       z-index: 6;
