@@ -41,6 +41,39 @@ const writeEmbedState = ({ user = null, initialSelection = null } = {}) => {
 
 const readJsonSafe = async (r) => { try { return await r.json(); } catch { return null; } };
 
+const resolveAvatarUrl = (value) => {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    if (/^(https?:|data:|blob:)/i.test(raw)) return raw;
+    if (raw.startsWith('/')) return `${API_BASE_URL}${raw}`;
+    return `${API_BASE_URL}/${raw.replace(/^\/+/, '')}`;
+};
+
+const OperatorAvatar = ({ operator, size = 32 }) => {
+    const [failed, setFailed] = useState(false);
+    const name = operator?.name || operator?.operator_name || '';
+    const avatarUrl = resolveAvatarUrl(operator?.avatar_url || operator?.avatarUrl || operator?.photo_url);
+    const initials = (name || 'U').charAt(0).toUpperCase();
+
+    return (
+        <div className="analytics-avatar" style={{ width: size, height: size }}>
+            {avatarUrl && !failed ? (
+                <img
+                    className="analytics-avatar-img"
+                    src={avatarUrl}
+                    alt={name || 'avatar'}
+                    loading="lazy"
+                    decoding="async"
+                    referrerPolicy="no-referrer"
+                    onError={() => setFailed(true)}
+                />
+            ) : (
+                initials
+            )}
+        </div>
+    );
+};
+
 const normalizeClientAuthTransport = (value) => {
     const normalized = String(value || '').trim().toLowerCase();
     if (normalized === 'bearer' || normalized === 'cookie') return normalized;
@@ -4716,12 +4749,11 @@ const App = ({ user, initialSelection }) => {
                                                 const displayTarget = planMeta?.requiredCalls ?? getAnalyticsExpectedCalls(getAnalyticsCurrentWeek());
                                                 const pct = displayTarget > 0 ? Math.round((callCount / displayTarget) * 100) : 0;
                                                 const hasIssue = displayTarget > 0 && (callCount / displayTarget) * 100 < 95;
-                                                const initials = (op.name || 'U').charAt(0).toUpperCase();
                                                 return (
                                                     <tr key={op.id ?? index} style={{ background: index % 2 === 0 ? 'var(--surface)' : 'var(--surface-2)' }}>
                                                         <td style={tdStyle}>
                                                             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                                                <div style={{ width: 32, height: 32, borderRadius: '50%', background: 'linear-gradient(135deg,#3b82f6,#1d4ed8)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, fontWeight: 600, color: '#fff', flexShrink: 0 }}>{initials}</div>
+                                                                <OperatorAvatar operator={op} />
                                                                 <span style={{ fontWeight: 500 }}>{op.name}</span>
                                                             </div>
                                                         </td>

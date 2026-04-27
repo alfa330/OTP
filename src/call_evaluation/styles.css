@@ -278,6 +278,25 @@
             display: block;
             visibility: hidden;
         }
+        .analytics-avatar {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+            overflow: hidden;
+            border-radius: 50%;
+            border: 1px solid var(--border);
+            background: linear-gradient(135deg, #3b82f6, #1d4ed8);
+            color: #fff;
+            font-size: 12px;
+            font-weight: 700;
+        }
+        .analytics-avatar-img {
+            width: 100%;
+            height: 100%;
+            display: block;
+            object-fit: cover;
+        }
 
         .calibration-cards {
             display: grid;
