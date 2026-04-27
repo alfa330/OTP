@@ -3009,13 +3009,10 @@ const App = ({ user, initialSelection }) => {
         : 100;
     const orderedSupervisors = sortByFiredAndName(supervisors);
     const orderedOperators = sortByFiredAndName(operators);
-    const analyticsSupervisorOptions = (() => {
-        const list = orderedSupervisors.filter(sv => sv.status === 'working' || sv.status === 'unpaid_leave' || !sv.status);
-        if (!isSupervisorRole || !userId || list.some(sv => Number(sv.id) === Number(userId))) return list;
-        return [{ id: userId, name: userName || 'Мои операторы', status: 'working' }, ...list];
-    })();
     const selectedSupervisorObj = selectedSupervisor ? supervisors.find(sv => sv.id === selectedSupervisor) : null;
     const selectedSupervisorIsFired = isFiredStatus(selectedSupervisorObj?.status);
+    const analyticsSelectedSupervisorObj = analyticsSelectedSvId ? supervisors.find(sv => Number(sv.id) === Number(analyticsSelectedSvId)) : null;
+    const analyticsSelectedSupervisorIsFired = isFiredStatus(analyticsSelectedSupervisorObj?.status);
     const selectedOperatorIsFired = isFiredStatus(selectedOperator?.status);
     const sectionTitle = activeSection === 'requests'
         ? 'Журнал запросов'
@@ -4682,17 +4679,31 @@ const App = ({ user, initialSelection }) => {
                     <div className="panel-header">
                         <div className="panel-title-wrap">
                             <span className="panel-title">Аналитика</span>
-                            <select
-                                value={analyticsSelectedSvId}
-                                onChange={(e) => setAnalyticsSelectedSvId(e.target.value)}
-                                className="select"
-                                disabled={analyticsLoading}
-                            >
-                                <option value="">Выберите супервайзера</option>
-                                {analyticsSupervisorOptions.map(sv => (
-                                    <option key={sv.id} value={sv.id}>{sv.name}</option>
-                                ))}
-                            </select>
+                            <div className="filter-group" style={{ marginBottom: 0, minWidth: 220 }}>
+                                <label className="label">Супервайзер</label>
+                                <select
+                                    className="select"
+                                    value={analyticsSelectedSvId}
+                                    style={analyticsSelectedSupervisorIsFired ? { color:'var(--text-3)' } : undefined}
+                                    onChange={(e) => {
+                                        setAnalyticsSelectedSvId(e.target.value);
+                                        setAnalyticsSelectedSvData(null);
+                                    }}
+                                    disabled={analyticsLoading}
+                                >
+                                    <option value="">Выбрать</option>
+                                    {orderedSupervisors.map(sv => (
+                                        <option
+                                            key={sv.id}
+                                            value={sv.id}
+                                            className={isFiredStatus(sv?.status) ? 'option-fired' : ''}
+                                            style={isFiredStatus(sv?.status) ? { color:'var(--text-3)' } : undefined}
+                                        >
+                                            {sv.name}
+                                        </option>
+                                    ))}
+                                </select>
+                            </div>
                         </div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                             <select
