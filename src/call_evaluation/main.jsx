@@ -2089,16 +2089,13 @@ const App = ({ user, initialSelection }) => {
     const calibrationJoinInFlightRef = useRef(new Map());
     const calibrationDetailInFlightRef = useRef(new Map());
     const calibrationDetailCacheRef = useRef(new Map());
-    const analyticsSvListRequestedRef = useRef(false);
     const DEFAULT_MAX_EVALS = 20;
 
     // Analytics section state
-    const [analyticsSvList, setAnalyticsSvList] = useState([]);
     const [analyticsSelectedSvId, setAnalyticsSelectedSvId] = useState('');
     const [analyticsSelectedSvData, setAnalyticsSelectedSvData] = useState(null);
     const [analyticsMonth, setAnalyticsMonth] = useState(new Date().toISOString().slice(0, 7));
     const [analyticsLoading, setAnalyticsLoading] = useState(false);
-    const [analyticsSvLoading, setAnalyticsSvLoading] = useState(false);
     const [analyticsActiveOperatorsTab, setAnalyticsActiveOperatorsTab] = useState('active');
     const [analyticsViewSortField, setAnalyticsViewSortField] = useState('name');
     const [analyticsViewSortDir, setAnalyticsViewSortDir] = useState('asc');
@@ -3248,18 +3245,6 @@ const App = ({ user, initialSelection }) => {
     };
 
     // ─── Analytics API ───────────────────────────────────────────────────────
-    const fetchAnalyticsSvList = useCallback(async () => {
-        analyticsSvListRequestedRef.current = true;
-        setAnalyticsSvLoading(true);
-        try {
-            const r = await authFetch(`${API_BASE_URL}/api/admin/sv_list`, { headers: { 'X-User-Id': userId } });
-            const d = await readJsonSafe(r);
-            if (d?.status === 'success') setAnalyticsSvList(d.supervisors || []);
-            else emitCallEvaluationToast(d?.error || 'Ошибка загрузки супервайзеров', 'error');
-        } catch { emitCallEvaluationToast('Ошибка загрузки супервайзеров', 'error'); }
-        finally { setAnalyticsSvLoading(false); }
-    }, [userId]);
-
     const fetchAnalyticsSvData = useCallback(async (svId, month) => {
         if (!svId) { setAnalyticsSelectedSvData(null); return; }
         setAnalyticsLoading(true);
@@ -3321,16 +3306,6 @@ const App = ({ user, initialSelection }) => {
     }, [userId]);
 
     const analyticsEffectiveSvId = isSupervisorRole ? String(userId || '') : analyticsSelectedSvId;
-
-    useEffect(() => {
-        analyticsSvListRequestedRef.current = false;
-    }, [userId]);
-
-    useEffect(() => {
-        if (activeSection === 'analytics' && isAdminRole && !analyticsSvListRequestedRef.current && !analyticsSvLoading) {
-            fetchAnalyticsSvList();
-        }
-    }, [activeSection, isAdminRole, analyticsSvLoading, fetchAnalyticsSvList]);
 
     useEffect(() => {
         if (activeSection === 'analytics' && analyticsEffectiveSvId) {
@@ -4599,10 +4574,10 @@ const App = ({ user, initialSelection }) => {
                                     value={analyticsSelectedSvId}
                                     onChange={(e) => setAnalyticsSelectedSvId(e.target.value)}
                                     className="select"
-                                    disabled={analyticsLoading || analyticsSvLoading}
+                                    disabled={analyticsLoading}
                                 >
                                     <option value="">Выберите супервайзера</option>
-                                    {analyticsSvList.filter(sv => sv.status === 'working' || sv.status === 'unpaid_leave' || !sv.status).map(sv => (
+                                    {supervisors.filter(sv => sv.status === 'working' || sv.status === 'unpaid_leave' || !sv.status).map(sv => (
                                         <option key={sv.id} value={sv.id}>{sv.name}</option>
                                     ))}
                                 </select>
@@ -4631,7 +4606,7 @@ const App = ({ user, initialSelection }) => {
                             <button
                                 className="btn btn-sm btn-primary"
                                 onClick={() => { if (!analyticsEffectiveSvId) { emitCallEvaluationToast('Выберите супервайзера', 'error'); return; } fetchAnalyticsSvData(analyticsEffectiveSvId, analyticsMonth); }}
-                                disabled={analyticsLoading || analyticsSvLoading || !analyticsEffectiveSvId}
+                                disabled={analyticsLoading || !analyticsEffectiveSvId}
                             >
                                 <FaIcon className="fas fa-sync-alt" /> {analyticsLoading ? 'Обновление...' : 'Обновить'}
                             </button>
