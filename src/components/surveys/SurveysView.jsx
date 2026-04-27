@@ -20,6 +20,21 @@ const parseWeeksInput = (value) => {
     if (!Number.isFinite(number)) return null;
     return Math.max(0, Math.floor(number));
 };
+const SkeletonBlock = ({ className = '' }) => (
+    <div className={`bg-gray-200 rounded animate-pulse ${className}`} />
+);
+
+const SurveysListSkeleton = ({ count = 4 }) => (
+    <div className="divide-y divide-gray-50">
+        {Array.from({ length: count }).map((_, i) => (
+            <div key={i} className="px-4 py-3 space-y-2">
+                <SkeletonBlock className="h-4 w-3/4" />
+                <SkeletonBlock className="h-3 w-1/4 rounded-full" />
+            </div>
+        ))}
+    </div>
+);
+
 const isDismissedOperatorStatus = (value) => {
     const normalized = String(value || '').trim().toLowerCase();
     return (
@@ -1370,11 +1385,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                     </div>
 
                     <div className="flex-1 overflow-y-auto divide-y divide-gray-50">
-                        {isLoading && (
-                            <div className="p-6 flex items-center justify-center gap-2 text-sm text-gray-400">
-                                <FaIcon className="fas fa-spinner fa-spin" />Загрузка...
-                            </div>
-                        )}
+                        {isLoading && <SurveysListSkeleton />}
                         {!isLoading && surveys.length === 0 && (
                             <div className="p-8 text-center">
                                 <div className="w-12 h-12 rounded-2xl bg-gray-50 flex items-center justify-center mx-auto mb-3">
