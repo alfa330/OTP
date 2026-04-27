@@ -29968,7 +29968,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 operatorName = '',
                 supervisorId = null,
                 month = (selectedReportMonth || selectedMonth),
-                section = 'journal',
+                section = 'analytics',
                 openInNewTab = false
             } = {}) => {
                 const nextSelection = {
@@ -32742,7 +32742,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         operatorId: op.id,
                                                                         operatorName: op.name,
                                                                         supervisorId: selectedSvId,
-                                                                        month: selectedReportMonth || selectedMonth
+                                                                        month: selectedReportMonth || selectedMonth,
+                                                                        section: 'journal'
                                                                     })}
                                                                     className="bg-blue-600 hover:bg-blue-700 text-white px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors"
                                                                     >
@@ -34441,6 +34442,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     operatorId: op.id,
                                                                     operatorName: op.name,
                                                                     month: selectedReportMonth || selectedMonth,
+                                                                    section: 'journal',
                                                                     openInNewTab: Boolean(e?.ctrlKey || e?.metaKey)
                                                                 })}
                                                                 className="inline-flex items-center gap-2 bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition"
@@ -34506,6 +34508,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     operatorId: op.id,
                                                                     operatorName: op.name,
                                                                     month: selectedReportMonth || selectedMonth,
+                                                                    section: 'journal',
                                                                     openInNewTab: Boolean(e?.ctrlKey || e?.metaKey)
                                                                 })}
                                                                 className="inline-flex items-center gap-2 bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition"
