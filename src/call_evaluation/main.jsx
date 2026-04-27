@@ -3392,6 +3392,32 @@ const App = ({ user, initialSelection }) => {
 
     const analyticsEffectiveSvId = analyticsSelectedSvId;
 
+    const getAnalyticsOperatorSupervisorId = (op) => {
+        const candidates = [
+            op?.supervisor_id,
+            op?.sv_id,
+            op?.supervisorId,
+            op?.supervisor?.id,
+            op?.evaluation_target?.supervisor_id,
+            op?.evaluation_target?.sv_id
+        ];
+        for (const candidate of candidates) {
+            if (candidate == null || candidate === '') continue;
+            const numeric = Number(candidate);
+            if (Number.isFinite(numeric) && numeric > 0) return String(numeric);
+        }
+        return '';
+    };
+
+    const getAnalyticsScopedOperators = (rows = []) => {
+        const list = Array.isArray(rows) ? rows : [];
+        const targetSvId = String(analyticsEffectiveSvId || '').trim();
+        if (!targetSvId) return list;
+        const hasSupervisorMeta = list.some((op) => !!getAnalyticsOperatorSupervisorId(op));
+        if (!hasSupervisorMeta) return list;
+        return list.filter((op) => getAnalyticsOperatorSupervisorId(op) === targetSvId);
+    };
+
     useEffect(() => {
         if (activeSection === 'analytics' && analyticsEffectiveSvId) {
             fetchAnalyticsSvData(analyticsEffectiveSvId, analyticsMonth);
@@ -3399,6 +3425,8 @@ const App = ({ user, initialSelection }) => {
             setAnalyticsSelectedSvData(null);
         }
     }, [analyticsEffectiveSvId, analyticsMonth, activeSection, fetchAnalyticsSvData]);
+
+    const analyticsScopedOperators = getAnalyticsScopedOperators(analyticsSelectedSvData?.operators ?? []);
 
     return (
         <div className="app">
@@ -4698,7 +4726,7 @@ const App = ({ user, initialSelection }) => {
                         {/* Active / Fired tabs */}
                         <div className="section-switch" style={{ marginBottom: 14 }}>
                             {(() => {
-                                const all = analyticsSelectedSvData?.operators ?? [];
+                                const all = analyticsScopedOperators;
                                 const activeCount = all.filter(op => op.status === 'working' || op.status === 'unpaid_leave' || !op.status).length;
                                 const firedCount = all.filter(op => op.status === 'fired').length;
                                 return (
@@ -4717,8 +4745,8 @@ const App = ({ user, initialSelection }) => {
                         {/* Table */}
                         {analyticsLoading ? (
                             <p style={{ textAlign: 'center', color: 'var(--text-2)', padding: '32px 0', fontSize: 13 }}>Загрузка...</p>
-                        ) : analyticsSelectedSvData?.operators?.length > 0 ? (() => {
-                            const allOps = analyticsSelectedSvData.operators;
+                        ) : analyticsScopedOperators.length > 0 ? (() => {
+                            const allOps = analyticsScopedOperators;
                             const filteredOps = analyticsActiveOperatorsTab === 'active'
                                 ? allOps.filter(op => op.status === 'working' || op.status === 'unpaid_leave' || !op.status)
                                 : allOps.filter(op => op.status === 'fired');
