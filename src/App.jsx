@@ -1,4 +1,4 @@
-﻿import React, { Suspense, lazy, useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import React, { Suspense, lazy, useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useLocation } from 'react-router-dom';
 import axios from 'axios';
 import _ from 'lodash';
@@ -27116,8 +27116,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         const frameWindow = callEvaluationFrameRef.current?.contentWindow;
                         if (!frameWindow) return;
                         frameWindow.postMessage(callEvaluationInitPayload, window.location.origin);
-                    } else if (event.data?.type === 'CALL_EVALUATION_SWITCH_ANALYTICS') {
-                        setCallEvalActiveTab('analytics');
                     }
                 };
 
@@ -32040,14 +32038,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     <div
                         className={`main-content w-full ${
                             isCallEvaluationView
-                                ? (callEvalActiveTab === 'analytics' ? 'p-0 min-h-screen overflow-y-auto bg-gray-50' : 'p-0 h-screen overflow-hidden')
+                                ? 'p-0 h-screen overflow-hidden'
                                 : (canAccessLmsSection && view === 'lms')
                                     ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
                                     : (view === 'tasks' || view === 'work_schedules')
                                         ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
                                     : 'p-8 bg-gray-50 min-h-screen overflow-y-auto'
                         } ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}
-                        style={isCallEvaluationView && callEvalActiveTab !== 'analytics' ? { backgroundColor: '#f7f7f5' } : undefined}
+                        style={isCallEvaluationView ? { backgroundColor: '#f7f7f5' } : undefined}
                     >
                         {birthdayBannerVisible && (
                         <div className="relative overflow-hidden rounded-2xl border border-amber-200/70 bg-gradient-to-r from-amber-50 via-yellow-50 to-rose-50 px-4 py-4 mb-6 shadow-lg">
@@ -32090,7 +32088,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             />
                         )}
                         {canSeeCallEvaluation && (
-                        <div className="w-full h-full px-2 md:px-3 py-3" style={{ backgroundColor: '#f7f7f5', display: isCallEvaluationView && callEvalActiveTab === 'journal' ? undefined : 'none' }}>
+                        <div className="w-full h-full px-2 md:px-3 py-3" style={{ backgroundColor: '#f7f7f5', display: isCallEvaluationView ? undefined : 'none' }}>
                             <iframe
                                 ref={callEvaluationFrameRef}
                                 title="Журнал оценок"
@@ -32569,74 +32567,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 />
                                 )}
 
-                                {view === 'call_evaluation' && callEvalActiveTab === 'analytics' && (
-                                <div style={{ maxWidth: 1280, margin: '0 auto', padding: '20px 20px 28px' }}>
-                                    {/* Header matching call_evaluation */}
-                                    <header style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: '#fff', padding: '14px 20px', border: '1px solid #e5e5e2', boxShadow: '0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04)', borderRadius: 12, marginBottom: 20, flexWrap: 'wrap', gap: 12 }}>
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                                            <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#2563eb' }} />
-                                            <h1 style={{ fontSize: 15, fontWeight: 600, letterSpacing: '-0.01em', color: '#1a1a18', margin: 0 }}>Журнал Оценок</h1>
-                                        </div>
-                                        <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-                                            {[{ key: 'journal', label: 'Журнал' }, { key: 'requests', label: 'Журнал запросов' }, { key: 'calibration', label: 'Калибровка' }, { key: 'analytics', label: 'Аналитика' }].map(tab => (
-                                                <button key={tab.key} onClick={() => { if (tab.key === 'analytics') return; setCallEvalActiveTab('journal'); const f = callEvaluationFrameRef.current?.contentWindow; if (f) f.postMessage({ type: 'CALL_EVALUATION_SWITCH_SECTION', section: tab.key }, '*'); }} style={{ padding: '5px 10px', fontSize: 12, borderRadius: 8, border: `1px solid ${tab.key === 'analytics' ? '#2563eb' : '#d0d0cc'}`, background: tab.key === 'analytics' ? '#2563eb' : '#fff', color: tab.key === 'analytics' ? '#fff' : '#1a1a18', cursor: tab.key === 'analytics' ? 'default' : 'pointer', fontWeight: 500, fontFamily: 'inherit', transition: '150ms ease' }}>
-                                                    {tab.label}
-                                                </button>
-                                            ))}
-                                        </div>
-                                    </header>
-
-                                    {/* Main panel */}
-                                    <div style={{ background: '#fff', border: '1px solid #e5e5e2', borderRadius: 12 }}>
-                                        {/* Panel header */}
-                                        <div style={{ padding: '16px 24px', borderBottom: '1px solid #e5e5e2', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
-                                            <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-                                                <span style={{ fontSize: 14, fontWeight: 600, color: '#1a1a18' }}>Аналитика</span>
-                                                <select value={selectedSvId} onChange={(e) => setSelectedSvId(e.target.value)} style={{ fontSize: 13, border: '1px solid #e5e5e2', borderRadius: 8, padding: '6px 10px', background: '#fff', color: '#1a1a18', outline: 'none' }} disabled={isLoading || isAdminDataLoading}>
-                                                    <option value="">Выберите супервайзера</option>
-                                                    {(() => { const all = svList || []; return all.filter(sv => sv.status === 'working' || sv.status === 'unpaid_leave' || !sv.status).map(sv => (<option key={sv.id} value={sv.id}>{sv.name}</option>)); })()}
-                                                </select>
-                                            </div>
-                                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                                                <select value={selectedReportMonth} onChange={(e) => setSelectedReportMonth(e.target.value)} style={{ fontSize: 13, border: '1px solid #e5e5e2', borderRadius: 8, padding: '6px 10px', background: '#fff', color: '#1a1a18', outline: 'none' }} disabled={isAdminDataLoading}>
-                                                    {getMonthOptions()}
-                                                </select>
-                                                <button onClick={generateMonthlyReport} disabled={isLoading} style={{ padding: '5px 10px', fontSize: 12, borderRadius: 8, border: '1px solid #86efac', background: '#f0fdf4', color: '#16a34a', fontWeight: 500, cursor: isLoading ? 'not-allowed' : 'pointer', opacity: isLoading ? 0.5 : 1, display: 'inline-flex', alignItems: 'center', gap: 6, fontFamily: 'inherit', transition: '150ms ease' }} title="Скачать отчет по прослушанным звонкам за выбранный месяц">
-                                                    <FaIcon className="fas fa-file-excel" /> {isLoading ? 'Загрузка...' : 'Скачать отчёт'}
-                                                </button>
-                                                <button onClick={() => { if (!selectedSvId) { showToast('Выберите супервайзера', 'error'); return; } fetchSelectedSvData(selectedSvId, selectedReportMonth || selectedMonth); }} disabled={isAdminDataLoading || isLoading || !selectedSvId} style={{ padding: '5px 10px', fontSize: 12, borderRadius: 8, border: '1px solid #2563eb', background: '#2563eb', color: '#fff', fontWeight: 500, cursor: (isAdminDataLoading || isLoading || !selectedSvId) ? 'not-allowed' : 'pointer', opacity: (isAdminDataLoading || isLoading || !selectedSvId) ? 0.4 : 1, display: 'inline-flex', alignItems: 'center', gap: 6, fontFamily: 'inherit', transition: '150ms ease' }} title="Обновить данные по оценкам">
-                                                    <FaIcon className="fas fa-sync-alt" /> {isAdminDataLoading ? 'Обновление...' : 'Обновить'}
-                                                </button>
-                                            </div>
-                                        </div>
-
-                                        {/* Panel body */}
-                                        <div style={{ padding: '20px 24px' }}>
-                                        {/* Tabs: Активные / Уволенные */}
-                                        <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center', marginBottom: 16 }}>
-                                        {(() => {
-                                            const all = selectedSvData?.operators ?? [];
-                                            const activeCount = all.filter(op => op.status === 'working' || op.status === 'unpaid_leave' || !op.status).length;
-                                            const firedCount = all.filter(op => op.status === 'fired').length;
-                                            return (
-                                            <>
-                                                <button onClick={() => setActiveOperatorsTab('active')} style={{ padding: '5px 10px', fontSize: 12, borderRadius: 8, border: `1px solid ${activeOperatorsTab === 'active' ? '#16a34a' : '#d0d0cc'}`, background: activeOperatorsTab === 'active' ? '#16a34a' : '#fff', color: activeOperatorsTab === 'active' ? '#fff' : '#1a1a18', fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit', transition: '150ms ease' }}>
-                                                    Активные ({activeCount})
-                                                </button>
-                                                <button onClick={() => setActiveOperatorsTab('fired')} style={{ padding: '5px 10px', fontSize: 12, borderRadius: 8, border: `1px solid ${activeOperatorsTab === 'fired' ? '#dc2626' : '#d0d0cc'}`, background: activeOperatorsTab === 'fired' ? '#dc2626' : '#fff', color: activeOperatorsTab === 'fired' ? '#fff' : '#1a1a18', fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit', transition: '150ms ease' }}>
-                                                    Уволенные ({firedCount})
-                                                </button>
-                                            </>
-                                            );
-                                        })()}
-                                        </div>
-
-                                        {/* Таблица операторов + footer */}
-                                        {isAdminDataLoading ? (
-                                        <p className="text-center text-gray-600 py-8">Загрузка...</p>
-                                        ) : selectedSvData && selectedSvData.operators && selectedSvData.operators.length > 0 ? (
-                                        (() => {
-                                            const allOps = selectedSvData.operators;
+                                {false && <span>{/* removed analytics section - now in call_evaluation iframe */}
+                                        {null && (() => {
+                                            const allOps = [];
                                             const filteredOperators = activeOperatorsTab === 'active'
                                             ? allOps.filter(op => op.status === 'working' || op.status === 'unpaid_leave' || !op.status)
                                             : allOps.filter(op => op.status === 'fired');
@@ -32857,23 +32790,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </table>
                                             </div>
                                             );
-                                        })()
-                                        ) : selectedSvId ? (
-                                        <p style={{ textAlign: 'center', color: '#6b6b67', padding: '32px 0', fontSize: 13 }}>Операторы не найдены для этого супервайзера.</p>
-                                        ) : null}
-                                        </div>
-                                    </div>
-                                </div>
-                                )}
-                                {showAiMonthlyFeedbackModal && (
-                                <MonthlyFeedbackModal
-                                    title={aiMonthlyFeedbackTitle}
-                                    loading={aiMonthlyFeedbackLoading}
-                                    error={aiMonthlyFeedbackError}
-                                    result={aiMonthlyFeedbackResult}
-                                    onClose={closeAiMonthlyFeedbackModal}
-                                />
-                                )}
+                                        })()}
+                                </span>}
 
                                 {(view === 'manage_users' || view === 'employees') && (
                                 <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">

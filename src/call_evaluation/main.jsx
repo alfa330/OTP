@@ -2090,6 +2090,18 @@ const App = ({ user, initialSelection }) => {
     const calibrationDetailCacheRef = useRef(new Map());
     const DEFAULT_MAX_EVALS = 20;
 
+    // Analytics section state
+    const [analyticsSvList, setAnalyticsSvList] = useState([]);
+    const [analyticsSelectedSvId, setAnalyticsSelectedSvId] = useState('');
+    const [analyticsSelectedSvData, setAnalyticsSelectedSvData] = useState(null);
+    const [analyticsMonth, setAnalyticsMonth] = useState(new Date().toISOString().slice(0, 7));
+    const [analyticsLoading, setAnalyticsLoading] = useState(false);
+    const [analyticsSvLoading, setAnalyticsSvLoading] = useState(false);
+    const [analyticsActiveOperatorsTab, setAnalyticsActiveOperatorsTab] = useState('active');
+    const [analyticsViewSortField, setAnalyticsViewSortField] = useState('name');
+    const [analyticsViewSortDir, setAnalyticsViewSortDir] = useState('asc');
+    const [analyticsAiModal, setAnalyticsAiModal] = useState({ show: false, loading: false, title: '', result: null, error: '' });
+
     const fmtDate = (ds) => {
         if (!ds) return '—';
         try {
@@ -2561,7 +2573,7 @@ const App = ({ user, initialSelection }) => {
 
     useEffect(() => {
         window.__callEvaluationSetSection = (section) => {
-            if (['journal', 'requests', 'calibration'].includes(section)) {
+            if (['journal', 'requests', 'calibration', 'analytics'].includes(section)) {
                 setActiveSection(section);
             }
         };
@@ -3137,6 +3149,169 @@ const App = ({ user, initialSelection }) => {
         }
     }, [calibrationCall, activeCalibrationRoomId, userId, generalCommentDraft, fetchCalibrationRoomDetail]);
 
+    // ─── Analytics helpers ───────────────────────────────────────────────────
+    const getAnalyticsMonthOptions = () => {
+        const opts = [];
+        const today = new Date();
+        for (let i = 0; i < 12; i++) {
+            const d = new Date(today.getFullYear(), today.getMonth() - i, 1);
+            const val = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+            opts.push(<option key={val} value={val}>{d.toLocaleString('ru-RU',{month:'long',year:'numeric'})}</option>);
+        }
+        return opts;
+    };
+
+    const getAnalyticsCurrentWeek = () => {
+        const today = new Date();
+        const firstDay = new Date(today.getFullYear(), today.getMonth(), 1);
+        return Math.ceil((today.getDate() + firstDay.getDay() - 1) / 7);
+    };
+
+    const getAnalyticsExpectedCalls = (week) => week * 5;
+
+    const getAnalyticsEvaluationPlanMeta = (op) => {
+        const target = op?.evaluation_target;
+        if (!target || typeof target !== 'object') return null;
+        const requiredCalls = Number(target?.required_calls);
+        if (!Number.isFinite(requiredCalls) || requiredCalls < 0) return null;
+        const workedHoursUsed = Number(target?.worked_hours_used ?? target?.accounted_hours ?? 0);
+        const normHours = Number(target?.full_rate_norm_hours ?? target?.norm_hours ?? 0);
+        const baseCallTarget = Number(target?.base_call_target ?? 0);
+        const requiredCallsRaw = Number(target?.required_calls_raw ?? requiredCalls);
+        return {
+            requiredCalls,
+            workedHoursUsed: Number.isFinite(workedHoursUsed) ? workedHoursUsed : 0,
+            normHours: Number.isFinite(normHours) ? normHours : 0,
+            baseCallTarget: Number.isFinite(baseCallTarget) ? baseCallTarget : 0,
+            requiredCallsRaw: Number.isFinite(requiredCallsRaw) ? requiredCallsRaw : requiredCalls,
+        };
+    };
+
+    const renderAnalyticsPlanContent = (op, callCount) => {
+        const meta = getAnalyticsEvaluationPlanMeta(op);
+        if (!meta) return <span>{callCount}</span>;
+        const formula = `Расчет: (${meta.workedHoursUsed.toFixed(2)} ч / ${meta.normHours.toFixed(2)} ч полной ставки) × ${meta.baseCallTarget} = ${meta.requiredCallsRaw.toFixed(2)}, итог ${meta.requiredCalls}`;
+        return (
+            <div className="group relative inline-flex">
+                <div className="font-medium cursor-help underline decoration-dotted underline-offset-2 decoration-gray-400">{callCount} / {meta.requiredCalls}</div>
+                <div className="pointer-events-none absolute left-1/2 top-full z-20 mt-2 w-max max-w-xs -translate-x-1/2 rounded-lg border border-gray-200 bg-gray-900 px-3 py-2 text-xs text-white opacity-0 shadow-lg transition-opacity group-hover:opacity-100">{formula}</div>
+            </div>
+        );
+    };
+
+    const handleAnalyticsSort = (field) => {
+        if (analyticsViewSortField === field) setAnalyticsViewSortDir(prev => prev === 'asc' ? 'desc' : 'asc');
+        else { setAnalyticsViewSortField(field); setAnalyticsViewSortDir('asc'); }
+    };
+
+    const getAnalyticsSortIcon = (field) => {
+        if (analyticsViewSortField !== field) return <span className="ml-1 text-gray-400 text-xs">⇅</span>;
+        return analyticsViewSortDir === 'asc' ? <span className="ml-1 text-xs">▲</span> : <span className="ml-1 text-xs">▼</span>;
+    };
+
+    const compareAnalyticsByField = (a, b) => {
+        const dir = analyticsViewSortDir === 'asc' ? 1 : -1;
+        const nameA = (a?.name || '').toString();
+        const nameB = (b?.name || '').toString();
+        const nameCmp = nameA.localeCompare(nameB, 'ru', {sensitivity:'base'});
+        switch (analyticsViewSortField) {
+            case 'listened': { const ca = parseInt(a.call_count)||0, cb = parseInt(b.call_count)||0; return (ca-cb)*dir || nameCmp; }
+            case 'avg_score': { const sa = a.avg_score==null?-1:Number(a.avg_score), sb = b.avg_score==null?-1:Number(b.avg_score); return (sa-sb)*dir || nameCmp; }
+            case 'feedback': { const fa = Number(a.feedback_count)||0, fb = Number(b.feedback_count)||0; return (fa-fb)*dir || nameCmp; }
+            case 'percent': {
+                const getPct = (op) => { const meta = getAnalyticsEvaluationPlanMeta(op); const t = meta?.requiredCalls ?? getAnalyticsExpectedCalls(getAnalyticsCurrentWeek()); return t > 0 ? ((parseInt(op.call_count)||0)/t)*100 : 0; };
+                return (getPct(a)-getPct(b))*dir || nameCmp;
+            }
+            default: return nameCmp * dir;
+        }
+    };
+
+    // ─── Analytics API ───────────────────────────────────────────────────────
+    const fetchAnalyticsSvList = useCallback(async () => {
+        setAnalyticsSvLoading(true);
+        try {
+            const r = await authFetch(`${API_BASE_URL}/api/admin/sv_list`, { headers: { 'X-User-Id': userId } });
+            const d = await readJsonSafe(r);
+            if (d?.status === 'success') setAnalyticsSvList(d.supervisors || []);
+            else emitCallEvaluationToast(d?.error || 'Ошибка загрузки супервайзеров', 'error');
+        } catch { emitCallEvaluationToast('Ошибка загрузки супервайзеров', 'error'); }
+        finally { setAnalyticsSvLoading(false); }
+    }, [userId]);
+
+    const fetchAnalyticsSvData = useCallback(async (svId, month) => {
+        if (!svId) { setAnalyticsSelectedSvData(null); return; }
+        setAnalyticsLoading(true);
+        try {
+            const url = `${API_BASE_URL}/api/sv/data?id=${encodeURIComponent(svId)}${month ? `&month=${encodeURIComponent(month)}` : ''}`;
+            const r = await authFetch(url, { headers: { 'X-User-Id': userId } });
+            const d = await readJsonSafe(r);
+            if (d?.status === 'success') setAnalyticsSelectedSvData(d);
+            else emitCallEvaluationToast(d?.error || 'Ошибка загрузки данных', 'error');
+        } catch { emitCallEvaluationToast('Ошибка загрузки данных', 'error'); }
+        finally { setAnalyticsLoading(false); }
+    }, [userId]);
+
+    const analyticsGenerateReport = useCallback(async () => {
+        setAnalyticsLoading(true);
+        try {
+            const r = await authFetch(`${API_BASE_URL}/api/admin/monthly_report?month=${analyticsMonth}`, { headers: { 'X-User-Id': userId } });
+            if (r.ok) {
+                const blob = await r.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url; a.download = `monthly_report_${analyticsMonth}.xlsx`;
+                document.body.appendChild(a); a.click(); a.remove();
+                window.URL.revokeObjectURL(url);
+                emitCallEvaluationToast('Отчёт скачан', 'success');
+            } else emitCallEvaluationToast('Ошибка генерации отчёта', 'error');
+        } catch { emitCallEvaluationToast('Ошибка генерации отчёта', 'error'); }
+        finally { setAnalyticsLoading(false); }
+    }, [analyticsMonth, userId]);
+
+    const analyticsNotifySv = useCallback(async (svId, operatorName, callCount, targetCalls) => {
+        setAnalyticsLoading(true);
+        try {
+            const r = await authFetch(`${API_BASE_URL}/api/admin/notify_sv`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-User-Id': userId },
+                body: JSON.stringify({ sv_id: svId, operator_name: operatorName, call_count: callCount, target_calls: targetCalls })
+            });
+            const d = await readJsonSafe(r);
+            if (d?.status === 'success') emitCallEvaluationToast('Уведомление отправлено', 'success');
+            else emitCallEvaluationToast(d?.error || 'Ошибка отправки', 'error');
+        } catch { emitCallEvaluationToast('Ошибка отправки уведомления', 'error'); }
+        finally { setAnalyticsLoading(false); }
+    }, [userId]);
+
+    const analyticsOpenAiFeedback = useCallback(async (operatorId, operatorName, month) => {
+        if (!operatorId || !month) return;
+        setAnalyticsAiModal({ show: true, loading: true, title: `${operatorName || 'Оператор'} · ${month}`, result: null, error: '' });
+        try {
+            const r = await authFetch(`${API_BASE_URL}/api/ai/monthly_feedback`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-User-Id': userId },
+                body: JSON.stringify({ operator_id: operatorId, month })
+            });
+            const d = await readJsonSafe(r);
+            if (d?.status === 'success') setAnalyticsAiModal(prev => ({ ...prev, loading: false, result: d.result || null }));
+            else setAnalyticsAiModal(prev => ({ ...prev, loading: false, error: d?.error || 'Ошибка запроса' }));
+        } catch (e) { setAnalyticsAiModal(prev => ({ ...prev, loading: false, error: e.message || 'Ошибка запроса' })); }
+    }, [userId]);
+
+    useEffect(() => {
+        if (activeSection === 'analytics' && isAdminRole && analyticsSvList.length === 0 && !analyticsSvLoading) {
+            fetchAnalyticsSvList();
+        }
+    }, [activeSection, isAdminRole]);
+
+    useEffect(() => {
+        if (activeSection === 'analytics' && analyticsSelectedSvId) {
+            fetchAnalyticsSvData(analyticsSelectedSvId, analyticsMonth);
+        } else if (activeSection === 'analytics' && !analyticsSelectedSvId) {
+            setAnalyticsSelectedSvData(null);
+        }
+    }, [analyticsSelectedSvId, analyticsMonth, activeSection]);
+
     return (
         <div className="app">
             {/* Header */}
@@ -3168,10 +3343,8 @@ const App = ({ user, initialSelection }) => {
                             </button>
                             {isAdminRole && (
                             <button
-                                className="btn btn-sm btn-secondary"
-                                onClick={() => {
-                                    try { window.parent.postMessage({ type: 'CALL_EVALUATION_SWITCH_ANALYTICS' }, '*'); } catch(e) {}
-                                }}
+                                className={`btn btn-sm ${activeSection === 'analytics' ? 'btn-primary' : 'btn-secondary'}`}
+                                onClick={() => setActiveSection('analytics')}
                             >
                                 Аналитика
                             </button>
@@ -4378,6 +4551,227 @@ const App = ({ user, initialSelection }) => {
                         </div>
                         <div className="modal-footer">
                             <button className="btn btn-secondary" onClick={() => setShowVersionsModal(false)}>Закрыть</button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* ── Analytics section ── */}
+            {activeSection === 'analytics' && isAdminRole && (
+                <div className="main-panel" style={{ margin: '0 0 16px' }}>
+                    <div className="panel-header">
+                        <div className="panel-title-wrap">
+                            <span className="panel-title">Аналитика</span>
+                            <select
+                                value={analyticsSelectedSvId}
+                                onChange={(e) => setAnalyticsSelectedSvId(e.target.value)}
+                                className="select"
+                                disabled={analyticsLoading || analyticsSvLoading}
+                            >
+                                <option value="">Выберите супервайзера</option>
+                                {analyticsSvList.filter(sv => sv.status === 'working' || sv.status === 'unpaid_leave' || !sv.status).map(sv => (
+                                    <option key={sv.id} value={sv.id}>{sv.name}</option>
+                                ))}
+                            </select>
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                            <select
+                                value={analyticsMonth}
+                                onChange={(e) => setAnalyticsMonth(e.target.value)}
+                                className="select"
+                                disabled={analyticsLoading}
+                            >
+                                {getAnalyticsMonthOptions()}
+                            </select>
+                            <button
+                                className="btn btn-sm"
+                                style={{ background: 'var(--green-light)', color: 'var(--green)', borderColor: 'var(--green)' }}
+                                onClick={analyticsGenerateReport}
+                                disabled={analyticsLoading}
+                                title="Скачать отчёт по прослушанным звонкам за выбранный месяц"
+                            >
+                                <FaIcon className="fas fa-file-excel" /> {analyticsLoading ? 'Загрузка...' : 'Скачать отчёт'}
+                            </button>
+                            <button
+                                className="btn btn-sm btn-primary"
+                                onClick={() => { if (!analyticsSelectedSvId) { emitCallEvaluationToast('Выберите супервайзера', 'error'); return; } fetchAnalyticsSvData(analyticsSelectedSvId, analyticsMonth); }}
+                                disabled={analyticsLoading || analyticsSvLoading || !analyticsSelectedSvId}
+                            >
+                                <FaIcon className="fas fa-sync-alt" /> {analyticsLoading ? 'Обновление...' : 'Обновить'}
+                            </button>
+                        </div>
+                    </div>
+
+                    <div style={{ padding: '16px 24px' }}>
+                        {/* Active / Fired tabs */}
+                        <div className="section-switch" style={{ marginBottom: 14 }}>
+                            {(() => {
+                                const all = analyticsSelectedSvData?.operators ?? [];
+                                const activeCount = all.filter(op => op.status === 'working' || op.status === 'unpaid_leave' || !op.status).length;
+                                const firedCount = all.filter(op => op.status === 'fired').length;
+                                return (
+                                    <>
+                                        <button className={`btn btn-sm ${analyticsActiveOperatorsTab === 'active' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setAnalyticsActiveOperatorsTab('active')}>
+                                            Активные ({activeCount})
+                                        </button>
+                                        <button className={`btn btn-sm ${analyticsActiveOperatorsTab === 'fired' ? '' : 'btn-secondary'}`} style={analyticsActiveOperatorsTab === 'fired' ? { background: 'var(--red)', color: '#fff', borderColor: 'var(--red)' } : {}} onClick={() => setAnalyticsActiveOperatorsTab('fired')}>
+                                            Уволенные ({firedCount})
+                                        </button>
+                                    </>
+                                );
+                            })()}
+                        </div>
+
+                        {/* Table */}
+                        {analyticsLoading ? (
+                            <p style={{ textAlign: 'center', color: 'var(--text-2)', padding: '32px 0', fontSize: 13 }}>Загрузка...</p>
+                        ) : analyticsSelectedSvData?.operators?.length > 0 ? (() => {
+                            const allOps = analyticsSelectedSvData.operators;
+                            const filteredOps = analyticsActiveOperatorsTab === 'active'
+                                ? allOps.filter(op => op.status === 'working' || op.status === 'unpaid_leave' || !op.status)
+                                : allOps.filter(op => op.status === 'fired');
+
+                            if (filteredOps.length === 0) return <p style={{ textAlign: 'center', color: 'var(--text-2)', padding: '32px 0', fontSize: 13 }}>Операторы не найдены.</p>;
+
+                            const sorted = [...filteredOps].sort(compareAnalyticsByField);
+
+                            const totalCalls = filteredOps.reduce((s, o) => s + (parseInt(o.call_count) || 0), 0);
+                            const totalPlanCalls = filteredOps.reduce((s, o) => { const m = getAnalyticsEvaluationPlanMeta(o); return s + (m ? m.requiredCalls : 0); }, 0);
+                            const scoresArr = filteredOps.map(o => o.avg_score == null ? NaN : Number(o.avg_score)).filter(v => !isNaN(v));
+                            const avgByScored = scoresArr.length > 0 ? scoresArr.reduce((a, b) => a + b, 0) / scoresArr.length : null;
+
+                            const thStyle = { padding: '10px 12px', textAlign: 'left', fontSize: 11, fontWeight: 600, color: 'var(--text-2)', textTransform: 'uppercase', letterSpacing: '0.04em', cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' };
+                            const tdStyle = { padding: '10px 12px', fontSize: 13, color: 'var(--text)', borderTop: '1px solid var(--border)' };
+
+                            const getScoreColor = (score) => { if (!score) return 'var(--text-2)'; if (score >= 90) return 'var(--green)'; if (score >= 60) return 'var(--amber)'; return 'var(--red)'; };
+                            const getBarColor = (pct) => pct >= 95 ? 'var(--green)' : pct >= 50 ? 'var(--amber)' : 'var(--red)';
+
+                            return (
+                                <div style={{ overflowX: 'auto', borderRadius: 8, border: '1px solid var(--border)' }}>
+                                    <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 600 }}>
+                                        <thead style={{ background: 'var(--surface-2)' }}>
+                                            <tr>
+                                                <th style={thStyle} onClick={() => handleAnalyticsSort('name')}>Оператор {getAnalyticsSortIcon('name')}</th>
+                                                <th style={thStyle} onClick={() => handleAnalyticsSort('listened')}>Оценено / план {getAnalyticsSortIcon('listened')}</th>
+                                                <th style={thStyle} onClick={() => handleAnalyticsSort('percent')}>% нормы {getAnalyticsSortIcon('percent')}</th>
+                                                <th style={thStyle} onClick={() => handleAnalyticsSort('avg_score')}>Ср. балл {getAnalyticsSortIcon('avg_score')}</th>
+                                                <th style={thStyle} onClick={() => handleAnalyticsSort('feedback')}>ОС / просрочки {getAnalyticsSortIcon('feedback')}</th>
+                                                <th style={{ ...thStyle, cursor: 'default' }}>Действия</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {sorted.map((op, index) => {
+                                                const callCount = parseInt(op.call_count) || 0;
+                                                const planMeta = getAnalyticsEvaluationPlanMeta(op);
+                                                const displayTarget = planMeta?.requiredCalls ?? getAnalyticsExpectedCalls(getAnalyticsCurrentWeek());
+                                                const pct = displayTarget > 0 ? Math.round((callCount / displayTarget) * 100) : 0;
+                                                const hasIssue = displayTarget > 0 && (callCount / displayTarget) * 100 < 95;
+                                                const initials = (op.name || 'U').charAt(0).toUpperCase();
+                                                return (
+                                                    <tr key={op.id ?? index} style={{ background: index % 2 === 0 ? 'var(--surface)' : 'var(--surface-2)' }}>
+                                                        <td style={tdStyle}>
+                                                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                                                <div style={{ width: 32, height: 32, borderRadius: '50%', background: 'linear-gradient(135deg,#3b82f6,#1d4ed8)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, fontWeight: 600, color: '#fff', flexShrink: 0 }}>{initials}</div>
+                                                                <span style={{ fontWeight: 500 }}>{op.name}</span>
+                                                            </div>
+                                                        </td>
+                                                        <td style={tdStyle}>{renderAnalyticsPlanContent(op, callCount)}</td>
+                                                        <td style={tdStyle}>
+                                                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                                                <div style={{ width: 64, height: 5, background: 'var(--border)', borderRadius: 99, overflow: 'hidden', flexShrink: 0 }}>
+                                                                    <div style={{ width: `${Math.min(pct, 100)}%`, height: '100%', background: getBarColor(pct), borderRadius: 99, transition: 'width 0.4s' }} />
+                                                                </div>
+                                                                <span style={{ fontSize: 12, fontWeight: 600, color: getBarColor(pct), tabularNums: true }}>{pct}%</span>
+                                                            </div>
+                                                        </td>
+                                                        <td style={{ ...tdStyle, fontWeight: 600, color: getScoreColor(op.avg_score) }}>
+                                                            {op.avg_score ? Number(op.avg_score).toFixed(2) : '—'}
+                                                        </td>
+                                                        <td style={tdStyle}>
+                                                            <span style={{ fontWeight: 500 }}>{Number(op.feedback_count) || 0}</span>
+                                                            <span style={{ color: 'var(--border)', margin: '0 3px' }}>/</span>
+                                                            <span style={{ fontWeight: 500, color: Number(op.feedback_overdue_count) > 0 ? 'var(--red)' : 'var(--text-2)' }}>{Number(op.feedback_overdue_count) || 0}</span>
+                                                        </td>
+                                                        <td style={{ ...tdStyle, whiteSpace: 'nowrap' }}>
+                                                            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                                                                {hasIssue && (
+                                                                    <button className="btn btn-sm" style={{ background: 'var(--amber-light,#fffbeb)', color: 'var(--amber,#d97706)', borderColor: 'var(--amber,#d97706)' }} onClick={() => analyticsNotifySv(analyticsSelectedSvId, op.name, callCount, displayTarget)} disabled={analyticsLoading}>
+                                                                        ⚠ Уведомить
+                                                                    </button>
+                                                                )}
+                                                                <button className="btn btn-sm btn-primary" onClick={() => { setActiveSection('journal'); }}>
+                                                                    Оценки
+                                                                </button>
+                                                                <button className="btn btn-sm" style={{ background: 'var(--accent-light)', color: 'var(--accent)', borderColor: 'var(--accent)' }} onClick={() => analyticsOpenAiFeedback(op.id, op.name, analyticsMonth)} disabled={analyticsAiModal.loading}>
+                                                                    ОС от ИИ
+                                                                </button>
+                                                            </div>
+                                                        </td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                        <tfoot style={{ background: 'var(--surface-2)', borderTop: '1px solid var(--border)' }}>
+                                            <tr>
+                                                <td style={{ ...tdStyle, fontWeight: 600 }}>Итого</td>
+                                                <td style={tdStyle}>{totalPlanCalls > 0 ? `${totalCalls} / ${totalPlanCalls}` : totalCalls}</td>
+                                                <td style={tdStyle}>
+                                                    {(() => {
+                                                        const withT = filteredOps.filter(o => (getAnalyticsEvaluationPlanMeta(o)?.requiredCalls ?? getAnalyticsExpectedCalls(getAnalyticsCurrentWeek())) > 0);
+                                                        if (!withT.length) return <span style={{ color: 'var(--text-2)' }}>—</span>;
+                                                        const ap = Math.round(withT.reduce((s, o) => { const t = getAnalyticsEvaluationPlanMeta(o)?.requiredCalls ?? getAnalyticsExpectedCalls(getAnalyticsCurrentWeek()); return s + ((parseInt(o.call_count)||0)/t)*100; }, 0) / withT.length);
+                                                        return <span style={{ fontWeight: 600, color: getBarColor(ap) }}>{ap}%</span>;
+                                                    })()}
+                                                </td>
+                                                <td style={{ ...tdStyle, fontWeight: 500 }}>{avgByScored == null ? '—' : avgByScored.toFixed(2)}</td>
+                                                <td style={tdStyle}>
+                                                    {filteredOps.reduce((s, o) => s + (Number(o.feedback_count)||0), 0)}
+                                                    <span style={{ color: 'var(--border)', margin: '0 3px' }}>/</span>
+                                                    <span style={{ fontWeight: 500, color: filteredOps.reduce((s, o) => s + (Number(o.feedback_overdue_count)||0), 0) > 0 ? 'var(--red)' : 'var(--text-2)' }}>
+                                                        {filteredOps.reduce((s, o) => s + (Number(o.feedback_overdue_count)||0), 0)}
+                                                    </span>
+                                                </td>
+                                                <td style={tdStyle} />
+                                            </tr>
+                                        </tfoot>
+                                    </table>
+                                </div>
+                            );
+                        })() : analyticsSelectedSvId ? (
+                            <p style={{ textAlign: 'center', color: 'var(--text-2)', padding: '32px 0', fontSize: 13 }}>Операторы не найдены для этого супервайзера.</p>
+                        ) : (
+                            <p style={{ textAlign: 'center', color: 'var(--text-2)', padding: '32px 0', fontSize: 13 }}>Выберите супервайзера для просмотра аналитики.</p>
+                        )}
+                    </div>
+                </div>
+            )}
+
+            {/* ── Analytics AI Feedback Modal ── */}
+            {analyticsAiModal.show && (
+                <div style={{ position: 'fixed', inset: 0, zIndex: 50, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
+                    <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.4)', backdropFilter: 'blur(2px)' }} onClick={() => setAnalyticsAiModal(prev => ({ ...prev, show: false }))} />
+                    <div style={{ position: 'relative', background: 'var(--surface)', borderRadius: 'var(--radius-lg)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)', width: '100%', maxWidth: 640, maxHeight: '80vh', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+                        <div className="panel-header">
+                            <div>
+                                <div style={{ fontSize: 11, color: 'var(--text-2)', marginBottom: 2 }}>{analyticsAiModal.title}</div>
+                                <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text)' }}>Обратная связь от ИИ — сводка за месяц</div>
+                            </div>
+                            <button className="btn btn-sm btn-secondary" onClick={() => setAnalyticsAiModal(prev => ({ ...prev, show: false }))}>Закрыть</button>
+                        </div>
+                        <div style={{ padding: '20px 24px', overflowY: 'auto' }}>
+                            {analyticsAiModal.loading && <p style={{ textAlign: 'center', color: 'var(--text-2)', padding: '32px 0' }}>Загрузка...</p>}
+                            {analyticsAiModal.error && <pre style={{ color: 'var(--red)', fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{analyticsAiModal.error}</pre>}
+                            {analyticsAiModal.result && (
+                                <div style={{ fontSize: 13, color: 'var(--text)', lineHeight: 1.6 }}>
+                                    {analyticsAiModal.result.summary?.text && <p style={{ marginBottom: 12 }}>{analyticsAiModal.result.summary.text}</p>}
+                                    {analyticsAiModal.result.per_criterion?.map((c, i) => (
+                                        <div key={i} style={{ marginBottom: 10, padding: '8px 12px', background: 'var(--surface-2)', borderRadius: 'var(--radius)', border: '1px solid var(--border)' }}>
+                                            <div style={{ fontWeight: 600, marginBottom: 4 }}>{c.criterion_name}</div>
+                                            <div style={{ color: 'var(--text-2)' }}>{c.feedback}</div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
                         </div>
                     </div>
                 </div>
