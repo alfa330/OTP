@@ -217,6 +217,67 @@
         .panel-title { font-size: 14px; font-weight: 600; color: var(--text); }
         .panel-title-wrap { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
         .section-switch { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+        .analytics-plan {
+            position: relative;
+            display: inline-flex;
+            align-items: center;
+        }
+        .analytics-plan-chip {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 58px;
+            padding: 3px 8px;
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            background: var(--surface-2);
+            color: var(--text);
+            font-size: 12px;
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
+            cursor: help;
+            white-space: nowrap;
+        }
+        .analytics-plan-tooltip {
+            pointer-events: none;
+            position: absolute;
+            left: 50%;
+            top: calc(100% + 8px);
+            z-index: 30;
+            width: max-content;
+            max-width: 320px;
+            transform: translateX(-50%) translateY(-2px);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: #111827;
+            color: #fff;
+            padding: 8px 10px;
+            font-size: 12px;
+            line-height: 1.35;
+            box-shadow: var(--shadow-lg);
+            opacity: 0;
+            transition: opacity var(--transition), transform var(--transition);
+        }
+        .analytics-plan:hover .analytics-plan-tooltip {
+            opacity: 1;
+            transform: translateX(-50%) translateY(0);
+        }
+        .analytics-actions {
+            display: grid;
+            grid-template-columns: 112px 74px 86px;
+            gap: 6px;
+            align-items: center;
+        }
+        .analytics-actions .btn,
+        .analytics-action-placeholder {
+            width: 100%;
+            min-height: 28px;
+            justify-content: center;
+        }
+        .analytics-action-placeholder {
+            display: block;
+            visibility: hidden;
+        }
 
         .calibration-cards {
             display: grid;
