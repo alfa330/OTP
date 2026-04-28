@@ -31,7 +31,16 @@ import xlsxwriter
 import json
 import html
 from concurrent.futures import ThreadPoolExecutor
-from database import db, TECHNICAL_ISSUE_REASONS
+from database import db, TECHNICAL_ISSUE_REASONS, normalize_role_value
+from resource_fte_service import (
+    get_resource_day,
+    get_resource_overview,
+    get_resource_settings,
+    import_resource_csv,
+    recalculate_resource_forecast,
+    update_resource_hour,
+    update_resource_settings,
+)
 import uuid
 from passlib.hash import pbkdf2_sha256
 from werkzeug.utils import secure_filename
@@ -2335,6 +2344,155 @@ def health_check():
     except Exception as e:
         logging.error(f"Health check failed: {e}")
         return jsonify({"status": "unhealthy", "error": "Health check failed"}), 500
+
+
+def _resource_fte_route_guard():
+    requester_id = getattr(g, 'user_id', None)
+    if not requester_id:
+        header_user_id = request.headers.get('X-User-Id')
+        try:
+            requester_id = int(header_user_id) if header_user_id else None
+        except Exception:
+            requester_id = None
+    if not requester_id:
+        return None, jsonify({"error": "Unauthorized"}), 401
+    requester = db.get_user(id=int(requester_id))
+    if not requester:
+        return None, jsonify({"error": "User not found"}), 404
+    role = normalize_role_value(requester[3])
+    if role not in {'super_admin', 'admin', 'sv', 'supervisor', 'trainer'}:
+        return None, jsonify({"error": "Only managers can access resource calculations"}), 403
+    return int(requester_id), None, None
+
+
+def _resource_fte_error_response(error):
+    message = str(error)
+    if message.startswith("INVALID_CSV_HEADERS:"):
+        return jsonify({
+            "error": "Invalid CSV structure",
+            "missing": message.split(":", 1)[1].split(",")
+        }), 400
+    if message in {"EMPTY_CSV", "EMPTY_CSV_ROWS"}:
+        return jsonify({"error": "CSV file is empty"}), 400
+    if message == "INVALID_REPORT_DATE":
+        return jsonify({"error": "Invalid date. Use YYYY-MM-DD"}), 400
+    if message == "DAY_NOT_FOUND":
+        return jsonify({"error": "Day not found"}), 404
+    if message.startswith("INVALID_HOUR"):
+        return jsonify({"error": "Invalid hour in CSV"}), 400
+    logging.error(f"Resource FTE API error: {error}", exc_info=True)
+    return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/resource_fte/overview', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_overview():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    try:
+        payload = get_resource_overview(
+            db,
+            date_from=request.args.get('date_from'),
+            date_to=request.args.get('date_to'),
+            as_of_date_value=request.args.get('as_of')
+        )
+        return jsonify({"status": "success", **payload}), 200
+    except Exception as error:
+        return _resource_fte_error_response(error)
+
+
+@app.route('/api/resource_fte/upload', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_upload():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    try:
+        report_date = (request.form.get('report_date') or request.form.get('date') or '').strip()
+        file_storage = request.files.get('file')
+        if not report_date:
+            return jsonify({"error": "report_date is required"}), 400
+        if not file_storage:
+            return jsonify({"error": "CSV file is required"}), 400
+        filename = secure_filename(file_storage.filename or 'resource_report.csv')
+        if not filename.lower().endswith('.csv'):
+            return jsonify({"error": "Only CSV files are supported"}), 400
+        content = file_storage.read()
+        if not content:
+            return jsonify({"error": "CSV file is empty"}), 400
+        payload = import_resource_csv(db, report_date, content, filename, requester_id)
+        return jsonify({"status": "success", **payload}), 200
+    except Exception as error:
+        return _resource_fte_error_response(error)
+
+
+@app.route('/api/resource_fte/day/<string:report_date>', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_day(report_date):
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    try:
+        return jsonify({"status": "success", "day": get_resource_day(db, report_date)}), 200
+    except Exception as error:
+        return _resource_fte_error_response(error)
+
+
+@app.route('/api/resource_fte/day/<string:report_date>/hours/<int:hour>', methods=['PATCH', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_update_hour(report_date, hour):
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    try:
+        payload = request.get_json(silent=True) or {}
+        return jsonify({"status": "success", "day": update_resource_hour(db, report_date, hour, payload)}), 200
+    except Exception as error:
+        return _resource_fte_error_response(error)
+
+
+@app.route('/api/resource_fte/settings', methods=['GET', 'PUT', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_settings():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    try:
+        if request.method == 'GET':
+            return jsonify({"status": "success", "settings": get_resource_settings(db)}), 200
+        payload = request.get_json(silent=True) or {}
+        settings = update_resource_settings(db, payload, requester_id)
+        overview = recalculate_resource_forecast(db)
+        return jsonify({"status": "success", "settings": settings, "overview": overview}), 200
+    except Exception as error:
+        return _resource_fte_error_response(error)
+
+
+@app.route('/api/resource_fte/recalculate', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_recalculate():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    try:
+        payload = request.get_json(silent=True) or {}
+        overview = recalculate_resource_forecast(db, payload.get('as_of'))
+        return jsonify({"status": "success", **overview}), 200
+    except Exception as error:
+        return _resource_fte_error_response(error)
 
 @app.route('/api/login', methods=['POST', 'OPTIONS'])
 def login():

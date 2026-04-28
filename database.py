@@ -1674,6 +1674,108 @@ class Database:
                 ALTER COLUMN file_data DROP NOT NULL;
             """)
 
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS raw_resource_uploads (
+                    id SERIAL PRIMARY KEY,
+                    report_date DATE NOT NULL UNIQUE,
+                    filename TEXT,
+                    content_sha256 VARCHAR(64),
+                    headers JSONB NOT NULL DEFAULT '[]',
+                    row_count INTEGER NOT NULL DEFAULT 0,
+                    uploaded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    uploaded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS daily_resource_hours (
+                    id SERIAL PRIMARY KEY,
+                    report_date DATE NOT NULL,
+                    hour INTEGER NOT NULL CHECK (hour >= 0 AND hour <= 23),
+                    received_calls INTEGER NOT NULL DEFAULT 0,
+                    accepted_calls INTEGER NOT NULL DEFAULT 0,
+                    lost_calls INTEGER NOT NULL DEFAULT 0,
+                    no_answer_rate NUMERIC(10,6) NOT NULL DEFAULT 0,
+                    talk_time_seconds INTEGER NOT NULL DEFAULT 0,
+                    avg_talk_seconds NUMERIC(12,4) NOT NULL DEFAULT 0,
+                    success_wait_seconds INTEGER NOT NULL DEFAULT 0,
+                    avg_success_wait_seconds NUMERIC(12,4) NOT NULL DEFAULT 0,
+                    total_time_seconds INTEGER NOT NULL DEFAULT 0,
+                    greeting_abandoned INTEGER NOT NULL DEFAULT 0,
+                    greeting_time_seconds INTEGER NOT NULL DEFAULT 0,
+                    queue_abandoned INTEGER NOT NULL DEFAULT 0,
+                    queue_wait_seconds INTEGER NOT NULL DEFAULT 0,
+                    avg_lost_wait_seconds NUMERIC(12,4) NOT NULL DEFAULT 0,
+                    avg_wait_seconds NUMERIC(12,4) NOT NULL DEFAULT 0,
+                    forecast_calls NUMERIC(12,4) NOT NULL DEFAULT 0,
+                    forecast_fte NUMERIC(12,4) NOT NULL DEFAULT 0,
+                    planned_fte NUMERIC(12,4) NOT NULL DEFAULT 0,
+                    actual_fte NUMERIC(12,4) NOT NULL DEFAULT 0,
+                    fact_forecast_delta NUMERIC(12,4) NOT NULL DEFAULT 0,
+                    comments TEXT,
+                    raw_payload JSONB NOT NULL DEFAULT '{}',
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(report_date, hour)
+                );
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS daily_resource_summary (
+                    report_date DATE PRIMARY KEY,
+                    weekday INTEGER NOT NULL CHECK (weekday >= 0 AND weekday <= 6),
+                    total_received INTEGER NOT NULL DEFAULT 0,
+                    total_accepted INTEGER NOT NULL DEFAULT 0,
+                    total_lost INTEGER NOT NULL DEFAULT 0,
+                    no_answer_rate NUMERIC(10,6) NOT NULL DEFAULT 0,
+                    avg_talk_seconds NUMERIC(12,4) NOT NULL DEFAULT 0,
+                    avg_wait_seconds NUMERIC(12,4) NOT NULL DEFAULT 0,
+                    forecast_fte_total NUMERIC(12,4) NOT NULL DEFAULT 0,
+                    planned_fte_total NUMERIC(12,4) NOT NULL DEFAULT 0,
+                    actual_fte_total NUMERIC(12,4) NOT NULL DEFAULT 0,
+                    fact_forecast_delta_total NUMERIC(12,4) NOT NULL DEFAULT 0,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS weekday_resource_profiles (
+                    id SERIAL PRIMARY KEY,
+                    as_of_date DATE NOT NULL,
+                    weekday INTEGER NOT NULL CHECK (weekday >= 0 AND weekday <= 6),
+                    history_dates JSONB NOT NULL DEFAULT '[]',
+                    history_count INTEGER NOT NULL DEFAULT 0,
+                    insufficient_history BOOLEAN NOT NULL DEFAULT TRUE,
+                    avg_daily_calls NUMERIC(12,4) NOT NULL DEFAULT 0,
+                    daily_fte NUMERIC(12,4) NOT NULL DEFAULT 0,
+                    hourly_profile JSONB NOT NULL DEFAULT '[]',
+                    settings_snapshot JSONB NOT NULL DEFAULT '{}',
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(as_of_date, weekday)
+                );
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS resource_settings (
+                    id INTEGER PRIMARY KEY DEFAULT 1,
+                    aht_seconds NUMERIC(12,4) NOT NULL DEFAULT 239,
+                    answer_rate NUMERIC(8,6) NOT NULL DEFAULT 0.95,
+                    occ NUMERIC(8,6) NOT NULL DEFAULT 0.70,
+                    ur NUMERIC(8,6) NOT NULL DEFAULT 0.95,
+                    shrinkage_coeff NUMERIC(8,6) NOT NULL DEFAULT 0.90,
+                    weekly_hours_per_operator NUMERIC(8,2) NOT NULL DEFAULT 40,
+                    fte_rounding VARCHAR(20) NOT NULL DEFAULT 'none',
+                    shift_rounding VARCHAR(20) NOT NULL DEFAULT 'ceil',
+                    updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT resource_settings_singleton CHECK (id = 1),
+                    CONSTRAINT resource_settings_fte_rounding_check CHECK (fte_rounding IN ('none', 'ceil', 'floor', 'round')),
+                    CONSTRAINT resource_settings_shift_rounding_check CHECK (shift_rounding IN ('none', 'ceil', 'floor', 'round'))
+                );
+            """)
+            cursor.execute("""
+                INSERT INTO resource_settings (id)
+                VALUES (1)
+                ON CONFLICT (id) DO NOTHING;
+            """)
+
             # Optimized Indexes (added more based on query patterns)
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_calls_month ON calls(month);
@@ -1759,6 +1861,10 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
                 CREATE INDEX IF NOT EXISTS idx_task_status_history_task_id ON task_status_history(task_id);
                 CREATE INDEX IF NOT EXISTS idx_task_attachments_task_id ON task_attachments(task_id);
+                CREATE INDEX IF NOT EXISTS idx_raw_resource_uploads_report_date ON raw_resource_uploads(report_date DESC);
+                CREATE INDEX IF NOT EXISTS idx_daily_resource_hours_report_hour ON daily_resource_hours(report_date, hour);
+                CREATE INDEX IF NOT EXISTS idx_daily_resource_summary_weekday_date ON daily_resource_summary(weekday, report_date DESC);
+                CREATE INDEX IF NOT EXISTS idx_weekday_resource_profiles_as_of ON weekday_resource_profiles(as_of_date DESC, weekday);
                 CREATE INDEX IF NOT EXISTS idx_calibration_rooms_month ON calibration_rooms(month);
                 CREATE INDEX IF NOT EXISTS idx_calibration_rooms_operator_id ON calibration_rooms(operator_id);
                 CREATE INDEX IF NOT EXISTS idx_calibration_rooms_admin_id ON calibration_rooms(created_by_admin_id);
