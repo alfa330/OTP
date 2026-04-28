@@ -400,6 +400,32 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
       .slice(0, 5);
   }, [selectedDay?.hours]);
 
+  const dayStaffingHotspots = useMemo(() => {
+    const rows = selectedDay?.hours || [];
+    return rows
+      .map((row) => ({
+        ...row,
+        delta: Number(row.fact_forecast_delta || 0),
+        gap: Math.abs(Number(row.fact_forecast_delta || 0)),
+      }))
+      .filter((row) => row.gap > 0)
+      .sort((a, b) => b.gap - a.gap)
+      .slice(0, 4);
+  }, [selectedDay?.hours]);
+
+  const dayPeakHours = useMemo(() => {
+    const rows = selectedDay?.hours || [];
+    return rows
+      .filter((row) => Number(row.received_calls || 0) > 0)
+      .sort((a, b) => Number(b.received_calls || 0) - Number(a.received_calls || 0))
+      .slice(0, 4);
+  }, [selectedDay?.hours]);
+
+  const dayFteDeltaTotal = useMemo(() => {
+    if (!selectedDay?.summary) return 0;
+    return Number(selectedDay.summary.actual_fte_total || 0) - Number(selectedDay.summary.forecast_fte_total || 0);
+  }, [selectedDay?.summary]);
+
   const dayAcceptedLostData = useMemo(
     () =>
       (selectedDay?.hours || []).map((row) => ({
@@ -1246,36 +1272,137 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
             <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
               {selectedSummary ? (
                 <>
-                  <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
-                    <div>
-                      <h2 className="text-lg font-semibold text-slate-950">
-                        Детализация дня: {formatDate(selectedSummary.report_date)} · {selectedSummary.weekday_short}
-                      </h2>
-                      <p className="text-sm text-slate-500">Почасовая нормализованная таблица и сравнение факта с прогнозом.</p>
+                  <div className="flex flex-col gap-2">
+                    <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+                      <div>
+                        <h2 className="text-lg font-semibold text-slate-950">
+                          День {formatDate(selectedSummary.report_date)} · {selectedSummary.weekday_short}
+                        </h2>
+                        <p className="text-sm text-slate-500">Звонки, потери и отклонение факта от прогноза по часам.</p>
+                      </div>
+                      <span className={`inline-flex w-fit items-center rounded-lg px-3 py-2 text-sm font-semibold ${
+                        dayFteDeltaTotal < -0.5
+                          ? 'bg-rose-50 text-rose-700'
+                          : dayFteDeltaTotal > 0.5
+                            ? 'bg-emerald-50 text-emerald-700'
+                            : 'bg-slate-100 text-slate-700'
+                      }`}>
+                        Разница факта: {formatNumber(dayFteDeltaTotal, 1)} FTE
+                      </span>
                     </div>
-                    <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
-                      {displayOptions.tableReceived && <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">Получено</div><b>{formatInt(selectedSummary.total_received)}</b></div>}
-                      {displayOptions.tableNoAnswer && <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">% Неотв</div><b>{formatPercent(selectedSummary.no_answer_rate)}</b></div>}
-                      {displayOptions.tableForecast && <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">Прогноз FTE</div><b>{formatNumber(selectedSummary.forecast_fte_total, 1)}</b></div>}
-                      {displayOptions.tableActual && <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">Факт</div><b>{formatNumber(selectedSummary.actual_fte_total, 1)}</b></div>}
+
+                    <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-6">
+                      {displayOptions.tableReceived && (
+                        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                          <div className="text-xs font-medium text-slate-500">Получено</div>
+                          <div className="mt-1 text-xl font-semibold text-slate-950">{formatInt(selectedSummary.total_received)}</div>
+                        </div>
+                      )}
+                      {displayOptions.tableAccepted && (
+                        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                          <div className="text-xs font-medium text-slate-500">Принято</div>
+                          <div className="mt-1 text-xl font-semibold text-emerald-700">{formatInt(selectedSummary.total_accepted)}</div>
+                        </div>
+                      )}
+                      {displayOptions.tableLost && (
+                        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                          <div className="text-xs font-medium text-slate-500">Потеряно</div>
+                          <div className="mt-1 text-xl font-semibold text-rose-700">{formatInt(selectedSummary.total_lost)}</div>
+                        </div>
+                      )}
+                      {displayOptions.tableNoAnswer && (
+                        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                          <div className="text-xs font-medium text-slate-500">Доля потерь</div>
+                          <div className="mt-1 text-xl font-semibold text-slate-950">{formatPercent(selectedSummary.no_answer_rate)}</div>
+                        </div>
+                      )}
+                      {displayOptions.tableForecast && (
+                        <div className="rounded-lg border border-slate-200 bg-blue-50 p-3">
+                          <div className="text-xs font-medium text-blue-700">Прогноз FTE</div>
+                          <div className="mt-1 text-xl font-semibold text-blue-800">{formatNumber(selectedSummary.forecast_fte_total, 1)}</div>
+                        </div>
+                      )}
+                      {displayOptions.tableActual && (
+                        <div className="rounded-lg border border-slate-200 bg-emerald-50 p-3">
+                          <div className="text-xs font-medium text-emerald-700">Факт FTE</div>
+                          <div className="mt-1 text-xl font-semibold text-emerald-800">{formatNumber(selectedSummary.actual_fte_total, 1)}</div>
+                        </div>
+                      )}
                     </div>
                   </div>
 
-                  {(displayOptions.chartCalls || displayOptions.chartFte || displayOptions.chartActual) && (
-                  <div className="mt-5 h-64">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <ComposedChart data={dayChartData} margin={{ top: 10, right: 18, left: 0, bottom: 0 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                        <XAxis dataKey="hour" tick={{ fontSize: 11 }} interval={2} />
-                        <YAxis tick={{ fontSize: 11 }} />
-                        <Tooltip formatter={(value, name) => [formatNumber(value, name === 'received' ? 0 : 2), name === 'received' ? 'Получено' : name === 'actual' ? 'Факт FTE' : 'Прогноз FTE']} />
-                        {displayOptions.chartCalls && <Bar dataKey="received" fill="#bfdbfe" radius={[4, 4, 0, 0]} />}
-                        {displayOptions.chartFte && <Line type="monotone" dataKey="fte" stroke="#2563eb" strokeWidth={2} dot={false} />}
-                        {displayOptions.chartActual && <Line type="monotone" dataKey="actual" stroke="#059669" strokeWidth={2} dot={false} />}
-                      </ComposedChart>
-                    </ResponsiveContainer>
+                  <div className="mt-5 grid gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
+                    {(displayOptions.chartCalls || displayOptions.chartFte || displayOptions.chartActual) && (
+                      <div className="rounded-lg border border-slate-200 p-3">
+                        <div className="mb-3 flex items-center justify-between gap-3">
+                          <div>
+                            <h3 className="text-sm font-semibold text-slate-950">Нагрузка по часам</h3>
+                            <p className="text-xs text-slate-500">Столбцы — звонки, линии — FTE.</p>
+                          </div>
+                          <div className="flex flex-wrap justify-end gap-2 text-xs">
+                            {displayOptions.chartCalls && <span className="rounded bg-blue-100 px-2 py-1 text-blue-700">Звонки</span>}
+                            {displayOptions.chartFte && <span className="rounded bg-blue-600 px-2 py-1 text-white">Прогноз</span>}
+                            {displayOptions.chartActual && <span className="rounded bg-emerald-600 px-2 py-1 text-white">Факт</span>}
+                          </div>
+                        </div>
+                        <div className="h-72">
+                          <ResponsiveContainer width="100%" height="100%">
+                            <ComposedChart data={dayChartData} margin={{ top: 10, right: 18, left: 0, bottom: 0 }}>
+                              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                              <XAxis dataKey="hour" tick={{ fontSize: 11 }} interval={2} />
+                              <YAxis yAxisId="left" tick={{ fontSize: 11 }} />
+                              <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} />
+                              <Tooltip formatter={(value, name) => [formatNumber(value, name === 'received' ? 0 : 2), name === 'received' ? 'Получено' : name === 'actual' ? 'Факт FTE' : 'Прогноз FTE']} />
+                              {displayOptions.chartCalls && <Bar yAxisId="left" dataKey="received" fill="#bfdbfe" radius={[4, 4, 0, 0]} />}
+                              {displayOptions.chartFte && <Line yAxisId="right" type="monotone" dataKey="fte" stroke="#2563eb" strokeWidth={2} dot={false} />}
+                              {displayOptions.chartActual && <Line yAxisId="right" type="monotone" dataKey="actual" stroke="#059669" strokeWidth={2} dot={false} />}
+                            </ComposedChart>
+                          </ResponsiveContainer>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="space-y-3">
+                      <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                        <div className="mb-2 text-sm font-semibold text-slate-950">Часы риска</div>
+                        <div className="space-y-2">
+                          {dayStaffingHotspots.length ? (
+                            dayStaffingHotspots.map((row) => (
+                              <div key={row.hour} className="rounded-md bg-white p-2 text-sm">
+                                <div className="flex items-center justify-between gap-2">
+                                  <b className="text-slate-900">{row.hour_label}</b>
+                                  <span className={row.delta < 0 ? 'font-semibold text-rose-700' : 'font-semibold text-emerald-700'}>
+                                    {formatNumber(row.delta, 2)} FTE
+                                  </span>
+                                </div>
+                                <div className="mt-1 text-xs text-slate-500">
+                                  Прогноз {formatNumber(row.forecast_fte, 2)} · факт {formatNumber(row.actual_fte, 2)}
+                                </div>
+                              </div>
+                            ))
+                          ) : (
+                            <div className="rounded-md border border-dashed border-slate-300 bg-white p-3 text-sm text-slate-500">Отклонений по FTE нет.</div>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                        <div className="mb-2 text-sm font-semibold text-slate-950">Пиковые часы</div>
+                        <div className="space-y-2">
+                          {dayPeakHours.length ? (
+                            dayPeakHours.map((row) => (
+                              <div key={row.hour} className="flex items-center justify-between rounded-md bg-white px-2 py-2 text-sm">
+                                <span className="font-medium text-slate-900">{row.hour_label}</span>
+                                <span className="text-slate-600">{formatInt(row.received_calls)} звонков</span>
+                              </div>
+                            ))
+                          ) : (
+                            <div className="rounded-md border border-dashed border-slate-300 bg-white p-3 text-sm text-slate-500">Звонков за день нет.</div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
                   </div>
-                  )}
 
                   <div className="mt-5 overflow-x-auto rounded-lg border border-slate-200">
                     <table className="min-w-[1180px] w-full divide-y divide-slate-200 text-sm">

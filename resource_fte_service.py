@@ -463,20 +463,12 @@ def _refresh_daily_summary_tx(cursor, report_date) -> None:
     )
 
 
-def _compute_profile_for_weekday_tx(cursor, weekday: int, as_of_date, settings: Dict[str, Any]) -> Dict[str, Any]:
-    start_date = as_of_date - timedelta(days=13)
-    cursor.execute(
-        """
-        SELECT report_date
-        FROM daily_resource_summary
-        WHERE report_date BETWEEN %s AND %s
-          AND weekday = %s
-        ORDER BY report_date DESC
-        LIMIT 2
-        """,
-        (start_date, as_of_date, weekday),
-    )
-    history_dates = [row[0] for row in cursor.fetchall()]
+def _build_profile_from_history_dates_tx(
+    cursor,
+    weekday: int,
+    history_dates: List[Any],
+    settings: Dict[str, Any],
+) -> Dict[str, Any]:
     if not history_dates:
         hourly_profile = [
             {
@@ -502,6 +494,7 @@ def _compute_profile_for_weekday_tx(cursor, weekday: int, as_of_date, settings: 
             "hourly_profile": hourly_profile,
         }
 
+    history_dates = sorted(history_dates, reverse=True)[:2]
     cursor.execute(
         """
         SELECT
@@ -567,6 +560,117 @@ def _compute_profile_for_weekday_tx(cursor, weekday: int, as_of_date, settings: 
         "daily_fte": round(daily_fte, 4),
         "hourly_profile": hourly_profile,
     }
+
+
+def _compute_profile_for_weekday_tx(cursor, weekday: int, as_of_date, settings: Dict[str, Any]) -> Dict[str, Any]:
+    start_date = as_of_date - timedelta(days=13)
+    cursor.execute(
+        """
+        SELECT report_date
+        FROM daily_resource_summary
+        WHERE report_date BETWEEN %s AND %s
+          AND weekday = %s
+        ORDER BY report_date DESC
+        LIMIT 2
+        """,
+        (start_date, as_of_date, weekday),
+    )
+    history_dates = [row[0] for row in cursor.fetchall()]
+    return _build_profile_from_history_dates_tx(cursor, weekday, history_dates, settings)
+
+
+def _week_start_date(value):
+    return value - timedelta(days=value.weekday())
+
+
+def _weekly_aht_from_profiles(profiles: List[Dict[str, Any]]) -> float:
+    total_calls = sum(_to_float(profile.get("avg_daily_calls")) for profile in profiles)
+    if total_calls <= 0:
+        return 0.0
+    weighted_aht = sum(
+        _to_float(profile.get("avg_daily_calls")) * _to_float(profile.get("aht_seconds"))
+        for profile in profiles
+    )
+    return weighted_aht / total_calls
+
+
+def _apply_weekly_aht_to_profile(profile: Dict[str, Any], weekly_aht_seconds: float, settings: Dict[str, Any]) -> Dict[str, Any]:
+    effective_minutes = 60 * settings["occ"] * settings["ur"]
+    hourly_profile = []
+    daily_fte = 0.0
+    for row in profile.get("hourly_profile", []):
+        avg_calls = _to_float(row.get("avg_calls"))
+        workload_minutes = avg_calls * settings["answer_rate"] * weekly_aht_seconds / 60
+        fte = workload_minutes / effective_minutes if effective_minutes > 0 else 0.0
+        fte_rounded = _round_value(fte, settings["fte_rounding"])
+        daily_fte += fte
+        hourly_profile.append(
+            {
+                **row,
+                "aht_seconds": round(weekly_aht_seconds, 4),
+                "workload_minutes": round(workload_minutes, 4),
+                "effective_fte_minutes": round(effective_minutes, 4),
+                "fte": round(fte, 4),
+                "fte_rounded": round(fte_rounded, 4),
+            }
+        )
+    return {
+        **profile,
+        "forecast_aht_seconds": round(weekly_aht_seconds, 4),
+        "daily_fte": round(daily_fte, 4),
+        "hourly_profile": hourly_profile,
+    }
+
+
+def _compute_week_forecast_profiles_tx(cursor, target_week_start, settings: Dict[str, Any]) -> List[Dict[str, Any]]:
+    as_of_date = target_week_start - timedelta(days=1)
+    base_profiles = [
+        _compute_profile_for_weekday_tx(cursor, weekday_meta["index"], as_of_date, settings)
+        for weekday_meta in WEEKDAYS_RU
+    ]
+    weekly_aht_seconds = _weekly_aht_from_profiles(base_profiles)
+    return [
+        {**WEEKDAYS_RU[index], **_apply_weekly_aht_to_profile(profile, weekly_aht_seconds, settings)}
+        for index, profile in enumerate(base_profiles)
+    ]
+
+
+def _compute_historical_forecast_profile_for_day_tx(cursor, report_date, settings: Dict[str, Any]) -> Dict[str, Any]:
+    profiles = _compute_week_forecast_profiles_tx(cursor, _week_start_date(report_date), settings)
+    return profiles[report_date.weekday()]
+
+
+def _apply_profile_forecast_to_day_tx(cursor, report_date, profile: Dict[str, Any]) -> None:
+    hourly = {int(item["hour"]): item for item in (profile.get("hourly_profile") or [])}
+    for hour in range(24):
+        profile_row = hourly.get(hour, {})
+        forecast_calls = _to_float(profile_row.get("avg_calls"))
+        forecast_fte = _to_float(profile_row.get("fte"))
+        cursor.execute(
+            """
+            UPDATE daily_resource_hours
+            SET forecast_calls = %s,
+                forecast_fte = %s,
+                fact_forecast_delta = actual_fte - %s,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE report_date = %s AND hour = %s
+            """,
+            (forecast_calls, forecast_fte, forecast_fte, report_date, hour),
+        )
+    _refresh_daily_summary_tx(cursor, report_date)
+
+
+def _refresh_historical_forecast_for_day_tx(cursor, report_date, settings: Dict[str, Any]) -> Dict[str, Any]:
+    profile = _compute_historical_forecast_profile_for_day_tx(cursor, report_date, settings)
+    _apply_profile_forecast_to_day_tx(cursor, report_date, profile)
+    return profile
+
+
+def _refresh_all_historical_forecasts_tx(cursor, settings: Dict[str, Any]) -> None:
+    cursor.execute("SELECT report_date FROM daily_resource_summary ORDER BY report_date ASC")
+    report_dates = [row[0] for row in cursor.fetchall()]
+    for report_date in report_dates:
+        _refresh_historical_forecast_for_day_tx(cursor, report_date, settings)
 
 
 def _upsert_profiles_tx(cursor, as_of_date, settings: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -713,6 +817,7 @@ def import_resource_csv(db, report_date_value: str, content: bytes, filename: st
             values,
         )
         _refresh_daily_summary_tx(cursor, report_date)
+        _refresh_all_historical_forecasts_tx(cursor, settings)
         cursor.execute("SELECT COALESCE(MAX(report_date), %s) FROM daily_resource_summary", (report_date,))
         as_of_date = cursor.fetchone()[0] or report_date
         profiles = _upsert_profiles_tx(cursor, as_of_date, settings)
@@ -759,27 +864,8 @@ def recalculate_resource_forecast(db, as_of_date_value: Optional[str] = None) ->
         else:
             cursor.execute("SELECT COALESCE(MAX(report_date), CURRENT_DATE) FROM daily_resource_summary")
             as_of_date = cursor.fetchone()[0]
+        _refresh_all_historical_forecasts_tx(cursor, settings)
         profiles = _upsert_profiles_tx(cursor, as_of_date, settings)
-        profile_by_weekday = {int(profile["weekday"]): profile for profile in profiles}
-        cursor.execute("SELECT report_date, weekday FROM daily_resource_summary")
-        for report_date, weekday in cursor.fetchall():
-            profile = profile_by_weekday.get(int(weekday))
-            hourly = {int(item["hour"]): item for item in (profile.get("hourly_profile") or [])} if profile else {}
-            for hour in range(24):
-                forecast_calls = _to_float(hourly.get(hour, {}).get("avg_calls"))
-                forecast_fte = _to_float(hourly.get(hour, {}).get("fte"))
-                cursor.execute(
-                    """
-                    UPDATE daily_resource_hours
-                    SET forecast_calls = %s,
-                        forecast_fte = %s,
-                        fact_forecast_delta = actual_fte - %s,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE report_date = %s AND hour = %s
-                    """,
-                    (forecast_calls, forecast_fte, forecast_fte, report_date, hour),
-                )
-            _refresh_daily_summary_tx(cursor, report_date)
     return get_resource_overview(db, as_of_date_value=as_of_date.isoformat())
 
 
@@ -796,6 +882,7 @@ def get_resource_overview(db, date_from: Optional[str] = None, date_to: Optional
         else:
             cursor.execute("SELECT COALESCE(MAX(report_date), CURRENT_DATE) FROM daily_resource_summary")
             as_of_date = cursor.fetchone()[0]
+        _refresh_all_historical_forecasts_tx(cursor, settings)
         profiles = _fetch_latest_profiles_tx(cursor, as_of_date, settings)
 
         where = []
@@ -854,26 +941,7 @@ def get_resource_day(db, report_date_value: str) -> Dict[str, Any]:
     report_date = _parse_report_date(report_date_value)
     with db._get_cursor() as cursor:
         settings = _get_settings_tx(cursor)
-        profile = _compute_profile_for_weekday_tx(cursor, report_date.weekday(), report_date, settings)
-        profile_by_hour = {int(item["hour"]): item for item in profile.get("hourly_profile", [])}
-        for hour, profile_row in profile_by_hour.items():
-            cursor.execute(
-                """
-                UPDATE daily_resource_hours
-                SET forecast_calls = %s,
-                    forecast_fte = %s,
-                    fact_forecast_delta = actual_fte - %s
-                WHERE report_date = %s AND hour = %s
-                """,
-                (
-                    _to_float(profile_row.get("avg_calls")),
-                    _to_float(profile_row.get("fte")),
-                    _to_float(profile_row.get("fte")),
-                    report_date,
-                    hour,
-                ),
-            )
-        _refresh_daily_summary_tx(cursor, report_date)
+        profile = _refresh_historical_forecast_for_day_tx(cursor, report_date, settings)
         cursor.execute(
             """
             SELECT report_date, weekday, total_received, total_accepted, total_lost,
