@@ -246,6 +246,8 @@ const ToggleSwitch = ({ checked, label, onChange }) => (
 const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast }) => {
   const apiRoot = String(apiBaseUrl || '').replace(/\/+$/, '');
   const fileInputRef = useRef(null);
+  const showToastRef = useRef(showToast);
+  const authHeaderRef = useRef(withAccessTokenHeader);
   const [overview, setOverview] = useState(null);
   const [selectedDate, setSelectedDate] = useState('');
   const [selectedDay, setSelectedDay] = useState(null);
@@ -262,12 +264,23 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
   const [activeDashboardView, setActiveDashboardView] = useState('overview');
   const [displayOptions, setDisplayOptions] = useState(loadDisplayOptions);
   const [selectedForecastWeekday, setSelectedForecastWeekday] = useState(0);
+  const userId = user?.id || '';
 
-  const notify = useCallback(
-    (message, type = 'success') => {
-      if (typeof showToast === 'function') showToast(message, type);
-    },
-    [showToast],
+  useEffect(() => {
+    showToastRef.current = showToast;
+  }, [showToast]);
+
+  useEffect(() => {
+    authHeaderRef.current = withAccessTokenHeader;
+  }, [withAccessTokenHeader]);
+
+  const notify = useCallback((message, type = 'success') => {
+    if (typeof showToastRef.current === 'function') showToastRef.current(message, type);
+  }, []);
+
+  const buildHeaders = useCallback(
+    (extra = {}) => apiHeaders(authHeaderRef.current, { ...extra, 'X-User-Id': String(userId) }),
+    [userId],
   );
 
   const fetchOverview = useCallback(async () => {
@@ -276,7 +289,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
     try {
       const response = await axios.get(`${apiRoot}/api/resource_fte/overview`, {
         params: { date_from: dateFrom || undefined, date_to: dateTo || undefined },
-        headers: apiHeaders(withAccessTokenHeader, { 'X-User-Id': String(user?.id || '') }),
+        headers: buildHeaders(),
       });
       const payload = response.data || {};
       setOverview(payload);
@@ -288,7 +301,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
     } finally {
       setIsLoading(false);
     }
-  }, [apiRoot, dateFrom, dateTo, notify, user?.id, withAccessTokenHeader]);
+  }, [apiRoot, buildHeaders, dateFrom, dateTo, notify]);
 
   const fetchDay = useCallback(
     async (date) => {
@@ -298,7 +311,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
       }
       try {
         const response = await axios.get(`${apiRoot}/api/resource_fte/day/${date}`, {
-          headers: apiHeaders(withAccessTokenHeader, { 'X-User-Id': String(user?.id || '') }),
+          headers: buildHeaders(),
         });
         setSelectedDay(response.data?.day || null);
       } catch (error) {
@@ -306,7 +319,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
         notify(error?.response?.data?.error || 'Не удалось открыть день', 'error');
       }
     },
-    [apiRoot, notify, user?.id, withAccessTokenHeader],
+    [apiRoot, buildHeaders, notify],
   );
 
   useEffect(() => {
@@ -548,7 +561,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
     setIsUploading(true);
     try {
       const response = await axios.post(`${apiRoot}/api/resource_fte/upload`, formData, {
-        headers: apiHeaders(withAccessTokenHeader, { 'X-User-Id': String(user?.id || '') }),
+        headers: buildHeaders(),
       });
       notify('Отчет загружен и пересчитан');
       setUploadFile(null);
@@ -570,7 +583,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
       await axios.post(
         `${apiRoot}/api/resource_fte/recalculate`,
         {},
-        { headers: apiHeaders(withAccessTokenHeader, { 'X-User-Id': String(user?.id || '') }) },
+        { headers: buildHeaders() },
       );
       notify('Прогноз пересчитан');
       await fetchOverview();
@@ -585,9 +598,8 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
   const handleSaveSettings = async () => {
     try {
       const response = await axios.put(`${apiRoot}/api/resource_fte/settings`, settingsDraft, {
-        headers: apiHeaders(withAccessTokenHeader, {
+        headers: buildHeaders({
           'Content-Type': 'application/json',
-          'X-User-Id': String(user?.id || ''),
         }),
       });
       notify('Настройки сохранены');
@@ -622,9 +634,8 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
           comments: row.comments,
         },
         {
-          headers: apiHeaders(withAccessTokenHeader, {
+          headers: buildHeaders({
             'Content-Type': 'application/json',
-            'X-User-Id': String(user?.id || ''),
           }),
         },
       );
