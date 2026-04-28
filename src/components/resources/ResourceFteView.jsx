@@ -91,6 +91,7 @@ const DISPLAY_PREFERENCES_STORAGE_KEY = 'otp_resource_fte_display_v1';
 const VIEW_TABS = [
   { key: 'overview', label: 'Обзор', icon: LayoutDashboard },
   { key: 'day', label: 'День', icon: CalendarDays },
+  { key: 'next_week', label: 'След. неделя', icon: TrendingUp },
   { key: 'losses', label: 'Потери', icon: PhoneMissed },
   { key: 'profiles', label: 'Профили', icon: BarChart3 },
   { key: 'settings', label: 'Настройки', icon: SlidersHorizontal },
@@ -411,12 +412,49 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
 
   const nextWeekForecast = useMemo(() => {
     const dates = getNextWeekDates(overview?.as_of_date || todayIso());
-    return (overview?.profiles || []).map((profile) => ({
-      ...profile,
-      forecast_date: dates[Number(profile.weekday || 0)] || '',
-      operators_equivalent: Number(profile.daily_fte || 0) / 8,
-    }));
-  }, [overview?.as_of_date, overview?.profiles]);
+    const profiles = overview?.profiles || [];
+    const totalCalls = profiles.reduce((sum, profile) => sum + Number(profile.avg_daily_calls || 0), 0);
+    const weeklyAhtSeconds = totalCalls > 0
+      ? profiles.reduce((sum, profile) => sum + Number(profile.avg_daily_calls || 0) * Number(profile.aht_seconds || 0), 0) / totalCalls
+      : 0;
+    const settings = overview?.settings || {};
+    const answerRate = Number(settings.answer_rate || 0);
+    const occ = Number(settings.occ || 0);
+    const ur = Number(settings.ur || 0);
+    const shrinkage = Number(settings.shrinkage_coeff || 0);
+    const weeklyHours = Number(settings.weekly_hours_per_operator || 40);
+    const effectiveMinutes = 60 * occ * ur;
+    const days = profiles.map((profile) => {
+      const calls = Number(profile.avg_daily_calls || 0);
+      const workloadMinutes = calls * answerRate * weeklyAhtSeconds / 60;
+      const dailyFte = effectiveMinutes > 0 ? workloadMinutes / effectiveMinutes : 0;
+      return {
+        ...profile,
+        forecast_date: dates[Number(profile.weekday || 0)] || '',
+        forecast_calls: calls,
+        forecast_aht_seconds: weeklyAhtSeconds,
+        forecast_workload_minutes: workloadMinutes,
+        forecast_daily_fte: dailyFte,
+        operators_equivalent: dailyFte / 8,
+      };
+    });
+    const weeklyFteHours = days.reduce((sum, day) => sum + Number(day.forecast_daily_fte || 0), 0);
+    const baseOperators = weeklyHours > 0 ? weeklyFteHours / weeklyHours : 0;
+    const operatorsWithShrinkage = shrinkage > 0 ? baseOperators / shrinkage : baseOperators;
+    return {
+      days,
+      weeklyAhtSeconds,
+      answerRate,
+      occ,
+      ur,
+      shrinkage,
+      weeklyHours,
+      effectiveMinutes,
+      weeklyFteHours,
+      baseOperators,
+      operatorsWithShrinkage,
+    };
+  }, [overview?.as_of_date, overview?.profiles, overview?.settings]);
 
   const visibleMetricCount = [
     displayOptions.metricOperators,
@@ -922,6 +960,71 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
               </section>
             )}
 
+            {activeDashboardView === 'next_week' && (
+              <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                  <div>
+                    <h2 className="text-lg font-semibold text-slate-950">Прогноз FTE на следующую неделю</h2>
+                    <p className="text-sm text-slate-500">Один AHT недели и единые коэффициенты применяются ко всем дням ПН-ВС.</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleRecalculate}
+                    disabled={isRecalculating}
+                    className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-100"
+                  >
+                    <RefreshCw size={16} className={isRecalculating ? 'animate-spin' : ''} />
+                    Пересчитать
+                  </button>
+                </div>
+
+                <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-6">
+                  <StatCard icon={Clock3} label="AHT недели" value={formatSeconds(nextWeekForecast.weeklyAhtSeconds)} hint="Взвешенно по профилям ПН-ВС" tone="blue" />
+                  <StatCard icon={PhoneCall} label="Принято" value={formatPercent(nextWeekForecast.answerRate)} hint="Коэффициент для всей недели" tone="slate" />
+                  <StatCard icon={Users} label="OCC / UR" value={`${formatPercent(nextWeekForecast.occ, 0)} / ${formatPercent(nextWeekForecast.ur, 0)}`} hint={`Эфф. мин/час: ${formatNumber(nextWeekForecast.effectiveMinutes, 1)}`} tone="emerald" />
+                  <StatCard icon={ShieldAlert} label="Усушка" value={formatPercent(nextWeekForecast.shrinkage, 0)} hint="Коэффициент недели" tone="amber" />
+                  <StatCard icon={TrendingUp} label="FTE-часы недели" value={formatNumber(nextWeekForecast.weeklyFteHours, 1)} hint="Сумма ПН-ВС" tone="blue" />
+                  <StatCard icon={Users} label="Операторы" value={formatNumber(nextWeekForecast.operatorsWithShrinkage, 2)} hint={`Без усушки: ${formatNumber(nextWeekForecast.baseOperators, 2)}`} tone="emerald" />
+                </div>
+
+                <div className="mt-5 overflow-x-auto rounded-lg border border-slate-200">
+                  <table className="min-w-[980px] w-full divide-y divide-slate-200 text-sm">
+                    <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+                      <tr>
+                        <th className="px-3 py-3 text-left">День</th>
+                        <th className="px-3 py-3 text-left">Дата</th>
+                        <th className="px-3 py-3 text-right">Прогноз звонков</th>
+                        <th className="px-3 py-3 text-right">AHT недели</th>
+                        <th className="px-3 py-3 text-right">Минут нагрузки</th>
+                        <th className="px-3 py-3 text-right">FTE дня</th>
+                        <th className="px-3 py-3 text-right">Опер. экв.</th>
+                        <th className="px-3 py-3 text-left">История</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 bg-white">
+                      {(nextWeekForecast.days || []).map((profile) => (
+                        <tr key={profile.weekday} className="hover:bg-slate-50/60">
+                          <td className="px-3 py-3 font-semibold text-slate-950">{profile.short}</td>
+                          <td className="px-3 py-3 text-slate-700">{formatDate(profile.forecast_date)}</td>
+                          <td className="px-3 py-3 text-right">{formatInt(profile.forecast_calls)}</td>
+                          <td className="px-3 py-3 text-right">{formatSeconds(profile.forecast_aht_seconds)}</td>
+                          <td className="px-3 py-3 text-right">{formatNumber(profile.forecast_workload_minutes, 1)}</td>
+                          <td className="px-3 py-3 text-right font-semibold text-blue-700">{formatNumber(profile.forecast_daily_fte, 2)}</td>
+                          <td className="px-3 py-3 text-right">{formatNumber(profile.operators_equivalent, 2)}</td>
+                          <td className="px-3 py-3">
+                            <span className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold ${profile.insufficient_history ? 'bg-amber-50 text-amber-700' : 'bg-emerald-50 text-emerald-700'}`}>
+                              {profile.insufficient_history ? <AlertTriangle size={13} /> : <CheckCircle2 size={13} />}
+                              {profile.history_count}/2
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            )}
+
             {(activeDashboardView === 'overview' || activeDashboardView === 'profiles') && (
             <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
               <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -942,42 +1045,6 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
               <div className="mt-4 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-sm text-blue-900">
                 Профиль - это типовой рисунок нагрузки конкретного дня недели: сколько звонков приходит по часам, какой AHT получается из истории и сколько FTE нужно. Поэтому прогноз следующей недели строится не как один общий средний день, а отдельно для ПН, ВТ, СР, ЧТ, ПТ, СБ и ВС.
               </div>
-              {nextWeekForecast.length ? (
-                <div className="mt-5">
-                  <div className="mb-3 flex items-center justify-between gap-3">
-                    <div>
-                      <h3 className="text-sm font-semibold text-slate-950">Прогноз FTE на следующую неделю</h3>
-                      <p className="text-xs text-slate-500">Расчет берет профиль соответствующего дня недели и переносит его на ближайшую следующую неделю.</p>
-                    </div>
-                  </div>
-                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-7">
-                    {nextWeekForecast.map((profile) => (
-                      <button
-                        key={profile.weekday}
-                        type="button"
-                        onClick={() => setActiveWeekday(profile.weekday)}
-                        className={`rounded-lg border p-3 text-left transition ${
-                          Number(activeWeekday) === Number(profile.weekday)
-                            ? 'border-blue-300 bg-blue-50'
-                            : 'border-slate-200 bg-slate-50 hover:border-slate-300 hover:bg-white'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="text-sm font-semibold text-slate-950">{profile.short}</span>
-                          {profile.insufficient_history ? <AlertTriangle size={14} className="text-amber-500" /> : <CheckCircle2 size={14} className="text-emerald-500" />}
-                        </div>
-                        <div className="mt-1 text-xs text-slate-500">{formatDate(profile.forecast_date)}</div>
-                        <div className="mt-3 space-y-2 text-xs">
-                          <div className="flex justify-between gap-2"><span className="text-slate-500">Звонки</span><b className="text-slate-900">{formatInt(profile.avg_daily_calls)}</b></div>
-                          <div className="flex justify-between gap-2"><span className="text-slate-500">AHT</span><b className="text-slate-900">{formatSeconds(profile.aht_seconds)}</b></div>
-                          <div className="flex justify-between gap-2"><span className="text-slate-500">FTE</span><b className="text-blue-700">{formatNumber(profile.daily_fte, 2)}</b></div>
-                          <div className="flex justify-between gap-2"><span className="text-slate-500">Опер.</span><b className="text-slate-900">{formatNumber(profile.operators_equivalent, 2)}</b></div>
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              ) : null}
               <div className="mt-4 flex gap-2 overflow-x-auto pb-1">
                 {(overview?.profiles || []).map((profile) => (
                   <button
