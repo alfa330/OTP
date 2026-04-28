@@ -411,6 +411,26 @@ const canAccessLmsSectionForUser = (userLike) => {
     );
 };
 
+const normalizeResourceFteAccessName = (value) =>
+    String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+
+const RESOURCE_FTE_ALLOWED_USER_NAMES = new Set([
+    'omarove aru',
+    'ядигаров руслан'
+]);
+
+const canAccessResourceFteSectionForUser = (userLike) => {
+    const possibleNames = [
+        userLike?.name,
+        userLike?.full_name,
+        userLike?.fullName,
+        userLike?.login
+    ];
+    return possibleNames.some((value) =>
+        RESOURCE_FTE_ALLOWED_USER_NAMES.has(normalizeResourceFteAccessName(value))
+    );
+};
+
 const isNewTabNavigationEvent = (event) => Boolean(event?.ctrlKey || event?.metaKey);
 
 const normalizeAppRelativePathname = (pathname = '') => {
@@ -24662,6 +24682,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const isSuperAdmin = currentUserRole === 'super_admin';
             const isAdminLikeRole = isAdminLikeRoleFn(currentUserRole);
             const canAccessLmsSection = canAccessLmsSectionForUser(user);
+            const canAccessResourceFteSection = canAccessResourceFteSectionForUser(user);
             const canChangeAccountAvatar = isAdminLikeRole || isSupervisorRole(currentUserRole);
             const [isAuthInitializing, setIsAuthInitializing] = useState(true);
             const [showAuthEntranceSplash, setShowAuthEntranceSplash] = useState(false);
@@ -27428,7 +27449,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return;
                 }
 
-                if (requestedViewFromUrl && (requestedViewFromUrl !== 'lms' || canAccessLmsSection)) {
+                const canOpenRequestedView =
+                    requestedViewFromUrl &&
+                    (requestedViewFromUrl !== 'lms' || canAccessLmsSection) &&
+                    (requestedViewFromUrl !== 'resource_fte' || canAccessResourceFteSection);
+                if (canOpenRequestedView) {
                     setView(requestedViewFromUrl);
                     return;
                 }
@@ -27436,7 +27461,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (isAdminLikeRoleFn(user?.role)) setView('sv_list');
                 else if (isSupervisorRole(user?.role)) setView('operators');
                 else setView('hours');
-            }, [user?.id, user?.role, canAccessLmsSection, requestedViewFromLocation]);
+            }, [user?.id, user?.role, canAccessLmsSection, canAccessResourceFteSection, requestedViewFromLocation]);
 
             useEffect(() => {
                 // Do not touch view while authentication is still initializing
@@ -27455,7 +27480,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     else if (user?.role === 'trainer') setView('surveys');
                     else setView('hours');
                 }
-            }, [isAuthInitializing, user?.role, view, canAccessLmsSection]);
+                if (view === 'resource_fte' && !canAccessResourceFteSection) {
+                    if (isAdminLikeRoleFn(user?.role)) setView('sv_list');
+                    else if (isSupervisorRole(user?.role)) setView('operators');
+                    else if (user?.role === 'trainer') setView('surveys');
+                    else setView('hours');
+                }
+            }, [isAuthInitializing, user?.role, view, canAccessLmsSection, canAccessResourceFteSection]);
 
             useEffect(() => {
                 // Only mirror `view` into the URL after authentication has
@@ -32196,14 +32227,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <FaIcon className="fas fa-clock" /> <span className="sidebar-text">Учет часов</span>
                                             </button>
                                         </li>
-                                        <li>
-                                            <button
-                                                onClick={(e) => handleSidebarViewNavigation(e, 'resource_fte')}
-                                                className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'resource_fte' ? 'bg-blue-700' : ''}`}
-                                            >
-                                                <FaIcon className="fas fa-users-cog" /> <span className="sidebar-text">Расчет ресурсов</span>
-                                            </button>
-                                        </li>
+                                        {canAccessResourceFteSection && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'resource_fte')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'resource_fte' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-users-cog" /> <span className="sidebar-text">Расчет ресурсов</span>
+                                                </button>
+                                            </li>
+                                        )}
                                         <li>
                                             <button onClick={(e) => handleSidebarViewNavigation(e, 'trainings')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'trainings' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-book"></FaIcon> <span className="sidebar-text">Учет тренингов</span>
@@ -32289,14 +32322,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <FaIcon className="fas fa-clock" /> <span className="sidebar-text">Учет часов</span>
                                             </button>
                                         </li>
-                                        <li>
-                                            <button
-                                                onClick={(e) => handleSidebarViewNavigation(e, 'resource_fte')}
-                                                className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'resource_fte' ? 'bg-blue-700' : ''}`}
-                                            >
-                                                <FaIcon className="fas fa-users-cog" /> <span className="sidebar-text">Расчет ресурсов</span>
-                                            </button>
-                                        </li>
+                                        {canAccessResourceFteSection && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'resource_fte')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'resource_fte' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-users-cog" /> <span className="sidebar-text">Расчет ресурсов</span>
+                                                </button>
+                                            </li>
+                                        )}
                                         <li>
                                             <button onClick={(e) => handleSidebarViewNavigation(e, 'trainings')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'trainings' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-book"></FaIcon> <span className="sidebar-text">Учет тренингов</span>
@@ -32500,7 +32535,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 ? 'p-0 h-screen overflow-hidden'
                                 : (canAccessLmsSection && view === 'lms')
                                     ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
-                                    : (view === 'tasks' || view === 'work_schedules' || view === 'resource_fte')
+                                    : (view === 'tasks' || view === 'work_schedules' || (view === 'resource_fte' && canAccessResourceFteSection))
                                         ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
                                     : 'p-8 bg-gray-50 min-h-screen overflow-y-auto'
                         } ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}
@@ -34042,7 +34077,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     />
                                 ))}
                                 {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
-                                {( view === "resource_fte" && (
+                                {( view === "resource_fte" && canAccessResourceFteSection && (
                                     <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
                                         <ResourceFteView
                                             user={user}
@@ -35038,7 +35073,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {( view === "tasks" && (<TasksView user={user} showToast={showToast} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} />))}
                                 {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
                                 {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
-                                {( view === "resource_fte" && (
+                                {( view === "resource_fte" && canAccessResourceFteSection && (
                                     <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
                                         <ResourceFteView
                                             user={user}
