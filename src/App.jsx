@@ -55,6 +55,7 @@ const HistoryModal = lazyWithRetry(() => import('./components/modals/HistoryModa
 const UserEditModal = lazyWithRetry(() => import('./components/modals/UserEditModal'));
 const AccountAvatarModal = lazyWithRetry(() => import('./components/modals/AccountAvatarModal'));
 const SalaryCalculatorChat = lazyWithRetry(() => import('./components/salary/SalaryCalculatorChat'));
+const ResourceFteView = lazyWithRetry(() => import('./components/resources/ResourceFteView'));
 
 
 if (typeof window !== 'undefined') {
@@ -32196,6 +32197,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </button>
                                         </li>
                                         <li>
+                                            <button
+                                                onClick={(e) => handleSidebarViewNavigation(e, 'resource_fte')}
+                                                className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'resource_fte' ? 'bg-blue-700' : ''}`}
+                                            >
+                                                <FaIcon className="fas fa-users-cog" /> <span className="sidebar-text">Расчет ресурсов</span>
+                                            </button>
+                                        </li>
+                                        <li>
                                             <button onClick={(e) => handleSidebarViewNavigation(e, 'trainings')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'trainings' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-book"></FaIcon> <span className="sidebar-text">Учет тренингов</span>
                                             </button>
@@ -32278,6 +32287,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sv_hours' ? 'bg-blue-700' : ''}`}
                                             >
                                                 <FaIcon className="fas fa-clock" /> <span className="sidebar-text">Учет часов</span>
+                                            </button>
+                                        </li>
+                                        <li>
+                                            <button
+                                                onClick={(e) => handleSidebarViewNavigation(e, 'resource_fte')}
+                                                className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'resource_fte' ? 'bg-blue-700' : ''}`}
+                                            >
+                                                <FaIcon className="fas fa-users-cog" /> <span className="sidebar-text">Расчет ресурсов</span>
                                             </button>
                                         </li>
                                         <li>
@@ -32483,7 +32500,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 ? 'p-0 h-screen overflow-hidden'
                                 : (canAccessLmsSection && view === 'lms')
                                     ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
-                                    : (view === 'tasks' || view === 'work_schedules')
+                                    : (view === 'tasks' || view === 'work_schedules' || view === 'resource_fte')
                                         ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
                                     : 'p-8 bg-gray-50 min-h-screen overflow-y-auto'
                         } ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}
@@ -34025,6 +34042,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     />
                                 ))}
                                 {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
+                                {( view === "resource_fte" && (
+                                    <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
+                                        <ResourceFteView
+                                            user={user}
+                                            showToast={showToast}
+                                            apiBaseUrl={API_BASE_URL}
+                                            withAccessTokenHeader={withAccessTokenHeader}
+                                        />
+                                    </Suspense>
+                                ))}
                                 {( view === "call_division" && (<AdminCallsUploadView user={user}/>))}
                                 {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
                             </>
@@ -35011,6 +35038,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {( view === "tasks" && (<TasksView user={user} showToast={showToast} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} />))}
                                 {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
                                 {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
+                                {( view === "resource_fte" && (
+                                    <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
+                                        <ResourceFteView
+                                            user={user}
+                                            showToast={showToast}
+                                            apiBaseUrl={API_BASE_URL}
+                                            withAccessTokenHeader={withAccessTokenHeader}
+                                        />
+                                    </Suspense>
+                                ))}
                                 {( view === "call_division" && (<AdminCallsUploadView user={user}/>))}
                                 {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
                             </>
