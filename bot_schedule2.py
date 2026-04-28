@@ -10894,6 +10894,47 @@ def get_trainings():
         logging.error(f"Error fetching trainings: {e}", exc_info=True)
         return jsonify({"error": f"Internal server error"}), 500
 
+def _training_time_to_minutes(value):
+    try:
+        if hasattr(value, 'hour') and hasattr(value, 'minute'):
+            return int(value.hour) * 60 + int(value.minute)
+        parsed = datetime.strptime(str(value), '%H:%M')
+        return parsed.hour * 60 + parsed.minute
+    except Exception:
+        return None
+
+def _training_intervals_overlap(left_start, left_end, right_start, right_end):
+    ls = _training_time_to_minutes(left_start)
+    le = _training_time_to_minutes(left_end)
+    rs = _training_time_to_minutes(right_start)
+    re = _training_time_to_minutes(right_end)
+    if None in (ls, le, rs, re):
+        return False
+    if le <= ls:
+        le += 24 * 60
+    if re <= rs:
+        re += 24 * 60
+    return max(ls, rs) < min(le, re)
+
+def _find_overlapping_training(operator_id, training_date, start_time, end_time, exclude_training_id=None):
+    with db._get_cursor() as cursor:
+        cursor.execute("""
+            SELECT id, start_time, end_time
+            FROM trainings
+            WHERE operator_id = %s
+              AND training_date = %s
+              AND (%s IS NULL OR id <> %s)
+        """, (operator_id, training_date, exclude_training_id, exclude_training_id))
+        rows = cursor.fetchall() or []
+    for row in rows:
+        if _training_intervals_overlap(start_time, end_time, row[1], row[2]):
+            return {
+                "id": row[0],
+                "start_time": row[1].strftime('%H:%M') if hasattr(row[1], 'strftime') else str(row[1]),
+                "end_time": row[2].strftime('%H:%M') if hasattr(row[2], 'strftime') else str(row[2])
+            }
+    return None
+
 @app.route('/api/trainings', methods=['POST'])
 @require_api_key
 def add_training():
@@ -10957,23 +10998,18 @@ def add_training():
                 logging.warning("Blocked training creation: requester=%s operator=%s error=%s", requester_id, operator_ids[0], message)
                 return jsonify({"error": message}), status_code
 
-            with db._get_cursor() as cursor:
-                cursor.execute("""
-                    SELECT id
-                    FROM trainings
-                    WHERE operator_id = %s
-                      AND training_date = %s
-                      AND start_time = %s
-                      AND end_time = %s
-                    LIMIT 1
-                """, (int(operator[0]), data['date'], data['start_time'], data['end_time']))
-                existing_training = cursor.fetchone()
-            if existing_training:
+            overlapping_training = _find_overlapping_training(
+                int(operator[0]),
+                data['date'],
+                data['start_time'],
+                data['end_time']
+            )
+            if overlapping_training:
                 return jsonify({
-                    "status": "duplicate",
-                    "error": "Training already exists for this operator and time",
-                    "duplicate": True,
-                    "id": existing_training[0]
+                    "status": "overlap",
+                    "error": "Training overlaps with an existing training for this operator",
+                    "overlap": True,
+                    "training": overlapping_training
                 }), 409
 
             training_id = db.add_training(
@@ -11020,24 +11056,19 @@ def add_training():
                     continue
 
                 scoped_operator_id = int(operator[0])
-                with db._get_cursor() as cursor:
-                    cursor.execute("""
-                        SELECT id
-                        FROM trainings
-                        WHERE operator_id = %s
-                          AND training_date = %s
-                          AND start_time = %s
-                          AND end_time = %s
-                        LIMIT 1
-                    """, (scoped_operator_id, data['date'], data['start_time'], data['end_time']))
-                    existing_training = cursor.fetchone()
-                if existing_training:
+                overlapping_training = _find_overlapping_training(
+                    scoped_operator_id,
+                    data['date'],
+                    data['start_time'],
+                    data['end_time']
+                )
+                if overlapping_training:
                     errors.append({
                         "operator_id": int(raw_operator_id),
-                        "error": "Training already exists for this operator and time",
+                        "error": "Training overlaps with an existing training for this operator",
                         "status_code": 409,
-                        "duplicate": True,
-                        "id": existing_training[0]
+                        "overlap": True,
+                        "training": overlapping_training
                     })
                     continue
 
@@ -11168,24 +11199,19 @@ def update_training(training_id):
         effective_date = data.get('date') or training[2].strftime('%Y-%m-%d')
         effective_start = data.get('start_time') or training[3].strftime('%H:%M')
         effective_end = data.get('end_time') or training[4].strftime('%H:%M')
-        with db._get_cursor() as cursor:
-            cursor.execute("""
-                SELECT id
-                FROM trainings
-                WHERE operator_id = %s
-                  AND training_date = %s
-                  AND start_time = %s
-                  AND end_time = %s
-                  AND id <> %s
-                LIMIT 1
-            """, (training[1], effective_date, effective_start, effective_end, training_id))
-            duplicate_training = cursor.fetchone()
-        if duplicate_training:
+        overlapping_training = _find_overlapping_training(
+            training[1],
+            effective_date,
+            effective_start,
+            effective_end,
+            exclude_training_id=training_id
+        )
+        if overlapping_training:
             return jsonify({
-                "status": "duplicate",
-                "error": "Training already exists for this operator and time",
-                "duplicate": True,
-                "id": duplicate_training[0]
+                "status": "overlap",
+                "error": "Training overlaps with an existing training for this operator",
+                "overlap": True,
+                "training": overlapping_training
             }), 409
 
         success = db.update_training(

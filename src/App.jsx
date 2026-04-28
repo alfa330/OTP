@@ -2730,7 +2730,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             closeTrainingModal();
             } catch (err) {
             console.error('handleTrainingSaveFromModal error', err);
-            fallbackToast('Не удалось сохранить тренинг', 'error');
+            const message = err?.response?.data?.overlap
+                ? 'У оператора уже есть тренинг, который пересекается по времени'
+                : 'Не удалось сохранить тренинг';
+            fallbackToast(message, 'error');
+            throw err;
             } finally {
             setIsTrainingActionLoading(false);
             }
@@ -10747,8 +10751,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             setPlannerOfflineActivityModalError('Выберите причину тренинга.');
                             return;
                         }
-                        if (plannerOfflineTrainingDraftOverlapInfo?.hasExactDuplicate) {
-                            setPlannerOfflineActivityModalError('Такой тренинг уже есть у оператора на это время.');
+                        if (plannerOfflineTrainingDraftOverlapInfo?.hasOverlap) {
+                            setPlannerOfflineActivityModalError('У оператора уже есть тренинг, который пересекается по времени.');
                             return;
                         }
                         const response = await fetch(`${API_BASE_URL}/api/trainings`, {
@@ -10769,7 +10773,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         });
                         const payload = await response.json().catch(() => ({}));
                         if (!response.ok) {
-                            throw new Error(payload?.error || `HTTP ${response.status}`);
+                            throw new Error(payload?.overlap ? 'У оператора уже есть тренинг, который пересекается по времени.' : (payload?.error || `HTTP ${response.status}`));
                         }
                         await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
                         await fetchPlannerTrainingsForMonth(dayKey.slice(0, 7), { force: true });
@@ -10817,7 +10821,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         });
                         const payload = await response.json().catch(() => ({}));
                         if (!response.ok) {
-                            throw new Error(payload?.error || `HTTP ${response.status}`);
+                            throw new Error(payload?.overlap ? 'У оператора уже есть тренинг, который пересекается по времени.' : (payload?.error || `HTTP ${response.status}`));
                         }
                         await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
                         const createdCount = Number(payload?.result?.created_count || 0);
@@ -11132,16 +11136,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setPlannerTrainingModalError('Не удалось подготовить интервалы для сохранения.');
                     return;
                 }
-                const duplicateInterval = payloadIntervals
+                const overlappingInterval = payloadIntervals
                     .map(interval => getTrainingOverlapInfo(
                         plannerTrainingsByOperator,
                         [operatorId],
                         { date: dayKey, start_time: interval.startTime, end_time: interval.endTime },
                         null
                     ))
-                    .find(info => info?.hasExactDuplicate);
-                if (duplicateInterval) {
-                    setPlannerTrainingModalError('Такой тренинг уже есть у оператора на это время.');
+                    .find(info => info?.hasOverlap);
+                if (overlappingInterval) {
+                    setPlannerTrainingModalError('У оператора уже есть тренинг, который пересекается по времени.');
                     return;
                 }
 
@@ -18952,11 +18956,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             {' '}({minutesToDisplayTime(item.overlapStart)} - {minutesToDisplayTime(item.overlapEnd)})
                                         </div>
                                     ))}
-                                    {!plannerTrainingDraftOverlapInfo.hasExactDuplicate && (
-                                        <div className="mt-1">
-                                            В часы добавится только уникальная часть: {(plannerTrainingDraftOverlapInfo.uniqueMinutes / 60).toFixed(2)} ч.
-                                        </div>
-                                    )}
+                                    <div className="mt-1">
+                                        Сохранение заблокировано: выберите свободный интервал.
+                                    </div>
                                 </div>
                             )}
 
@@ -19004,7 +19006,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             <button
                                 type="button"
                                 onClick={submitPlannerTrainingModal}
-                                disabled={plannerTrainingActionLoading || !!plannerTrainingDraftOverlapInfo?.hasExactDuplicate}
+                                disabled={plannerTrainingActionLoading || !!plannerTrainingDraftOverlapInfo?.hasOverlap}
                                 className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
                             >
                                 <FaIcon className={`fas ${plannerTrainingActionLoading ? 'fa-spinner fa-spin' : 'fa-save'}`}></FaIcon>
@@ -19286,11 +19288,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 {' '}({minutesToDisplayTime(item.overlapStart)} - {minutesToDisplayTime(item.overlapEnd)})
                                             </div>
                                         ))}
-                                        {!plannerOfflineTrainingDraftOverlapInfo.hasExactDuplicate && (
-                                            <div className="mt-1">
-                                                В часы добавится только уникальная часть: {(plannerOfflineTrainingDraftOverlapInfo.uniqueMinutes / 60).toFixed(2)} ч.
-                                            </div>
-                                        )}
+                                        <div className="mt-1">
+                                            Сохранение заблокировано: выберите свободный интервал.
+                                        </div>
                                     </div>
                                 )}
 
@@ -19427,7 +19427,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 <button
                                     type="button"
                                     onClick={submitPlannerOfflineActivityModal}
-                                    disabled={plannerOfflineActivityActionLoading || (isTraining && !!plannerOfflineTrainingDraftOverlapInfo?.hasExactDuplicate)}
+                                    disabled={plannerOfflineActivityActionLoading || (isTraining && !!plannerOfflineTrainingDraftOverlapInfo?.hasOverlap)}
                                     className={`px-4 py-2 rounded-lg text-white text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2 ${saveButtonClass}`}
                                 >
                                     <FaIcon className={`fas ${plannerOfflineActivityActionLoading ? 'fa-spinner fa-spin' : 'fa-save'}`}></FaIcon>
@@ -26125,7 +26125,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const e = parseTime(endTime);
                     if (s == null || e == null) return "Неправильный формат времени.";
                     if (e <= s) return "Время окончания должно быть позже времени начала.";
-                    if (overlapInfo?.hasExactDuplicate) return "Такой тренинг уже есть у выбранного оператора на это время.";
+                    if (overlapInfo?.hasOverlap) return "У выбранного оператора уже есть тренинг, который пересекается по времени.";
                     return "";
                 };
 
@@ -26153,7 +26153,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     onClose();
                     } catch (err) {
                     console.error("Training save error:", err);
-                    setError("Не удалось сохранить. Попробуйте ещё раз.");
+                    const hasOverlapResponse = !!err?.response?.data?.overlap
+                        || (Array.isArray(err?.response?.data?.errors) && err.response.data.errors.some(item => item?.overlap));
+                    setError(hasOverlapResponse
+                        ? "У выбранного оператора уже есть тренинг, который пересекается по времени."
+                        : "Не удалось сохранить. Попробуйте ещё раз.");
                     setIsLoading(false);
                     }
                 };
@@ -26289,11 +26293,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <div className="text-xs">Еще пересечений: {overlapInfo.items.length - 4}</div>
                                         )}
                                     </div>
-                                    {!overlapInfo.hasExactDuplicate && (
-                                        <div className="mt-1 text-xs">
-                                            В часы добавится только уникальная часть: {(overlapInfo.uniqueMinutes / 60).toFixed(2)} ч.
-                                        </div>
-                                    )}
+                                    <div className="mt-1 text-xs">
+                                        Сохранение заблокировано: выберите свободный интервал.
+                                    </div>
                                 </div>
                             )}
 
@@ -26361,9 +26363,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 <button
                                 type="button"
                                 onClick={handleSave}
-                                disabled={isLoading || !!overlapInfo?.hasExactDuplicate}
+                                disabled={isLoading || !!overlapInfo?.hasOverlap}
                                 className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-white ${
-                                    (isLoading || !!overlapInfo?.hasExactDuplicate) ? "bg-blue-600 opacity-70 cursor-not-allowed" : "bg-green-600 hover:bg-green-700"
+                                    (isLoading || !!overlapInfo?.hasOverlap) ? "bg-blue-600 opacity-70 cursor-not-allowed" : "bg-green-600 hover:bg-green-700"
                                 }`}
                                 >
                                 {isLoading ? (
@@ -26746,7 +26748,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             return;
                         } catch (error) {
                             console.error('Error updating training:', error);
-                            showToast('Ошибка при обновлении тренинга', 'error');
+                            showToast(error?.response?.data?.overlap
+                                ? 'У оператора уже есть тренинг, который пересекается по времени'
+                                : 'Ошибка при обновлении тренинга', 'error');
                             throw error;
                         }
                     }
@@ -26772,7 +26776,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     if (response.status === 207 || payload.status === 'partial_success') {
                         const createdCount = Number(payload?.created_count || 0);
                         const totalCount = targetOperatorIds.length;
-                        const firstErrorMessage = String(payload?.errors?.[0]?.error || 'Часть тренингов не удалось создать');
+                        const hasOverlapError = (Array.isArray(payload?.errors) ? payload.errors : []).some(item => item?.overlap);
+                        const firstErrorMessage = hasOverlapError
+                            ? 'У части операторов уже есть пересекающийся тренинг'
+                            : String(payload?.errors?.[0]?.error || 'Часть тренингов не удалось создать');
                         showToast(`Создано для ${createdCount} из ${totalCount}. ${firstErrorMessage}`, 'info');
                         return;
                     }
