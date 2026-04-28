@@ -698,7 +698,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
           </button>
         </div>
 
-        {activeDashboardView !== 'settings' && visibleMetricCount > 0 && (
+        {activeDashboardView !== 'settings' && activeDashboardView !== 'next_week' && visibleMetricCount > 0 && (
           <div className={`grid gap-3 md:grid-cols-2 ${visibleMetricCount >= 5 ? 'xl:grid-cols-6' : visibleMetricCount >= 4 ? 'xl:grid-cols-4' : 'xl:grid-cols-3'}`}>
             {displayOptions.metricOperators && (
               <StatCard icon={Users} label="Операторы с усушкой" value={formatNumber(weekly.operators_with_shrinkage, 2)} hint={`Округление: ${formatNumber(weekly.operators_rounded, 0)}`} tone="blue" />
