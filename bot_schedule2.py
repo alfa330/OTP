@@ -2062,8 +2062,9 @@ def _task_route_guard():
     if error:
         message, status_code = error
         return None, None, jsonify({"error": message}), status_code
-    if not (_is_admin_role(requester[3]) or _is_supervisor_role(requester[3])):
-        return None, None, jsonify({"error": "Only admin and sv can access tasks"}), 403
+    requester_role = _normalize_user_role(requester[3])
+    if not (_is_admin_role(requester_role) or requester_role in ('sv', 'trainer')):
+        return None, None, jsonify({"error": "Only admin, sv and trainer can access tasks"}), 403
     return requester_id, requester, None, None
 
 

@@ -1249,7 +1249,7 @@ const SkeletonList = ({ count = 4 }) => (
 /* ─── Main Component ─── */
 const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
   const currentUserRole = normalizeRole(user?.role);
-  const canAccessTasks = isAdminLikeRole(currentUserRole) || isSupervisorRole(currentUserRole);
+  const canAccessTasks = isAdminLikeRole(currentUserRole) || isSupervisorRole(currentUserRole) || currentUserRole === 'trainer';
   const [tasks,               setTasks]               = useState([]);
   const [pagedTasks,          setPagedTasks]          = useState([]);
   const [recipients,          setRecipients]          = useState([]);

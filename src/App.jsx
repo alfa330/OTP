@@ -27418,7 +27418,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                 const requestedViewFromUrl = requestedViewFromLocation;
                 if (user.role === 'trainer') {
-                    const trainerAllowedViews = new Set(['surveys', 'manage_operators', 'lms']);
+                    const trainerAllowedViews = new Set(['surveys', 'manage_operators', 'tasks', 'lms']);
                     if (requestedViewFromUrl && trainerAllowedViews.has(requestedViewFromUrl)) {
                         setView(requestedViewFromUrl);
                         return;
@@ -27445,7 +27445,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // null, and the subsequent URL sync effect rewrites the
                 // pathname, erasing the original LMS sub-path on reload.
                 if (isAuthInitializing || !user) return;
-                if (user?.role === 'trainer' && !['surveys', 'manage_operators', 'lms'].includes(view)) {
+                if (user?.role === 'trainer' && !['surveys', 'manage_operators', 'tasks', 'lms'].includes(view)) {
                     setView('surveys');
                 }
                 if (view === 'lms' && !canAccessLmsSection) {
@@ -32322,6 +32322,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </button>
                                         </li>
                                         {renderSidebarDivider()}
+                                        <li>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'tasks')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'tasks' ? 'bg-blue-700' : ''}`}>
+                                                <FaIcon className="fas fa-tasks"></FaIcon> <span className="sidebar-text">Задачи</span>
+                                            </button>
+                                        </li>
                                         <li>
                                             <button onClick={(e) => handleSidebarViewNavigation(e, 'surveys')} className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarCompactBadge()} {renderSurveysSidebarLabel()}

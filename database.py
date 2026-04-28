@@ -17451,7 +17451,7 @@ class Database:
         requester_id = int(requester_id)
         role = normalize_role_value(requester_role)
         with self._get_cursor() as cursor:
-            if role_has_min(role, 'admin') or role == 'sv':
+            if role_has_min(role, 'admin') or role in ('sv', 'trainer'):
                 cursor.execute("""
                     SELECT u.id, u.name, u.role, u.supervisor_id, COALESCE(u.status, 'working')
                     FROM users u
@@ -17776,7 +17776,7 @@ class Database:
         base_params = []
         if role_has_min(role, 'admin'):
             pass
-        elif role == 'sv':
+        elif role in ('sv', 'trainer'):
             base_conditions.append("(t.created_by = %s OR t.assigned_to = %s)")
             base_params.extend([requester_id, requester_id])
         else:
