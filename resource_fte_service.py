@@ -340,7 +340,7 @@ def _shift_hourly_fte_tx(cursor, report_date) -> Dict[int, float]:
     prev_date = report_date - timedelta(days=1)
     cursor.execute(
         """
-        SELECT ws.id, ws.shift_date, ws.start_time, ws.end_time, COALESCE(u.rate, 1.0)
+        SELECT ws.id, ws.shift_date, ws.start_time, ws.end_time
         FROM work_shifts ws
         JOIN users u ON u.id = ws.operator_id
         WHERE ws.shift_date IN (%s, %s)
@@ -366,7 +366,7 @@ def _shift_hourly_fte_tx(cursor, report_date) -> Dict[int, float]:
         breaks_by_shift[shift_id].append((int(start_minutes or 0), int(end_minutes or 0)))
 
     hourly = {hour: 0.0 for hour in range(24)}
-    for shift_id, shift_date, start_time, end_time, rate in shifts:
+    for shift_id, shift_date, start_time, end_time in shifts:
         start = start_time.hour * 60 + start_time.minute
         end = end_time.hour * 60 + end_time.minute
         if end <= start:
@@ -374,7 +374,6 @@ def _shift_hourly_fte_tx(cursor, report_date) -> Dict[int, float]:
         if shift_date == prev_date:
             start -= 24 * 60
             end -= 24 * 60
-        operator_rate = float(rate or 1.0)
         for hour in range(24):
             hour_start = hour * 60
             hour_end = hour_start + 60
@@ -390,8 +389,30 @@ def _shift_hourly_fte_tx(cursor, report_date) -> Dict[int, float]:
                     break_end -= 24 * 60
                 break_overlap += max(0, min(break_end, hour_end) - max(break_start, hour_start))
             payable_minutes = max(0, overlap - break_overlap)
-            hourly[hour] += operator_rate * (payable_minutes / 60)
+            hourly[hour] += payable_minutes / 60
     return hourly
+
+
+def _refresh_actual_fte_for_day_tx(cursor, report_date) -> None:
+    schedule_fte = _shift_hourly_fte_tx(cursor, report_date)
+    for hour, actual_fte in schedule_fte.items():
+        cursor.execute(
+            """
+            UPDATE daily_resource_hours
+            SET actual_fte = %s,
+                fact_forecast_delta = %s - forecast_fte,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE report_date = %s AND hour = %s
+            """,
+            (actual_fte, actual_fte, report_date, hour),
+        )
+    _refresh_daily_summary_tx(cursor, report_date)
+
+
+def _refresh_all_actual_fte_tx(cursor) -> None:
+    cursor.execute("SELECT report_date FROM daily_resource_summary ORDER BY report_date ASC")
+    for (report_date,) in cursor.fetchall():
+        _refresh_actual_fte_for_day_tx(cursor, report_date)
 
 
 def _refresh_daily_summary_tx(cursor, report_date) -> None:
@@ -807,10 +828,7 @@ def import_resource_csv(db, report_date_value: str, content: bytes, filename: st
                 queue_wait_seconds = EXCLUDED.queue_wait_seconds,
                 avg_lost_wait_seconds = EXCLUDED.avg_lost_wait_seconds,
                 avg_wait_seconds = EXCLUDED.avg_wait_seconds,
-                actual_fte = CASE
-                    WHEN COALESCE(daily_resource_hours.actual_fte, 0) = 0 THEN EXCLUDED.actual_fte
-                    ELSE daily_resource_hours.actual_fte
-                END,
+                actual_fte = EXCLUDED.actual_fte,
                 raw_payload = EXCLUDED.raw_payload,
                 updated_at = CURRENT_TIMESTAMP
             """,
@@ -864,6 +882,7 @@ def recalculate_resource_forecast(db, as_of_date_value: Optional[str] = None) ->
         else:
             cursor.execute("SELECT COALESCE(MAX(report_date), CURRENT_DATE) FROM daily_resource_summary")
             as_of_date = cursor.fetchone()[0]
+        _refresh_all_actual_fte_tx(cursor)
         _refresh_all_historical_forecasts_tx(cursor, settings)
         profiles = _upsert_profiles_tx(cursor, as_of_date, settings)
     return get_resource_overview(db, as_of_date_value=as_of_date.isoformat())
@@ -941,6 +960,7 @@ def get_resource_day(db, report_date_value: str) -> Dict[str, Any]:
     report_date = _parse_report_date(report_date_value)
     with db._get_cursor() as cursor:
         settings = _get_settings_tx(cursor)
+        _refresh_actual_fte_for_day_tx(cursor, report_date)
         profile = _refresh_historical_forecast_for_day_tx(cursor, report_date, settings)
         cursor.execute(
             """
