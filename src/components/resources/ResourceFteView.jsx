@@ -261,6 +261,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
   const [savingHourKey, setSavingHourKey] = useState('');
   const [activeDashboardView, setActiveDashboardView] = useState('overview');
   const [displayOptions, setDisplayOptions] = useState(loadDisplayOptions);
+  const [selectedForecastWeekday, setSelectedForecastWeekday] = useState(0);
 
   const notify = useCallback(
     (message, type = 'success') => {
@@ -428,6 +429,18 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
       const calls = Number(profile.avg_daily_calls || 0);
       const workloadMinutes = calls * answerRate * weeklyAhtSeconds / 60;
       const dailyFte = effectiveMinutes > 0 ? workloadMinutes / effectiveMinutes : 0;
+      const hourly = (profile.hourly_profile || []).map((hourRow) => {
+        const hourCalls = Number(hourRow.avg_calls || 0);
+        const hourWorkloadMinutes = hourCalls * answerRate * weeklyAhtSeconds / 60;
+        const hourFte = effectiveMinutes > 0 ? hourWorkloadMinutes / effectiveMinutes : 0;
+        return {
+          ...hourRow,
+          forecast_calls: hourCalls,
+          forecast_aht_seconds: weeklyAhtSeconds,
+          forecast_workload_minutes: hourWorkloadMinutes,
+          forecast_fte: hourFte,
+        };
+      });
       return {
         ...profile,
         forecast_date: dates[Number(profile.weekday || 0)] || '',
@@ -436,6 +449,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
         forecast_workload_minutes: workloadMinutes,
         forecast_daily_fte: dailyFte,
         operators_equivalent: dailyFte / 8,
+        hourly_forecast: hourly,
       };
     });
     const weeklyFteHours = days.reduce((sum, day) => sum + Number(day.forecast_daily_fte || 0), 0);
@@ -455,6 +469,33 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
       operatorsWithShrinkage,
     };
   }, [overview?.as_of_date, overview?.profiles, overview?.settings]);
+
+  const selectedForecastDay = useMemo(
+    () =>
+      (nextWeekForecast.days || []).find((day) => Number(day.weekday) === Number(selectedForecastWeekday)) ||
+      (nextWeekForecast.days || [])[0] ||
+      null,
+    [nextWeekForecast.days, selectedForecastWeekday],
+  );
+
+  const selectedForecastHourlyData = useMemo(
+    () =>
+      (selectedForecastDay?.hourly_forecast || []).map((row) => ({
+        hour: `${String(row.hour).padStart(2, '0')}:00`,
+        calls: Number(row.forecast_calls || 0),
+        fte: Number(row.forecast_fte || 0),
+        workload: Number(row.forecast_workload_minutes || 0),
+      })),
+    [selectedForecastDay],
+  );
+
+  const selectedForecastPeakHours = useMemo(
+    () =>
+      [...(selectedForecastDay?.hourly_forecast || [])]
+        .sort((a, b) => Number(b.forecast_fte || 0) - Number(a.forecast_fte || 0))
+        .slice(0, 5),
+    [selectedForecastDay],
+  );
 
   const visibleMetricCount = [
     displayOptions.metricOperators,
@@ -987,40 +1028,131 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                   <StatCard icon={Users} label="Операторы" value={formatNumber(nextWeekForecast.operatorsWithShrinkage, 2)} hint={`Без усушки: ${formatNumber(nextWeekForecast.baseOperators, 2)}`} tone="emerald" />
                 </div>
 
-                <div className="mt-5 overflow-x-auto rounded-lg border border-slate-200">
-                  <table className="min-w-[980px] w-full divide-y divide-slate-200 text-sm">
-                    <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
-                      <tr>
-                        <th className="px-3 py-3 text-left">День</th>
-                        <th className="px-3 py-3 text-left">Дата</th>
-                        <th className="px-3 py-3 text-right">Прогноз звонков</th>
-                        <th className="px-3 py-3 text-right">AHT недели</th>
-                        <th className="px-3 py-3 text-right">Минут нагрузки</th>
-                        <th className="px-3 py-3 text-right">FTE дня</th>
-                        <th className="px-3 py-3 text-right">Опер. экв.</th>
-                        <th className="px-3 py-3 text-left">История</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100 bg-white">
+                <div className="mt-5 grid gap-5 xl:grid-cols-[300px_minmax(0,1fr)]">
+                  <aside className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                    <div className="mb-3 text-sm font-semibold text-slate-900">Выберите день</div>
+                    <div className="space-y-2">
                       {(nextWeekForecast.days || []).map((profile) => (
-                        <tr key={profile.weekday} className="hover:bg-slate-50/60">
-                          <td className="px-3 py-3 font-semibold text-slate-950">{profile.short}</td>
-                          <td className="px-3 py-3 text-slate-700">{formatDate(profile.forecast_date)}</td>
-                          <td className="px-3 py-3 text-right">{formatInt(profile.forecast_calls)}</td>
-                          <td className="px-3 py-3 text-right">{formatSeconds(profile.forecast_aht_seconds)}</td>
-                          <td className="px-3 py-3 text-right">{formatNumber(profile.forecast_workload_minutes, 1)}</td>
-                          <td className="px-3 py-3 text-right font-semibold text-blue-700">{formatNumber(profile.forecast_daily_fte, 2)}</td>
-                          <td className="px-3 py-3 text-right">{formatNumber(profile.operators_equivalent, 2)}</td>
-                          <td className="px-3 py-3">
-                            <span className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold ${profile.insufficient_history ? 'bg-amber-50 text-amber-700' : 'bg-emerald-50 text-emerald-700'}`}>
-                              {profile.insufficient_history ? <AlertTriangle size={13} /> : <CheckCircle2 size={13} />}
-                              {profile.history_count}/2
-                            </span>
-                          </td>
-                        </tr>
+                        <button
+                          key={profile.weekday}
+                          type="button"
+                          onClick={() => setSelectedForecastWeekday(profile.weekday)}
+                          className={`w-full rounded-lg border p-3 text-left transition ${
+                            Number(selectedForecastWeekday) === Number(profile.weekday)
+                              ? 'border-blue-300 bg-blue-50'
+                              : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <div>
+                              <div className="font-semibold text-slate-950">{profile.short}</div>
+                              <div className="text-xs text-slate-500">{formatDate(profile.forecast_date)}</div>
+                            </div>
+                            <div className="text-right">
+                              <div className="text-sm font-semibold text-blue-700">{formatNumber(profile.forecast_daily_fte, 2)}</div>
+                              <div className="text-[11px] text-slate-500">FTE</div>
+                            </div>
+                          </div>
+                          <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-500">
+                            <span>Звонки: <b className="text-slate-800">{formatInt(profile.forecast_calls)}</b></span>
+                            <span>История: <b className={profile.insufficient_history ? 'text-amber-700' : 'text-emerald-700'}>{profile.history_count}/2</b></span>
+                          </div>
+                        </button>
                       ))}
-                    </tbody>
-                  </table>
+                    </div>
+                  </aside>
+
+                  <div className="min-w-0 space-y-4">
+                    {selectedForecastDay ? (
+                      <>
+                        <div className="rounded-lg border border-slate-200 bg-white p-4">
+                          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                            <div>
+                              <h3 className="text-base font-semibold text-slate-950">
+                                Почасовой FTE: {selectedForecastDay.short} · {formatDate(selectedForecastDay.forecast_date)}
+                              </h3>
+                              <p className="text-sm text-slate-500">Разбивка использует AHT недели {formatSeconds(nextWeekForecast.weeklyAhtSeconds)} и единые коэффициенты.</p>
+                            </div>
+                            <span className={`inline-flex w-fit items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold ${selectedForecastDay.insufficient_history ? 'bg-amber-50 text-amber-700' : 'bg-emerald-50 text-emerald-700'}`}>
+                              {selectedForecastDay.insufficient_history ? <AlertTriangle size={13} /> : <CheckCircle2 size={13} />}
+                              История {selectedForecastDay.history_count}/2
+                            </span>
+                          </div>
+
+                          <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                            <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">Звонки</div><b>{formatInt(selectedForecastDay.forecast_calls)}</b></div>
+                            <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">Минут нагрузки</div><b>{formatNumber(selectedForecastDay.forecast_workload_minutes, 1)}</b></div>
+                            <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">FTE дня</div><b>{formatNumber(selectedForecastDay.forecast_daily_fte, 2)}</b></div>
+                            <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">Пиковый час</div><b>{selectedForecastPeakHours[0] ? `${String(selectedForecastPeakHours[0].hour).padStart(2, '0')}:00` : '-'}</b></div>
+                          </div>
+
+                          <div className="mt-5 h-72">
+                            <ResponsiveContainer width="100%" height="100%">
+                              <ComposedChart data={selectedForecastHourlyData} margin={{ top: 10, right: 18, left: 0, bottom: 0 }}>
+                                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                                <XAxis dataKey="hour" tick={{ fontSize: 11 }} interval={2} />
+                                <YAxis yAxisId="left" tick={{ fontSize: 11 }} />
+                                <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} />
+                                <Tooltip formatter={(value, name) => [formatNumber(value, name === 'calls' ? 0 : 2), name === 'calls' ? 'Звонки' : name === 'workload' ? 'Минут нагрузки' : 'FTE']} />
+                                <Bar yAxisId="left" dataKey="calls" fill="#bfdbfe" radius={[4, 4, 0, 0]} />
+                                <Line yAxisId="right" type="monotone" dataKey="fte" stroke="#2563eb" strokeWidth={2} dot={false} />
+                              </ComposedChart>
+                            </ResponsiveContainer>
+                          </div>
+                        </div>
+
+                        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_300px]">
+                          <div className="overflow-x-auto rounded-lg border border-slate-200">
+                            <table className="min-w-[760px] w-full divide-y divide-slate-200 text-sm">
+                              <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+                                <tr>
+                                  <th className="px-3 py-3 text-left">Час</th>
+                                  <th className="px-3 py-3 text-right">Звонки</th>
+                                  <th className="px-3 py-3 text-right">AHT недели</th>
+                                  <th className="px-3 py-3 text-right">Минут нагрузки</th>
+                                  <th className="px-3 py-3 text-right">FTE</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-slate-100 bg-white">
+                                {(selectedForecastDay.hourly_forecast || []).map((row) => (
+                                  <tr key={row.hour} className="hover:bg-slate-50/60">
+                                    <td className="px-3 py-2 font-medium text-slate-900">{String(row.hour).padStart(2, '0')}:00</td>
+                                    <td className="px-3 py-2 text-right">{formatNumber(row.forecast_calls, 1)}</td>
+                                    <td className="px-3 py-2 text-right">{formatSeconds(row.forecast_aht_seconds)}</td>
+                                    <td className="px-3 py-2 text-right">{formatNumber(row.forecast_workload_minutes, 1)}</td>
+                                    <td className="px-3 py-2 text-right font-semibold text-blue-700">{formatNumber(row.forecast_fte, 2)}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+
+                          <div className="rounded-lg border border-slate-200 bg-white p-4">
+                            <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+                              <TrendingUp size={16} />
+                              Пиковые часы
+                            </div>
+                            <div className="mt-4 space-y-3">
+                              {selectedForecastPeakHours.map((row) => (
+                                <div key={row.hour} className="rounded-lg bg-slate-50 p-3">
+                                  <div className="flex items-center justify-between">
+                                    <span className="font-semibold text-slate-900">{String(row.hour).padStart(2, '0')}:00</span>
+                                    <span className="rounded-md bg-blue-100 px-2 py-1 text-xs font-semibold text-blue-700">{formatNumber(row.forecast_fte, 2)} FTE</span>
+                                  </div>
+                                  <div className="mt-2 text-xs text-slate-500">Звонки: {formatNumber(row.forecast_calls, 1)} · нагрузка: {formatNumber(row.forecast_workload_minutes, 1)} мин</div>
+                                  <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-200">
+                                    <div className="h-full rounded-full bg-blue-500" style={{ width: `${Math.min(100, Number(row.forecast_fte || 0) * 25)}%` }} />
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      </>
+                    ) : (
+                      <EmptyState title="Нет прогноза" text="Загрузите исторические отчеты, чтобы построить прогноз следующей недели." />
+                    )}
+                  </div>
                 </div>
               </section>
             )}
