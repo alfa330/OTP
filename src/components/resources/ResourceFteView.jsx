@@ -939,6 +939,45 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                   Пересчитать
                 </button>
               </div>
+              <div className="mt-4 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-sm text-blue-900">
+                Профиль - это типовой рисунок нагрузки конкретного дня недели: сколько звонков приходит по часам, какой AHT получается из истории и сколько FTE нужно. Поэтому прогноз следующей недели строится не как один общий средний день, а отдельно для ПН, ВТ, СР, ЧТ, ПТ, СБ и ВС.
+              </div>
+              {nextWeekForecast.length ? (
+                <div className="mt-5">
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-sm font-semibold text-slate-950">Прогноз FTE на следующую неделю</h3>
+                      <p className="text-xs text-slate-500">Расчет берет профиль соответствующего дня недели и переносит его на ближайшую следующую неделю.</p>
+                    </div>
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-7">
+                    {nextWeekForecast.map((profile) => (
+                      <button
+                        key={profile.weekday}
+                        type="button"
+                        onClick={() => setActiveWeekday(profile.weekday)}
+                        className={`rounded-lg border p-3 text-left transition ${
+                          Number(activeWeekday) === Number(profile.weekday)
+                            ? 'border-blue-300 bg-blue-50'
+                            : 'border-slate-200 bg-slate-50 hover:border-slate-300 hover:bg-white'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-sm font-semibold text-slate-950">{profile.short}</span>
+                          {profile.insufficient_history ? <AlertTriangle size={14} className="text-amber-500" /> : <CheckCircle2 size={14} className="text-emerald-500" />}
+                        </div>
+                        <div className="mt-1 text-xs text-slate-500">{formatDate(profile.forecast_date)}</div>
+                        <div className="mt-3 space-y-2 text-xs">
+                          <div className="flex justify-between gap-2"><span className="text-slate-500">Звонки</span><b className="text-slate-900">{formatInt(profile.avg_daily_calls)}</b></div>
+                          <div className="flex justify-between gap-2"><span className="text-slate-500">AHT</span><b className="text-slate-900">{formatSeconds(profile.aht_seconds)}</b></div>
+                          <div className="flex justify-between gap-2"><span className="text-slate-500">FTE</span><b className="text-blue-700">{formatNumber(profile.daily_fte, 2)}</b></div>
+                          <div className="flex justify-between gap-2"><span className="text-slate-500">Опер.</span><b className="text-slate-900">{formatNumber(profile.operators_equivalent, 2)}</b></div>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
               <div className="mt-4 flex gap-2 overflow-x-auto pb-1">
                 {(overview?.profiles || []).map((profile) => (
                   <button
