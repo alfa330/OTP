@@ -2346,6 +2346,29 @@ def health_check():
         return jsonify({"status": "unhealthy", "error": "Health check failed"}), 500
 
 
+RESOURCE_FTE_ALLOWED_USER_NAMES = {
+    'omarove aru',
+    'ядигаров руслан',
+}
+
+
+def _normalize_resource_fte_access_name(value):
+    return re.sub(r'\s+', ' ', str(value or '').strip()).lower()
+
+
+def _can_access_resource_fte(requester):
+    if not requester:
+        return False
+    possible_names = [
+        requester[2] if len(requester) > 2 else None,
+        requester[7] if len(requester) > 7 else None,
+    ]
+    return any(
+        _normalize_resource_fte_access_name(value) in RESOURCE_FTE_ALLOWED_USER_NAMES
+        for value in possible_names
+    )
+
+
 def _resource_fte_route_guard():
     requester_id = getattr(g, 'user_id', None)
     if not requester_id:
@@ -2362,6 +2385,8 @@ def _resource_fte_route_guard():
     role = normalize_role_value(requester[3])
     if role not in {'super_admin', 'admin', 'sv', 'supervisor', 'trainer'}:
         return None, jsonify({"error": "Only managers can access resource calculations"}), 403
+    if not _can_access_resource_fte(requester):
+        return None, jsonify({"error": "Access denied"}), 403
     return int(requester_id), None, None
 
 
