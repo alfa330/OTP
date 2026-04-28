@@ -1,4 +1,4 @@
-import os
+﻿import os
 import logging
 import psycopg2
 from contextlib import contextmanager
@@ -8337,7 +8337,8 @@ class Database:
                         COALESCE(u.front_office_training, FALSE) as front_office_training,
                         u.front_office_training_date,
                         u.taxipro_id,
-                        u.supervisor_id
+                        u.supervisor_id,
+                        u.gender
                     FROM users u
                     LEFT JOIN directions d ON u.direction_id = d.id
                     LEFT JOIN users s ON u.supervisor_id = s.id
@@ -8378,11 +8379,20 @@ class Database:
                     return 'ОФ'
                 return ''
 
+            def _format_gender(value):
+                normalized = str(value or '').strip().lower()
+                if normalized == 'male':
+                    return 'Мужской'
+                if normalized == 'female':
+                    return 'Женский'
+                return ''
+
             def _format_proxy(value):
                 return 'Да' if bool(value) else 'Нет'
 
             headers = [
                 "ФИО",
+                "Пол",
                 "Логин",
                 "Роль",
                 "Направление",
@@ -8427,11 +8437,12 @@ class Database:
                     has_proxy, proxy_card_number, has_driver_license, sip_number,
                     close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
                     close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
-                    card_number, internship_in_company, front_office_training, front_office_training_date, taxipro_id, sup_id
+                    card_number, internship_in_company, front_office_training, front_office_training_date, taxipro_id, sup_id, gender
                 ) = row
 
                 row_values = [
                     name or "",
+                    _format_gender(gender),
                     login or "",
                     role or "",
                     direction or "N/A",
@@ -8796,6 +8807,36 @@ class Database:
             except Exception:
                 return 0.0
 
+        def training_to_interval_minutes(t: Dict[str, Any]):
+            s = parse_time_to_minutes((t or {}).get('start_time'))
+            e = parse_time_to_minutes((t or {}).get('end_time'))
+            if s is None or e is None:
+                return None
+            if e < s:
+                e += 24 * 60
+            if e <= s:
+                return None
+            return (s, e)
+
+        def compute_unique_training_duration_hours(items: List[Dict[str, Any]], counted_only: bool = False) -> float:
+            intervals = []
+            for item in items or []:
+                if counted_only and not item.get('count_in_hours'):
+                    continue
+                interval = training_to_interval_minutes(item)
+                if interval:
+                    intervals.append(interval)
+            if not intervals:
+                return 0.0
+            intervals.sort(key=lambda part: (part[0], part[1]))
+            merged = []
+            for start, end in intervals:
+                if not merged or start > merged[-1][1]:
+                    merged.append([start, end])
+                elif end > merged[-1][1]:
+                    merged[-1][1] = end
+            return sum(end - start for start, end in merged) / 60.0
+
         def compute_technical_issue_duration_hours(item: Dict[str, Any]) -> float:
             try:
                 if item.get('duration_minutes') is not None:
@@ -9039,11 +9080,7 @@ class Database:
                         work_val = float(d.get('work_time') or 0.0)
                     # Рассчитываем зачётные часы тренинга для дня и добавляем их к дневному показателю
                     trainings_for_day = trainings_by_day.get(day, []) if trainings_by_day else []
-                    counted_for_day = 0.0
-                    for t in trainings_for_day:
-                        dur = compute_training_duration_hours(t)
-                        if t.get('count_in_hours'):
-                            counted_for_day += dur
+                    counted_for_day = compute_unique_training_duration_hours(trainings_for_day, counted_only=True)
 
                     technical_for_day = 0.0
                     technical_items_for_day = technical_by_day.get(day, []) if technical_by_day else []
@@ -9250,9 +9287,7 @@ class Database:
             # Сначала пройдем все дни, чтобы посчитать общие итоги
             for day in days:
                 arr = op_trainings.get(day, []) if isinstance(op_trainings, dict) else []
-                for t in arr:
-                    dur = compute_training_duration_hours(t)
-                    total_all += dur
+                total_all += compute_unique_training_duration_hours(arr)
 
             # --- Заполнение вкладки "Тренинги" ---
             set_cell(ws_t, row_counted, 1, name, align_center=False)
@@ -9262,10 +9297,7 @@ class Database:
             day_start = 2 + (1 if include_supervisor else 0)
             for c_idx, day in enumerate(days, start=day_start):
                 arr = op_trainings.get(day, []) if isinstance(op_trainings, dict) else []
-                counted = 0.0
-                for t in arr:
-                    if t.get('count_in_hours'):
-                        counted += compute_training_duration_hours(t)
+                counted = compute_unique_training_duration_hours(arr, counted_only=True)
                 if counted == 0:
                     set_cell(ws_t, row_counted, c_idx, "")
                 else:
