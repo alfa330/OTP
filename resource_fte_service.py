@@ -23,7 +23,6 @@ WEEKDAYS_RU = [
 ]
 
 DEFAULT_RESOURCE_SETTINGS = {
-    "aht_seconds": 239.0,
     "answer_rate": 0.95,
     "occ": 0.70,
     "ur": 0.95,
@@ -164,7 +163,6 @@ def _as_settings(row: Optional[Iterable[Any]]) -> Dict[str, Any]:
     if not row:
         return dict(DEFAULT_RESOURCE_SETTINGS)
     keys = [
-        "aht_seconds",
         "answer_rate",
         "occ",
         "ur",
@@ -184,7 +182,7 @@ def _as_settings(row: Optional[Iterable[Any]]) -> Dict[str, Any]:
 def _get_settings_tx(cursor) -> Dict[str, Any]:
     cursor.execute(
         """
-        SELECT aht_seconds, answer_rate, occ, ur, shrinkage_coeff,
+        SELECT answer_rate, occ, ur, shrinkage_coeff,
                weekly_hours_per_operator, fte_rounding, shift_rounding
         FROM resource_settings
         WHERE id = 1
@@ -201,7 +199,7 @@ def get_resource_settings(db) -> Dict[str, Any]:
 def update_resource_settings(db, payload: Dict[str, Any], user_id: Optional[int] = None) -> Dict[str, Any]:
     current = get_resource_settings(db)
     next_settings = dict(current)
-    numeric_keys = ["aht_seconds", "answer_rate", "occ", "ur", "shrinkage_coeff", "weekly_hours_per_operator"]
+    numeric_keys = ["answer_rate", "occ", "ur", "shrinkage_coeff", "weekly_hours_per_operator"]
     for key in numeric_keys:
         if key in payload:
             next_settings[key] = max(0.0, _to_float(payload.get(key), current[key]))
@@ -219,8 +217,7 @@ def update_resource_settings(db, payload: Dict[str, Any], user_id: Optional[int]
         cursor.execute(
             """
             UPDATE resource_settings
-            SET aht_seconds = %s,
-                answer_rate = %s,
+            SET answer_rate = %s,
                 occ = %s,
                 ur = %s,
                 shrinkage_coeff = %s,
@@ -232,7 +229,6 @@ def update_resource_settings(db, payload: Dict[str, Any], user_id: Optional[int]
             WHERE id = 1
             """,
             (
-                next_settings["aht_seconds"],
                 next_settings["answer_rate"],
                 next_settings["occ"],
                 next_settings["ur"],
@@ -486,6 +482,7 @@ def _compute_profile_for_weekday_tx(cursor, weekday: int, as_of_date, settings: 
             {
                 "hour": hour,
                 "avg_calls": 0.0,
+                "aht_seconds": 0.0,
                 "distribution": 0.0,
                 "workload_minutes": 0.0,
                 "effective_fte_minutes": 60 * settings["occ"] * settings["ur"],
@@ -500,13 +497,18 @@ def _compute_profile_for_weekday_tx(cursor, weekday: int, as_of_date, settings: 
             "history_count": 0,
             "insufficient_history": True,
             "avg_daily_calls": 0.0,
+            "aht_seconds": 0.0,
             "daily_fte": 0.0,
             "hourly_profile": hourly_profile,
         }
 
     cursor.execute(
         """
-        SELECT hour, AVG(received_calls)::float
+        SELECT
+            hour,
+            AVG(received_calls)::float,
+            COALESCE(SUM(talk_time_seconds), 0)::float,
+            COALESCE(SUM(accepted_calls), 0)::float
         FROM daily_resource_hours
         WHERE report_date = ANY(%s)
         GROUP BY hour
@@ -514,15 +516,32 @@ def _compute_profile_for_weekday_tx(cursor, weekday: int, as_of_date, settings: 
         """,
         (history_dates,),
     )
-    avg_by_hour = {int(row[0]): _to_float(row[1]) for row in cursor.fetchall()}
-    avg_daily_calls = sum(avg_by_hour.get(hour, 0.0) for hour in range(24))
+    hourly_source = {
+        int(row[0]): {
+            "avg_calls": _to_float(row[1]),
+            "talk_time_seconds": _to_float(row[2]),
+            "accepted_calls": _to_float(row[3]),
+        }
+        for row in cursor.fetchall()
+    }
+    avg_daily_calls = sum(_to_float(hourly_source.get(hour, {}).get("avg_calls")) for hour in range(24))
+    total_talk_seconds = sum(item["talk_time_seconds"] for item in hourly_source.values())
+    total_accepted_calls = sum(item["accepted_calls"] for item in hourly_source.values())
+    profile_aht_seconds = total_talk_seconds / total_accepted_calls if total_accepted_calls > 0 else 0.0
     effective_minutes = 60 * settings["occ"] * settings["ur"]
     hourly_profile = []
     daily_fte = 0.0
     for hour in range(24):
-        avg_calls = avg_by_hour.get(hour, 0.0)
+        source = hourly_source.get(hour, {})
+        avg_calls = _to_float(source.get("avg_calls"))
+        accepted_calls = _to_float(source.get("accepted_calls"))
+        aht_seconds = (
+            _to_float(source.get("talk_time_seconds")) / accepted_calls
+            if accepted_calls > 0
+            else profile_aht_seconds
+        )
         distribution = avg_calls / avg_daily_calls if avg_daily_calls > 0 else 0.0
-        workload_minutes = avg_calls * settings["answer_rate"] * settings["aht_seconds"] / 60
+        workload_minutes = avg_calls * settings["answer_rate"] * aht_seconds / 60
         fte = workload_minutes / effective_minutes if effective_minutes > 0 else 0.0
         fte_rounded = _round_value(fte, settings["fte_rounding"])
         daily_fte += fte
@@ -530,6 +549,7 @@ def _compute_profile_for_weekday_tx(cursor, weekday: int, as_of_date, settings: 
             {
                 "hour": hour,
                 "avg_calls": round(avg_calls, 4),
+                "aht_seconds": round(aht_seconds, 4),
                 "distribution": round(distribution, 6),
                 "workload_minutes": round(workload_minutes, 4),
                 "effective_fte_minutes": round(effective_minutes, 4),
@@ -543,6 +563,7 @@ def _compute_profile_for_weekday_tx(cursor, weekday: int, as_of_date, settings: 
         "history_count": len(history_dates),
         "insufficient_history": len(history_dates) < 2,
         "avg_daily_calls": round(avg_daily_calls, 4),
+        "aht_seconds": round(profile_aht_seconds, 4),
         "daily_fte": round(daily_fte, 4),
         "hourly_profile": hourly_profile,
     }

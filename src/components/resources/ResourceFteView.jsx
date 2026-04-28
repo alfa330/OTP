@@ -408,7 +408,6 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
               {settingsDraft ? (
                 <div className="grid grid-cols-2 gap-3">
                   {[
-                    ['aht_seconds', 'AHT, сек'],
                     ['answer_rate', 'Принято'],
                     ['occ', 'OCC'],
                     ['ur', 'UR'],
@@ -511,6 +510,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                     <dl className="mt-4 space-y-3 text-sm">
                       <div className="flex justify-between gap-3"><dt className="text-slate-500">История</dt><dd className="font-medium text-slate-900">{activeProfile.history_count}/2</dd></div>
                       <div className="flex justify-between gap-3"><dt className="text-slate-500">Сред. звонков</dt><dd className="font-medium text-slate-900">{formatInt(activeProfile.avg_daily_calls)}</dd></div>
+                      <div className="flex justify-between gap-3"><dt className="text-slate-500">AHT из истории</dt><dd className="font-medium text-slate-900">{formatSeconds(activeProfile.aht_seconds)}</dd></div>
                       <div className="flex justify-between gap-3"><dt className="text-slate-500">Суточная FTE</dt><dd className="font-medium text-slate-900">{formatNumber(activeProfile.daily_fte, 2)}</dd></div>
                     </dl>
                     {activeProfile.insufficient_history ? (
