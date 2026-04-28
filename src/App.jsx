@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useState, useEffect, useCallback, useRef, useMemo } from 'react';
+﻿import React, { Suspense, lazy, useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useLocation } from 'react-router-dom';
 import axios from 'axios';
 import _ from 'lodash';
@@ -886,6 +886,117 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         let diff = e - s;
         if (diff < 0) diff += 24 * 60;
         return Number((diff / 60).toFixed(2));
+        }
+
+        function trainingToIntervalMinutes(t) {
+        const start = parseTimeToMinutes(t?.start_time ?? t?.start);
+        const endRaw = parseTimeToMinutes(t?.end_time ?? t?.end);
+        if (start == null || endRaw == null) return null;
+        let end = endRaw;
+        if (end < start) end += 24 * 60;
+        if (end <= start) return null;
+        return { start, end };
+        }
+
+        function mergeMinuteIntervals(intervals) {
+        const sorted = (Array.isArray(intervals) ? intervals : [])
+            .filter(item => item && Number.isFinite(item.start) && Number.isFinite(item.end) && item.end > item.start)
+            .sort((a, b) => a.start - b.start || a.end - b.end);
+        const merged = [];
+        for (const interval of sorted) {
+            const prev = merged[merged.length - 1];
+            if (!prev || interval.start > prev.end) {
+            merged.push({ start: interval.start, end: interval.end });
+            } else if (interval.end > prev.end) {
+            prev.end = interval.end;
+            }
+        }
+        return merged;
+        }
+
+        function minutesToDisplayTime(totalMinutes) {
+        if (!Number.isFinite(totalMinutes)) return '';
+        const normalized = ((Math.round(totalMinutes) % (24 * 60)) + (24 * 60)) % (24 * 60);
+        const hh = Math.floor(normalized / 60);
+        const mm = normalized % 60;
+        return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+        }
+
+        function computeUniqueTrainingDurationHours(trainings, predicate = null) {
+        const intervals = [];
+        for (const training of (Array.isArray(trainings) ? trainings : [])) {
+            if (typeof predicate === 'function' && !predicate(training)) continue;
+            const interval = trainingToIntervalMinutes(training);
+            if (interval) intervals.push(interval);
+        }
+        const totalMinutes = mergeMinuteIntervals(intervals).reduce((sum, interval) => sum + (interval.end - interval.start), 0);
+        return Number((totalMinutes / 60).toFixed(2));
+        }
+
+        function normalizeTrainingId(value) {
+        if (value === null || value === undefined || value === '') return '';
+        return String(value);
+        }
+
+        function getTrainingListForOperator(existingTrainingsByOperator, operatorId) {
+        if (!existingTrainingsByOperator || operatorId === null || operatorId === undefined) return [];
+        const direct = existingTrainingsByOperator[operatorId] ?? existingTrainingsByOperator[String(operatorId)];
+        if (Array.isArray(direct)) return direct;
+        if (direct && typeof direct === 'object') {
+            return Object.values(direct).flatMap(value => Array.isArray(value) ? value : (value ? [value] : []));
+        }
+        return [];
+        }
+
+        function getTrainingOverlapInfo(existingTrainingsByOperator, operatorIds, draft, ignoreTrainingId = null) {
+        const date = String(draft?.date || '').trim();
+        const draftInterval = trainingToIntervalMinutes({
+            start_time: draft?.start_time ?? draft?.startTime,
+            end_time: draft?.end_time ?? draft?.endTime
+        });
+        const normalizedOperatorIds = Array.from(new Set((Array.isArray(operatorIds) ? operatorIds : [operatorIds])
+            .map(id => Number(id))
+            .filter(id => Number.isFinite(id) && id > 0)));
+        const result = {
+            hasOverlap: false,
+            hasExactDuplicate: false,
+            draftMinutes: draftInterval ? draftInterval.end - draftInterval.start : 0,
+            overlapMinutes: 0,
+            uniqueMinutes: draftInterval ? draftInterval.end - draftInterval.start : 0,
+            items: []
+        };
+        if (!date || !draftInterval || normalizedOperatorIds.length === 0) return result;
+
+        const ignoreId = normalizeTrainingId(ignoreTrainingId);
+        for (const operatorId of normalizedOperatorIds) {
+            const overlapsForOperator = [];
+            for (const training of getTrainingListForOperator(existingTrainingsByOperator, operatorId)) {
+            if (!training || String(training?.date || '').trim() !== date) continue;
+            if (ignoreId && normalizeTrainingId(training?.id) === ignoreId) continue;
+            const interval = trainingToIntervalMinutes(training);
+            if (!interval) continue;
+            const overlapStart = Math.max(draftInterval.start, interval.start);
+            const overlapEnd = Math.min(draftInterval.end, interval.end);
+            if (overlapEnd <= overlapStart) continue;
+            const isExactDuplicate = interval.start === draftInterval.start && interval.end === draftInterval.end;
+            overlapsForOperator.push({ start: overlapStart, end: overlapEnd });
+            result.items.push({
+                operatorId,
+                training,
+                overlapStart,
+                overlapEnd,
+                overlapMinutes: overlapEnd - overlapStart,
+                isExactDuplicate
+            });
+            if (isExactDuplicate) result.hasExactDuplicate = true;
+            }
+            const operatorOverlapMinutes = mergeMinuteIntervals(overlapsForOperator)
+            .reduce((sum, interval) => sum + (interval.end - interval.start), 0);
+            if (operatorOverlapMinutes > result.overlapMinutes) result.overlapMinutes = operatorOverlapMinutes;
+        }
+        result.hasOverlap = result.items.length > 0;
+        result.uniqueMinutes = Math.max(0, result.draftMinutes - result.overlapMinutes);
+        return result;
         }
 
         function computeTechnicalIssueDurationHours(item) {
@@ -1854,7 +1965,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             let max = 0;
             for (const opId of Object.keys(trainingsMap)) {
             for (const dayKey of Object.keys(trainingsMap[opId] || {})) {
-                const sum = (trainingsMap[opId][dayKey] || []).reduce((acc, t) => acc + computeTrainingDurationHours(t), 0);
+                const sum = computeUniqueTrainingDurationHours(trainingsMap[opId][dayKey] || []);
                 if (sum > max) max = sum;
             }
             }
@@ -2242,11 +2353,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             let totalHoursCounted = 0;
             for (const dKey of Object.keys(byDay)) {
                 const arr = byDay[dKey] || [];
-                for (const t of arr) {
-                const h = computeTrainingDurationHours(t) || 0;
-                totalHoursAll += h;
-                if (t.count_in_hours !== false) totalHoursCounted += h;
-                }
+                totalHoursAll += computeUniqueTrainingDurationHours(arr);
+                totalHoursCounted += computeUniqueTrainingDurationHours(arr, t => t && t.count_in_hours !== false);
             }
 
             const technicalByDay = technicalIssuesMap[op.operator_id] || {};
@@ -2358,10 +2466,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             if (selectedTab === 'work_time') {
             const baseWork = d ? Number(d.work_time || 0) : 0;
-            const countedTrainingHours = (trainings || []).reduce((acc, t) => {
-                if (!t || t.count_in_hours === false) return acc;
-                return acc + (computeTrainingDurationHours(t) || 0);
-            }, 0);
+            const countedTrainingHours = computeUniqueTrainingDurationHours(trainings || [], t => t && t.count_in_hours !== false);
             const technicalHours = (technicalIssues || []).reduce((acc, item) => acc + (computeTechnicalIssueDurationHours(item) || 0), 0);
             const offlineHours = (offlineActivities || []).reduce((acc, item) => acc + (computeOfflineActivityDurationHours(item) || 0), 0);
             const work = baseWork + countedTrainingHours + technicalHours + offlineHours;
@@ -2421,12 +2526,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             if (selectedTab === 'trainings') {
             if (!trainings || trainings.length === 0) return <div className="text-sm text-gray-400">—</div>;
 
-            let countedHours = 0;
-            let notCountedHours = 0;
-            for (const t of trainings) {
-                const h = computeTrainingDurationHours(t);
-                if (t.count_in_hours !== false) countedHours += h; else notCountedHours += h;
-            }
+            const countedHours = computeUniqueTrainingDurationHours(trainings, t => t && t.count_in_hours !== false);
+            const notCountedHours = computeUniqueTrainingDurationHours(trainings, t => t && t.count_in_hours === false);
 
             const parts = [];
             if (countedHours > 0) {
@@ -2590,7 +2691,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         function getCountedTrainingHoursForRow(opId) {
             const all = trainingsMap[opId] || {};
             let sum = 0;
-            for (const d of Object.keys(all)) sum += (all[d] || []).reduce((s, t) => s + ((t && t.count_in_hours !== false) ? computeTrainingDurationHours(t) : 0), 0);
+            for (const d of Object.keys(all)) {
+            sum += computeUniqueTrainingDurationHours(all[d] || [], t => t && t.count_in_hours !== false);
+            }
             return sum;
         }
 
@@ -3012,12 +3115,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             const byDay = trainingsMap[op.operator_id] || {};
                             for (const dKey of Object.keys(byDay)) {
                             const arr = byDay[dKey] || [];
-                            for (const t of arr) {
-                                const h = computeTrainingDurationHours(t) || 0;
-                                totalHoursAll += h;
-                                if (t.count_in_hours !== false) totalHoursCounted += h;
-                                else totalHoursNotCounted += h;
-                            }
+                            totalHoursAll += computeUniqueTrainingDurationHours(arr);
+                            totalHoursCounted += computeUniqueTrainingDurationHours(arr, t => t && t.count_in_hours !== false);
+                            totalHoursNotCounted += computeUniqueTrainingDurationHours(arr, t => t && t.count_in_hours === false);
                             }
                             const technicalByDay = technicalIssuesMap[op.operator_id] || {};
                             for (const dKey of Object.keys(technicalByDay)) {
@@ -3925,6 +4025,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 onClose={closeTrainingModal}
                 onSave={handleTrainingSaveFromModal}
                 initialData={trainingModalState.training ? { ...trainingModalState.training, date: trainingModalState.date || trainingModalState.training.date } : { date: trainingModalState.date }}
+                selectedOperators={operators
+                    .filter(op => Number(op?.operator_id) === Number(trainingModalState.operatorId))
+                    .map(op => ({ id: op.operator_id, name: op.name }))}
+                selectedOperatorIds={trainingModalState.operatorId ? [Number(trainingModalState.operatorId)] : []}
+                selectableOperators={operators.map(op => ({ id: op.operator_id, name: op.name }))}
+                existingTrainingsByOperator={trainingsMap}
                 />
             )}
             </div>
@@ -7373,6 +7479,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             });
             const [plannerTrainingActionLoading, setPlannerTrainingActionLoading] = useState(false);
             const [plannerTrainingModalError, setPlannerTrainingModalError] = useState('');
+            const [plannerTrainingsByOperator, setPlannerTrainingsByOperator] = useState({});
+            const plannerLoadedTrainingMonthKeysRef = useRef(new Set());
             const [plannerTechStatusModalState, setPlannerTechStatusModalState] = useState({
                 open: false,
                 operatorId: null,
@@ -7989,6 +8097,65 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     }
                 }
             }, [user?.id, user?.role, plannerMonthBoundsByKey, mergePlannerOperatorsFromServer]);
+            const mergePlannerTrainingRows = useCallback((rows = []) => {
+                setPlannerTrainingsByOperator(prev => {
+                    const next = { ...(prev || {}) };
+                    for (const row of (Array.isArray(rows) ? rows : [])) {
+                        const operatorId = Number(row?.operator_id);
+                        if (!Number.isFinite(operatorId) || operatorId <= 0) continue;
+                        const key = String(operatorId);
+                        const existing = Array.isArray(next[key]) ? next[key].slice() : [];
+                        const byId = new Map(existing.map(item => [normalizeTrainingId(item?.id), item]));
+                        const rowId = normalizeTrainingId(row?.id);
+                        if (rowId) byId.set(rowId, row);
+                        else existing.push(row);
+                        next[key] = rowId ? Array.from(byId.values()) : existing;
+                    }
+                    return next;
+                });
+            }, []);
+            const fetchPlannerTrainingsForMonth = useCallback(async (monthKey, { force = false } = {}) => {
+                const normalizedMonth = String(monthKey || '').trim();
+                if (!user?.id || !/^\d{4}-\d{2}$/.test(normalizedMonth)) return;
+                if (!force && plannerLoadedTrainingMonthKeysRef.current.has(normalizedMonth)) return;
+                const response = await fetch(`${API_BASE_URL}/api/trainings?month=${encodeURIComponent(normalizedMonth)}`, {
+                    credentials: 'include',
+                    headers: withAccessTokenHeader({ 'X-User-Id': String(user.id) })
+                });
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    throw new Error(payload?.error || `HTTP ${response.status}`);
+                }
+                const rows = Array.isArray(payload?.trainings) ? payload.trainings : (Array.isArray(payload) ? payload : []);
+                mergePlannerTrainingRows(rows);
+                plannerLoadedTrainingMonthKeysRef.current.add(normalizedMonth);
+            }, [API_BASE_URL, user?.id, withAccessTokenHeader, mergePlannerTrainingRows]);
+            useEffect(() => {
+                const datesToLoad = [];
+                if (plannerTrainingModalState?.open && plannerTrainingModalState?.date) {
+                    datesToLoad.push(String(plannerTrainingModalState.date).slice(0, 7));
+                }
+                if (
+                    plannerOfflineActivityModalState?.open
+                    && String(plannerOfflineActivityModalState?.activityType || '') === 'training'
+                    && plannerOfflineActivityModalState?.date
+                ) {
+                    datesToLoad.push(String(plannerOfflineActivityModalState.date).slice(0, 7));
+                }
+                Array.from(new Set(datesToLoad.filter(monthKey => /^\d{4}-\d{2}$/.test(monthKey))))
+                    .forEach(monthKey => {
+                        fetchPlannerTrainingsForMonth(monthKey).catch(error => {
+                            console.error('Error loading planner trainings:', error);
+                        });
+                    });
+            }, [
+                plannerTrainingModalState?.open,
+                plannerTrainingModalState?.date,
+                plannerOfflineActivityModalState?.open,
+                plannerOfflineActivityModalState?.activityType,
+                plannerOfflineActivityModalState?.date,
+                fetchPlannerTrainingsForMonth
+            ]);
             const plannerStatusRangeKey = useCallback((startDate, endDate) => {
                 const start = String(startDate || '').trim();
                 const end = String(endDate || '').trim();
@@ -10522,6 +10689,32 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (intValue < 1 || intValue > 30) return null;
                 return intValue;
             };
+            const plannerOfflineTrainingDraftOverlapInfo = useMemo(() => {
+                if (
+                    !plannerOfflineActivityModalState?.open
+                    || String(plannerOfflineActivityModalState?.activityType || '') !== 'training'
+                ) {
+                    return getTrainingOverlapInfo({}, [], {}, null);
+                }
+                return getTrainingOverlapInfo(
+                    plannerTrainingsByOperator,
+                    [plannerOfflineActivityModalState?.operatorId],
+                    {
+                        date: plannerOfflineActivityModalState?.date,
+                        start_time: plannerOfflineActivityModalState?.startTime,
+                        end_time: plannerOfflineActivityModalState?.endTime
+                    },
+                    null
+                );
+            }, [
+                plannerOfflineActivityModalState?.open,
+                plannerOfflineActivityModalState?.activityType,
+                plannerOfflineActivityModalState?.operatorId,
+                plannerOfflineActivityModalState?.date,
+                plannerOfflineActivityModalState?.startTime,
+                plannerOfflineActivityModalState?.endTime,
+                plannerTrainingsByOperator
+            ]);
 
             const submitPlannerOfflineActivityModal = async () => {
                 const operatorId = Number(plannerOfflineActivityModalState?.operatorId);
@@ -10554,6 +10747,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             setPlannerOfflineActivityModalError('Выберите причину тренинга.');
                             return;
                         }
+                        if (plannerOfflineTrainingDraftOverlapInfo?.hasExactDuplicate) {
+                            setPlannerOfflineActivityModalError('Такой тренинг уже есть у оператора на это время.');
+                            return;
+                        }
                         const response = await fetch(`${API_BASE_URL}/api/trainings`, {
                             method: 'POST',
                             credentials: 'include',
@@ -10575,6 +10772,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             throw new Error(payload?.error || `HTTP ${response.status}`);
                         }
                         await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
+                        await fetchPlannerTrainingsForMonth(dayKey.slice(0, 7), { force: true });
                         emitAppToast('Тренинг сохранен', 'success');
                         closePlannerOfflineActivityModal();
                         return;
@@ -10859,6 +11057,32 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     [field]: value
                 }));
             };
+            const plannerTrainingDraftOverlapInfo = useMemo(() => {
+                if (!plannerTrainingModalState?.open) {
+                    return getTrainingOverlapInfo({}, [], {}, null);
+                }
+                if (String(plannerTrainingModalState?.mode || '') === 'confirm_training_flag_all') {
+                    return getTrainingOverlapInfo({}, [], {}, null);
+                }
+                return getTrainingOverlapInfo(
+                    plannerTrainingsByOperator,
+                    [plannerTrainingModalState?.operatorId],
+                    {
+                        date: plannerTrainingModalState?.date,
+                        start_time: plannerTrainingModalState?.startTime,
+                        end_time: plannerTrainingModalState?.endTime
+                    },
+                    null
+                );
+            }, [
+                plannerTrainingModalState?.open,
+                plannerTrainingModalState?.mode,
+                plannerTrainingModalState?.operatorId,
+                plannerTrainingModalState?.date,
+                plannerTrainingModalState?.startTime,
+                plannerTrainingModalState?.endTime,
+                plannerTrainingsByOperator
+            ]);
 
             const submitPlannerTrainingModal = async () => {
                 const operatorId = Number(plannerTrainingModalState?.operatorId);
@@ -10906,6 +11130,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     .filter(Boolean);
                 if (payloadIntervals.length === 0) {
                     setPlannerTrainingModalError('Не удалось подготовить интервалы для сохранения.');
+                    return;
+                }
+                const duplicateInterval = payloadIntervals
+                    .map(interval => getTrainingOverlapInfo(
+                        plannerTrainingsByOperator,
+                        [operatorId],
+                        { date: dayKey, start_time: interval.startTime, end_time: interval.endTime },
+                        null
+                    ))
+                    .find(info => info?.hasExactDuplicate);
+                if (duplicateInterval) {
+                    setPlannerTrainingModalError('Такой тренинг уже есть у оператора на это время.');
                     return;
                 }
 
@@ -10956,6 +11192,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     }
 
                     await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
+                    await fetchPlannerTrainingsForMonth(dayKey.slice(0, 7), { force: true });
                     if (isFlagConfirmMode) {
                         emitAppToast(payloadIntervals.length > 1 ? 'Интервалы тренинга подтверждены' : 'Тренинг добавлен и подтвержден', 'success');
                     } else {
@@ -18698,6 +18935,31 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 </div>
                             )}
 
+                            {plannerTrainingDraftOverlapInfo?.hasOverlap && (
+                                <div className={`rounded-lg border px-3 py-2 text-xs ${
+                                    plannerTrainingDraftOverlapInfo.hasExactDuplicate
+                                        ? 'border-red-200 bg-red-50 text-red-700'
+                                        : 'border-amber-200 bg-amber-50 text-amber-800'
+                                }`}>
+                                    <div className="font-semibold">
+                                        {plannerTrainingDraftOverlapInfo.hasExactDuplicate
+                                            ? 'Такой тренинг уже есть.'
+                                            : 'Есть пересечение по времени.'}
+                                    </div>
+                                    {plannerTrainingDraftOverlapInfo.items.slice(0, 3).map((item, idx) => (
+                                        <div key={`planner-training-overlap-${item.training?.id || idx}`} className="mt-1">
+                                            {item.training?.start_time || '—'} - {item.training?.end_time || '—'}
+                                            {' '}({minutesToDisplayTime(item.overlapStart)} - {minutesToDisplayTime(item.overlapEnd)})
+                                        </div>
+                                    ))}
+                                    {!plannerTrainingDraftOverlapInfo.hasExactDuplicate && (
+                                        <div className="mt-1">
+                                            В часы добавится только уникальная часть: {(plannerTrainingDraftOverlapInfo.uniqueMinutes / 60).toFixed(2)} ч.
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
                             <div>
                                 <label className="block text-xs font-medium text-slate-600 mb-1">Причина</label>
                                 <select
@@ -18742,7 +19004,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             <button
                                 type="button"
                                 onClick={submitPlannerTrainingModal}
-                                disabled={plannerTrainingActionLoading}
+                                disabled={plannerTrainingActionLoading || !!plannerTrainingDraftOverlapInfo?.hasExactDuplicate}
                                 className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
                             >
                                 <FaIcon className={`fas ${plannerTrainingActionLoading ? 'fa-spinner fa-spin' : 'fa-save'}`}></FaIcon>
@@ -19007,6 +19269,31 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </div>
                                 </div>
 
+                                {isTraining && plannerOfflineTrainingDraftOverlapInfo?.hasOverlap && (
+                                    <div className={`rounded-lg border px-3 py-2 text-xs ${
+                                        plannerOfflineTrainingDraftOverlapInfo.hasExactDuplicate
+                                            ? 'border-red-200 bg-red-50 text-red-700'
+                                            : 'border-amber-200 bg-amber-50 text-amber-800'
+                                    }`}>
+                                        <div className="font-semibold">
+                                            {plannerOfflineTrainingDraftOverlapInfo.hasExactDuplicate
+                                                ? 'Такой тренинг уже есть.'
+                                                : 'Есть пересечение по времени.'}
+                                        </div>
+                                        {plannerOfflineTrainingDraftOverlapInfo.items.slice(0, 3).map((item, idx) => (
+                                            <div key={`planner-offline-training-overlap-${item.training?.id || idx}`} className="mt-1">
+                                                {item.training?.start_time || '—'} - {item.training?.end_time || '—'}
+                                                {' '}({minutesToDisplayTime(item.overlapStart)} - {minutesToDisplayTime(item.overlapEnd)})
+                                            </div>
+                                        ))}
+                                        {!plannerOfflineTrainingDraftOverlapInfo.hasExactDuplicate && (
+                                            <div className="mt-1">
+                                                В часы добавится только уникальная часть: {(plannerOfflineTrainingDraftOverlapInfo.uniqueMinutes / 60).toFixed(2)} ч.
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+
                                 {isTraining && (
                                     <>
                                         <div>
@@ -19140,7 +19427,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 <button
                                     type="button"
                                     onClick={submitPlannerOfflineActivityModal}
-                                    disabled={plannerOfflineActivityActionLoading}
+                                    disabled={plannerOfflineActivityActionLoading || (isTraining && !!plannerOfflineTrainingDraftOverlapInfo?.hasExactDuplicate)}
                                     className={`px-4 py-2 rounded-lg text-white text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2 ${saveButtonClass}`}
                                 >
                                     <FaIcon className={`fas ${plannerOfflineActivityActionLoading ? 'fa-spinner fa-spin' : 'fa-save'}`}></FaIcon>
@@ -25717,6 +26004,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 selectedOperatorIds = [],
                 selectableOperators = [],
                 onSelectedOperatorsChange,
+                existingTrainingsByOperator = {},
             }) {
                 const [date, setDate] = useState(initialData.date || "");
                 const [startTime, setStartTime] = useState(initialData.start_time || "");
@@ -25739,6 +26027,33 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     if (selectedOperatorNames.length <= 3) return selectedOperatorNames.join(", ");
                     return `${selectedOperatorNames.slice(0, 3).join(", ")} +${selectedOperatorNames.length - 3}`;
                 }, [selectedOperatorNames]);
+                const selectedOperatorIdList = useMemo(() => {
+                    const ids = Array.isArray(selectedOperatorIds) ? selectedOperatorIds : [];
+                    const normalized = ids
+                        .map(id => Number(id))
+                        .filter(id => Number.isFinite(id) && id > 0);
+                    if (normalized.length > 0) return Array.from(new Set(normalized));
+                    const initialOperatorId = Number(initialData?.operator_id);
+                    return Number.isFinite(initialOperatorId) && initialOperatorId > 0 ? [initialOperatorId] : [];
+                }, [selectedOperatorIds, initialData?.operator_id]);
+                const operatorNameById = useMemo(() => {
+                    const map = new Map();
+                    (Array.isArray(selectableOperators) ? selectableOperators : []).forEach(operator => {
+                        const id = Number(operator?.id ?? operator?.operator_id);
+                        if (Number.isFinite(id)) map.set(id, String(operator?.name || '').trim());
+                    });
+                    (Array.isArray(selectedOperators) ? selectedOperators : []).forEach(operator => {
+                        const id = Number(operator?.id ?? operator?.operator_id);
+                        if (Number.isFinite(id)) map.set(id, String(operator?.name || '').trim());
+                    });
+                    return map;
+                }, [selectableOperators, selectedOperators]);
+                const overlapInfo = useMemo(() => getTrainingOverlapInfo(
+                    existingTrainingsByOperator,
+                    selectedOperatorIdList,
+                    { date, start_time: startTime, end_time: endTime },
+                    initialData?.id
+                ), [existingTrainingsByOperator, selectedOperatorIdList, date, startTime, endTime, initialData?.id]);
 
                 const reasons = [
                     "Обратная связь",
@@ -25810,6 +26125,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const e = parseTime(endTime);
                     if (s == null || e == null) return "Неправильный формат времени.";
                     if (e <= s) return "Время окончания должно быть позже времени начала.";
+                    if (overlapInfo?.hasExactDuplicate) return "Такой тренинг уже есть у выбранного оператора на это время.";
                     return "";
                 };
 
@@ -25947,6 +26263,40 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 </div>
                             </div>
 
+                            {overlapInfo?.hasOverlap && (
+                                <div className={`rounded-lg border px-3 py-2 text-sm ${
+                                    overlapInfo.hasExactDuplicate
+                                        ? 'border-red-200 bg-red-50 text-red-700'
+                                        : 'border-amber-200 bg-amber-50 text-amber-800'
+                                }`}>
+                                    <div className="font-semibold">
+                                        {overlapInfo.hasExactDuplicate
+                                            ? 'Такой тренинг уже есть.'
+                                            : 'Есть пересечение по времени.'}
+                                    </div>
+                                    <div className="mt-1 space-y-1">
+                                        {overlapInfo.items.slice(0, 4).map((item, idx) => {
+                                            const opName = operatorNameById.get(Number(item.operatorId)) || `ID ${item.operatorId}`;
+                                            const training = item.training || {};
+                                            return (
+                                                <div key={`training-overlap-${item.operatorId}-${training.id || idx}`} className="text-xs">
+                                                    {opName}: {training.start_time || '—'} - {training.end_time || '—'}
+                                                    {' '}({minutesToDisplayTime(item.overlapStart)} - {minutesToDisplayTime(item.overlapEnd)})
+                                                </div>
+                                            );
+                                        })}
+                                        {overlapInfo.items.length > 4 && (
+                                            <div className="text-xs">Еще пересечений: {overlapInfo.items.length - 4}</div>
+                                        )}
+                                    </div>
+                                    {!overlapInfo.hasExactDuplicate && (
+                                        <div className="mt-1 text-xs">
+                                            В часы добавится только уникальная часть: {(overlapInfo.uniqueMinutes / 60).toFixed(2)} ч.
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
                                 Причина <span className="text-red-500">*</span>
@@ -26011,9 +26361,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 <button
                                 type="button"
                                 onClick={handleSave}
-                                disabled={isLoading}
+                                disabled={isLoading || !!overlapInfo?.hasExactDuplicate}
                                 className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-white ${
-                                    isLoading ? "bg-blue-600 opacity-70 cursor-not-allowed" : "bg-green-600 hover:bg-green-700"
+                                    (isLoading || !!overlapInfo?.hasExactDuplicate) ? "bg-blue-600 opacity-70 cursor-not-allowed" : "bg-green-600 hover:bg-green-700"
                                 }`}
                                 >
                                 {isLoading ? (
@@ -26870,6 +27220,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             selectedOperatorIds={modalOperatorIds}
                             selectableOperators={selectableOperators}
                             onSelectedOperatorsChange={setModalOperatorIds}
+                            existingTrainingsByOperator={trainings}
                         />
                         {/* Модальное окно календаря по дню (общий) */}
                         {calendarModal.open && (
@@ -27646,10 +27997,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                     const trainingsForDay = Array.isArray(trainings) ? trainings.filter(t => t?.date === dateStr) : [];
                     // training hours that should be counted in work hours
-                    const trainingHoursForDay = trainingsForDay.reduce((acc, t) => {
-                        if (!t || t.count_in_hours === false) return acc;
-                        return acc + computeTrainingDuration(t);
-                    }, 0);
+                    const trainingHoursForDay = computeUniqueTrainingDurationHours(trainingsForDay, t => t && t.count_in_hours !== false);
                     const hasTraining = trainingsForDay.length > 0;
                     const technicalIssuesForDay = Array.isArray(normalizedTechnicalIssuesByDay[dayKey]) ? normalizedTechnicalIssuesByDay[dayKey] : [];
                     const hasTechnicalIssues = technicalIssuesForDay.length > 0;
@@ -28056,11 +28404,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                 const trainingsOnDay = Array.isArray(trainings) ? trainings.filter((t) => t.date === selectedDay.dateStr) : [];
 
-                                const countedTrainingSummary = trainingsOnDay.reduce((acc, t) => {
-                                if (!t || t.count_in_hours === false) return acc;
-                                const { hours } = computeTrainingDuration(t);
-                                return acc + hours;
-                                }, 0);
+                                const countedTrainingSummary = computeUniqueTrainingDurationHours(trainingsOnDay, t => t && t.count_in_hours !== false);
 
                                 if (trainingsOnDay.length === 0) return null;
 
@@ -34729,26 +35073,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             if (Number.isNaN(hh) || Number.isNaN(mm)) return null;
                                             return hh * 60 + mm;
                                           };
-                                          const totalHoursTraining = (Array.isArray(operatorTrainings) ? operatorTrainings : []).reduce((sum, t) => {
-                                            if (!t) return sum;
-                                            if (t.operator_id && Number(t.operator_id) !== Number(hoursOp?.operator_id ?? user.id)) return sum;
-                                            if (t.date && String(t.date).slice(0, 7) !== selectedMonth) return sum;
-                                            if (t.count_in_hours === false) return sum;
-
-                                            const startMin = parseHMToMinutes(t.start_time);
-                                            const endMin = parseHMToMinutes(t.end_time);
-                                            let hours = 0;
-                                            if (startMin !== null && endMin !== null) {
-                                              let diff = endMin - startMin;
-                                              if (diff < 0) diff += 24 * 60;
-                                              hours = diff / 60;
-                                            } else {
-                                              const maybe = Number(t.hours ?? t.duration_hours ?? t.duration ?? t.count ?? 0);
-                                              if (Number.isFinite(maybe) && maybe > 0) hours = maybe;
-                                            }
-                                            if (!Number.isFinite(hours) || hours <= 0) hours = 1;
-                                            return sum + hours;
-                                          }, 0);
+                                          const totalHoursTraining = computeUniqueTrainingDurationHours(
+                                            (Array.isArray(operatorTrainings) ? operatorTrainings : []).filter(t => {
+                                              if (!t) return false;
+                                              if (t.operator_id && Number(t.operator_id) !== Number(hoursOp?.operator_id ?? user.id)) return false;
+                                              if (t.date && String(t.date).slice(0, 7) !== selectedMonth) return false;
+                                              return t.count_in_hours !== false;
+                                            })
+                                          );
                                           const totalHoursTechnical = Number(hoursOp?.technical_issue_hours ?? 0);
                                           const totalHoursOffline = Number(hoursOp?.offline_activity_hours ?? 0);
                                           const totalHours = totalHoursBase + totalHoursTraining + totalHoursTechnical + totalHoursOffline;
@@ -34952,30 +35284,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 })
                                             : [];
 
-                                            // --- суммируем часы тренинга из самих записей trainings ---
-                                            const trainingHoursFromList = trainingsForOp.reduce((sum, t) => {
-                                            if (!t || t.count_in_hours === false) return sum;
-
-                                            // 1) пытаемся вычислить по start_time/end_time
-                                            const startMin = parseHMToMinutes(t.start_time);
-                                            const endMin = parseHMToMinutes(t.end_time);
-
-                                            let hours = 0;
-                                            if (startMin !== null && endMin !== null) {
-                                                let diff = endMin - startMin;
-                                                if (diff < 0) diff += 24 * 60; // переход через полночь
-                                                hours = diff / 60;
-                                            } else {
-                                                // 2) fallback: поля hours/duration/duration_hours/count
-                                                const maybe = Number(t.hours ?? t.duration_hours ?? t.duration ?? t.count ?? 0);
-                                                if (Number.isFinite(maybe) && maybe > 0) hours = maybe;
-                                            }
-
-                                            // 3) безопасный fallback: если не удалось посчитать или получилось 0 -> 1 час
-                                            if (!Number.isFinite(hours) || hours <= 0) hours = 1;
-
-                                            return sum + hours;
-                                            }, 0);
+                                            // --- считаем только уникальный зачтенный интервал тренингов ---
+                                            const trainingHoursFromList = computeUniqueTrainingDurationHours(trainingsForOp, t => t && t.count_in_hours !== false);
                                             const trainingHours = safeNum(trainingHoursFromList);
 
                                             const technicalByDayMap = (op && typeof op.technical_issues_by_day === 'object' && !Array.isArray(op.technical_issues_by_day))

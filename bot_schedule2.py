@@ -10957,6 +10957,25 @@ def add_training():
                 logging.warning("Blocked training creation: requester=%s operator=%s error=%s", requester_id, operator_ids[0], message)
                 return jsonify({"error": message}), status_code
 
+            with db._get_cursor() as cursor:
+                cursor.execute("""
+                    SELECT id
+                    FROM trainings
+                    WHERE operator_id = %s
+                      AND training_date = %s
+                      AND start_time = %s
+                      AND end_time = %s
+                    LIMIT 1
+                """, (int(operator[0]), data['date'], data['start_time'], data['end_time']))
+                existing_training = cursor.fetchone()
+            if existing_training:
+                return jsonify({
+                    "status": "duplicate",
+                    "error": "Training already exists for this operator and time",
+                    "duplicate": True,
+                    "id": existing_training[0]
+                }), 409
+
             training_id = db.add_training(
                 operator_id=int(operator[0]),
                 training_date=data['date'],
@@ -11001,6 +11020,27 @@ def add_training():
                     continue
 
                 scoped_operator_id = int(operator[0])
+                with db._get_cursor() as cursor:
+                    cursor.execute("""
+                        SELECT id
+                        FROM trainings
+                        WHERE operator_id = %s
+                          AND training_date = %s
+                          AND start_time = %s
+                          AND end_time = %s
+                        LIMIT 1
+                    """, (scoped_operator_id, data['date'], data['start_time'], data['end_time']))
+                    existing_training = cursor.fetchone()
+                if existing_training:
+                    errors.append({
+                        "operator_id": int(raw_operator_id),
+                        "error": "Training already exists for this operator and time",
+                        "status_code": 409,
+                        "duplicate": True,
+                        "id": existing_training[0]
+                    })
+                    continue
+
                 training_id = db.add_training(
                     operator_id=scoped_operator_id,
                     training_date=data['date'],
@@ -11076,7 +11116,7 @@ def update_training(training_id):
 
         with db._get_cursor() as cursor:
             cursor.execute("""
-                SELECT created_by, operator_id FROM trainings WHERE id = %s
+                SELECT created_by, operator_id, training_date, start_time, end_time FROM trainings WHERE id = %s
             """, (training_id,))
             training = cursor.fetchone()
             if not training:
@@ -11124,6 +11164,29 @@ def update_training(training_id):
             if data['reason'] not in allowed_reasons:
                 logging.warning(f"Invalid training reason: {data['reason']}")
                 return jsonify({"error": "Invalid training reason"}), 400
+
+        effective_date = data.get('date') or training[2].strftime('%Y-%m-%d')
+        effective_start = data.get('start_time') or training[3].strftime('%H:%M')
+        effective_end = data.get('end_time') or training[4].strftime('%H:%M')
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id
+                FROM trainings
+                WHERE operator_id = %s
+                  AND training_date = %s
+                  AND start_time = %s
+                  AND end_time = %s
+                  AND id <> %s
+                LIMIT 1
+            """, (training[1], effective_date, effective_start, effective_end, training_id))
+            duplicate_training = cursor.fetchone()
+        if duplicate_training:
+            return jsonify({
+                "status": "duplicate",
+                "error": "Training already exists for this operator and time",
+                "duplicate": True,
+                "id": duplicate_training[0]
+            }), 409
 
         success = db.update_training(
             training_id=training_id,
