@@ -662,7 +662,7 @@ def import_resource_csv(db, report_date_value: str, content: bytes, filename: st
                 success_wait_seconds, avg_success_wait_seconds, total_time_seconds,
                 greeting_abandoned, greeting_time_seconds, queue_abandoned,
                 queue_wait_seconds, avg_lost_wait_seconds, avg_wait_seconds,
-                actual_fte, raw_payload, created_at, updated_at
+                actual_fte, raw_payload
             )
             VALUES %s
             ON CONFLICT (report_date, hour)
