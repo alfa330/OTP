@@ -32315,13 +32315,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 )}
                                 {currentUserRole === 'trainer' && (
                                     <>
-                                        {canAccessLmsSection && renderSidebarDivider()}
                                         <li>
                                             <button onClick={(e) => handleSidebarViewNavigation(e, 'manage_operators')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_operators' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-user-edit"></FaIcon> <span className="sidebar-text">Сотрудники</span>
                                             </button>
                                         </li>
-                                        {renderSidebarDivider()}
                                         <li>
                                             <button onClick={(e) => handleSidebarViewNavigation(e, 'tasks')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'tasks' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-tasks"></FaIcon> <span className="sidebar-text">Задачи</span>
