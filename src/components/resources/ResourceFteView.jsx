@@ -14,6 +14,9 @@ import {
   Save,
   Settings,
   SlidersHorizontal,
+  PhoneCall,
+  PhoneMissed,
+  ShieldAlert,
   TrendingUp,
   Users,
 } from 'lucide-react';
@@ -23,6 +26,8 @@ import {
   ComposedChart,
   Line,
   LineChart,
+  Area,
+  AreaChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -68,6 +73,7 @@ const DISPLAY_PREFERENCES_STORAGE_KEY = 'otp_resource_fte_display_v1';
 const VIEW_TABS = [
   { key: 'overview', label: 'Обзор', icon: LayoutDashboard },
   { key: 'day', label: 'День', icon: CalendarDays },
+  { key: 'losses', label: 'Потери', icon: PhoneMissed },
   { key: 'profiles', label: 'Профили', icon: BarChart3 },
   { key: 'settings', label: 'Настройки', icon: SlidersHorizontal },
 ];
@@ -77,9 +83,13 @@ const DEFAULT_DISPLAY_OPTIONS = {
   metricWeeklyFte: true,
   metricBaseOperators: true,
   metricHistoryWarnings: true,
+  metricLostCalls: true,
+  metricLossRate: true,
   chartCalls: true,
   chartFte: true,
   chartActual: true,
+  chartLosses: true,
+  chartLossRate: true,
   profileCalls: true,
   profileAht: true,
   profileDailyFte: true,
@@ -104,6 +114,8 @@ const DISPLAY_GROUPS = [
       ['metricWeeklyFte', 'Недельная потребность'],
       ['metricBaseOperators', 'Без усушки'],
       ['metricHistoryWarnings', 'Недостаток истории'],
+      ['metricLostCalls', 'Потерянные звонки'],
+      ['metricLossRate', 'Доля потерь'],
     ],
   },
   {
@@ -112,6 +124,8 @@ const DISPLAY_GROUPS = [
       ['chartCalls', 'Звонки'],
       ['chartFte', 'Прогноз FTE'],
       ['chartActual', 'Факт FTE'],
+      ['chartLosses', 'Потери'],
+      ['chartLossRate', 'Доля потерь'],
     ],
   },
   {
@@ -323,10 +337,58 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
         .map((item) => ({
           date: formatDate(item.report_date).slice(0, 5),
           calls: Number(item.total_received || 0),
+          accepted: Number(item.total_accepted || 0),
+          lost: Number(item.total_lost || 0),
+          lossRate: Number(item.no_answer_rate || 0) * 100,
           forecastFte: Number(item.forecast_fte_total || 0),
           actualFte: Number(item.actual_fte_total || 0),
         })),
     [overview?.history],
+  );
+
+  const periodLossSummary = useMemo(() => {
+    const rows = overview?.history || [];
+    const totalReceived = rows.reduce((sum, row) => sum + Number(row.total_received || 0), 0);
+    const totalAccepted = rows.reduce((sum, row) => sum + Number(row.total_accepted || 0), 0);
+    const totalLost = rows.reduce((sum, row) => sum + Number(row.total_lost || 0), 0);
+    const worstDay = rows.reduce((worst, row) => {
+      if (!worst) return row;
+      return Number(row.no_answer_rate || 0) > Number(worst.no_answer_rate || 0) ? row : worst;
+    }, null);
+    return {
+      totalReceived,
+      totalAccepted,
+      totalLost,
+      lossRate: totalReceived > 0 ? totalLost / totalReceived : 0,
+      worstDay,
+    };
+  }, [overview?.history]);
+
+  const dayLossHotspots = useMemo(() => {
+    const rows = selectedDay?.hours || [];
+    return rows
+      .filter((row) => Number(row.received_calls || 0) > 0)
+      .map((row) => ({
+        ...row,
+        lossScore: Number(row.lost_calls || 0) * Number(row.no_answer_rate || 0),
+      }))
+      .sort((a, b) => {
+        const byLost = Number(b.lost_calls || 0) - Number(a.lost_calls || 0);
+        if (byLost !== 0) return byLost;
+        return Number(b.no_answer_rate || 0) - Number(a.no_answer_rate || 0);
+      })
+      .slice(0, 5);
+  }, [selectedDay?.hours]);
+
+  const dayAcceptedLostData = useMemo(
+    () =>
+      (selectedDay?.hours || []).map((row) => ({
+        hour: row.hour_label,
+        accepted: Number(row.accepted_calls || 0),
+        lost: Number(row.lost_calls || 0),
+        lossRate: Number(row.no_answer_rate || 0) * 100,
+      })),
+    [selectedDay?.hours],
   );
 
   const visibleMetricCount = [
@@ -334,6 +396,8 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
     displayOptions.metricWeeklyFte,
     displayOptions.metricBaseOperators,
     displayOptions.metricHistoryWarnings,
+    displayOptions.metricLostCalls,
+    displayOptions.metricLossRate,
   ].filter(Boolean).length;
 
   const toggleDisplayOption = useCallback((key, value) => {
@@ -529,7 +593,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
         </div>
 
         {activeDashboardView !== 'settings' && visibleMetricCount > 0 && (
-          <div className={`grid gap-3 md:grid-cols-2 ${visibleMetricCount >= 4 ? 'xl:grid-cols-4' : 'xl:grid-cols-3'}`}>
+          <div className={`grid gap-3 md:grid-cols-2 ${visibleMetricCount >= 5 ? 'xl:grid-cols-6' : visibleMetricCount >= 4 ? 'xl:grid-cols-4' : 'xl:grid-cols-3'}`}>
             {displayOptions.metricOperators && (
               <StatCard icon={Users} label="Операторы с усушкой" value={formatNumber(weekly.operators_with_shrinkage, 2)} hint={`Округление: ${formatNumber(weekly.operators_rounded, 0)}`} tone="blue" />
             )}
@@ -541,6 +605,12 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
             )}
             {displayOptions.metricHistoryWarnings && (
               <StatCard icon={AlertTriangle} label="Недостаток истории" value={(overview?.profiles || []).filter((item) => item.insufficient_history).length} hint="Дни недели с менее чем 2 значениями" tone="amber" />
+            )}
+            {displayOptions.metricLostCalls && (
+              <StatCard icon={PhoneMissed} label="Потерянные звонки" value={formatInt(periodLossSummary.totalLost)} hint={`Принято: ${formatInt(periodLossSummary.totalAccepted)}`} tone="rose" />
+            )}
+            {displayOptions.metricLossRate && (
+              <StatCard icon={ShieldAlert} label="Доля потерь" value={formatPercent(periodLossSummary.lossRate)} hint={periodLossSummary.worstDay ? `Пик: ${formatDate(periodLossSummary.worstDay.report_date)}` : 'За выбранный период'} tone={periodLossSummary.lossRate > 0.08 ? 'rose' : 'amber'} />
             )}
           </div>
         )}
@@ -562,16 +632,132 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                     <XAxis dataKey="date" tick={{ fontSize: 11 }} />
                     <YAxis yAxisId="left" tick={{ fontSize: 11 }} />
                     <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} />
-                    <Tooltip formatter={(value, name) => [formatNumber(value, name === 'calls' ? 0 : 2), name === 'calls' ? 'Звонки' : name === 'actualFte' ? 'Факт FTE' : 'Прогноз FTE']} />
+                    <Tooltip formatter={(value, name) => {
+                      const labelMap = { calls: 'Звонки', lost: 'Потеряно', lossRate: 'Доля потерь', actualFte: 'Факт FTE', forecastFte: 'Прогноз FTE' };
+                      return [name === 'lossRate' ? `${formatNumber(value, 1)}%` : formatNumber(value, name === 'calls' || name === 'lost' ? 0 : 2), labelMap[name] || name];
+                    }} />
                     {displayOptions.chartCalls && <Bar yAxisId="left" dataKey="calls" fill="#bfdbfe" radius={[4, 4, 0, 0]} />}
+                    {displayOptions.chartLosses && <Bar yAxisId="left" dataKey="lost" fill="#fecdd3" radius={[4, 4, 0, 0]} />}
                     {displayOptions.chartFte && <Line yAxisId="right" type="monotone" dataKey="forecastFte" stroke="#2563eb" strokeWidth={2} dot={false} />}
                     {displayOptions.chartActual && <Line yAxisId="right" type="monotone" dataKey="actualFte" stroke="#059669" strokeWidth={2} dot={false} />}
+                    {displayOptions.chartLossRate && <Line yAxisId="right" type="monotone" dataKey="lossRate" stroke="#e11d48" strokeWidth={2} dot={false} />}
                   </ComposedChart>
                 </ResponsiveContainer>
               </div>
             ) : (
               <EmptyState title="Нет данных для сводки" text="Загрузите первый ежедневный CSV, чтобы увидеть динамику." />
             )}
+          </section>
+        )}
+
+        {activeDashboardView === 'losses' && (
+          <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+              <div>
+                <h2 className="text-lg font-semibold text-slate-950">Аналитика потерь</h2>
+                <p className="text-sm text-slate-500">Потерянные звонки, доля неответов и часы с максимальным риском.</p>
+              </div>
+              {periodLossSummary.worstDay ? (
+                <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">
+                  Худший день: <b>{formatDate(periodLossSummary.worstDay.report_date)}</b> · {formatPercent(periodLossSummary.worstDay.no_answer_rate)}
+                </div>
+              ) : null}
+            </div>
+
+            <div className="mt-5 grid gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
+              <div className="min-w-0 rounded-lg border border-slate-200 bg-white p-3">
+                <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-900">
+                  <PhoneMissed size={16} />
+                  Потери по дням
+                </div>
+                {historyTrendData.length ? (
+                  <div className="h-72">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <ComposedChart data={historyTrendData} margin={{ top: 10, right: 18, left: 0, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                        <XAxis dataKey="date" tick={{ fontSize: 11 }} />
+                        <YAxis yAxisId="left" tick={{ fontSize: 11 }} />
+                        <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} />
+                        <Tooltip formatter={(value, name) => [name === 'lossRate' ? `${formatNumber(value, 1)}%` : formatNumber(value, 0), name === 'lost' ? 'Потеряно' : name === 'accepted' ? 'Принято' : 'Доля потерь']} />
+                        {displayOptions.chartCalls && <Bar yAxisId="left" dataKey="accepted" stackId="calls" fill="#bbf7d0" radius={[0, 0, 0, 0]} />}
+                        {displayOptions.chartLosses && <Bar yAxisId="left" dataKey="lost" stackId="calls" fill="#fecdd3" radius={[4, 4, 0, 0]} />}
+                        {displayOptions.chartLossRate && <Line yAxisId="right" type="monotone" dataKey="lossRate" stroke="#e11d48" strokeWidth={2} dot={false} />}
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                  </div>
+                ) : (
+                  <EmptyState title="Нет данных по потерям" text="Загрузите ежедневные отчеты, чтобы увидеть динамику потерь." />
+                )}
+              </div>
+
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+                <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+                  <ShieldAlert size={16} />
+                  Сводка периода
+                </div>
+                <dl className="mt-4 space-y-3 text-sm">
+                  <div className="flex justify-between gap-3"><dt className="text-slate-500">Поступило</dt><dd className="font-medium text-slate-900">{formatInt(periodLossSummary.totalReceived)}</dd></div>
+                  <div className="flex justify-between gap-3"><dt className="text-slate-500">Принято</dt><dd className="font-medium text-emerald-700">{formatInt(periodLossSummary.totalAccepted)}</dd></div>
+                  <div className="flex justify-between gap-3"><dt className="text-slate-500">Потеряно</dt><dd className="font-medium text-rose-700">{formatInt(periodLossSummary.totalLost)}</dd></div>
+                  <div className="flex justify-between gap-3"><dt className="text-slate-500">Доля потерь</dt><dd className="font-medium text-rose-700">{formatPercent(periodLossSummary.lossRate)}</dd></div>
+                </dl>
+                <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                  Высокая доля потерь в часы с большим входящим потоком обычно указывает на недобор факта или неверное распределение смен.
+                </div>
+              </div>
+            </div>
+
+            {selectedSummary ? (
+              <div className="mt-5 grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
+                <div className="rounded-lg border border-slate-200 bg-white p-3">
+                  <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-900">
+                    <PhoneCall size={16} />
+                    Принято / потеряно по часам: {formatDate(selectedSummary.report_date)}
+                  </div>
+                  <div className="h-72">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <AreaChart data={dayAcceptedLostData} margin={{ top: 10, right: 18, left: 0, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                        <XAxis dataKey="hour" tick={{ fontSize: 11 }} interval={2} />
+                        <YAxis tick={{ fontSize: 11 }} />
+                        <Tooltip formatter={(value, name) => [name === 'lossRate' ? `${formatNumber(value, 1)}%` : formatNumber(value, 0), name === 'accepted' ? 'Принято' : name === 'lost' ? 'Потеряно' : 'Доля потерь']} />
+                        <Area type="monotone" dataKey="accepted" stackId="1" stroke="#16a34a" fill="#bbf7d0" />
+                        <Area type="monotone" dataKey="lost" stackId="1" stroke="#e11d48" fill="#fecdd3" />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-slate-200 bg-white p-4">
+                  <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+                    <AlertTriangle size={16} />
+                    Топ часов риска
+                  </div>
+                  <div className="mt-4 space-y-3">
+                    {dayLossHotspots.length ? (
+                      dayLossHotspots.map((row) => (
+                        <div key={row.hour} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="font-semibold text-slate-900">{row.hour_label}</div>
+                            <div className="rounded-md bg-rose-100 px-2 py-1 text-xs font-semibold text-rose-700">{formatPercent(row.no_answer_rate)}</div>
+                          </div>
+                          <div className="mt-2 grid grid-cols-3 gap-2 text-xs text-slate-500">
+                            <span>Вход: <b className="text-slate-800">{formatInt(row.received_calls)}</b></span>
+                            <span>Потери: <b className="text-rose-700">{formatInt(row.lost_calls)}</b></span>
+                            <span>Факт: <b className="text-slate-800">{formatNumber(row.actual_fte, 1)}</b></span>
+                          </div>
+                          <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-200">
+                            <div className="h-full rounded-full bg-rose-500" style={{ width: `${Math.min(100, Number(row.no_answer_rate || 0) * 100)}%` }} />
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="rounded-lg border border-dashed border-slate-300 p-4 text-sm text-slate-500">По выбранному дню потерь нет.</div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ) : null}
           </section>
         )}
 
