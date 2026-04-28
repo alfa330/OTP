@@ -58,6 +58,24 @@ const formatDate = (iso) => {
   return day && month && year ? `${day}.${month}.${year}` : iso;
 };
 
+const addDaysIso = (iso, days) => {
+  const [year, month, day] = String(iso || todayIso()).split('-').map(Number);
+  const date = new Date(year, (month || 1) - 1, day || 1);
+  date.setDate(date.getDate() + days);
+  const nextYear = date.getFullYear();
+  const nextMonth = String(date.getMonth() + 1).padStart(2, '0');
+  const nextDay = String(date.getDate()).padStart(2, '0');
+  return `${nextYear}-${nextMonth}-${nextDay}`;
+};
+
+const getNextWeekDates = (asOfIso) => {
+  const [year, month, day] = String(asOfIso || todayIso()).split('-').map(Number);
+  const date = new Date(year, (month || 1) - 1, day || 1);
+  const mondayIndex = (date.getDay() + 6) % 7;
+  const nextMonday = addDaysIso(asOfIso || todayIso(), 7 - mondayIndex);
+  return Array.from({ length: 7 }, (_, index) => addDaysIso(nextMonday, index));
+};
+
 const formatSeconds = (seconds) => {
   const total = Math.round(Number(seconds || 0));
   const minutes = Math.floor(total / 60);
@@ -390,6 +408,15 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
       })),
     [selectedDay?.hours],
   );
+
+  const nextWeekForecast = useMemo(() => {
+    const dates = getNextWeekDates(overview?.as_of_date || todayIso());
+    return (overview?.profiles || []).map((profile) => ({
+      ...profile,
+      forecast_date: dates[Number(profile.weekday || 0)] || '',
+      operators_equivalent: Number(profile.daily_fte || 0) / 8,
+    }));
+  }, [overview?.as_of_date, overview?.profiles]);
 
   const visibleMetricCount = [
     displayOptions.metricOperators,
