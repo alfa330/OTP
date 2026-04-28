@@ -867,7 +867,12 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
           </section>
         )}
 
-        <div className="grid gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">
+        <div className={`grid gap-6 ${
+          activeDashboardView === 'overview' || activeDashboardView === 'day' || activeDashboardView === 'settings'
+            ? 'xl:grid-cols-[320px_minmax(0,1fr)]'
+            : 'xl:grid-cols-1'
+        }`}>
+          {(activeDashboardView === 'overview' || activeDashboardView === 'day' || activeDashboardView === 'settings') && (
           <aside className="space-y-4">
             {(activeDashboardView === 'overview' || activeDashboardView === 'day') && (
             <div className="rounded-xl border border-slate-200 bg-white shadow-sm">
@@ -960,6 +965,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
             </div>
             )}
           </aside>
+          )}
 
           <main className="space-y-6 min-w-0">
             {activeDashboardView === 'settings' && (
