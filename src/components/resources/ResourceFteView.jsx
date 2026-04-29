@@ -932,6 +932,15 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
     [selectedForecastDay],
   );
 
+  const selectedActualPeakHours = useMemo(
+    () =>
+      [...(selectedForecastDay?.hourly_forecast || [])]
+        .filter((row) => row.has_actual_report)
+        .sort((a, b) => Number(b.actual_report_fte || 0) - Number(a.actual_report_fte || 0))
+        .slice(0, 5),
+    [selectedForecastDay],
+  );
+
   const todayValue = todayIso();
   const selectedForecastHasActualLoad = Boolean(
     selectedForecastDay?.has_actual_report && selectedForecastDay?.forecast_date <= todayValue,
@@ -1790,13 +1799,14 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                             </div>
                           </div>
 
-                          <div className={`mt-4 grid gap-3 md:grid-cols-2 ${showForecastActualLoad && selectedForecastHasActualLoad ? 'xl:grid-cols-6' : 'xl:grid-cols-4'}`}>
+                          <div className={`mt-4 grid gap-3 md:grid-cols-2 ${showForecastActualLoad && selectedForecastHasActualLoad ? 'xl:grid-cols-7' : 'xl:grid-cols-4'}`}>
                             <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">Звонки</div><b>{formatInt(selectedForecastDay.forecast_calls)}</b></div>
                             <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">Минут нагрузки</div><b>{formatNumber(selectedForecastDay.forecast_workload_minutes, 1)}</b></div>
                             <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">FTE дня</div><b>{formatNumber(selectedForecastDay.forecast_daily_fte, 2)}</b></div>
                             <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">Пиковый час</div><b>{selectedForecastPeakHours[0] ? `${String(selectedForecastPeakHours[0].hour).padStart(2, '0')}:00` : '-'}</b></div>
                             {showForecastActualLoad && selectedForecastHasActualLoad ? (
                               <>
+                                <div className="rounded-lg bg-emerald-50 px-3 py-2"><div className="text-xs text-emerald-700">Факт звонков</div><b>{formatInt(selectedForecastDay.actual_received_calls)}</b></div>
                                 <div className="rounded-lg bg-emerald-50 px-3 py-2"><div className="text-xs text-emerald-700">Факт нагрузки</div><b>{formatNumber(selectedForecastDay.actual_workload_minutes, 1)}</b></div>
                                 <div className="rounded-lg bg-emerald-50 px-3 py-2"><div className="text-xs text-emerald-700">FTE из отчета</div><b>{formatNumber(selectedForecastDay.actual_report_fte, 2)}</b></div>
                               </>
@@ -1940,25 +1950,84 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                             </table>
                           </div>
 
-                          <div className="rounded-lg border border-slate-200 bg-white p-4">
-                            <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
-                              <TrendingUp size={16} />
-                              Пиковые часы
+                          <div className="space-y-4">
+                            <div className="rounded-lg border border-slate-200 bg-white p-4">
+                              <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+                                <TrendingUp size={16} />
+                                Пиковые часы прогноз
+                              </div>
+                              <div className="mt-4 space-y-3">
+                                {selectedForecastPeakHours.map((row) => {
+                                  const rowIsActive = activeForecastHour !== null && Number(row.hour) === Number(activeForecastHour);
+                                  const rowIsPinned = pinnedForecastHour !== null && Number(row.hour) === Number(pinnedForecastHour);
+                                  return (
+                                    <button
+                                      key={row.hour}
+                                      type="button"
+                                      onMouseEnter={() => setHoveredForecastHour(Number(row.hour))}
+                                      onMouseLeave={() => setHoveredForecastHour(null)}
+                                      onClick={() => togglePinnedForecastSlice(Number(row.hour))}
+                                      className={`w-full rounded-lg p-3 text-left transition ${
+                                        rowIsPinned
+                                          ? 'bg-slate-100 ring-1 ring-inset ring-slate-300'
+                                          : rowIsActive
+                                            ? 'bg-blue-50'
+                                            : 'bg-slate-50 hover:bg-blue-50'
+                                      }`}
+                                    >
+                                      <div className="flex items-center justify-between">
+                                        <span className="font-semibold text-slate-900">{String(row.hour).padStart(2, '0')}:00</span>
+                                        <span className="rounded-md bg-blue-100 px-2 py-1 text-xs font-semibold text-blue-700">{formatNumber(row.forecast_fte, 2)} FTE</span>
+                                      </div>
+                                      <div className="mt-2 text-xs text-slate-500">Звонки: {formatNumber(row.forecast_calls, 1)} · нагрузка: {formatNumber(row.forecast_workload_minutes, 1)} мин</div>
+                                      <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-200">
+                                        <div className="h-full rounded-full bg-blue-500" style={{ width: `${Math.min(100, Number(row.forecast_fte || 0) * 25)}%` }} />
+                                      </div>
+                                    </button>
+                                  );
+                                })}
+                              </div>
                             </div>
-                            <div className="mt-4 space-y-3">
-                              {selectedForecastPeakHours.map((row) => (
-                                <div key={row.hour} className="rounded-lg bg-slate-50 p-3">
-                                  <div className="flex items-center justify-between">
-                                    <span className="font-semibold text-slate-900">{String(row.hour).padStart(2, '0')}:00</span>
-                                    <span className="rounded-md bg-blue-100 px-2 py-1 text-xs font-semibold text-blue-700">{formatNumber(row.forecast_fte, 2)} FTE</span>
-                                  </div>
-                                  <div className="mt-2 text-xs text-slate-500">Звонки: {formatNumber(row.forecast_calls, 1)} · нагрузка: {formatNumber(row.forecast_workload_minutes, 1)} мин</div>
-                                  <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-200">
-                                    <div className="h-full rounded-full bg-blue-500" style={{ width: `${Math.min(100, Number(row.forecast_fte || 0) * 25)}%` }} />
-                                  </div>
+
+                            {showForecastActualLoad && selectedForecastHasActualLoad ? (
+                              <div className="rounded-lg border border-emerald-100 bg-white p-4">
+                                <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+                                  <TrendingUp size={16} className="text-emerald-600" />
+                                  Пиковые часы факт
                                 </div>
-                              ))}
-                            </div>
+                                <div className="mt-4 space-y-3">
+                                  {selectedActualPeakHours.map((row) => {
+                                    const rowIsActive = activeForecastHour !== null && Number(row.hour) === Number(activeForecastHour);
+                                    const rowIsPinned = pinnedForecastHour !== null && Number(row.hour) === Number(pinnedForecastHour);
+                                    return (
+                                      <button
+                                        key={row.hour}
+                                        type="button"
+                                        onMouseEnter={() => setHoveredForecastHour(Number(row.hour))}
+                                        onMouseLeave={() => setHoveredForecastHour(null)}
+                                        onClick={() => togglePinnedForecastSlice(Number(row.hour))}
+                                        className={`w-full rounded-lg p-3 text-left transition ${
+                                          rowIsPinned
+                                            ? 'bg-slate-100 ring-1 ring-inset ring-slate-300'
+                                            : rowIsActive
+                                              ? 'bg-emerald-50'
+                                              : 'bg-slate-50 hover:bg-emerald-50'
+                                        }`}
+                                      >
+                                        <div className="flex items-center justify-between">
+                                          <span className="font-semibold text-slate-900">{String(row.hour).padStart(2, '0')}:00</span>
+                                          <span className="rounded-md bg-emerald-100 px-2 py-1 text-xs font-semibold text-emerald-700">{formatNumber(row.actual_report_fte, 2)} FTE</span>
+                                        </div>
+                                        <div className="mt-2 text-xs text-slate-500">Звонки: {formatInt(row.actual_received_calls)} · нагрузка: {formatNumber(row.actual_workload_minutes, 1)} мин</div>
+                                        <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-200">
+                                          <div className="h-full rounded-full bg-emerald-500" style={{ width: `${Math.min(100, Number(row.actual_report_fte || 0) * 25)}%` }} />
+                                        </div>
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            ) : null}
                           </div>
                         </div>
                       </>
