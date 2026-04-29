@@ -538,6 +538,23 @@ def _build_profile_from_history_dates_tx(
         }
         for row in cursor.fetchall()
     }
+    cursor.execute(
+        """
+        SELECT report_date, hour, received_calls
+        FROM daily_resource_hours
+        WHERE report_date = ANY(%s)
+        ORDER BY report_date DESC, hour
+        """,
+        (history_dates,),
+    )
+    source_calls_by_hour = defaultdict(list)
+    for report_date, hour, received_calls in cursor.fetchall():
+        source_calls_by_hour[int(hour)].append(
+            {
+                "date": report_date.isoformat(),
+                "calls": _to_int(received_calls),
+            }
+        )
     avg_daily_calls = sum(_to_float(hourly_source.get(hour, {}).get("avg_calls")) for hour in range(24))
     total_talk_seconds = sum(item["talk_time_seconds"] for item in hourly_source.values())
     total_accepted_calls = sum(item["accepted_calls"] for item in hourly_source.values())
@@ -569,6 +586,7 @@ def _build_profile_from_history_dates_tx(
                 "effective_fte_minutes": round(effective_minutes, 4),
                 "fte": round(fte, 4),
                 "fte_rounded": round(fte_rounded, 4),
+                "source_calls": source_calls_by_hour.get(hour, []),
             }
         )
     return {
