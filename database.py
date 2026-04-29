@@ -1763,6 +1763,7 @@ class Database:
                     weekly_hours_per_operator NUMERIC(8,2) NOT NULL DEFAULT 40,
                     fte_rounding VARCHAR(20) NOT NULL DEFAULT 'none',
                     shift_rounding VARCHAR(20) NOT NULL DEFAULT 'ceil',
+                    selected_direction_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
                     updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
                     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     CONSTRAINT resource_settings_singleton CHECK (id = 1),
@@ -1774,6 +1775,10 @@ class Database:
                 INSERT INTO resource_settings (id)
                 VALUES (1)
                 ON CONFLICT (id) DO NOTHING;
+            """)
+            cursor.execute("""
+                ALTER TABLE resource_settings
+                ADD COLUMN IF NOT EXISTS selected_direction_ids JSONB NOT NULL DEFAULT '[]'::jsonb;
             """)
 
             # Optimized Indexes (added more based on query patterns)

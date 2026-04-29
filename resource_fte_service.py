@@ -30,6 +30,7 @@ DEFAULT_RESOURCE_SETTINGS = {
     "weekly_hours_per_operator": 40.0,
     "fte_rounding": "none",
     "shift_rounding": "ceil",
+    "selected_direction_ids": [],
 }
 
 ROUNDING_MODES = {"none", "ceil", "floor", "round"}
@@ -170,20 +171,49 @@ def _as_settings(row: Optional[Iterable[Any]]) -> Dict[str, Any]:
         "weekly_hours_per_operator",
         "fte_rounding",
         "shift_rounding",
+        "selected_direction_ids",
     ]
     settings = dict(DEFAULT_RESOURCE_SETTINGS)
     for key, value in zip(keys, row):
-        settings[key] = value if key.endswith("_rounding") else _to_float(value, settings[key])
+        if key == "selected_direction_ids":
+            settings[key] = _coerce_int_list(value)
+        else:
+            settings[key] = value if key.endswith("_rounding") else _to_float(value, settings[key])
     settings["fte_rounding"] = settings.get("fte_rounding") if settings.get("fte_rounding") in ROUNDING_MODES else "none"
     settings["shift_rounding"] = settings.get("shift_rounding") if settings.get("shift_rounding") in ROUNDING_MODES else "ceil"
     return settings
+
+
+def _coerce_int_list(value: Any) -> List[int]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except Exception:
+            value = [value]
+    if not isinstance(value, (list, tuple, set)):
+        value = [value]
+    result = []
+    seen = set()
+    for item in value:
+        try:
+            parsed = int(item)
+        except Exception:
+            continue
+        if parsed <= 0 or parsed in seen:
+            continue
+        seen.add(parsed)
+        result.append(parsed)
+    return result
 
 
 def _get_settings_tx(cursor) -> Dict[str, Any]:
     cursor.execute(
         """
         SELECT answer_rate, occ, ur, shrinkage_coeff,
-               weekly_hours_per_operator, fte_rounding, shift_rounding
+               weekly_hours_per_operator, fte_rounding, shift_rounding,
+               selected_direction_ids
         FROM resource_settings
         WHERE id = 1
         """
@@ -206,6 +236,8 @@ def update_resource_settings(db, payload: Dict[str, Any], user_id: Optional[int]
     for key in ("fte_rounding", "shift_rounding"):
         if key in payload and payload.get(key) in ROUNDING_MODES:
             next_settings[key] = payload.get(key)
+    if "selected_direction_ids" in payload:
+        next_settings["selected_direction_ids"] = _coerce_int_list(payload.get("selected_direction_ids"))
 
     if next_settings["answer_rate"] > 1:
         next_settings["answer_rate"] = next_settings["answer_rate"] / 100
@@ -214,6 +246,21 @@ def update_resource_settings(db, payload: Dict[str, Any], user_id: Optional[int]
     next_settings["weekly_hours_per_operator"] = max(1.0, float(next_settings["weekly_hours_per_operator"]))
 
     with db._get_cursor() as cursor:
+        if next_settings["selected_direction_ids"]:
+            cursor.execute(
+                """
+                SELECT id
+                FROM directions
+                WHERE is_active = TRUE
+                  AND id = ANY(%s)
+                """,
+                (next_settings["selected_direction_ids"],),
+            )
+            valid_direction_ids = {int(row[0]) for row in cursor.fetchall()}
+            next_settings["selected_direction_ids"] = [
+                direction_id for direction_id in next_settings["selected_direction_ids"]
+                if direction_id in valid_direction_ids
+            ]
         cursor.execute(
             """
             UPDATE resource_settings
@@ -224,6 +271,7 @@ def update_resource_settings(db, payload: Dict[str, Any], user_id: Optional[int]
                 weekly_hours_per_operator = %s,
                 fte_rounding = %s,
                 shift_rounding = %s,
+                selected_direction_ids = %s,
                 updated_by = %s,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1
@@ -236,6 +284,7 @@ def update_resource_settings(db, payload: Dict[str, Any], user_id: Optional[int]
                 next_settings["weekly_hours_per_operator"],
                 next_settings["fte_rounding"],
                 next_settings["shift_rounding"],
+                Json(next_settings["selected_direction_ids"]),
                 user_id,
             ),
         )
@@ -415,19 +464,26 @@ def _refresh_all_actual_fte_tx(cursor) -> None:
         _refresh_actual_fte_for_day_tx(cursor, report_date)
 
 
-def _current_operator_fte_tx(cursor) -> Dict[str, Any]:
+def _current_operator_fte_tx(cursor, settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    selected_direction_ids = _coerce_int_list((settings or {}).get("selected_direction_ids"))
+    direction_filter = "AND u.direction_id = ANY(%s)" if selected_direction_ids else ""
+    params = [selected_direction_ids] if selected_direction_ids else []
     cursor.execute(
-        """
-        SELECT COUNT(*), COALESCE(SUM(COALESCE(rate, 1.0)), 0)
-        FROM users
-        WHERE role = 'operator'
-          AND (status IS NULL OR status NOT IN ('fired', 'dismissal'))
-        """
+        f"""
+        SELECT COUNT(*), COALESCE(SUM(COALESCE(u.rate, 1.0)), 0)
+        FROM users u
+        WHERE u.role = 'operator'
+          AND COALESCE(u.is_active, FALSE) = TRUE
+          AND (u.status IS NULL OR u.status NOT IN ('fired', 'dismissal'))
+          {direction_filter}
+        """,
+        params,
     )
     row = cursor.fetchone() or (0, 0)
     return {
         "active_operator_count": _to_int(row[0]),
         "current_operator_fte": _to_float(row[1]),
+        "selected_direction_ids": selected_direction_ids,
     }
 
 
@@ -992,6 +1048,18 @@ def _fetch_latest_profiles_tx(cursor, as_of_date, settings: Dict[str, Any]) -> L
     return _compute_week_forecast_profiles_tx(cursor, _next_week_start_date(as_of_date), settings)
 
 
+def _resource_directions_tx(cursor) -> List[Dict[str, Any]]:
+    cursor.execute(
+        """
+        SELECT id, name
+        FROM directions
+        WHERE is_active = TRUE
+        ORDER BY name
+        """
+    )
+    return [{"id": int(row[0]), "name": row[1]} for row in cursor.fetchall()]
+
+
 def get_resource_overview(db, date_from: Optional[str] = None, date_to: Optional[str] = None, as_of_date_value: Optional[str] = None) -> Dict[str, Any]:
     with db._get_cursor() as cursor:
         settings = _get_settings_tx(cursor)
@@ -1002,9 +1070,10 @@ def get_resource_overview(db, date_from: Optional[str] = None, date_to: Optional
             as_of_date = cursor.fetchone()[0]
         next_week_start = _next_week_start_date(as_of_date)
         profiles = _fetch_latest_profiles_tx(cursor, as_of_date, settings)
-        operator_capacity = _current_operator_fte_tx(cursor)
+        operator_capacity = _current_operator_fte_tx(cursor, settings)
         current_operator_fte = operator_capacity["current_operator_fte"]
         next_week_forecast = _build_week_forecast_payload(next_week_start, profiles, settings, current_operator_fte)
+        directions = _resource_directions_tx(cursor)
 
         where = []
         params = []
@@ -1055,6 +1124,7 @@ def get_resource_overview(db, date_from: Optional[str] = None, date_to: Optional
         "profiles": _json_safe(profiles),
         "weekly_totals": _weekly_totals(profiles, settings, current_operator_fte),
         "operator_capacity": _json_safe(operator_capacity),
+        "directions": directions,
         "next_week_forecast": _json_safe(next_week_forecast),
         "history": history,
     }

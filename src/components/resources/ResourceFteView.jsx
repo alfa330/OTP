@@ -845,6 +845,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
   };
 
   const weekly = overview?.weekly_totals || {};
+  const resourceDirections = overview?.directions || [];
   const selectedSummary = selectedDay?.summary;
   const loadedReportDates = useMemo(
     () => Array.from(new Set([
@@ -855,6 +856,18 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
   );
   const uploadDateAlreadyLoaded = loadedReportDates.includes(uploadDate);
   const selectedFileName = uploadFile?.name || 'Файл не выбран';
+  const selectedDirectionIds = (settingsDraft?.selected_direction_ids || []).map((item) => Number(item)).filter(Boolean);
+  const selectedDirectionSet = new Set(selectedDirectionIds);
+
+  const toggleResourceDirection = (directionId, checked) => {
+    setSettingsDraft((current) => {
+      const currentIds = (current?.selected_direction_ids || []).map((item) => Number(item)).filter(Boolean);
+      const next = new Set(currentIds);
+      if (checked) next.add(Number(directionId));
+      else next.delete(Number(directionId));
+      return { ...current, selected_direction_ids: Array.from(next) };
+    });
+  };
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -1292,6 +1305,38 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                       <option value="floor">вниз</option>
                     </select>
                   </label>
+                  <div className="col-span-2 rounded-lg border border-slate-200 bg-slate-50 p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-semibold text-slate-900">Направления для текущего FTE</div>
+                        <p className="text-xs text-slate-500">Если ничего не выбрано, считается сумма ставок всех активных операторов.</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setSettingsDraft((current) => ({ ...current, selected_direction_ids: [] }))}
+                        className="text-xs font-semibold text-blue-700 hover:text-blue-800"
+                      >
+                        Все
+                      </button>
+                    </div>
+                    <div className="mt-3 max-h-44 space-y-2 overflow-y-auto pr-1">
+                      {resourceDirections.length ? (
+                        resourceDirections.map((direction) => (
+                          <label key={direction.id} className="flex items-center justify-between gap-3 rounded-md bg-white px-3 py-2 text-sm">
+                            <span className="font-medium text-slate-700">{direction.name}</span>
+                            <input
+                              type="checkbox"
+                              checked={selectedDirectionSet.has(Number(direction.id))}
+                              onChange={(event) => toggleResourceDirection(direction.id, event.target.checked)}
+                              className="h-4 w-4 rounded border-slate-300 text-blue-600"
+                            />
+                          </label>
+                        ))
+                      ) : (
+                        <div className="rounded-md border border-dashed border-slate-300 bg-white p-3 text-sm text-slate-500">Активные направления не найдены.</div>
+                      )}
+                    </div>
+                  </div>
                   <button type="button" onClick={handleSaveSettings} className="col-span-2 inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-slate-900 px-4 text-sm font-semibold text-white transition hover:bg-slate-800">
                     <Save size={16} />
                     Сохранить
@@ -1371,7 +1416,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                     icon={Users}
                     label="Операторы"
                     value={formatNumber(nextWeekForecast.operatorsWithShrinkage, 2)}
-                    hint={`Текущий FTE: ${formatNumber(nextWeekForecast.currentOperatorFte, 2)} · разница: ${formatSignedNumber(nextWeekForecast.operatorFteGap, 2)}`}
+                    hint={`Без усушки: ${formatNumber(nextWeekForecast.baseOperators, 2)} · текущий FTE: ${formatNumber(nextWeekForecast.currentOperatorFte, 2)} · разница: ${formatSignedNumber(nextWeekForecast.operatorFteGap, 2)}`}
                     tone={Number(nextWeekForecast.operatorFteGap || 0) < 0 ? 'rose' : 'emerald'}
                   />
                 </div>
