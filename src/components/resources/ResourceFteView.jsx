@@ -112,14 +112,6 @@ const addDaysIso = (iso, days) => {
   return `${nextYear}-${nextMonth}-${nextDay}`;
 };
 
-const getNextWeekDates = (asOfIso) => {
-  const [year, month, day] = String(asOfIso || todayIso()).split('-').map(Number);
-  const date = new Date(year, (month || 1) - 1, day || 1);
-  const mondayIndex = (date.getDay() + 6) % 7;
-  const nextMonday = addDaysIso(asOfIso || todayIso(), 7 - mondayIndex);
-  return Array.from({ length: 7 }, (_, index) => addDaysIso(nextMonday, index));
-};
-
 const formatSeconds = (seconds) => {
   const total = Math.round(Number(seconds || 0));
   const minutes = Math.floor(total / 60);
@@ -664,64 +656,19 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
     [selectedDay?.hours],
   );
 
-  const nextWeekForecast = useMemo(() => {
-    const dates = getNextWeekDates(overview?.as_of_date || todayIso());
-    const profiles = overview?.profiles || [];
-    const totalCalls = profiles.reduce((sum, profile) => sum + Number(profile.avg_daily_calls || 0), 0);
-    const weeklyAhtSeconds = totalCalls > 0
-      ? profiles.reduce((sum, profile) => sum + Number(profile.avg_daily_calls || 0) * Number(profile.aht_seconds || 0), 0) / totalCalls
-      : 0;
-    const settings = overview?.settings || {};
-    const answerRate = Number(settings.answer_rate || 0);
-    const occ = Number(settings.occ || 0);
-    const ur = Number(settings.ur || 0);
-    const shrinkage = Number(settings.shrinkage_coeff || 0);
-    const weeklyHours = Number(settings.weekly_hours_per_operator || 40);
-    const effectiveMinutes = 60 * occ * ur;
-    const days = profiles.map((profile) => {
-      const calls = Number(profile.avg_daily_calls || 0);
-      const workloadMinutes = calls * answerRate * weeklyAhtSeconds / 60;
-      const dailyFte = effectiveMinutes > 0 ? workloadMinutes / effectiveMinutes : 0;
-      const hourly = (profile.hourly_profile || []).map((hourRow) => {
-        const hourCalls = Number(hourRow.avg_calls || 0);
-        const hourWorkloadMinutes = hourCalls * answerRate * weeklyAhtSeconds / 60;
-        const hourFte = effectiveMinutes > 0 ? hourWorkloadMinutes / effectiveMinutes : 0;
-        return {
-          ...hourRow,
-          forecast_calls: hourCalls,
-          forecast_aht_seconds: weeklyAhtSeconds,
-          forecast_workload_minutes: hourWorkloadMinutes,
-          forecast_fte: hourFte,
-        };
-      });
-      return {
-        ...profile,
-        forecast_date: dates[Number(profile.weekday || 0)] || '',
-        forecast_calls: calls,
-        forecast_aht_seconds: weeklyAhtSeconds,
-        forecast_workload_minutes: workloadMinutes,
-        forecast_daily_fte: dailyFte,
-        operators_equivalent: dailyFte / 8,
-        hourly_forecast: hourly,
-      };
-    });
-    const weeklyFteHours = days.reduce((sum, day) => sum + Number(day.forecast_daily_fte || 0), 0);
-    const baseOperators = weeklyHours > 0 ? weeklyFteHours / weeklyHours : 0;
-    const operatorsWithShrinkage = shrinkage > 0 ? baseOperators / shrinkage : baseOperators;
-    return {
-      days,
-      weeklyAhtSeconds,
-      answerRate,
-      occ,
-      ur,
-      shrinkage,
-      weeklyHours,
-      effectiveMinutes,
-      weeklyFteHours,
-      baseOperators,
-      operatorsWithShrinkage,
-    };
-  }, [overview?.as_of_date, overview?.profiles, overview?.settings]);
+  const nextWeekForecast = overview?.next_week_forecast || {
+    days: [],
+    weeklyAhtSeconds: 0,
+    answerRate: 0,
+    occ: 0,
+    ur: 0,
+    shrinkage: 0,
+    weeklyHours: 0,
+    effectiveMinutes: 0,
+    weeklyFteHours: 0,
+    baseOperators: 0,
+    operatorsWithShrinkage: 0,
+  };
 
   const selectedForecastDay = useMemo(
     () =>
