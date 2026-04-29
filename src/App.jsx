@@ -411,24 +411,9 @@ const canAccessLmsSectionForUser = (userLike) => {
     );
 };
 
-const normalizeResourceFteAccessName = (value) =>
-    String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
-
-const RESOURCE_FTE_ALLOWED_USER_NAMES = new Set([
-    'omarove aru',
-    'ядигаров руслан'
-]);
-
 const canAccessResourceFteSectionForUser = (userLike) => {
-    const possibleNames = [
-        userLike?.name,
-        userLike?.full_name,
-        userLike?.fullName,
-        userLike?.login
-    ];
-    return possibleNames.some((value) =>
-        RESOURCE_FTE_ALLOWED_USER_NAMES.has(normalizeResourceFteAccessName(value))
-    );
+    const role = normalizeRole(userLike?.role);
+    return role === 'super_admin' || role === 'admin' || isSupervisorRole(role);
 };
 
 const isNewTabNavigationEvent = (event) => Boolean(event?.ctrlKey || event?.metaKey);
