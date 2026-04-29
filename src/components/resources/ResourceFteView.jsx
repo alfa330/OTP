@@ -4,6 +4,8 @@ import {
   AlertTriangle,
   BarChart3,
   CalendarDays,
+  ChevronLeft,
+  ChevronRight,
   CheckCircle2,
   Clock3,
   Eye,
@@ -18,6 +20,7 @@ import {
   PhoneMissed,
   ShieldAlert,
   TrendingUp,
+  UploadCloud,
   Users,
 } from 'lucide-react';
 import {
@@ -56,6 +59,46 @@ const formatDate = (iso) => {
   if (!iso) return '-';
   const [year, month, day] = String(iso).split('-');
   return day && month && year ? `${day}.${month}.${year}` : iso;
+};
+
+const parseIsoDate = (iso) => {
+  const [year, month, day] = String(iso || '').split('-').map(Number);
+  if (!year || !month || !day) return null;
+  return new Date(year, month - 1, day);
+};
+
+const toIsoDate = (date) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
+const monthLabel = (date) =>
+  new Intl.DateTimeFormat('ru-RU', { month: 'long', year: 'numeric' }).format(date);
+
+const daysBetweenInclusive = (startIso, endIso) => {
+  const start = parseIsoDate(startIso);
+  const end = parseIsoDate(endIso);
+  if (!start || !end) return 0;
+  return Math.round((end - start) / 86400000) + 1;
+};
+
+const buildCalendarDays = (monthDate) => {
+  const first = new Date(monthDate.getFullYear(), monthDate.getMonth(), 1);
+  const startOffset = (first.getDay() + 6) % 7;
+  const start = new Date(first);
+  start.setDate(first.getDate() - startOffset);
+  return Array.from({ length: 42 }, (_, index) => {
+    const date = new Date(start);
+    date.setDate(start.getDate() + index);
+    return date;
+  });
+};
+
+const isIsoInRange = (iso, startIso, endIso) => {
+  if (!iso || !startIso || !endIso) return false;
+  return iso >= startIso && iso <= endIso;
 };
 
 const addDaysIso = (iso, days) => {
@@ -243,6 +286,156 @@ const ToggleSwitch = ({ checked, label, onChange }) => (
   </button>
 );
 
+const CalendarPicker = ({
+  label,
+  value,
+  startValue,
+  endValue,
+  onChange,
+  onRangeChange,
+  loadedDates = [],
+  mode = 'single',
+  hint,
+}) => {
+  const [open, setOpen] = useState(false);
+  const [draftStart, setDraftStart] = useState('');
+  const anchorRef = useRef(null);
+  const loadedSet = useMemo(() => new Set(loadedDates), [loadedDates]);
+  const initialDate = parseIsoDate(value || startValue || endValue) || new Date();
+  const [visibleMonth, setVisibleMonth] = useState(new Date(initialDate.getFullYear(), initialDate.getMonth(), 1));
+
+  useEffect(() => {
+    const next = parseIsoDate(value || startValue || endValue);
+    if (next) setVisibleMonth(new Date(next.getFullYear(), next.getMonth(), 1));
+  }, [endValue, startValue, value]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const handlePointerDown = (event) => {
+      if (anchorRef.current && !anchorRef.current.contains(event.target)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => document.removeEventListener('mousedown', handlePointerDown);
+  }, [open]);
+
+  const calendarDays = useMemo(() => buildCalendarDays(visibleMonth), [visibleMonth]);
+  const displayStart = draftStart || startValue;
+  const displayEnd = draftStart ? '' : endValue;
+  const periodLength = mode === 'range' ? daysBetweenInclusive(displayStart, displayEnd) : 0;
+  const selectedText = mode === 'range'
+    ? `${formatDate(startValue)} — ${formatDate(endValue)}`
+    : formatDate(value);
+
+  const moveMonth = (delta) => {
+    setVisibleMonth((current) => new Date(current.getFullYear(), current.getMonth() + delta, 1));
+  };
+
+  const selectDay = (iso) => {
+    if (mode === 'range') {
+      if (!draftStart) {
+        setDraftStart(iso);
+      } else if (iso < draftStart) {
+        setDraftStart(iso);
+      } else {
+        onRangeChange?.(draftStart, iso);
+        setDraftStart('');
+        setOpen(false);
+      }
+      return;
+    }
+    onChange?.(iso);
+    setOpen(false);
+  };
+
+  const setLastTwoWeeks = () => {
+    const end = todayIso();
+    onRangeChange?.(addDaysIso(end, -13), end);
+    setDraftStart('');
+    setOpen(false);
+  };
+
+  return (
+    <div ref={anchorRef} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        className="flex h-11 w-full items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 text-left text-sm shadow-sm transition hover:border-slate-300 hover:bg-slate-50"
+      >
+        <span className="min-w-0">
+          <span className="block text-[11px] font-semibold uppercase tracking-wide text-slate-500">{label}</span>
+          <span className="block truncate font-semibold text-slate-900">{selectedText}</span>
+        </span>
+        <CalendarDays size={17} className="shrink-0 text-blue-600" />
+      </button>
+
+      {open && (
+        <div className="absolute right-0 z-40 mt-2 w-[330px] rounded-xl border border-slate-200 bg-white p-3 shadow-xl">
+          <div className="flex items-center justify-between gap-2">
+            <button type="button" onClick={() => moveMonth(-1)} className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-600 hover:bg-slate-100">
+              <ChevronLeft size={16} />
+            </button>
+            <div className="text-sm font-semibold capitalize text-slate-950">{monthLabel(visibleMonth)}</div>
+            <button type="button" onClick={() => moveMonth(1)} className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-600 hover:bg-slate-100">
+              <ChevronRight size={16} />
+            </button>
+          </div>
+
+          {mode === 'range' && (
+            <div className="mt-3 flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-600">
+              <span>{periodLength > 0 ? `${periodLength} дней в периоде` : 'Выберите начало периода'}</span>
+              <button type="button" onClick={setLastTwoWeeks} className="font-semibold text-blue-700 hover:text-blue-800">
+                Последние 14 дней
+              </button>
+            </div>
+          )}
+
+          <div className="mt-3 grid grid-cols-7 gap-1 text-center text-[11px] font-semibold uppercase text-slate-400">
+            {['ПН', 'ВТ', 'СР', 'ЧТ', 'ПТ', 'СБ', 'ВС'].map((day) => (
+              <div key={day} className="py-1">{day}</div>
+            ))}
+          </div>
+
+          <div className="mt-1 grid grid-cols-7 gap-1">
+            {calendarDays.map((date) => {
+              const iso = toIsoDate(date);
+              const isOutside = date.getMonth() !== visibleMonth.getMonth();
+              const isSelected = mode === 'single' ? iso === value : iso === displayStart || iso === displayEnd;
+              const inRange = mode === 'range' && isIsoInRange(iso, displayStart, displayEnd);
+              const hasUpload = loadedSet.has(iso);
+              return (
+                <button
+                  key={iso}
+                  type="button"
+                  onClick={() => selectDay(iso)}
+                  className={`relative flex h-9 items-center justify-center rounded-lg text-sm font-medium transition ${
+                    isSelected
+                      ? 'bg-slate-900 text-white shadow-sm'
+                      : inRange
+                        ? 'bg-blue-50 text-blue-800'
+                        : isOutside
+                          ? 'text-slate-300 hover:bg-slate-50'
+                          : 'text-slate-700 hover:bg-slate-100'
+                  }`}
+                >
+                  {date.getDate()}
+                  {hasUpload && (
+                    <span className={`absolute bottom-1 h-1.5 w-1.5 rounded-full ${isSelected ? 'bg-white' : 'bg-emerald-500'}`} />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="mt-3 flex items-center justify-between border-t border-slate-100 pt-3 text-xs text-slate-500">
+            <span className="inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" /> отчет загружен</span>
+            {hint ? <span>{hint}</span> : null}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast }) => {
   const apiRoot = String(apiBaseUrl || '').replace(/\/+$/, '');
   const fileInputRef = useRef(null);
@@ -264,6 +457,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
   const [activeDashboardView, setActiveDashboardView] = useState('overview');
   const [displayOptions, setDisplayOptions] = useState(loadDisplayOptions);
   const [selectedForecastWeekday, setSelectedForecastWeekday] = useState(0);
+  const [loadedDateCache, setLoadedDateCache] = useState([]);
   const userId = user?.id || '';
 
   useEffect(() => {
@@ -294,6 +488,13 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
       const payload = response.data || {};
       setOverview(payload);
       setSettingsDraft(payload.settings || null);
+      setLoadedDateCache((current) => {
+        const next = new Set(current);
+        (payload.history || []).forEach((item) => {
+          if (item?.report_date) next.add(item.report_date);
+        });
+        return Array.from(next).sort();
+      });
       const firstDate = payload.history?.[0]?.report_date || '';
       setSelectedDate((current) => current || firstDate);
     } catch (error) {
@@ -650,6 +851,15 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
 
   const weekly = overview?.weekly_totals || {};
   const selectedSummary = selectedDay?.summary;
+  const loadedReportDates = useMemo(
+    () => Array.from(new Set([
+      ...loadedDateCache,
+      ...(overview?.history || []).map((item) => item.report_date).filter(Boolean),
+    ])).sort(),
+    [loadedDateCache, overview?.history],
+  );
+  const uploadDateAlreadyLoaded = loadedReportDates.includes(uploadDate);
+  const selectedFileName = uploadFile?.name || 'Файл не выбран';
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -663,8 +873,20 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
             <h1 className="mt-1 text-2xl font-semibold text-slate-950">Расчет ресурсов / FTE</h1>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <input type="date" value={dateFrom} onChange={(event) => setDateFrom(event.target.value)} className={inputClass} />
-            <input type="date" value={dateTo} onChange={(event) => setDateTo(event.target.value)} className={inputClass} />
+            <div className="w-full sm:w-[330px]">
+              <CalendarPicker
+                mode="range"
+                label="Период анализа"
+                startValue={dateFrom}
+                endValue={dateTo}
+                onRangeChange={(start, end) => {
+                  setDateFrom(start);
+                  setDateTo(end);
+                }}
+                loadedDates={loadedReportDates}
+                hint="точка = есть отчет"
+              />
+            </div>
             <button
               type="button"
               onClick={fetchOverview}
@@ -679,28 +901,63 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
 
       <div className="space-y-6 p-4 md:p-6">
         <form onSubmit={handleUpload} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div className="grid gap-3 lg:grid-cols-[180px_minmax(240px,1fr)_auto] lg:items-end">
-            <label className="block">
-              <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Дата отчета</span>
-              <input type="date" value={uploadDate} onChange={(event) => setUploadDate(event.target.value)} className={`${inputClass} mt-1 w-full`} />
-            </label>
-            <label className="block">
-              <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">CSV-отчет за 24 часа</span>
+          <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+            <div>
+              <div className="flex items-center gap-2 text-sm font-semibold text-slate-950">
+                <UploadCloud size={17} className="text-blue-600" />
+                Загрузка ежедневного отчета
+              </div>
+              <p className="mt-1 text-sm text-slate-500">Выберите дату в календаре и приложите CSV за 24 часа.</p>
+            </div>
+            <div className={`inline-flex w-fit items-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold ${
+              uploadDateAlreadyLoaded ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-600'
+            }`}>
+              {uploadDateAlreadyLoaded ? <CheckCircle2 size={14} /> : <CalendarDays size={14} />}
+              {uploadDateAlreadyLoaded ? 'За эту дату отчет уже есть' : 'Новая дата отчета'}
+            </div>
+          </div>
+
+          <div className="mt-4 grid gap-3 xl:grid-cols-[330px_minmax(260px,1fr)_auto] xl:items-end">
+            <CalendarPicker
+              label="Дата отчета"
+              value={uploadDate}
+              onChange={setUploadDate}
+              loadedDates={loadedReportDates}
+              hint="можно перезагрузить"
+            />
+
+            <div>
+              <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">CSV-отчет за 24 часа</div>
+              <div className="flex min-h-11 items-center justify-between gap-3 rounded-lg border border-dashed border-slate-300 bg-slate-50 px-3 py-2">
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-semibold text-slate-900">{selectedFileName}</div>
+                  <div className="text-xs text-slate-500">Поддерживается .csv</div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="inline-flex h-9 shrink-0 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-100"
+                >
+                  <FileUp size={15} />
+                  Выбрать
+                </button>
+              </div>
               <input
                 ref={fileInputRef}
                 type="file"
                 accept=".csv,text/csv"
                 onChange={(event) => setUploadFile(event.target.files?.[0] || null)}
-                className="mt-1 block h-10 w-full rounded-lg border border-slate-200 bg-white text-sm text-slate-700 shadow-sm file:mr-3 file:h-10 file:border-0 file:bg-slate-900 file:px-4 file:text-sm file:font-medium file:text-white"
+                className="hidden"
               />
-            </label>
+            </div>
+
             <button
               type="submit"
               disabled={isUploading}
-              className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300"
+              className="inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-blue-600 px-5 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300"
             >
               <FileUp size={16} />
-              {isUploading ? 'Загрузка...' : 'Загрузить'}
+              {isUploading ? 'Загрузка...' : uploadDateAlreadyLoaded ? 'Обновить отчет' : 'Загрузить'}
             </button>
           </div>
         </form>
