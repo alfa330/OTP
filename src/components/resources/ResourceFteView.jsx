@@ -1000,19 +1000,33 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
       const row = (selectedForecastDay?.hourly_forecast || []).find((item) => Number(item.hour) === Number(hour));
       if (!row) return null;
       return (
-        <div className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs shadow-lg">
+        <div className="min-w-56 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs shadow-lg">
           <div className="mb-2 font-semibold text-slate-900">{String(row.hour).padStart(2, '0')}:00</div>
-          <div className="space-y-1 text-slate-600">
-            <div className="flex justify-between gap-6"><span>Прогноз звонков</span><b className="text-slate-900">{formatNumber(row.forecast_calls, 1)}</b></div>
-            <div className="flex justify-between gap-6"><span>Прогноз минут</span><b className="text-blue-700">{formatNumber(row.forecast_workload_minutes, 1)}</b></div>
-            <div className="flex justify-between gap-6"><span>Прогноз FTE</span><b className="text-blue-700">{formatNumber(row.forecast_fte, 2)}</b></div>
-            {showForecastActualLoad && selectedForecastHasActualLoad ? (
-              <>
-                <div className="flex justify-between gap-6"><span>Факт минут</span><b className="text-emerald-700">{row.has_actual_report ? formatNumber(row.actual_workload_minutes, 1) : '-'}</b></div>
-                <div className="flex justify-between gap-6"><span>FTE из отчета</span><b className="text-emerald-700">{row.has_actual_report ? formatNumber(row.actual_report_fte, 2) : '-'}</b></div>
-              </>
-            ) : null}
-          </div>
+          {showForecastActualLoad && selectedForecastHasActualLoad ? (
+            <div className="space-y-2">
+              <div className="rounded-md bg-slate-50 px-2 py-1.5">
+                <div className="mb-1 font-medium text-slate-500">Звонки</div>
+                <div className="flex justify-between gap-6"><span>Прогноз</span><b className="text-blue-700">{formatNumber(row.forecast_calls, 1)}</b></div>
+                <div className="flex justify-between gap-6"><span>Факт</span><b className="text-emerald-700">{row.has_actual_report ? formatInt(row.actual_received_calls) : '-'}</b></div>
+              </div>
+              <div className="rounded-md bg-slate-50 px-2 py-1.5">
+                <div className="mb-1 font-medium text-slate-500">Минуты нагрузки</div>
+                <div className="flex justify-between gap-6"><span>Прогноз</span><b className="text-blue-700">{formatNumber(row.forecast_workload_minutes, 1)}</b></div>
+                <div className="flex justify-between gap-6"><span>Факт</span><b className="text-emerald-700">{row.has_actual_report ? formatNumber(row.actual_workload_minutes, 1) : '-'}</b></div>
+              </div>
+              <div className="rounded-md bg-slate-50 px-2 py-1.5">
+                <div className="mb-1 font-medium text-slate-500">FTE</div>
+                <div className="flex justify-between gap-6"><span>Прогноз</span><b className="text-blue-700">{formatNumber(row.forecast_fte, 2)}</b></div>
+                <div className="flex justify-between gap-6"><span>Факт</span><b className="text-emerald-700">{row.has_actual_report ? formatNumber(row.actual_report_fte, 2) : '-'}</b></div>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-1 text-slate-600">
+              <div className="flex justify-between gap-6"><span>Прогноз звонков</span><b className="text-slate-900">{formatNumber(row.forecast_calls, 1)}</b></div>
+              <div className="flex justify-between gap-6"><span>Прогноз минут</span><b className="text-blue-700">{formatNumber(row.forecast_workload_minutes, 1)}</b></div>
+              <div className="flex justify-between gap-6"><span>Прогноз FTE</span><b className="text-blue-700">{formatNumber(row.forecast_fte, 2)}</b></div>
+            </div>
+          )}
           {pinnedForecastHour !== null && Number(pinnedForecastHour) === Number(row.hour) ? (
             <div className="mt-2 rounded bg-slate-100 px-2 py-1 font-medium text-slate-600">Срез закреплен</div>
           ) : null}
@@ -1873,19 +1887,45 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                             </div>
                           </div>
 
-                          <div className={`mt-4 grid gap-3 md:grid-cols-2 ${showForecastActualLoad && selectedForecastHasActualLoad ? 'xl:grid-cols-7' : 'xl:grid-cols-4'}`}>
-                            <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">Звонки</div><b>{formatInt(selectedForecastDay.forecast_calls)}</b></div>
-                            <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">Минут нагрузки</div><b>{formatNumber(selectedForecastDay.forecast_workload_minutes, 1)}</b></div>
-                            <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">FTE дня</div><b>{formatNumber(selectedForecastDay.forecast_daily_fte, 2)}</b></div>
-                            <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">Пиковый час</div><b>{selectedForecastPeakHours[0] ? `${String(selectedForecastPeakHours[0].hour).padStart(2, '0')}:00` : '-'}</b></div>
-                            {showForecastActualLoad && selectedForecastHasActualLoad ? (
-                              <>
-                                <div className="rounded-lg bg-emerald-50 px-3 py-2"><div className="text-xs text-emerald-700">Факт звонков</div><b>{formatInt(selectedForecastDay.actual_received_calls)}</b></div>
-                                <div className="rounded-lg bg-emerald-50 px-3 py-2"><div className="text-xs text-emerald-700">Факт нагрузки</div><b>{formatNumber(selectedForecastDay.actual_workload_minutes, 1)}</b></div>
-                                <div className="rounded-lg bg-emerald-50 px-3 py-2"><div className="text-xs text-emerald-700">FTE из отчета</div><b>{formatNumber(selectedForecastDay.actual_report_fte, 2)}</b></div>
-                              </>
-                            ) : null}
-                          </div>
+                          {showForecastActualLoad && selectedForecastHasActualLoad ? (
+                            <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                              <div className="rounded-lg bg-slate-50 px-3 py-2">
+                                <div className="text-xs text-slate-500">Звонки</div>
+                                <div className="mt-1 grid grid-cols-2 gap-2">
+                                  <div><span className="block text-[11px] text-blue-700">Прогноз</span><b>{formatInt(selectedForecastDay.forecast_calls)}</b></div>
+                                  <div><span className="block text-[11px] text-emerald-700">Факт</span><b>{formatInt(selectedForecastDay.actual_received_calls)}</b></div>
+                                </div>
+                              </div>
+                              <div className="rounded-lg bg-slate-50 px-3 py-2">
+                                <div className="text-xs text-slate-500">Минуты нагрузки</div>
+                                <div className="mt-1 grid grid-cols-2 gap-2">
+                                  <div><span className="block text-[11px] text-blue-700">Прогноз</span><b>{formatNumber(selectedForecastDay.forecast_workload_minutes, 1)}</b></div>
+                                  <div><span className="block text-[11px] text-emerald-700">Факт</span><b>{formatNumber(selectedForecastDay.actual_workload_minutes, 1)}</b></div>
+                                </div>
+                              </div>
+                              <div className="rounded-lg bg-slate-50 px-3 py-2">
+                                <div className="text-xs text-slate-500">FTE</div>
+                                <div className="mt-1 grid grid-cols-2 gap-2">
+                                  <div><span className="block text-[11px] text-blue-700">Прогноз</span><b>{formatNumber(selectedForecastDay.forecast_daily_fte, 2)}</b></div>
+                                  <div><span className="block text-[11px] text-emerald-700">Факт</span><b>{formatNumber(selectedForecastDay.actual_report_fte, 2)}</b></div>
+                                </div>
+                              </div>
+                              <div className="rounded-lg bg-slate-50 px-3 py-2">
+                                <div className="text-xs text-slate-500">Пиковый час</div>
+                                <div className="mt-1 grid grid-cols-2 gap-2">
+                                  <div><span className="block text-[11px] text-blue-700">Прогноз</span><b>{selectedForecastPeakHours[0] ? `${String(selectedForecastPeakHours[0].hour).padStart(2, '0')}:00` : '-'}</b></div>
+                                  <div><span className="block text-[11px] text-emerald-700">Факт</span><b>{selectedActualPeakHours[0] ? `${String(selectedActualPeakHours[0].hour).padStart(2, '0')}:00` : '-'}</b></div>
+                                </div>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                              <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">Звонки</div><b>{formatInt(selectedForecastDay.forecast_calls)}</b></div>
+                              <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">Минут нагрузки</div><b>{formatNumber(selectedForecastDay.forecast_workload_minutes, 1)}</b></div>
+                              <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">FTE дня</div><b>{formatNumber(selectedForecastDay.forecast_daily_fte, 2)}</b></div>
+                              <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">Пиковый час</div><b>{selectedForecastPeakHours[0] ? `${String(selectedForecastPeakHours[0].hour).padStart(2, '0')}:00` : '-'}</b></div>
+                            </div>
+                          )}
 
                           <div className="mt-5 h-72">
                             <ResponsiveContainer width="100%" height="100%">
@@ -1939,12 +1979,12 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                                   <th className="px-3 py-3 text-right">Звонки</th>
                                   <th className="px-3 py-3 text-right">AHT недели</th>
                                   <th className="px-3 py-3 text-right">Минут нагрузки</th>
+                                  {showForecastActualLoad && selectedForecastHasActualLoad ? (
+                                    <th className="px-3 py-3 text-right">Факт нагрузки</th>
+                                  ) : null}
                                   <th className="px-3 py-3 text-right">FTE</th>
                                   {showForecastActualLoad && selectedForecastHasActualLoad ? (
-                                    <>
-                                      <th className="px-3 py-3 text-right">Факт нагрузки</th>
-                                      <th className="px-3 py-3 text-right">FTE из отчета</th>
-                                    </>
+                                    <th className="px-3 py-3 text-right">Факт FTE</th>
                                   ) : null}
                                 </tr>
                               </thead>
@@ -1999,23 +2039,23 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                                           {formatNumber(row.forecast_workload_minutes, 1)}
                                         </span>
                                       </td>
+                                      {showForecastActualLoad && selectedForecastHasActualLoad ? (
+                                        <td className="px-3 py-2 text-right">
+                                          <span
+                                            title={formatActualLoadTooltip(row, nextWeekForecast.effectiveMinutes)}
+                                            className={`inline-flex cursor-help items-center justify-end rounded-md border px-2 py-1 font-medium text-emerald-700 transition ${
+                                              rowIsActive ? 'border-emerald-200 bg-emerald-50' : 'border-transparent hover:border-emerald-200 hover:bg-emerald-50'
+                                            }`}
+                                          >
+                                            {row.has_actual_report ? formatNumber(row.actual_workload_minutes, 1) : '-'}
+                                          </span>
+                                        </td>
+                                      ) : null}
                                       <td className="px-3 py-2 text-right font-semibold text-blue-700">{formatNumber(row.forecast_fte, 2)}</td>
                                       {showForecastActualLoad && selectedForecastHasActualLoad ? (
-                                        <>
-                                          <td className="px-3 py-2 text-right">
-                                            <span
-                                              title={formatActualLoadTooltip(row, nextWeekForecast.effectiveMinutes)}
-                                              className={`inline-flex cursor-help items-center justify-end rounded-md border px-2 py-1 font-medium text-emerald-700 transition ${
-                                                rowIsActive ? 'border-emerald-200 bg-emerald-50' : 'border-transparent hover:border-emerald-200 hover:bg-emerald-50'
-                                              }`}
-                                            >
-                                              {row.has_actual_report ? formatNumber(row.actual_workload_minutes, 1) : '-'}
-                                            </span>
-                                          </td>
-                                          <td className="px-3 py-2 text-right font-semibold text-emerald-700">
-                                            {row.has_actual_report ? formatNumber(row.actual_report_fte, 2) : '-'}
-                                          </td>
-                                        </>
+                                        <td className="px-3 py-2 text-right font-semibold text-emerald-700">
+                                          {row.has_actual_report ? formatNumber(row.actual_report_fte, 2) : '-'}
+                                        </td>
                                       ) : null}
                                     </tr>
                                   );
