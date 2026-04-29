@@ -764,6 +764,10 @@ def _build_week_forecast_payload(
     weekly_aht_seconds = _weekly_aht_from_profiles(profiles)
     weekly_totals = _weekly_totals(profiles, settings, current_operator_fte)
     effective_minutes = 60 * settings["occ"] * settings["ur"]
+    first_history_week_start = target_week_start - timedelta(days=21)
+    first_history_week_end = target_week_start - timedelta(days=15)
+    second_history_week_start = target_week_start - timedelta(days=14)
+    second_history_week_end = target_week_start - timedelta(days=8)
     days = []
     for profile in profiles:
         weekday = int(profile.get("weekday", 0))
@@ -793,6 +797,19 @@ def _build_week_forecast_payload(
     return {
         "week_start": target_week_start.isoformat(),
         "week_end": (target_week_start + timedelta(days=6)).isoformat(),
+        "history_start": first_history_week_start.isoformat(),
+        "history_end": second_history_week_end.isoformat(),
+        "history_weeks": [
+            {
+                "start": first_history_week_start.isoformat(),
+                "end": first_history_week_end.isoformat(),
+            },
+            {
+                "start": second_history_week_start.isoformat(),
+                "end": second_history_week_end.isoformat(),
+            },
+        ],
+        "historyComplete": all(not bool(profile.get("insufficient_history")) for profile in profiles),
         "days": days,
         "weeklyAhtSeconds": weekly_aht_seconds,
         "answerRate": settings["answer_rate"],
@@ -1065,7 +1082,13 @@ def _resource_directions_tx(cursor) -> List[Dict[str, Any]]:
     return [{"id": int(row[0]), "name": row[1]} for row in cursor.fetchall()]
 
 
-def get_resource_overview(db, date_from: Optional[str] = None, date_to: Optional[str] = None, as_of_date_value: Optional[str] = None) -> Dict[str, Any]:
+def get_resource_overview(
+    db,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    as_of_date_value: Optional[str] = None,
+    forecast_week_start_value: Optional[str] = None,
+) -> Dict[str, Any]:
     with db._get_cursor() as cursor:
         settings = _get_settings_tx(cursor)
         if as_of_date_value:
@@ -1073,8 +1096,12 @@ def get_resource_overview(db, date_from: Optional[str] = None, date_to: Optional
         else:
             cursor.execute("SELECT CURRENT_DATE")
             as_of_date = cursor.fetchone()[0]
-        next_week_start = _next_week_start_date(as_of_date)
-        profiles = _fetch_latest_profiles_tx(cursor, as_of_date, settings)
+        if forecast_week_start_value:
+            next_week_start = _week_start_date(_parse_report_date(forecast_week_start_value))
+            profiles = _compute_week_forecast_profiles_tx(cursor, next_week_start, settings)
+        else:
+            next_week_start = _next_week_start_date(as_of_date)
+            profiles = _fetch_latest_profiles_tx(cursor, as_of_date, settings)
         operator_capacity = _current_operator_fte_tx(cursor, settings)
         current_operator_fte = operator_capacity["current_operator_fte"]
         next_week_forecast = _build_week_forecast_payload(next_week_start, profiles, settings, current_operator_fte)
@@ -1121,6 +1148,8 @@ def get_resource_overview(db, date_from: Optional[str] = None, date_to: Optional
             }
             for row in cursor.fetchall()
         ]
+        cursor.execute("SELECT report_date FROM daily_resource_summary ORDER BY report_date ASC")
+        loaded_report_dates = [row[0].isoformat() for row in cursor.fetchall()]
 
     return {
         "settings": _json_safe(settings),
@@ -1131,6 +1160,7 @@ def get_resource_overview(db, date_from: Optional[str] = None, date_to: Optional
         "operator_capacity": _json_safe(operator_capacity),
         "directions": directions,
         "next_week_forecast": _json_safe(next_week_forecast),
+        "loaded_report_dates": loaded_report_dates,
         "history": history,
     }
 
