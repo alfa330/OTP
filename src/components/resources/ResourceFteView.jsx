@@ -22,6 +22,7 @@ import {
   TrendingUp,
   UploadCloud,
   Users,
+  X,
 } from 'lucide-react';
 import {
   Bar,
@@ -359,7 +360,7 @@ const CalendarPicker = ({
       <button
         type="button"
         onClick={() => setOpen((current) => !current)}
-        className="flex h-11 w-full items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 text-left text-sm shadow-sm transition hover:border-slate-300 hover:bg-slate-50"
+        className="flex h-12 w-full items-center justify-between gap-3 rounded-xl border-2 border-slate-200 bg-white px-4 text-left text-sm shadow-sm transition hover:border-slate-300 hover:bg-slate-50"
       >
         <span className="min-w-0">
           <span className="block text-[11px] font-semibold uppercase tracking-wide text-slate-500">{label}</span>
@@ -369,7 +370,7 @@ const CalendarPicker = ({
       </button>
 
       {open && (
-        <div className="absolute right-0 z-40 mt-2 w-[330px] rounded-xl border border-slate-200 bg-white p-3 shadow-xl">
+        <div className="absolute right-0 z-40 mt-2 w-[360px] rounded-2xl border-2 border-slate-200 bg-white p-4 shadow-xl">
           <div className="flex items-center justify-between gap-2">
             <button type="button" onClick={() => moveMonth(-1)} className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-600 hover:bg-slate-100">
               <ChevronLeft size={16} />
@@ -458,6 +459,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
   const [displayOptions, setDisplayOptions] = useState(loadDisplayOptions);
   const [selectedForecastWeekday, setSelectedForecastWeekday] = useState(0);
   const [loadedDateCache, setLoadedDateCache] = useState([]);
+  const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
   const userId = user?.id || '';
 
   useEffect(() => {
@@ -768,6 +770,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
       setUploadFile(null);
       if (fileInputRef.current) fileInputRef.current.value = '';
       setSelectedDate(response.data?.report_date || uploadDate);
+      setIsUploadModalOpen(false);
       await fetchOverview();
     } catch (error) {
       const data = error?.response?.data || {};
@@ -872,8 +875,8 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
             </div>
             <h1 className="mt-1 text-2xl font-semibold text-slate-950">Расчет ресурсов / FTE</h1>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="w-full sm:w-[330px]">
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="w-full sm:w-[360px]">
               <CalendarPicker
                 mode="range"
                 label="Период анализа"
@@ -887,10 +890,24 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                 hint="точка = есть отчет"
               />
             </div>
+            <div className="w-full sm:w-[260px]">
+              <CalendarPicker
+                label="Загрузить отчет"
+                value={uploadDate}
+                onChange={(date) => {
+                  setUploadDate(date);
+                  setUploadFile(null);
+                  if (fileInputRef.current) fileInputRef.current.value = '';
+                  setIsUploadModalOpen(true);
+                }}
+                loadedDates={loadedReportDates}
+                hint="выберите день"
+              />
+            </div>
             <button
               type="button"
               onClick={fetchOverview}
-              className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-100"
+              className="inline-flex h-12 items-center gap-2 rounded-xl border-2 border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-100"
             >
               <RefreshCw size={16} className={isLoading ? 'animate-spin' : ''} />
               Обновить
@@ -899,36 +916,48 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
         </div>
       </div>
 
-      <div className="space-y-6 p-4 md:p-6">
-        <form onSubmit={handleUpload} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
-            <div>
-              <div className="flex items-center gap-2 text-sm font-semibold text-slate-950">
-                <UploadCloud size={17} className="text-blue-600" />
-                Загрузка ежедневного отчета
+      {isUploadModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm">
+          <form onSubmit={handleUpload} className="w-full max-w-xl rounded-2xl border-2 border-slate-200 bg-white p-5 shadow-2xl">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="flex items-center gap-2 text-base font-semibold text-slate-950">
+                  <UploadCloud size={19} className="text-blue-600" />
+                  Загрузка отчета
+                </div>
+                <p className="mt-1 text-sm text-slate-500">Дата выбрана в календаре. Приложите CSV-отчет за 24 часа.</p>
               </div>
-              <p className="mt-1 text-sm text-slate-500">Выберите дату в календаре и приложите CSV за 24 часа.</p>
+              <button
+                type="button"
+                onClick={() => {
+                  setUploadFile(null);
+                  if (fileInputRef.current) fileInputRef.current.value = '';
+                  setIsUploadModalOpen(false);
+                }}
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border-2 border-slate-200 text-slate-500 transition hover:bg-slate-100 hover:text-slate-900"
+              >
+                <X size={16} />
+              </button>
             </div>
-            <div className={`inline-flex w-fit items-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold ${
-              uploadDateAlreadyLoaded ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-600'
-            }`}>
-              {uploadDateAlreadyLoaded ? <CheckCircle2 size={14} /> : <CalendarDays size={14} />}
-              {uploadDateAlreadyLoaded ? 'За эту дату отчет уже есть' : 'Новая дата отчета'}
+
+            <div className="mt-5 rounded-xl border-2 border-slate-200 bg-slate-50 p-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Дата отчета</div>
+                  <div className="mt-1 text-xl font-semibold text-slate-950">{formatDate(uploadDate)}</div>
+                </div>
+                <div className={`inline-flex w-fit items-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold ${
+                  uploadDateAlreadyLoaded ? 'bg-emerald-50 text-emerald-700' : 'bg-white text-slate-600'
+                }`}>
+                  {uploadDateAlreadyLoaded ? <CheckCircle2 size={14} /> : <CalendarDays size={14} />}
+                  {uploadDateAlreadyLoaded ? 'Отчет уже есть, можно обновить' : 'Новая дата отчета'}
+                </div>
+              </div>
             </div>
-          </div>
 
-          <div className="mt-4 grid gap-3 xl:grid-cols-[330px_minmax(260px,1fr)_auto] xl:items-end">
-            <CalendarPicker
-              label="Дата отчета"
-              value={uploadDate}
-              onChange={setUploadDate}
-              loadedDates={loadedReportDates}
-              hint="можно перезагрузить"
-            />
-
-            <div>
-              <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">CSV-отчет за 24 часа</div>
-              <div className="flex min-h-11 items-center justify-between gap-3 rounded-lg border border-dashed border-slate-300 bg-slate-50 px-3 py-2">
+            <div className="mt-4">
+              <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">CSV-отчет за 24 часа</div>
+              <div className="flex min-h-14 items-center justify-between gap-3 rounded-xl border-2 border-dashed border-slate-300 bg-slate-50 px-4 py-3">
                 <div className="min-w-0">
                   <div className="truncate text-sm font-semibold text-slate-900">{selectedFileName}</div>
                   <div className="text-xs text-slate-500">Поддерживается .csv</div>
@@ -936,7 +965,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
-                  className="inline-flex h-9 shrink-0 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-100"
+                  className="inline-flex h-10 shrink-0 items-center gap-2 rounded-xl border-2 border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-100"
                 >
                   <FileUp size={15} />
                   Выбрать
@@ -951,18 +980,33 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
               />
             </div>
 
-            <button
-              type="submit"
-              disabled={isUploading}
-              className="inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-blue-600 px-5 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300"
-            >
-              <FileUp size={16} />
-              {isUploading ? 'Загрузка...' : uploadDateAlreadyLoaded ? 'Обновить отчет' : 'Загрузить'}
-            </button>
-          </div>
-        </form>
+            <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+              <button
+                type="button"
+                onClick={() => {
+                  setUploadFile(null);
+                  if (fileInputRef.current) fileInputRef.current.value = '';
+                  setIsUploadModalOpen(false);
+                }}
+                className="inline-flex h-11 items-center justify-center rounded-xl border-2 border-slate-200 bg-white px-5 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
+              >
+                Отмена
+              </button>
+              <button
+                type="submit"
+                disabled={isUploading}
+                className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-blue-600 px-5 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300"
+              >
+                <FileUp size={16} />
+                {isUploading ? 'Загрузка...' : uploadDateAlreadyLoaded ? 'Обновить отчет' : 'Загрузить отчет'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
 
-        <div className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white p-2 shadow-sm lg:flex-row lg:items-center lg:justify-between">
+      <div className="space-y-6 p-4 md:p-6">
+        <div className="flex flex-col gap-3 rounded-xl border-2 border-slate-200 bg-white p-2 shadow-sm lg:flex-row lg:items-center lg:justify-between">
           <div className="flex gap-1 overflow-x-auto">
             {VIEW_TABS.map((tab) => {
               const Icon = tab.icon;
