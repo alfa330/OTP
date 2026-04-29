@@ -624,6 +624,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
   const [overview, setOverview] = useState(null);
   const [selectedDate, setSelectedDate] = useState('');
   const [selectedDay, setSelectedDay] = useState(null);
+  const [isDayLoading, setIsDayLoading] = useState(false);
   const [dateFrom, setDateFrom] = useState(monthStartIso);
   const [dateTo, setDateTo] = useState(todayIso);
   const [uploadFile, setUploadFile] = useState(null);
@@ -697,8 +698,10 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
     async (date) => {
       if (!apiRoot || !date) {
         setSelectedDay(null);
+        setIsDayLoading(false);
         return;
       }
+      setIsDayLoading(true);
       try {
         const response = await axios.get(`${apiRoot}/api/resource_fte/day/${date}`, {
           headers: buildHeaders(),
@@ -707,6 +710,8 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
       } catch (error) {
         setSelectedDay(null);
         notify(error?.response?.data?.error || 'Не удалось открыть день', 'error');
+      } finally {
+        setIsDayLoading(false);
       }
     },
     [apiRoot, buildHeaders, notify],
@@ -725,7 +730,8 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
     window.localStorage.setItem(DISPLAY_PREFERENCES_STORAGE_KEY, JSON.stringify(displayOptions));
   }, [displayOptions]);
 
-  const selectedSummary = selectedDay?.summary;
+  const selectedDayMatchesDate = Boolean(selectedDate && selectedDay?.summary?.report_date === selectedDate);
+  const selectedSummary = selectedDayMatchesDate ? selectedDay?.summary : null;
 
   const historyTrendData = useMemo(
     () =>
@@ -775,8 +781,10 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
     };
   }, [overview?.history]);
 
+  const selectedDayHours = selectedDayMatchesDate ? selectedDay?.hours || [] : [];
+
   const dayLossHotspots = useMemo(() => {
-    const rows = selectedDay?.hours || [];
+    const rows = selectedDayHours;
     return rows
       .filter((row) => Number(row.received_calls || 0) > 0)
       .map((row) => ({
@@ -789,32 +797,34 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
         return Number(b.no_answer_rate || 0) - Number(a.no_answer_rate || 0);
       })
       .slice(0, 5);
-  }, [selectedDay?.hours]);
+  }, [selectedDayHours]);
 
   const dayAcceptedLostData = useMemo(
     () =>
-      (selectedDay?.hours || []).map((row) => ({
+      selectedDayHours.map((row) => ({
         hour: row.hour_label,
         accepted: Number(row.accepted_calls || 0),
         lost: Number(row.lost_calls || 0),
         lossRate: Number(row.no_answer_rate || 0) * 100,
       })),
-    [selectedDay?.hours],
+    [selectedDayHours],
   );
 
   const selectedLossSummary = useMemo(() => {
-    if (!selectedSummary) return null;
+    const overviewRow = (overview?.history || []).find((item) => item.report_date === selectedDate);
+    const source = selectedSummary || overviewRow;
+    if (!source) return null;
     const peakLossHour = dayLossHotspots[0] || null;
     return {
-      reportDate: selectedSummary.report_date,
-      weekday: selectedSummary.weekday_short,
-      received: Number(selectedSummary.total_received || 0),
-      accepted: Number(selectedSummary.total_accepted || 0),
-      lost: Number(selectedSummary.total_lost || 0),
-      lossRate: Number(selectedSummary.no_answer_rate || 0),
+      reportDate: source.report_date,
+      weekday: source.weekday_short,
+      received: Number(source.total_received || 0),
+      accepted: Number(source.total_accepted || 0),
+      lost: Number(source.total_lost || 0),
+      lossRate: Number(source.no_answer_rate || 0),
       peakLossHour,
     };
-  }, [dayLossHotspots, selectedSummary]);
+  }, [dayLossHotspots, overview?.history, selectedDate, selectedSummary]);
 
   const selectedLossTrendPoint = useMemo(
     () => historyTrendData.find((item) => item.reportDate === selectedDate) || null,
@@ -822,7 +832,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
   );
 
   const selectLossChartDay = useCallback((state) => {
-    const reportDate = state?.activePayload?.[0]?.payload?.reportDate;
+    const reportDate = state?.activePayload?.[0]?.payload?.reportDate || state?.payload?.reportDate;
     if (reportDate) setSelectedDate(reportDate);
   }, []);
 
@@ -1344,7 +1354,34 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                             ))}
                           </Bar>
                         )}
-                        {displayOptions.chartLossRate && <Line yAxisId="right" type="monotone" dataKey="lossRate" stroke="#e11d48" strokeWidth={2} dot={false} />}
+                        {displayOptions.chartLossRate && (
+                          <Line
+                            yAxisId="right"
+                            type="monotone"
+                            dataKey="lossRate"
+                            stroke="#e11d48"
+                            strokeWidth={2}
+                            dot={(props) => {
+                              const isSelected = props.payload?.reportDate === selectedDate;
+                              return (
+                                <circle
+                                  cx={props.cx}
+                                  cy={props.cy}
+                                  r={isSelected ? 5 : 3.5}
+                                  fill={isSelected ? '#be123c' : '#fff'}
+                                  stroke="#e11d48"
+                                  strokeWidth={2}
+                                  className="cursor-pointer"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    selectLossChartDay(props);
+                                  }}
+                                />
+                              );
+                            }}
+                            activeDot={{ r: 6, strokeWidth: 2, onClick: selectLossChartDay }}
+                          />
+                        )}
                       </ComposedChart>
                     </ResponsiveContainer>
                   </div>
@@ -1370,16 +1407,16 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
               </div>
             </div>
 
-            {selectedSummary ? (
+            {selectedLossSummary ? (
               <>
               <div className="mt-5 rounded-lg border border-slate-200 bg-slate-50 p-4">
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                   <div>
                     <div className="text-sm font-semibold text-slate-950">Сводка выбранного дня</div>
-                    <div className="text-sm text-slate-500">{formatDate(selectedSummary.report_date)} · {selectedSummary.weekday_short}</div>
+                    <div className="text-sm text-slate-500">{formatDate(selectedLossSummary.reportDate)} · {selectedLossSummary.weekday}</div>
                   </div>
                   <span className="inline-flex h-9 w-fit items-center justify-center rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-600">
-                    Детализация ниже
+                    {selectedSummary ? 'Детализация ниже' : isDayLoading ? 'Загружаем часы' : 'Нет почасовой детализации'}
                   </span>
                 </div>
                 <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
@@ -1394,6 +1431,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                 </div>
               </div>
 
+              {selectedSummary ? (
               <div className="mt-5 grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
                 <div className="rounded-lg border border-slate-200 bg-white p-3">
                   <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-900">
@@ -1443,6 +1481,11 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                   </div>
                 </div>
               </div>
+              ) : (
+                <div className="mt-5 rounded-lg border border-dashed border-slate-300 bg-white p-4 text-sm text-slate-500">
+                  {isDayLoading ? 'Загружаем почасовую детализацию выбранной даты...' : 'Для выбранной даты нет почасовой детализации.'}
+                </div>
+              )}
               </>
             ) : null}
           </section>
