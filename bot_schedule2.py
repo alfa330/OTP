@@ -38,7 +38,6 @@ from resource_fte_service import (
     get_resource_settings,
     import_resource_csv,
     recalculate_resource_forecast,
-    update_resource_hour,
     update_resource_settings,
 )
 import uuid
@@ -2442,21 +2441,6 @@ def api_resource_fte_day(report_date):
         return guard_response, guard_status
     try:
         return jsonify({"status": "success", "day": get_resource_day(db, report_date)}), 200
-    except Exception as error:
-        return _resource_fte_error_response(error)
-
-
-@app.route('/api/resource_fte/day/<string:report_date>/hours/<int:hour>', methods=['PATCH', 'OPTIONS'])
-@require_api_key
-def api_resource_fte_update_hour(report_date, hour):
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    requester_id, guard_response, guard_status = _resource_fte_route_guard()
-    if guard_response is not None:
-        return guard_response, guard_status
-    try:
-        payload = request.get_json(silent=True) or {}
-        return jsonify({"status": "success", "day": update_resource_hour(db, report_date, hour, payload)}), 200
     except Exception as error:
         return _resource_fte_error_response(error)
 
