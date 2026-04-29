@@ -947,45 +947,6 @@ def _refresh_all_historical_forecasts_tx(cursor, settings: Dict[str, Any]) -> No
         _refresh_historical_forecast_for_day_tx(cursor, report_date, settings)
 
 
-def _upsert_profiles_tx(cursor, as_of_date, settings: Dict[str, Any]) -> List[Dict[str, Any]]:
-    profiles = []
-    for weekday_meta in WEEKDAYS_RU:
-        profile = _compute_profile_for_weekday_tx(cursor, weekday_meta["index"], as_of_date, settings)
-        profiles.append({**weekday_meta, **profile})
-        cursor.execute(
-            """
-            INSERT INTO weekday_resource_profiles (
-                as_of_date, weekday, history_dates, history_count,
-                insufficient_history, avg_daily_calls, daily_fte,
-                hourly_profile, settings_snapshot, updated_at
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-            ON CONFLICT (as_of_date, weekday)
-            DO UPDATE SET
-                history_dates = EXCLUDED.history_dates,
-                history_count = EXCLUDED.history_count,
-                insufficient_history = EXCLUDED.insufficient_history,
-                avg_daily_calls = EXCLUDED.avg_daily_calls,
-                daily_fte = EXCLUDED.daily_fte,
-                hourly_profile = EXCLUDED.hourly_profile,
-                settings_snapshot = EXCLUDED.settings_snapshot,
-                updated_at = CURRENT_TIMESTAMP
-            """,
-            (
-                as_of_date,
-                profile["weekday"],
-                Json(profile["history_dates"]),
-                profile["history_count"],
-                profile["insufficient_history"],
-                profile["avg_daily_calls"],
-                profile["daily_fte"],
-                Json(profile["hourly_profile"]),
-                Json(settings),
-            ),
-        )
-    return profiles
-
-
 def _weekly_totals(
     profiles: List[Dict[str, Any]],
     settings: Dict[str, Any],
@@ -1096,42 +1057,13 @@ def import_resource_csv(db, report_date_value: str, content: bytes, filename: st
         )
         _refresh_daily_summary_tx(cursor, report_date)
         _refresh_all_historical_forecasts_tx(cursor, settings)
-        cursor.execute("SELECT COALESCE(MAX(report_date), %s) FROM daily_resource_summary", (report_date,))
-        as_of_date = cursor.fetchone()[0] or report_date
-        profiles = _upsert_profiles_tx(cursor, as_of_date, settings)
     day_payload = get_resource_day(db, report_date.isoformat())
     return {
         "upload_id": upload_id,
         "report_date": report_date.isoformat(),
         "mapped_headers": parsed["mapped_headers"],
         "day": day_payload,
-        "profiles": profiles,
     }
-
-
-def update_resource_hour(db, report_date_value: str, hour: int, payload: Dict[str, Any]) -> Dict[str, Any]:
-    report_date = _parse_report_date(report_date_value)
-    hour = int(hour)
-    if hour < 0 or hour > 23:
-        raise ValueError("INVALID_HOUR")
-    planned = max(0.0, _to_float(payload.get("planned_fte"), 0.0)) if "planned_fte" in payload else None
-    actual = max(0.0, _to_float(payload.get("actual_fte"), 0.0)) if "actual_fte" in payload else None
-    comments = payload.get("comments") if "comments" in payload else None
-    with db._get_cursor() as cursor:
-        cursor.execute(
-            """
-            UPDATE daily_resource_hours
-            SET planned_fte = COALESCE(%s, planned_fte),
-                actual_fte = COALESCE(%s, actual_fte),
-                comments = COALESCE(%s, comments),
-                fact_forecast_delta = COALESCE(%s, actual_fte) - forecast_fte,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE report_date = %s AND hour = %s
-            """,
-            (planned, actual, comments, actual, report_date, hour),
-        )
-        _refresh_daily_summary_tx(cursor, report_date)
-    return get_resource_day(db, report_date.isoformat())
 
 
 def recalculate_resource_forecast(db, as_of_date_value: Optional[str] = None) -> Dict[str, Any]:
@@ -1141,10 +1073,9 @@ def recalculate_resource_forecast(db, as_of_date_value: Optional[str] = None) ->
             as_of_date = _parse_report_date(as_of_date_value)
         else:
             cursor.execute("SELECT CURRENT_DATE")
-            as_of_date = cursor.fetchone()[0]
+        as_of_date = cursor.fetchone()[0]
         _refresh_all_actual_fte_tx(cursor, settings)
         _refresh_all_historical_forecasts_tx(cursor, settings)
-        profiles = _compute_week_forecast_profiles_tx(cursor, _next_week_start_date(as_of_date), settings)
     return get_resource_overview(db, as_of_date_value=as_of_date.isoformat())
 
 
@@ -1243,10 +1174,6 @@ def get_resource_overview(
     return {
         "settings": _json_safe(settings),
         "as_of_date": as_of_date.isoformat(),
-        "weekdays": WEEKDAYS_RU,
-        "profiles": _json_safe(profiles),
-        "weekly_totals": _weekly_totals(profiles, settings, current_operator_fte),
-        "operator_capacity": _json_safe(operator_capacity),
         "directions": directions,
         "next_week_forecast": _json_safe(next_week_forecast),
         "loaded_report_dates": loaded_report_dates,
@@ -1259,7 +1186,7 @@ def get_resource_day(db, report_date_value: str) -> Dict[str, Any]:
     with db._get_cursor() as cursor:
         settings = _get_settings_tx(cursor)
         _refresh_actual_fte_for_day_tx(cursor, report_date, settings)
-        profile = _refresh_historical_forecast_for_day_tx(cursor, report_date, settings)
+        _refresh_historical_forecast_for_day_tx(cursor, report_date, settings)
         cursor.execute(
             """
             SELECT report_date, weekday, total_received, total_accepted, total_lost,
@@ -1326,5 +1253,4 @@ def get_resource_day(db, report_date_value: str) -> Dict[str, Any]:
             "fact_forecast_delta_total": _to_float(summary_row[11]),
         },
         "hours": hours,
-        "profile": _json_safe(profile),
     }

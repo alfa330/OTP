@@ -30,7 +30,6 @@ import {
   Cell,
   ComposedChart,
   Line,
-  LineChart,
   Area,
   AreaChart,
   ReferenceLine,
@@ -222,10 +221,8 @@ const DISPLAY_PREFERENCES_STORAGE_KEY = 'otp_resource_fte_display_v1';
 
 const VIEW_TABS = [
   { key: 'overview', label: 'Обзор', icon: LayoutDashboard },
-  { key: 'day', label: 'День', icon: CalendarDays },
   { key: 'next_week', label: 'Прогнозы', icon: TrendingUp },
   { key: 'losses', label: 'Потери', icon: PhoneMissed },
-  { key: 'profiles', label: 'Профили', icon: BarChart3 },
   { key: 'settings', label: 'Настройки', icon: SlidersHorizontal },
 ];
 
@@ -241,30 +238,16 @@ const DEFAULT_DISPLAY_OPTIONS = {
   chartActual: true,
   chartLosses: true,
   chartLossRate: true,
-  profileCalls: true,
-  profileAht: true,
-  profileDailyFte: true,
-  tableReceived: true,
-  tableAccepted: true,
-  tableLost: true,
-  tableNoAnswer: true,
-  tableAvgTalk: true,
-  tableAvgWait: true,
-  tableForecast: true,
-  tablePlan: true,
-  tableActual: true,
-  tableDelta: true,
-  tableComments: true,
 };
 
 const DISPLAY_GROUPS = [
   {
     title: 'Карточки',
     items: [
-      ['metricOperators', 'Операторы с усушкой'],
-      ['metricWeeklyFte', 'Недельная потребность'],
-      ['metricBaseOperators', 'Без усушки'],
-      ['metricHistoryWarnings', 'Недостаток истории'],
+      ['metricOperators', 'Прогноз FTE периода'],
+      ['metricWeeklyFte', 'Факт FTE периода'],
+      ['metricBaseOperators', 'Разница FTE'],
+      ['metricHistoryWarnings', 'Дни с отчетами'],
       ['metricLostCalls', 'Потерянные звонки'],
       ['metricLossRate', 'Доля потерь'],
     ],
@@ -277,30 +260,6 @@ const DISPLAY_GROUPS = [
       ['chartActual', 'Факт FTE'],
       ['chartLosses', 'Потери'],
       ['chartLossRate', 'Доля потерь'],
-    ],
-  },
-  {
-    title: 'Профиль дня недели',
-    items: [
-      ['profileCalls', 'Среднее количество звонков'],
-      ['profileAht', 'AHT из истории'],
-      ['profileDailyFte', 'Суточная FTE'],
-    ],
-  },
-  {
-    title: 'Почасовая таблица',
-    items: [
-      ['tableReceived', 'Получено'],
-      ['tableAccepted', 'Принято'],
-      ['tableLost', 'Потеряно'],
-      ['tableNoAnswer', '% Неотв'],
-      ['tableAvgTalk', 'Средняя длительность'],
-      ['tableAvgWait', 'Ожидание'],
-      ['tableForecast', 'Прогноз FTE'],
-      ['tablePlan', 'План'],
-      ['tableActual', 'Факт'],
-      ['tableDelta', 'Разница'],
-      ['tableComments', 'Комментарии'],
     ],
   },
 ];
@@ -665,7 +624,6 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
   const [overview, setOverview] = useState(null);
   const [selectedDate, setSelectedDate] = useState('');
   const [selectedDay, setSelectedDay] = useState(null);
-  const [activeWeekday, setActiveWeekday] = useState(0);
   const [dateFrom, setDateFrom] = useState(monthStartIso);
   const [dateTo, setDateTo] = useState(todayIso);
   const [uploadDate, setUploadDate] = useState(todayIso);
@@ -674,7 +632,6 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
   const [isUploading, setIsUploading] = useState(false);
   const [isRecalculating, setIsRecalculating] = useState(false);
   const [settingsDraft, setSettingsDraft] = useState(null);
-  const [savingHourKey, setSavingHourKey] = useState('');
   const [activeDashboardView, setActiveDashboardView] = useState('overview');
   const [displayOptions, setDisplayOptions] = useState(loadDisplayOptions);
   const [selectedForecastWeekStart, setSelectedForecastWeekStart] = useState(() => getNextWeekStartIso());
@@ -769,34 +726,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
     window.localStorage.setItem(DISPLAY_PREFERENCES_STORAGE_KEY, JSON.stringify(displayOptions));
   }, [displayOptions]);
 
-  const activeProfile = useMemo(() => {
-    const profiles = overview?.profiles || [];
-    return profiles.find((item) => Number(item.weekday) === Number(activeWeekday)) || profiles[0] || null;
-  }, [activeWeekday, overview?.profiles]);
-
   const selectedSummary = selectedDay?.summary;
-
-  const dayChartData = useMemo(
-    () =>
-      (selectedDay?.hours || []).map((row) => ({
-        hour: row.hour_label,
-        received: row.received_calls,
-        forecast: Number(row.forecast_calls || 0),
-        actual: Number(row.actual_fte || 0),
-        fte: Number(row.forecast_fte || 0),
-      })),
-    [selectedDay],
-  );
-
-  const profileChartData = useMemo(
-    () =>
-      (activeProfile?.hourly_profile || []).map((row) => ({
-        hour: `${String(row.hour).padStart(2, '0')}:00`,
-        calls: Number(row.avg_calls || 0),
-        fte: Number(row.fte || 0),
-      })),
-    [activeProfile],
-  );
 
   const historyTrendData = useMemo(
     () =>
@@ -834,6 +764,18 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
     };
   }, [overview?.history]);
 
+  const overviewPeriodSummary = useMemo(() => {
+    const rows = overview?.history || [];
+    const forecastFteTotal = rows.reduce((sum, row) => sum + Number(row.forecast_fte_total || 0), 0);
+    const actualFteTotal = rows.reduce((sum, row) => sum + Number(row.actual_fte_total || 0), 0);
+    return {
+      days: rows.length,
+      forecastFteTotal,
+      actualFteTotal,
+      fteDelta: actualFteTotal - forecastFteTotal,
+    };
+  }, [overview?.history]);
+
   const dayLossHotspots = useMemo(() => {
     const rows = selectedDay?.hours || [];
     return rows
@@ -849,32 +791,6 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
       })
       .slice(0, 5);
   }, [selectedDay?.hours]);
-
-  const dayStaffingHotspots = useMemo(() => {
-    const rows = selectedDay?.hours || [];
-    return rows
-      .map((row) => ({
-        ...row,
-        delta: Number(row.fact_forecast_delta || 0),
-        gap: Math.abs(Number(row.fact_forecast_delta || 0)),
-      }))
-      .filter((row) => row.gap > 0)
-      .sort((a, b) => b.gap - a.gap)
-      .slice(0, 4);
-  }, [selectedDay?.hours]);
-
-  const dayPeakHours = useMemo(() => {
-    const rows = selectedDay?.hours || [];
-    return rows
-      .filter((row) => Number(row.received_calls || 0) > 0)
-      .sort((a, b) => Number(b.received_calls || 0) - Number(a.received_calls || 0))
-      .slice(0, 4);
-  }, [selectedDay?.hours]);
-
-  const dayFteDeltaTotal = useMemo(() => {
-    if (!selectedDay?.summary) return 0;
-    return Number(selectedDay.summary.actual_fte_total || 0) - Number(selectedDay.summary.forecast_fte_total || 0);
-  }, [selectedDay?.summary]);
 
   const dayAcceptedLostData = useMemo(
     () =>
@@ -1112,44 +1028,6 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
     }
   };
 
-  const updateHourLocal = (hour, key, value) => {
-    setSelectedDay((current) => {
-      if (!current) return current;
-      return {
-        ...current,
-        hours: current.hours.map((row) => (row.hour === hour ? { ...row, [key]: value } : row)),
-      };
-    });
-  };
-
-  const saveHour = async (row) => {
-    if (!selectedDay?.summary?.report_date) return;
-    const key = `${selectedDay.summary.report_date}-${row.hour}`;
-    setSavingHourKey(key);
-    try {
-      const response = await axios.patch(
-        `${apiRoot}/api/resource_fte/day/${selectedDay.summary.report_date}/hours/${row.hour}`,
-        {
-          planned_fte: row.planned_fte,
-          actual_fte: row.actual_fte,
-          comments: row.comments,
-        },
-        {
-          headers: buildHeaders({
-            'Content-Type': 'application/json',
-          }),
-        },
-      );
-      setSelectedDay(response.data?.day || selectedDay);
-      await fetchOverview();
-    } catch (error) {
-      notify(error?.response?.data?.error || 'Не удалось сохранить строку', 'error');
-    } finally {
-      setSavingHourKey('');
-    }
-  };
-
-  const weekly = overview?.weekly_totals || {};
   const resourceDirections = overview?.directions || [];
   const loadedReportDates = useMemo(
     () => Array.from(new Set([
@@ -1350,21 +1228,27 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
           <div className={`grid gap-3 md:grid-cols-2 ${visibleMetricCount >= 5 ? 'xl:grid-cols-6' : visibleMetricCount >= 4 ? 'xl:grid-cols-4' : 'xl:grid-cols-3'}`}>
             {displayOptions.metricOperators && (
               <StatCard
-                icon={Users}
-                label="Операторы с усушкой"
-                value={formatNumber(weekly.operators_with_shrinkage, 2)}
-                hint={`Текущий FTE: ${formatNumber(weekly.current_operator_fte, 2)} · разница: ${formatSignedNumber(weekly.operator_fte_gap, 2)}`}
-                tone={Number(weekly.operator_fte_gap || 0) < 0 ? 'rose' : 'blue'}
+                icon={TrendingUp}
+                label="Прогноз FTE периода"
+                value={formatNumber(overviewPeriodSummary.forecastFteTotal, 1)}
+                hint="Сумма прогнозных FTE по загруженным дням"
+                tone="blue"
               />
             )}
             {displayOptions.metricWeeklyFte && (
-              <StatCard icon={Clock3} label="Недельная потребность" value={formatNumber(weekly.weekly_fte_hours, 1)} hint="Сумма ПН-ВС в FTE-часах" tone="emerald" />
+              <StatCard icon={Users} label="Факт FTE периода" value={formatNumber(overviewPeriodSummary.actualFteTotal, 1)} hint="Сумма фактических смен по загруженным дням" tone="emerald" />
             )}
             {displayOptions.metricBaseOperators && (
-              <StatCard icon={TrendingUp} label="Без усушки" value={formatNumber(weekly.base_operators, 2)} hint="Расчет от 40 часов в неделю" tone="slate" />
+              <StatCard
+                icon={Clock3}
+                label="Разница FTE"
+                value={formatSignedNumber(overviewPeriodSummary.fteDelta, 1)}
+                hint="Факт минус прогноз за период"
+                tone={overviewPeriodSummary.fteDelta < -0.5 ? 'rose' : overviewPeriodSummary.fteDelta > 0.5 ? 'emerald' : 'slate'}
+              />
             )}
             {displayOptions.metricHistoryWarnings && (
-              <StatCard icon={AlertTriangle} label="Недостаток истории" value={(overview?.profiles || []).filter((item) => item.insufficient_history).length} hint="Дни недели с менее чем 2 значениями" tone="amber" />
+              <StatCard icon={CalendarDays} label="Дни с отчетами" value={overviewPeriodSummary.days} hint="В выбранном периоде анализа" tone="slate" />
             )}
             {displayOptions.metricLostCalls && (
               <StatCard icon={PhoneMissed} label="Потерянные звонки" value={formatInt(periodLossSummary.totalLost)} hint={`Принято: ${formatInt(periodLossSummary.totalAccepted)}`} tone="rose" />
@@ -1495,13 +1379,9 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                     <div className="text-sm font-semibold text-slate-950">Сводка выбранного дня</div>
                     <div className="text-sm text-slate-500">{formatDate(selectedSummary.report_date)} · {selectedSummary.weekday_short}</div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => setActiveDashboardView('day')}
-                    className="inline-flex h-9 w-fit items-center justify-center rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-100"
-                  >
-                    Открыть день
-                  </button>
+                  <span className="inline-flex h-9 w-fit items-center justify-center rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-600">
+                    Детализация ниже
+                  </span>
                 </div>
                 <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
                   <div className="rounded-lg bg-white px-3 py-2"><div className="text-xs text-slate-500">Поступило</div><b>{formatInt(selectedLossSummary?.received)}</b></div>
@@ -1569,52 +1449,10 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
           </section>
         )}
 
-        <div className={`grid gap-6 ${
-          activeDashboardView === 'overview' || activeDashboardView === 'day' || activeDashboardView === 'settings'
-            ? 'xl:grid-cols-[320px_minmax(0,1fr)]'
-            : 'xl:grid-cols-1'
-        }`}>
-          {(activeDashboardView === 'overview' || activeDashboardView === 'day' || activeDashboardView === 'settings') && (
+        {(activeDashboardView === 'settings' || activeDashboardView === 'next_week') && (
+        <div className={`grid gap-6 ${activeDashboardView === 'settings' ? 'xl:grid-cols-[320px_minmax(0,1fr)]' : 'xl:grid-cols-1'}`}>
+          {activeDashboardView === 'settings' && (
           <aside className="space-y-4">
-            {(activeDashboardView === 'overview' || activeDashboardView === 'day') && (
-            <div className="rounded-xl border border-slate-200 bg-white shadow-sm">
-              <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
-                <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
-                  <CalendarDays size={16} />
-                  История загрузок
-                </div>
-              </div>
-              <div className="max-h-[420px] overflow-y-auto p-2">
-                {(overview?.history || []).length ? (
-                  overview.history.map((item) => (
-                    <button
-                      key={item.report_date}
-                      type="button"
-                      onClick={() => setSelectedDate(item.report_date)}
-                      className={`mb-2 w-full rounded-lg border p-3 text-left transition ${
-                        selectedDate === item.report_date
-                          ? 'border-blue-300 bg-blue-50'
-                          : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="font-semibold text-slate-950">{formatDate(item.report_date)}</div>
-                        <span className="rounded-md bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-600">{item.weekday_short}</span>
-                      </div>
-                      <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-500">
-                        <span>Получено: <b className="text-slate-800">{formatInt(item.total_received)}</b></span>
-                        <span>FTE: <b className="text-slate-800">{formatNumber(item.forecast_fte_total, 1)}</b></span>
-                      </div>
-                    </button>
-                  ))
-                ) : (
-                  <div className="p-5 text-sm text-slate-500">Загрузок пока нет.</div>
-                )}
-              </div>
-            </div>
-            )}
-
-            {activeDashboardView === 'settings' && (
             <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
               <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-900">
                 <Settings size={16} />
@@ -1697,7 +1535,6 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                 </div>
               ) : null}
             </div>
-            )}
           </aside>
           )}
 
@@ -2153,288 +1990,9 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
               </section>
             )}
 
-            {(activeDashboardView === 'overview' || activeDashboardView === 'profiles') && (
-            <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-              <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                <div>
-                  <h2 className="text-lg font-semibold text-slate-950">Профили по дням недели</h2>
-                  <p className="text-sm text-slate-500">Скользящее окно последних 14 календарных дней, максимум два одинаковых дня недели.</p>
-                </div>
-                <button
-                  type="button"
-                  onClick={handleRecalculate}
-                  disabled={isRecalculating}
-                  className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-100"
-                >
-                  <RefreshCw size={16} className={isRecalculating ? 'animate-spin' : ''} />
-                  Пересчитать
-                </button>
-              </div>
-              <div className="mt-4 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-sm text-blue-900">
-                Профиль - это типовой рисунок нагрузки конкретного дня недели: сколько звонков приходит по часам, какой AHT получается из истории и сколько FTE нужно. Поэтому прогноз следующей недели строится не как один общий средний день, а отдельно для ПН, ВТ, СР, ЧТ, ПТ, СБ и ВС.
-              </div>
-              <div className="mt-4 flex gap-2 overflow-x-auto pb-1">
-                {(overview?.profiles || []).map((profile) => (
-                  <button
-                    type="button"
-                    key={profile.weekday}
-                    onClick={() => setActiveWeekday(profile.weekday)}
-                    className={`min-w-[112px] rounded-lg border px-3 py-2 text-left transition ${
-                      Number(activeWeekday) === Number(profile.weekday)
-                        ? 'border-blue-300 bg-blue-50 text-blue-900'
-                        : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm font-semibold">{profile.short}</span>
-                      {profile.insufficient_history ? <AlertTriangle size={14} className="text-amber-500" /> : <CheckCircle2 size={14} className="text-emerald-500" />}
-                    </div>
-                    <div className="mt-1 text-xs text-slate-500">{formatNumber(profile.daily_fte, 1)} FTE</div>
-                  </button>
-                ))}
-              </div>
-
-              {activeProfile ? (
-                <div className="mt-5 grid gap-4 xl:grid-cols-[minmax(0,1fr)_280px]">
-                  {(displayOptions.chartCalls || displayOptions.chartFte) && (
-                  <div className="h-72 min-w-0">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <LineChart data={profileChartData} margin={{ top: 10, right: 18, left: 0, bottom: 0 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                        <XAxis dataKey="hour" tick={{ fontSize: 11 }} interval={2} />
-                        <YAxis yAxisId="left" tick={{ fontSize: 11 }} />
-                        <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} />
-                        <Tooltip formatter={(value, name) => [formatNumber(value, name === 'fte' ? 2 : 0), name === 'fte' ? 'FTE' : 'Звонки']} />
-                        {displayOptions.chartCalls && <Line yAxisId="left" type="monotone" dataKey="calls" stroke="#2563eb" strokeWidth={2} dot={false} />}
-                        {displayOptions.chartFte && <Line yAxisId="right" type="monotone" dataKey="fte" stroke="#059669" strokeWidth={2} dot={false} />}
-                      </LineChart>
-                    </ResponsiveContainer>
-                  </div>
-                  )}
-                  <div className="rounded-lg bg-slate-50 p-4">
-                    <div className="text-sm font-semibold text-slate-900">{activeProfile.label}</div>
-                    <dl className="mt-4 space-y-3 text-sm">
-                      <div className="flex justify-between gap-3"><dt className="text-slate-500">История</dt><dd className="font-medium text-slate-900">{activeProfile.history_count}/2</dd></div>
-                      {displayOptions.profileCalls && <div className="flex justify-between gap-3"><dt className="text-slate-500">Сред. звонков</dt><dd className="font-medium text-slate-900">{formatInt(activeProfile.avg_daily_calls)}</dd></div>}
-                      {displayOptions.profileAht && <div className="flex justify-between gap-3"><dt className="text-slate-500">AHT из истории</dt><dd className="font-medium text-slate-900">{formatSeconds(activeProfile.aht_seconds)}</dd></div>}
-                      {displayOptions.profileDailyFte && <div className="flex justify-between gap-3"><dt className="text-slate-500">Суточная FTE</dt><dd className="font-medium text-slate-900">{formatNumber(activeProfile.daily_fte, 2)}</dd></div>}
-                    </dl>
-                    {activeProfile.insufficient_history ? (
-                      <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-                        Недостаточно истории: расчет построен по доступным данным.
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
-              ) : (
-                <EmptyState title="Нет профилей" text="Загрузите ежедневные CSV-отчеты, чтобы система построила недельный профиль." />
-              )}
-            </section>
-            )}
-
-            {(activeDashboardView === 'overview' || activeDashboardView === 'day') && (
-            <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-              {selectedSummary ? (
-                <>
-                  <div className="flex flex-col gap-2">
-                    <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
-                      <div>
-                        <h2 className="text-lg font-semibold text-slate-950">
-                          День {formatDate(selectedSummary.report_date)} · {selectedSummary.weekday_short}
-                        </h2>
-                        <p className="text-sm text-slate-500">Звонки, потери и отклонение факта от прогноза по часам.</p>
-                      </div>
-                      <span className={`inline-flex w-fit items-center rounded-lg px-3 py-2 text-sm font-semibold ${
-                        dayFteDeltaTotal < -0.5
-                          ? 'bg-rose-50 text-rose-700'
-                          : dayFteDeltaTotal > 0.5
-                            ? 'bg-emerald-50 text-emerald-700'
-                            : 'bg-slate-100 text-slate-700'
-                      }`}>
-                        Разница факта: {formatNumber(dayFteDeltaTotal, 1)} FTE
-                      </span>
-                    </div>
-
-                    <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-6">
-                      {displayOptions.tableReceived && (
-                        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                          <div className="text-xs font-medium text-slate-500">Получено</div>
-                          <div className="mt-1 text-xl font-semibold text-slate-950">{formatInt(selectedSummary.total_received)}</div>
-                        </div>
-                      )}
-                      {displayOptions.tableAccepted && (
-                        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                          <div className="text-xs font-medium text-slate-500">Принято</div>
-                          <div className="mt-1 text-xl font-semibold text-emerald-700">{formatInt(selectedSummary.total_accepted)}</div>
-                        </div>
-                      )}
-                      {displayOptions.tableLost && (
-                        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                          <div className="text-xs font-medium text-slate-500">Потеряно</div>
-                          <div className="mt-1 text-xl font-semibold text-rose-700">{formatInt(selectedSummary.total_lost)}</div>
-                        </div>
-                      )}
-                      {displayOptions.tableNoAnswer && (
-                        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                          <div className="text-xs font-medium text-slate-500">Доля потерь</div>
-                          <div className="mt-1 text-xl font-semibold text-slate-950">{formatPercent(selectedSummary.no_answer_rate)}</div>
-                        </div>
-                      )}
-                      {displayOptions.tableForecast && (
-                        <div className="rounded-lg border border-slate-200 bg-blue-50 p-3">
-                          <div className="text-xs font-medium text-blue-700">Прогноз FTE</div>
-                          <div className="mt-1 text-xl font-semibold text-blue-800">{formatNumber(selectedSummary.forecast_fte_total, 1)}</div>
-                        </div>
-                      )}
-                      {displayOptions.tableActual && (
-                        <div className="rounded-lg border border-slate-200 bg-emerald-50 p-3">
-                          <div className="text-xs font-medium text-emerald-700">Факт FTE</div>
-                          <div className="mt-1 text-xl font-semibold text-emerald-800">{formatNumber(selectedSummary.actual_fte_total, 1)}</div>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="mt-5 grid gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
-                    {(displayOptions.chartCalls || displayOptions.chartFte || displayOptions.chartActual) && (
-                      <div className="rounded-lg border border-slate-200 p-3">
-                        <div className="mb-3 flex items-center justify-between gap-3">
-                          <div>
-                            <h3 className="text-sm font-semibold text-slate-950">Нагрузка по часам</h3>
-                            <p className="text-xs text-slate-500">Столбцы — звонки, линии — FTE.</p>
-                          </div>
-                          <div className="flex flex-wrap justify-end gap-2 text-xs">
-                            {displayOptions.chartCalls && <span className="rounded bg-blue-100 px-2 py-1 text-blue-700">Звонки</span>}
-                            {displayOptions.chartFte && <span className="rounded bg-blue-600 px-2 py-1 text-white">Прогноз</span>}
-                            {displayOptions.chartActual && <span className="rounded bg-emerald-600 px-2 py-1 text-white">Факт</span>}
-                          </div>
-                        </div>
-                        <div className="h-72">
-                          <ResponsiveContainer width="100%" height="100%">
-                            <ComposedChart data={dayChartData} margin={{ top: 10, right: 18, left: 0, bottom: 0 }}>
-                              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                              <XAxis dataKey="hour" tick={{ fontSize: 11 }} interval={2} />
-                              <YAxis yAxisId="left" tick={{ fontSize: 11 }} />
-                              <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} />
-                              <Tooltip formatter={(value, name) => [formatNumber(value, name === 'received' ? 0 : 2), name === 'received' ? 'Получено' : name === 'actual' ? 'Факт FTE' : 'Прогноз FTE']} />
-                              {displayOptions.chartCalls && <Bar yAxisId="left" dataKey="received" fill="#bfdbfe" radius={[4, 4, 0, 0]} />}
-                              {displayOptions.chartFte && <Line yAxisId="right" type="monotone" dataKey="fte" stroke="#2563eb" strokeWidth={2} dot={false} />}
-                              {displayOptions.chartActual && <Line yAxisId="right" type="monotone" dataKey="actual" stroke="#059669" strokeWidth={2} dot={false} />}
-                            </ComposedChart>
-                          </ResponsiveContainer>
-                        </div>
-                      </div>
-                    )}
-
-                    <div className="space-y-3">
-                      <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                        <div className="mb-2 text-sm font-semibold text-slate-950">Часы риска</div>
-                        <div className="space-y-2">
-                          {dayStaffingHotspots.length ? (
-                            dayStaffingHotspots.map((row) => (
-                              <div key={row.hour} className="rounded-md bg-white p-2 text-sm">
-                                <div className="flex items-center justify-between gap-2">
-                                  <b className="text-slate-900">{row.hour_label}</b>
-                                  <span className={row.delta < 0 ? 'font-semibold text-rose-700' : 'font-semibold text-emerald-700'}>
-                                    {formatNumber(row.delta, 2)} FTE
-                                  </span>
-                                </div>
-                                <div className="mt-1 text-xs text-slate-500">
-                                  Прогноз {formatNumber(row.forecast_fte, 2)} · факт {formatNumber(row.actual_fte, 2)}
-                                </div>
-                              </div>
-                            ))
-                          ) : (
-                            <div className="rounded-md border border-dashed border-slate-300 bg-white p-3 text-sm text-slate-500">Отклонений по FTE нет.</div>
-                          )}
-                        </div>
-                      </div>
-
-                      <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                        <div className="mb-2 text-sm font-semibold text-slate-950">Пиковые часы</div>
-                        <div className="space-y-2">
-                          {dayPeakHours.length ? (
-                            dayPeakHours.map((row) => (
-                              <div key={row.hour} className="flex items-center justify-between rounded-md bg-white px-2 py-2 text-sm">
-                                <span className="font-medium text-slate-900">{row.hour_label}</span>
-                                <span className="text-slate-600">{formatInt(row.received_calls)} звонков</span>
-                              </div>
-                            ))
-                          ) : (
-                            <div className="rounded-md border border-dashed border-slate-300 bg-white p-3 text-sm text-slate-500">Звонков за день нет.</div>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="mt-5 overflow-x-auto rounded-lg border border-slate-200">
-                    <table className="min-w-[1180px] w-full divide-y divide-slate-200 text-sm">
-                      <thead className="sticky top-0 bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
-                        <tr>
-                          <th className="px-3 py-3 text-left">Час</th>
-                          {displayOptions.tableReceived && <th className="px-3 py-3 text-right">Получено</th>}
-                          {displayOptions.tableAccepted && <th className="px-3 py-3 text-right">Принято</th>}
-                          {displayOptions.tableLost && <th className="px-3 py-3 text-right">Потеряно</th>}
-                          {displayOptions.tableNoAnswer && <th className="px-3 py-3 text-right">% Неотв</th>}
-                          {displayOptions.tableAvgTalk && <th className="px-3 py-3 text-right">Средн. прод.</th>}
-                          {displayOptions.tableAvgWait && <th className="px-3 py-3 text-right">Ожидание</th>}
-                          {displayOptions.tableForecast && <th className="px-3 py-3 text-right">Прогноз FTE</th>}
-                          {displayOptions.tablePlan && <th className="px-3 py-3 text-right">План</th>}
-                          {displayOptions.tableActual && <th className="px-3 py-3 text-right">Факт</th>}
-                          {displayOptions.tableDelta && <th className="px-3 py-3 text-right">Разница</th>}
-                          {displayOptions.tableComments && <th className="px-3 py-3 text-left">Комментарий</th>}
-                          <th className="px-3 py-3 text-right"></th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100 bg-white">
-                        {(selectedDay.hours || []).map((row) => {
-                          const delta = Number(row.fact_forecast_delta || 0);
-                          const deltaClass = delta < -0.25 ? 'text-rose-700 bg-rose-50' : delta > 0.25 ? 'text-emerald-700 bg-emerald-50' : 'text-slate-700 bg-slate-50';
-                          const rowKey = `${selectedSummary.report_date}-${row.hour}`;
-                          return (
-                            <tr key={row.hour} className="hover:bg-slate-50/60">
-                              <td className="whitespace-nowrap px-3 py-2 font-medium text-slate-900">{row.hour_label}</td>
-                              {displayOptions.tableReceived && <td className="px-3 py-2 text-right">{formatInt(row.received_calls)}</td>}
-                              {displayOptions.tableAccepted && <td className="px-3 py-2 text-right">{formatInt(row.accepted_calls)}</td>}
-                              {displayOptions.tableLost && <td className="px-3 py-2 text-right">{formatInt(row.lost_calls)}</td>}
-                              {displayOptions.tableNoAnswer && <td className="px-3 py-2 text-right">{formatPercent(row.no_answer_rate)}</td>}
-                              {displayOptions.tableAvgTalk && <td className="px-3 py-2 text-right">{formatSeconds(row.avg_talk_seconds)}</td>}
-                              {displayOptions.tableAvgWait && <td className="px-3 py-2 text-right">{formatSeconds(row.avg_wait_seconds)}</td>}
-                              {displayOptions.tableForecast && <td className="px-3 py-2 text-right font-semibold text-blue-700">{formatNumber(row.forecast_fte, 2)}</td>}
-                              {displayOptions.tablePlan && <td className="px-3 py-2 text-right">
-                                <input type="number" step="0.25" value={row.planned_fte ?? 0} onChange={(event) => updateHourLocal(row.hour, 'planned_fte', event.target.value)} className="h-8 w-20 rounded-md border border-slate-200 px-2 text-right text-sm" />
-                              </td>}
-                              {displayOptions.tableActual && <td className="px-3 py-2 text-right">
-                                <input type="number" step="0.25" value={row.actual_fte ?? 0} onChange={(event) => updateHourLocal(row.hour, 'actual_fte', event.target.value)} className="h-8 w-20 rounded-md border border-slate-200 px-2 text-right text-sm" />
-                              </td>}
-                              {displayOptions.tableDelta && <td className="px-3 py-2 text-right">
-                                <span className={`inline-flex min-w-16 justify-center rounded-md px-2 py-1 text-xs font-semibold ${deltaClass}`}>
-                                  {formatNumber(delta, 2)}
-                                </span>
-                              </td>}
-                              {displayOptions.tableComments && <td className="px-3 py-2">
-                                <input value={row.comments || ''} onChange={(event) => updateHourLocal(row.hour, 'comments', event.target.value)} className="h-8 w-56 rounded-md border border-slate-200 px-2 text-sm" placeholder="Комментарий" />
-                              </td>}
-                              <td className="px-3 py-2 text-right">
-                                <button type="button" onClick={() => saveHour(row)} className="inline-flex h-8 w-8 items-center justify-center rounded-md text-slate-500 transition hover:bg-slate-100 hover:text-slate-900" title="Сохранить строку">
-                                  <Save size={15} className={savingHourKey === rowKey ? 'animate-pulse' : ''} />
-                                </button>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                </>
-              ) : (
-                <EmptyState title="Выберите или загрузите день" text="После загрузки CSV здесь появится почасовой расчет FTE, план, факт и отклонения." />
-              )}
-            </section>
-            )}
           </main>
         </div>
+        )}
       </div>
     </div>
   );

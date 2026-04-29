@@ -1737,22 +1737,6 @@ class Database:
                 );
             """)
             cursor.execute("""
-                CREATE TABLE IF NOT EXISTS weekday_resource_profiles (
-                    id SERIAL PRIMARY KEY,
-                    as_of_date DATE NOT NULL,
-                    weekday INTEGER NOT NULL CHECK (weekday >= 0 AND weekday <= 6),
-                    history_dates JSONB NOT NULL DEFAULT '[]',
-                    history_count INTEGER NOT NULL DEFAULT 0,
-                    insufficient_history BOOLEAN NOT NULL DEFAULT TRUE,
-                    avg_daily_calls NUMERIC(12,4) NOT NULL DEFAULT 0,
-                    daily_fte NUMERIC(12,4) NOT NULL DEFAULT 0,
-                    hourly_profile JSONB NOT NULL DEFAULT '[]',
-                    settings_snapshot JSONB NOT NULL DEFAULT '{}',
-                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(as_of_date, weekday)
-                );
-            """)
-            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS resource_settings (
                     id INTEGER PRIMARY KEY DEFAULT 1,
                     aht_seconds NUMERIC(12,4) NOT NULL DEFAULT 239,
@@ -1869,7 +1853,6 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_raw_resource_uploads_report_date ON raw_resource_uploads(report_date DESC);
                 CREATE INDEX IF NOT EXISTS idx_daily_resource_hours_report_hour ON daily_resource_hours(report_date, hour);
                 CREATE INDEX IF NOT EXISTS idx_daily_resource_summary_weekday_date ON daily_resource_summary(weekday, report_date DESC);
-                CREATE INDEX IF NOT EXISTS idx_weekday_resource_profiles_as_of ON weekday_resource_profiles(as_of_date DESC, weekday);
                 CREATE INDEX IF NOT EXISTS idx_calibration_rooms_month ON calibration_rooms(month);
                 CREATE INDEX IF NOT EXISTS idx_calibration_rooms_operator_id ON calibration_rooms(operator_id);
                 CREATE INDEX IF NOT EXISTS idx_calibration_rooms_admin_id ON calibration_rooms(created_by_admin_id);
