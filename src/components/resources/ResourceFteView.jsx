@@ -874,11 +874,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
       <div className="sticky top-0 z-20 border-b border-slate-200 bg-white/95 px-4 py-4 backdrop-blur md:px-6">
         <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
           <div>
-            <div className="flex items-center gap-2 text-sm font-medium text-blue-700">
-              <Users size={16} />
-              OTP / КЦ
-            </div>
-            <h1 className="mt-1 text-2xl font-semibold text-slate-950">Расчет ресурсов / FTE</h1>
+            <h1 className="text-2xl font-semibold text-slate-950">Расчет ресурсов / FTE</h1>
           </div>
           <div className="flex flex-wrap items-center gap-3">
             <div className="w-full sm:w-[330px]">
