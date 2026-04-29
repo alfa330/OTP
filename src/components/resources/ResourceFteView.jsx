@@ -831,10 +831,17 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
     [historyTrendData, selectedDate],
   );
 
-  const selectLossChartDay = useCallback((state) => {
-    const reportDate = state?.activePayload?.[0]?.payload?.reportDate || state?.payload?.reportDate;
+  const selectLossReportDate = useCallback((reportDate) => {
     if (reportDate) setSelectedDate(reportDate);
   }, []);
+
+  const selectLossChartDay = useCallback((state) => {
+    const reportDate =
+      state?.activePayload?.[0]?.payload?.reportDate ||
+      state?.payload?.reportDate ||
+      state?.reportDate;
+    selectLossReportDate(reportDate);
+  }, [selectLossReportDate]);
 
   const nextWeekForecast = overview?.next_week_forecast || {
     days: [],
@@ -1341,16 +1348,40 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                           <ReferenceLine yAxisId="left" x={selectedLossTrendPoint.date} stroke="#0f172a" strokeDasharray="4 4" />
                         ) : null}
                         {displayOptions.chartCalls && (
-                          <Bar yAxisId="left" dataKey="accepted" stackId="calls" fill="#bbf7d0" radius={[0, 0, 0, 0]}>
+                          <Bar
+                            yAxisId="left"
+                            dataKey="accepted"
+                            stackId="calls"
+                            fill="#bbf7d0"
+                            radius={[0, 0, 0, 0]}
+                            onClick={selectLossChartDay}
+                          >
                             {historyTrendData.map((item) => (
-                              <Cell key={`accepted-${item.reportDate}`} fill={item.reportDate === selectedDate ? '#22c55e' : '#bbf7d0'} />
+                              <Cell
+                                key={`accepted-${item.reportDate}`}
+                                fill={item.reportDate === selectedDate ? '#22c55e' : '#bbf7d0'}
+                                className="cursor-pointer"
+                                onClick={() => selectLossReportDate(item.reportDate)}
+                              />
                             ))}
                           </Bar>
                         )}
                         {displayOptions.chartLosses && (
-                          <Bar yAxisId="left" dataKey="lost" stackId="calls" fill="#fecdd3" radius={[4, 4, 0, 0]}>
+                          <Bar
+                            yAxisId="left"
+                            dataKey="lost"
+                            stackId="calls"
+                            fill="#fecdd3"
+                            radius={[4, 4, 0, 0]}
+                            onClick={selectLossChartDay}
+                          >
                             {historyTrendData.map((item) => (
-                              <Cell key={`lost-${item.reportDate}`} fill={item.reportDate === selectedDate ? '#fb7185' : '#fecdd3'} />
+                              <Cell
+                                key={`lost-${item.reportDate}`}
+                                fill={item.reportDate === selectedDate ? '#fb7185' : '#fecdd3'}
+                                className="cursor-pointer"
+                                onClick={() => selectLossReportDate(item.reportDate)}
+                              />
                             ))}
                           </Bar>
                         )}
