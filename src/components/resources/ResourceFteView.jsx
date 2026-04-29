@@ -52,6 +52,12 @@ const formatNumber = (value, digits = 1) => {
   }).format(number);
 };
 
+const formatSignedNumber = (value, digits = 1) => {
+  const number = Number(value || 0);
+  const sign = number > 0 ? '+' : '';
+  return `${sign}${formatNumber(number, digits)}`;
+};
+
 const formatInt = (value) => new Intl.NumberFormat('ru-RU').format(Math.round(Number(value || 0)));
 
 const formatPercent = (value, digits = 1) => `${formatNumber(Number(value || 0) * 100, digits)}%`;
@@ -694,6 +700,8 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
     weeklyFteHours: 0,
     baseOperators: 0,
     operatorsWithShrinkage: 0,
+    currentOperatorFte: 0,
+    operatorFteGap: 0,
   };
 
   const selectedForecastDay = useMemo(
@@ -1023,7 +1031,13 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
         {activeDashboardView !== 'settings' && activeDashboardView !== 'next_week' && visibleMetricCount > 0 && (
           <div className={`grid gap-3 md:grid-cols-2 ${visibleMetricCount >= 5 ? 'xl:grid-cols-6' : visibleMetricCount >= 4 ? 'xl:grid-cols-4' : 'xl:grid-cols-3'}`}>
             {displayOptions.metricOperators && (
-              <StatCard icon={Users} label="Операторы с усушкой" value={formatNumber(weekly.operators_with_shrinkage, 2)} hint={`Округление: ${formatNumber(weekly.operators_rounded, 0)}`} tone="blue" />
+              <StatCard
+                icon={Users}
+                label="Операторы с усушкой"
+                value={formatNumber(weekly.operators_with_shrinkage, 2)}
+                hint={`Текущий FTE: ${formatNumber(weekly.current_operator_fte, 2)} · разница: ${formatSignedNumber(weekly.operator_fte_gap, 2)}`}
+                tone={Number(weekly.operator_fte_gap || 0) < 0 ? 'rose' : 'blue'}
+              />
             )}
             {displayOptions.metricWeeklyFte && (
               <StatCard icon={Clock3} label="Недельная потребность" value={formatNumber(weekly.weekly_fte_hours, 1)} hint="Сумма ПН-ВС в FTE-часах" tone="emerald" />
@@ -1353,7 +1367,13 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                   <StatCard icon={Users} label="OCC / UR" value={`${formatPercent(nextWeekForecast.occ, 0)} / ${formatPercent(nextWeekForecast.ur, 0)}`} hint={`Эфф. мин/час: ${formatNumber(nextWeekForecast.effectiveMinutes, 1)}`} tone="emerald" />
                   <StatCard icon={ShieldAlert} label="Усушка" value={formatPercent(nextWeekForecast.shrinkage, 0)} hint="Коэффициент недели" tone="amber" />
                   <StatCard icon={TrendingUp} label="FTE-часы недели" value={formatNumber(nextWeekForecast.weeklyFteHours, 1)} hint="Сумма ПН-ВС" tone="blue" />
-                  <StatCard icon={Users} label="Операторы" value={formatNumber(nextWeekForecast.operatorsWithShrinkage, 2)} hint={`Без усушки: ${formatNumber(nextWeekForecast.baseOperators, 2)}`} tone="emerald" />
+                  <StatCard
+                    icon={Users}
+                    label="Операторы"
+                    value={formatNumber(nextWeekForecast.operatorsWithShrinkage, 2)}
+                    hint={`Текущий FTE: ${formatNumber(nextWeekForecast.currentOperatorFte, 2)} · разница: ${formatSignedNumber(nextWeekForecast.operatorFteGap, 2)}`}
+                    tone={Number(nextWeekForecast.operatorFteGap || 0) < 0 ? 'rose' : 'emerald'}
+                  />
                 </div>
 
                 <div className="mt-5 grid gap-5 xl:grid-cols-[300px_minmax(0,1fr)]">

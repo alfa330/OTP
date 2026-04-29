@@ -415,6 +415,22 @@ def _refresh_all_actual_fte_tx(cursor) -> None:
         _refresh_actual_fte_for_day_tx(cursor, report_date)
 
 
+def _current_operator_fte_tx(cursor) -> Dict[str, Any]:
+    cursor.execute(
+        """
+        SELECT COUNT(*), COALESCE(SUM(COALESCE(rate, 1.0)), 0)
+        FROM users
+        WHERE role = 'operator'
+          AND (status IS NULL OR status NOT IN ('fired', 'dismissal'))
+        """
+    )
+    row = cursor.fetchone() or (0, 0)
+    return {
+        "active_operator_count": _to_int(row[0]),
+        "current_operator_fte": _to_float(row[1]),
+    }
+
+
 def _refresh_daily_summary_tx(cursor, report_date) -> None:
     cursor.execute(
         """
@@ -678,9 +694,14 @@ def _compute_week_forecast_profiles_tx(cursor, target_week_start, settings: Dict
     ]
 
 
-def _build_week_forecast_payload(target_week_start, profiles: List[Dict[str, Any]], settings: Dict[str, Any]) -> Dict[str, Any]:
+def _build_week_forecast_payload(
+    target_week_start,
+    profiles: List[Dict[str, Any]],
+    settings: Dict[str, Any],
+    current_operator_fte: float = 0.0,
+) -> Dict[str, Any]:
     weekly_aht_seconds = _weekly_aht_from_profiles(profiles)
-    weekly_totals = _weekly_totals(profiles, settings)
+    weekly_totals = _weekly_totals(profiles, settings, current_operator_fte)
     effective_minutes = 60 * settings["occ"] * settings["ur"]
     days = []
     for profile in profiles:
@@ -723,6 +744,8 @@ def _build_week_forecast_payload(target_week_start, profiles: List[Dict[str, Any
         "baseOperators": weekly_totals["base_operators"],
         "operatorsWithShrinkage": weekly_totals["operators_with_shrinkage"],
         "operatorsRounded": weekly_totals["operators_rounded"],
+        "currentOperatorFte": weekly_totals["current_operator_fte"],
+        "operatorFteGap": weekly_totals["operator_fte_gap"],
     }
 
 
@@ -803,15 +826,22 @@ def _upsert_profiles_tx(cursor, as_of_date, settings: Dict[str, Any]) -> List[Di
     return profiles
 
 
-def _weekly_totals(profiles: List[Dict[str, Any]], settings: Dict[str, Any]) -> Dict[str, Any]:
+def _weekly_totals(
+    profiles: List[Dict[str, Any]],
+    settings: Dict[str, Any],
+    current_operator_fte: float = 0.0,
+) -> Dict[str, Any]:
     weekly_fte_hours = sum(_to_float(profile.get("daily_fte")) for profile in profiles)
     base_operators = weekly_fte_hours / settings["weekly_hours_per_operator"] if settings["weekly_hours_per_operator"] > 0 else 0
     operators_with_shrinkage = base_operators / settings["shrinkage_coeff"] if settings["shrinkage_coeff"] > 0 else 0
+    operator_fte_gap = current_operator_fte - operators_with_shrinkage
     return {
         "weekly_fte_hours": round(weekly_fte_hours, 4),
         "base_operators": round(base_operators, 4),
         "operators_with_shrinkage": round(operators_with_shrinkage, 4),
         "operators_rounded": round(_round_value(operators_with_shrinkage, settings["shift_rounding"]), 4),
+        "current_operator_fte": round(current_operator_fte, 4),
+        "operator_fte_gap": round(operator_fte_gap, 4),
     }
 
 
@@ -972,7 +1002,9 @@ def get_resource_overview(db, date_from: Optional[str] = None, date_to: Optional
             as_of_date = cursor.fetchone()[0]
         next_week_start = _next_week_start_date(as_of_date)
         profiles = _fetch_latest_profiles_tx(cursor, as_of_date, settings)
-        next_week_forecast = _build_week_forecast_payload(next_week_start, profiles, settings)
+        operator_capacity = _current_operator_fte_tx(cursor)
+        current_operator_fte = operator_capacity["current_operator_fte"]
+        next_week_forecast = _build_week_forecast_payload(next_week_start, profiles, settings, current_operator_fte)
 
         where = []
         params = []
@@ -1021,7 +1053,8 @@ def get_resource_overview(db, date_from: Optional[str] = None, date_to: Optional
         "as_of_date": as_of_date.isoformat(),
         "weekdays": WEEKDAYS_RU,
         "profiles": _json_safe(profiles),
-        "weekly_totals": _weekly_totals(profiles, settings),
+        "weekly_totals": _weekly_totals(profiles, settings, current_operator_fte),
+        "operator_capacity": _json_safe(operator_capacity),
         "next_week_forecast": _json_safe(next_week_forecast),
         "history": history,
     }
