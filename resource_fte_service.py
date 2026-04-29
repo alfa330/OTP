@@ -755,15 +755,77 @@ def _compute_week_forecast_profiles_tx(cursor, target_week_start, settings: Dict
     ]
 
 
+def _actual_resource_load_for_week_tx(cursor, target_week_start, settings: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    week_end = target_week_start + timedelta(days=6)
+    effective_minutes = 60 * settings["occ"] * settings["ur"]
+    cursor.execute(
+        """
+        SELECT report_date, hour, received_calls, accepted_calls, lost_calls,
+               talk_time_seconds, avg_talk_seconds
+        FROM daily_resource_hours
+        WHERE report_date BETWEEN %s AND %s
+        ORDER BY report_date, hour
+        """,
+        (target_week_start, week_end),
+    )
+    by_day: Dict[str, Dict[str, Any]] = {}
+    for row in cursor.fetchall():
+        report_date = row[0].isoformat()
+        hour = int(row[1])
+        received_calls = _to_int(row[2])
+        accepted_calls = _to_int(row[3])
+        lost_calls = _to_int(row[4])
+        talk_time_seconds = _to_float(row[5])
+        actual_aht_seconds = talk_time_seconds / accepted_calls if accepted_calls > 0 else 0.0
+        workload_minutes = talk_time_seconds / 60
+        report_fte = workload_minutes / effective_minutes if effective_minutes > 0 else 0.0
+        day = by_day.setdefault(
+            report_date,
+            {
+                "has_actual_report": True,
+                "actual_received_calls": 0,
+                "actual_accepted_calls": 0,
+                "actual_lost_calls": 0,
+                "actual_talk_time_seconds": 0.0,
+                "actual_workload_minutes": 0.0,
+                "actual_report_fte": 0.0,
+                "actual_aht_seconds": 0.0,
+                "hourly": {},
+            },
+        )
+        day["actual_received_calls"] += received_calls
+        day["actual_accepted_calls"] += accepted_calls
+        day["actual_lost_calls"] += lost_calls
+        day["actual_talk_time_seconds"] += talk_time_seconds
+        day["actual_workload_minutes"] += workload_minutes
+        day["actual_report_fte"] += report_fte
+        day["hourly"][hour] = {
+            "has_actual_report": True,
+            "actual_received_calls": received_calls,
+            "actual_accepted_calls": accepted_calls,
+            "actual_lost_calls": lost_calls,
+            "actual_talk_time_seconds": talk_time_seconds,
+            "actual_aht_seconds": actual_aht_seconds,
+            "actual_workload_minutes": workload_minutes,
+            "actual_report_fte": report_fte,
+        }
+    for day in by_day.values():
+        accepted_total = day["actual_accepted_calls"]
+        day["actual_aht_seconds"] = day["actual_talk_time_seconds"] / accepted_total if accepted_total > 0 else 0.0
+    return by_day
+
+
 def _build_week_forecast_payload(
     target_week_start,
     profiles: List[Dict[str, Any]],
     settings: Dict[str, Any],
     current_operator_fte: float = 0.0,
+    actual_resource_by_day: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     weekly_aht_seconds = _weekly_aht_from_profiles(profiles)
     weekly_totals = _weekly_totals(profiles, settings, current_operator_fte)
     effective_minutes = 60 * settings["occ"] * settings["ur"]
+    actual_resource_by_day = actual_resource_by_day or {}
     first_history_week_start = target_week_start - timedelta(days=21)
     first_history_week_end = target_week_start - timedelta(days=15)
     second_history_week_start = target_week_start - timedelta(days=14)
@@ -771,8 +833,12 @@ def _build_week_forecast_payload(
     days = []
     for profile in profiles:
         weekday = int(profile.get("weekday", 0))
+        forecast_date = target_week_start + timedelta(days=weekday)
+        forecast_date_iso = forecast_date.isoformat()
+        actual_day = actual_resource_by_day.get(forecast_date_iso, {})
         hourly_forecast = []
         for row in profile.get("hourly_profile", []):
+            actual_hour = (actual_day.get("hourly") or {}).get(int(row.get("hour", 0)), {})
             hourly_forecast.append(
                 {
                     **row,
@@ -780,17 +846,33 @@ def _build_week_forecast_payload(
                     "forecast_aht_seconds": _to_float(row.get("aht_seconds")),
                     "forecast_workload_minutes": _to_float(row.get("workload_minutes")),
                     "forecast_fte": _to_float(row.get("fte")),
+                    "has_actual_report": bool(actual_hour.get("has_actual_report")),
+                    "actual_received_calls": _to_int(actual_hour.get("actual_received_calls")),
+                    "actual_accepted_calls": _to_int(actual_hour.get("actual_accepted_calls")),
+                    "actual_lost_calls": _to_int(actual_hour.get("actual_lost_calls")),
+                    "actual_talk_time_seconds": _to_float(actual_hour.get("actual_talk_time_seconds")),
+                    "actual_aht_seconds": _to_float(actual_hour.get("actual_aht_seconds")),
+                    "actual_workload_minutes": _to_float(actual_hour.get("actual_workload_minutes")),
+                    "actual_report_fte": _to_float(actual_hour.get("actual_report_fte")),
                 }
             )
         days.append(
             {
                 **profile,
-                "forecast_date": (target_week_start + timedelta(days=weekday)).isoformat(),
+                "forecast_date": forecast_date_iso,
                 "forecast_calls": _to_float(profile.get("avg_daily_calls")),
                 "forecast_aht_seconds": weekly_aht_seconds,
                 "forecast_workload_minutes": sum(_to_float(row.get("workload_minutes")) for row in profile.get("hourly_profile", [])),
                 "forecast_daily_fte": _to_float(profile.get("daily_fte")),
                 "operators_equivalent": _to_float(profile.get("daily_fte")) / 8,
+                "has_actual_report": bool(actual_day.get("has_actual_report")),
+                "actual_received_calls": _to_int(actual_day.get("actual_received_calls")),
+                "actual_accepted_calls": _to_int(actual_day.get("actual_accepted_calls")),
+                "actual_lost_calls": _to_int(actual_day.get("actual_lost_calls")),
+                "actual_aht_seconds": _to_float(actual_day.get("actual_aht_seconds")),
+                "actual_workload_minutes": _to_float(actual_day.get("actual_workload_minutes")),
+                "actual_report_fte": _to_float(actual_day.get("actual_report_fte")),
+                "actual_forecast_fte_delta": _to_float(actual_day.get("actual_report_fte")) - _to_float(profile.get("daily_fte")),
                 "hourly_forecast": hourly_forecast,
             }
         )
@@ -1104,7 +1186,14 @@ def get_resource_overview(
             profiles = _fetch_latest_profiles_tx(cursor, as_of_date, settings)
         operator_capacity = _current_operator_fte_tx(cursor, settings)
         current_operator_fte = operator_capacity["current_operator_fte"]
-        next_week_forecast = _build_week_forecast_payload(next_week_start, profiles, settings, current_operator_fte)
+        actual_resource_by_day = _actual_resource_load_for_week_tx(cursor, next_week_start, settings)
+        next_week_forecast = _build_week_forecast_payload(
+            next_week_start,
+            profiles,
+            settings,
+            current_operator_fte,
+            actual_resource_by_day,
+        )
         directions = _resource_directions_tx(cursor)
 
         where = []

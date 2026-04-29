@@ -190,6 +190,22 @@ const formatWorkloadTooltip = (row, answerRate) => {
   ].join('\n');
 };
 
+const formatActualLoadTooltip = (row, effectiveMinutes) => {
+  const accepted = Number(row.actual_accepted_calls || 0);
+  const talkSeconds = Number(row.actual_talk_time_seconds || 0);
+  const aht = accepted > 0 ? talkSeconds / accepted : 0;
+  const workload = talkSeconds / 60;
+  const fte = Number(effectiveMinutes || 0) > 0 ? workload / Number(effectiveMinutes || 0) : 0;
+  return [
+    'Факт нагрузки считается по загруженному отчету за этот день:',
+    `принятые звонки: ${formatPreciseNumber(accepted, 6)}`,
+    `сумма времени разговора: ${formatPreciseNumber(talkSeconds, 6)} сек`,
+    `AHT факта: ${formatPreciseNumber(talkSeconds, 6)} / ${formatPreciseNumber(accepted, 6)} = ${formatPreciseNumber(aht, 6)} сек`,
+    `минуты нагрузки: ${formatPreciseNumber(talkSeconds, 6)} / 60 = ${formatPreciseNumber(workload, 6)}`,
+    `FTE из отчета: ${formatPreciseNumber(workload, 6)} / ${formatPreciseNumber(effectiveMinutes, 6)} = ${formatPreciseNumber(fte, 6)}`,
+  ].join('\n');
+};
+
 const inputClass =
   'h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-900 shadow-sm outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100';
 
@@ -654,6 +670,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
   const [displayOptions, setDisplayOptions] = useState(loadDisplayOptions);
   const [selectedForecastWeekStart, setSelectedForecastWeekStart] = useState(() => getNextWeekStartIso());
   const [selectedForecastWeekday, setSelectedForecastWeekday] = useState(0);
+  const [showForecastActualLoad, setShowForecastActualLoad] = useState(false);
   const [loadedDateCache, setLoadedDateCache] = useState([]);
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
   const userId = user?.id || '';
@@ -889,6 +906,8 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
         calls: Number(row.forecast_calls || 0),
         fte: Number(row.forecast_fte || 0),
         workload: Number(row.forecast_workload_minutes || 0),
+        actualWorkload: row.has_actual_report ? Number(row.actual_workload_minutes || 0) : null,
+        actualFte: row.has_actual_report ? Number(row.actual_report_fte || 0) : null,
       })),
     [selectedForecastDay],
   );
@@ -1033,6 +1052,13 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
   const selectedFileName = uploadFile?.name || 'Файл не выбран';
   const selectedDirectionIds = (settingsDraft?.selected_direction_ids || []).map((item) => Number(item)).filter(Boolean);
   const selectedDirectionSet = new Set(selectedDirectionIds);
+  const todayValue = todayIso();
+  const selectedForecastHasActualLoad = Boolean(
+    selectedForecastDay?.has_actual_report && selectedForecastDay?.forecast_date <= todayValue,
+  );
+  const forecastActualLoadAvailable = (nextWeekForecast.days || []).some(
+    (day) => day?.has_actual_report && day?.forecast_date <= todayValue,
+  );
 
   const toggleResourceDirection = (directionId, checked) => {
     setSettingsDraft((current) => {
@@ -1568,15 +1594,42 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                       Для выбранной недели берутся две исторические недели до нее, один AHT недели и единые коэффициенты ПН-ВС.
                     </p>
                   </div>
-                  <button
-                    type="button"
-                    onClick={handleRecalculate}
-                    disabled={isRecalculating}
-                    className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-100"
-                  >
-                    <RefreshCw size={16} className={isRecalculating ? 'animate-spin' : ''} />
-                    Пересчитать
-                  </button>
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                    <button
+                      type="button"
+                      onClick={() => setShowForecastActualLoad((current) => !current)}
+                      disabled={!forecastActualLoadAvailable && !showForecastActualLoad}
+                      className={`inline-flex h-10 items-center justify-center gap-2 rounded-lg border px-3 text-sm font-medium transition ${
+                        showForecastActualLoad
+                          ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                          : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100'
+                      } ${!forecastActualLoadAvailable && !showForecastActualLoad ? 'cursor-not-allowed opacity-50' : ''}`}
+                      title={forecastActualLoadAvailable ? 'Показать факт нагрузки из загруженных отчетов' : 'Для выбранной недели нет прошедших дней с загруженным отчетом'}
+                    >
+                      <span
+                        className={`relative inline-flex h-5 w-9 shrink-0 rounded-full transition ${
+                          showForecastActualLoad ? 'bg-emerald-600' : 'bg-slate-300'
+                        }`}
+                        aria-hidden="true"
+                      >
+                        <span
+                          className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition ${
+                            showForecastActualLoad ? 'left-4' : 'left-0.5'
+                          }`}
+                        />
+                      </span>
+                      Показать факт нагрузки
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleRecalculate}
+                      disabled={isRecalculating}
+                      className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-100"
+                    >
+                      <RefreshCw size={16} className={isRecalculating ? 'animate-spin' : ''} />
+                      Пересчитать
+                    </button>
+                  </div>
                 </div>
 
                 <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-6">
@@ -1644,6 +1697,9 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                           <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-500">
                             <span>Звонки: <b className="text-slate-800">{formatInt(profile.forecast_calls)}</b></span>
                             <span>История: <b className={profile.insufficient_history ? 'text-amber-700' : 'text-emerald-700'}>{profile.history_count}/2</b></span>
+                            {profile.has_actual_report && profile.forecast_date <= todayValue ? (
+                              <span className="col-span-2 text-emerald-700">Факт отчета: <b>{formatNumber(profile.actual_report_fte, 2)} FTE</b></span>
+                            ) : null}
                           </div>
                         </button>
                       ))}
@@ -1661,17 +1717,31 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                               </h3>
                               <p className="text-sm text-slate-500">Разбивка использует AHT недели {formatSeconds(nextWeekForecast.weeklyAhtSeconds)} и единые коэффициенты.</p>
                             </div>
-                            <span className={`inline-flex w-fit items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold ${selectedForecastDay.insufficient_history ? 'bg-amber-50 text-amber-700' : 'bg-emerald-50 text-emerald-700'}`}>
-                              {selectedForecastDay.insufficient_history ? <AlertTriangle size={13} /> : <CheckCircle2 size={13} />}
-                              История {selectedForecastDay.history_count}/2
-                            </span>
+                            <div className="flex flex-wrap gap-2">
+                              <span className={`inline-flex w-fit items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold ${selectedForecastDay.insufficient_history ? 'bg-amber-50 text-amber-700' : 'bg-emerald-50 text-emerald-700'}`}>
+                                {selectedForecastDay.insufficient_history ? <AlertTriangle size={13} /> : <CheckCircle2 size={13} />}
+                                История {selectedForecastDay.history_count}/2
+                              </span>
+                              {showForecastActualLoad ? (
+                                <span className={`inline-flex w-fit items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold ${selectedForecastHasActualLoad ? 'bg-blue-50 text-blue-700' : 'bg-slate-100 text-slate-500'}`}>
+                                  {selectedForecastHasActualLoad ? <CheckCircle2 size={13} /> : <AlertTriangle size={13} />}
+                                  {selectedForecastHasActualLoad ? 'Факт отчета загружен' : 'Факта отчета нет'}
+                                </span>
+                              ) : null}
+                            </div>
                           </div>
 
-                          <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                          <div className={`mt-4 grid gap-3 md:grid-cols-2 ${showForecastActualLoad && selectedForecastHasActualLoad ? 'xl:grid-cols-6' : 'xl:grid-cols-4'}`}>
                             <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">Звонки</div><b>{formatInt(selectedForecastDay.forecast_calls)}</b></div>
                             <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">Минут нагрузки</div><b>{formatNumber(selectedForecastDay.forecast_workload_minutes, 1)}</b></div>
                             <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">FTE дня</div><b>{formatNumber(selectedForecastDay.forecast_daily_fte, 2)}</b></div>
                             <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">Пиковый час</div><b>{selectedForecastPeakHours[0] ? `${String(selectedForecastPeakHours[0].hour).padStart(2, '0')}:00` : '-'}</b></div>
+                            {showForecastActualLoad && selectedForecastHasActualLoad ? (
+                              <>
+                                <div className="rounded-lg bg-emerald-50 px-3 py-2"><div className="text-xs text-emerald-700">Факт нагрузки</div><b>{formatNumber(selectedForecastDay.actual_workload_minutes, 1)}</b></div>
+                                <div className="rounded-lg bg-emerald-50 px-3 py-2"><div className="text-xs text-emerald-700">FTE из отчета</div><b>{formatNumber(selectedForecastDay.actual_report_fte, 2)}</b></div>
+                              </>
+                            ) : null}
                           </div>
 
                           <div className="mt-5 h-72">
@@ -1681,17 +1751,41 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                                 <XAxis dataKey="hour" tick={{ fontSize: 11 }} interval={2} />
                                 <YAxis yAxisId="left" tick={{ fontSize: 11 }} />
                                 <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} />
-                                <Tooltip formatter={(value, name) => [formatNumber(value, name === 'calls' ? 0 : 2), name === 'calls' ? 'Звонки' : name === 'workload' ? 'Минут нагрузки' : 'FTE']} />
+                                <Tooltip
+                                  formatter={(value, name) => [
+                                    formatNumber(value, name === 'calls' ? 0 : 2),
+                                    name === 'calls'
+                                      ? 'Прогноз звонков'
+                                      : name === 'workload'
+                                        ? 'Прогноз минут'
+                                        : name === 'actualWorkload'
+                                          ? 'Факт минут'
+                                          : name === 'actualFte'
+                                            ? 'FTE из отчета'
+                                            : 'Прогноз FTE',
+                                  ]}
+                                />
                                 <Bar yAxisId="left" dataKey="calls" fill="#bfdbfe" radius={[4, 4, 0, 0]} />
                                 <Line yAxisId="right" type="monotone" dataKey="fte" stroke="#2563eb" strokeWidth={2} dot={false} />
+                                {showForecastActualLoad && selectedForecastHasActualLoad && (
+                                  <>
+                                    <Line yAxisId="left" type="monotone" dataKey="actualWorkload" stroke="#10b981" strokeWidth={2} dot={false} />
+                                    <Line yAxisId="right" type="monotone" dataKey="actualFte" stroke="#059669" strokeWidth={2} strokeDasharray="5 4" dot={false} />
+                                  </>
+                                )}
                               </ComposedChart>
                             </ResponsiveContainer>
                           </div>
+                          {showForecastActualLoad && !selectedForecastHasActualLoad ? (
+                            <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
+                              Для выбранного дня нет загруженного отчета или день еще не прошел, поэтому факт нагрузки не отображается.
+                            </div>
+                          ) : null}
                         </div>
 
                         <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_300px]">
                           <div className="overflow-x-auto rounded-lg border border-slate-200">
-                            <table className="min-w-[760px] w-full divide-y divide-slate-200 text-sm">
+                            <table className={`${showForecastActualLoad && selectedForecastHasActualLoad ? 'min-w-[980px]' : 'min-w-[760px]'} w-full divide-y divide-slate-200 text-sm`}>
                               <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
                                 <tr>
                                   <th className="px-3 py-3 text-left">Час</th>
@@ -1699,6 +1793,12 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                                   <th className="px-3 py-3 text-right">AHT недели</th>
                                   <th className="px-3 py-3 text-right">Минут нагрузки</th>
                                   <th className="px-3 py-3 text-right">FTE</th>
+                                  {showForecastActualLoad && selectedForecastHasActualLoad ? (
+                                    <>
+                                      <th className="px-3 py-3 text-right">Факт нагрузки</th>
+                                      <th className="px-3 py-3 text-right">FTE из отчета</th>
+                                    </>
+                                  ) : null}
                                 </tr>
                               </thead>
                               <tbody className="divide-y divide-slate-100 bg-white">
@@ -1730,6 +1830,21 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                                       </span>
                                     </td>
                                     <td className="px-3 py-2 text-right font-semibold text-blue-700">{formatNumber(row.forecast_fte, 2)}</td>
+                                    {showForecastActualLoad && selectedForecastHasActualLoad ? (
+                                      <>
+                                        <td className="px-3 py-2 text-right">
+                                          <span
+                                            title={formatActualLoadTooltip(row, nextWeekForecast.effectiveMinutes)}
+                                            className="inline-flex cursor-help items-center justify-end rounded-md border border-transparent px-2 py-1 font-medium text-emerald-700 transition hover:border-emerald-200 hover:bg-emerald-50"
+                                          >
+                                            {row.has_actual_report ? formatNumber(row.actual_workload_minutes, 1) : '-'}
+                                          </span>
+                                        </td>
+                                        <td className="px-3 py-2 text-right font-semibold text-emerald-700">
+                                          {row.has_actual_report ? formatNumber(row.actual_report_fte, 2) : '-'}
+                                        </td>
+                                      </>
+                                    ) : null}
                                   </tr>
                                 ))}
                               </tbody>
