@@ -127,6 +127,17 @@ const formatSeconds = (seconds) => {
   return `${minutes}:${String(rest).padStart(2, '0')}`;
 };
 
+const formatSourceCallsTooltip = (sources = []) => {
+  if (!sources.length) return 'Нет исторических значений для расчета среднего';
+  const total = sources.reduce((sum, item) => sum + Number(item.calls || 0), 0);
+  const avg = total / sources.length;
+  return [
+    'Использовано для среднего:',
+    ...sources.map((item) => `${formatDate(item.date)}: ${formatInt(item.calls)} звонков`),
+    `Среднее: ${formatNumber(avg, 1)}`,
+  ].join('\n');
+};
+
 const inputClass =
   'h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-900 shadow-sm outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100';
 
@@ -1461,7 +1472,14 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                                 {(selectedForecastDay.hourly_forecast || []).map((row) => (
                                   <tr key={row.hour} className="hover:bg-slate-50/60">
                                     <td className="px-3 py-2 font-medium text-slate-900">{String(row.hour).padStart(2, '0')}:00</td>
-                                    <td className="px-3 py-2 text-right">{formatNumber(row.forecast_calls, 1)}</td>
+                                    <td className="px-3 py-2 text-right">
+                                      <span
+                                        title={formatSourceCallsTooltip(row.source_calls)}
+                                        className="inline-flex cursor-help items-center justify-end rounded-md border border-transparent px-2 py-1 font-medium text-slate-900 transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700"
+                                      >
+                                        {formatNumber(row.forecast_calls, 1)}
+                                      </span>
+                                    </td>
                                     <td className="px-3 py-2 text-right">{formatSeconds(row.forecast_aht_seconds)}</td>
                                     <td className="px-3 py-2 text-right">{formatNumber(row.forecast_workload_minutes, 1)}</td>
                                     <td className="px-3 py-2 text-right font-semibold text-blue-700">{formatNumber(row.forecast_fte, 2)}</td>
