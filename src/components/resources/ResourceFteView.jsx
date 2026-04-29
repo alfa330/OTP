@@ -360,7 +360,7 @@ const CalendarPicker = ({
       <button
         type="button"
         onClick={() => setOpen((current) => !current)}
-        className="flex h-12 w-full items-center justify-between gap-3 rounded-xl border-2 border-slate-200 bg-white px-4 text-left text-sm shadow-sm transition hover:border-slate-300 hover:bg-slate-50"
+        className="flex h-14 w-full items-center justify-between gap-3 rounded-xl border-2 border-slate-200 bg-white px-4 text-left text-sm shadow-sm transition hover:border-slate-300 hover:bg-slate-50"
       >
         <span className="min-w-0">
           <span className="block text-[11px] font-semibold uppercase tracking-wide text-slate-500">{label}</span>
@@ -370,7 +370,7 @@ const CalendarPicker = ({
       </button>
 
       {open && (
-        <div className="absolute right-0 z-40 mt-2 w-[360px] rounded-2xl border-2 border-slate-200 bg-white p-4 shadow-xl">
+        <div className="absolute right-0 z-40 mt-2 w-[330px] rounded-2xl border-2 border-slate-200 bg-white p-4 shadow-xl">
           <div className="flex items-center justify-between gap-2">
             <button type="button" onClick={() => moveMonth(-1)} className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-600 hover:bg-slate-100">
               <ChevronLeft size={16} />
@@ -876,7 +876,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
             <h1 className="mt-1 text-2xl font-semibold text-slate-950">Расчет ресурсов / FTE</h1>
           </div>
           <div className="flex flex-wrap items-center gap-3">
-            <div className="w-full sm:w-[360px]">
+            <div className="w-full sm:w-[330px]">
               <CalendarPicker
                 mode="range"
                 label="Период анализа"
@@ -890,7 +890,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                 hint="точка = есть отчет"
               />
             </div>
-            <div className="w-full sm:w-[260px]">
+            <div className="w-full sm:w-[240px]">
               <CalendarPicker
                 label="Загрузить отчет"
                 value={uploadDate}
@@ -907,7 +907,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
             <button
               type="button"
               onClick={fetchOverview}
-              className="inline-flex h-12 items-center gap-2 rounded-xl border-2 border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-100"
+              className="inline-flex h-14 items-center gap-2 rounded-xl border-2 border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-100"
             >
               <RefreshCw size={16} className={isLoading ? 'animate-spin' : ''} />
               Обновить
@@ -918,7 +918,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
 
       {isUploadModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm">
-          <form onSubmit={handleUpload} className="w-full max-w-xl rounded-2xl border-2 border-slate-200 bg-white p-5 shadow-2xl">
+          <form onSubmit={handleUpload} className="w-full max-w-xl rounded-2xl border-2 border-slate-200 bg-white px-5 py-7 shadow-2xl">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <div className="flex items-center gap-2 text-base font-semibold text-slate-950">
@@ -934,13 +934,13 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                   if (fileInputRef.current) fileInputRef.current.value = '';
                   setIsUploadModalOpen(false);
                 }}
-                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border-2 border-slate-200 text-slate-500 transition hover:bg-slate-100 hover:text-slate-900"
+                className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border-2 border-slate-200 text-slate-500 transition hover:bg-slate-100 hover:text-slate-900"
               >
                 <X size={16} />
               </button>
             </div>
 
-            <div className="mt-5 rounded-xl border-2 border-slate-200 bg-slate-50 p-4">
+            <div className="mt-6 rounded-xl border-2 border-slate-200 bg-slate-50 px-4 py-5">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Дата отчета</div>
@@ -957,7 +957,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
 
             <div className="mt-4">
               <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">CSV-отчет за 24 часа</div>
-              <div className="flex min-h-14 items-center justify-between gap-3 rounded-xl border-2 border-dashed border-slate-300 bg-slate-50 px-4 py-3">
+              <div className="flex min-h-20 items-center justify-between gap-3 rounded-xl border-2 border-dashed border-slate-300 bg-slate-50 px-4 py-5">
                 <div className="min-w-0">
                   <div className="truncate text-sm font-semibold text-slate-900">{selectedFileName}</div>
                   <div className="text-xs text-slate-500">Поддерживается .csv</div>
@@ -965,7 +965,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
-                  className="inline-flex h-10 shrink-0 items-center gap-2 rounded-xl border-2 border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-100"
+                  className="inline-flex h-12 shrink-0 items-center gap-2 rounded-xl border-2 border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-100"
                 >
                   <FileUp size={15} />
                   Выбрать
@@ -980,7 +980,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
               />
             </div>
 
-            <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+            <div className="mt-7 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
               <button
                 type="button"
                 onClick={() => {
@@ -988,14 +988,14 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                   if (fileInputRef.current) fileInputRef.current.value = '';
                   setIsUploadModalOpen(false);
                 }}
-                className="inline-flex h-11 items-center justify-center rounded-xl border-2 border-slate-200 bg-white px-5 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
+                className="inline-flex h-12 items-center justify-center rounded-xl border-2 border-slate-200 bg-white px-5 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
               >
                 Отмена
               </button>
               <button
                 type="submit"
                 disabled={isUploading}
-                className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-blue-600 px-5 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300"
+                className="inline-flex h-12 items-center justify-center gap-2 rounded-xl bg-blue-600 px-5 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300"
               >
                 <FileUp size={16} />
                 {isUploading ? 'Загрузка...' : uploadDateAlreadyLoaded ? 'Обновить отчет' : 'Загрузить отчет'}
