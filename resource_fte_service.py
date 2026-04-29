@@ -36,6 +36,7 @@ DEFAULT_RESOURCE_SETTINGS = {
 ROUNDING_MODES = {"none", "ceil", "floor", "round"}
 
 HEADER_ALIASES = {
+    "report_date": ["дата", "date", "день"],
     "hour": ["час"],
     "accepted_calls": ["разговор"],
     "talk_time": ["время разговора"],
@@ -51,7 +52,7 @@ HEADER_ALIASES = {
     "avg_lost_wait": ["среднее время ожидания в очереди неудачные звонки"],
 }
 
-REQUIRED_FIELDS = set(HEADER_ALIASES.keys())
+REQUIRED_FIELDS = set(HEADER_ALIASES.keys()) - {"report_date"}
 
 
 def _to_float(value: Any, default: float = 0.0) -> float:
@@ -306,6 +307,65 @@ def _map_headers(headers: List[str]) -> Dict[str, str]:
     return mapped
 
 
+def _empty_resource_hour(hour: int) -> Dict[str, Any]:
+    return {
+        "hour": hour,
+        "received_calls": 0,
+        "accepted_calls": 0,
+        "lost_calls": 0,
+        "no_answer_rate": 0,
+        "talk_time_seconds": 0,
+        "avg_talk_seconds": 0,
+        "success_wait_seconds": 0,
+        "avg_success_wait_seconds": 0,
+        "total_time_seconds": 0,
+        "greeting_abandoned": 0,
+        "greeting_time_seconds": 0,
+        "queue_abandoned": 0,
+        "queue_wait_seconds": 0,
+        "avg_lost_wait_seconds": 0,
+        "avg_wait_seconds": 0,
+        "raw_payload": {},
+    }
+
+
+def _parse_resource_csv_row(row: Dict[str, Any], header_map: Dict[str, str], row_number: int) -> Dict[str, Any]:
+    hour = _to_int(row.get(header_map["hour"]), -1)
+    if hour < 0 or hour > 23:
+        raise ValueError(f"INVALID_HOUR:{row_number}")
+    accepted = max(0, _to_int(row.get(header_map["accepted_calls"])))
+    received = max(0, _to_int(row.get(header_map["received_calls"])))
+    lost = max(0, received - accepted)
+    success_wait_seconds = _parse_seconds(row.get(header_map.get("success_wait")))
+    queue_wait_seconds = _parse_seconds(row.get(header_map.get("queue_wait")))
+    queue_abandoned = max(0, _to_int(row.get(header_map.get("queue_abandoned"))))
+    avg_wait_denominator = accepted + queue_abandoned
+    avg_wait_seconds = (
+        (success_wait_seconds + queue_wait_seconds) / avg_wait_denominator
+        if avg_wait_denominator > 0
+        else 0
+    )
+    return {
+        "hour": hour,
+        "received_calls": received,
+        "accepted_calls": accepted,
+        "lost_calls": lost,
+        "no_answer_rate": (lost / received) if received > 0 else 0,
+        "talk_time_seconds": _parse_seconds(row.get(header_map.get("talk_time"))),
+        "avg_talk_seconds": _parse_seconds(row.get(header_map["avg_talk"])),
+        "success_wait_seconds": success_wait_seconds,
+        "avg_success_wait_seconds": _parse_seconds(row.get(header_map.get("avg_success_wait"))),
+        "total_time_seconds": _parse_seconds(row.get(header_map.get("total_time"))),
+        "greeting_abandoned": max(0, _to_int(row.get(header_map.get("greeting_abandoned")))),
+        "greeting_time_seconds": _parse_seconds(row.get(header_map.get("greeting_time"))),
+        "queue_abandoned": queue_abandoned,
+        "queue_wait_seconds": queue_wait_seconds,
+        "avg_lost_wait_seconds": _parse_seconds(row.get(header_map.get("avg_lost_wait"))),
+        "avg_wait_seconds": avg_wait_seconds,
+        "raw_payload": dict(row),
+    }
+
+
 def parse_resource_csv(content: bytes) -> Dict[str, Any]:
     text = _decode_csv_bytes(content)
     dialect = _detect_dialect(text)
@@ -314,73 +374,38 @@ def parse_resource_csv(content: bytes) -> Dict[str, Any]:
     if not headers:
         raise ValueError("EMPTY_CSV")
     header_map = _map_headers(headers)
-    rows_by_hour = {}
+    date_header = header_map.get("report_date")
+    if not date_header:
+        raise ValueError("INVALID_CSV_HEADERS:report_date")
+    rows_by_date_hour = defaultdict(dict)
+    row_counts_by_date = defaultdict(int)
     for row_number, row in enumerate(reader, start=2):
         if not any(str(value or "").strip() for value in row.values()):
             continue
-        hour = _to_int(row.get(header_map["hour"]), -1)
-        if hour < 0 or hour > 23:
-            raise ValueError(f"INVALID_HOUR:{row_number}")
-        accepted = max(0, _to_int(row.get(header_map["accepted_calls"])))
-        received = max(0, _to_int(row.get(header_map["received_calls"])))
-        lost = max(0, received - accepted)
-        success_wait_seconds = _parse_seconds(row.get(header_map.get("success_wait")))
-        queue_wait_seconds = _parse_seconds(row.get(header_map.get("queue_wait")))
-        queue_abandoned = max(0, _to_int(row.get(header_map.get("queue_abandoned"))))
-        avg_wait_denominator = accepted + queue_abandoned
-        avg_wait_seconds = (
-            (success_wait_seconds + queue_wait_seconds) / avg_wait_denominator
-            if avg_wait_denominator > 0
-            else 0
-        )
-        rows_by_hour[hour] = {
-            "hour": hour,
-            "received_calls": received,
-            "accepted_calls": accepted,
-            "lost_calls": lost,
-            "no_answer_rate": (lost / received) if received > 0 else 0,
-            "talk_time_seconds": _parse_seconds(row.get(header_map.get("talk_time"))),
-            "avg_talk_seconds": _parse_seconds(row.get(header_map["avg_talk"])),
-            "success_wait_seconds": success_wait_seconds,
-            "avg_success_wait_seconds": _parse_seconds(row.get(header_map.get("avg_success_wait"))),
-            "total_time_seconds": _parse_seconds(row.get(header_map.get("total_time"))),
-            "greeting_abandoned": max(0, _to_int(row.get(header_map.get("greeting_abandoned")))),
-            "greeting_time_seconds": _parse_seconds(row.get(header_map.get("greeting_time"))),
-            "queue_abandoned": queue_abandoned,
-            "queue_wait_seconds": queue_wait_seconds,
-            "avg_lost_wait_seconds": _parse_seconds(row.get(header_map.get("avg_lost_wait"))),
-            "avg_wait_seconds": avg_wait_seconds,
-            "raw_payload": row,
-        }
-    if not rows_by_hour:
+        report_date = _parse_report_date(row.get(date_header))
+        row_counts_by_date[report_date.isoformat()] += 1
+        parsed_row = _parse_resource_csv_row(row, header_map, row_number)
+        rows_by_date_hour[report_date.isoformat()][parsed_row["hour"]] = parsed_row
+    if not rows_by_date_hour:
         raise ValueError("EMPTY_CSV_ROWS")
-    for hour in range(24):
-        rows_by_hour.setdefault(
-            hour,
+    days = []
+    for report_date in sorted(rows_by_date_hour.keys()):
+        rows_by_hour = rows_by_date_hour[report_date]
+        source_row_count = int(row_counts_by_date.get(report_date) or len(rows_by_hour))
+        for hour in range(24):
+            rows_by_hour.setdefault(hour, _empty_resource_hour(hour))
+        days.append(
             {
-                "hour": hour,
-                "received_calls": 0,
-                "accepted_calls": 0,
-                "lost_calls": 0,
-                "no_answer_rate": 0,
-                "talk_time_seconds": 0,
-                "avg_talk_seconds": 0,
-                "success_wait_seconds": 0,
-                "avg_success_wait_seconds": 0,
-                "total_time_seconds": 0,
-                "greeting_abandoned": 0,
-                "greeting_time_seconds": 0,
-                "queue_abandoned": 0,
-                "queue_wait_seconds": 0,
-                "avg_lost_wait_seconds": 0,
-                "avg_wait_seconds": 0,
-                "raw_payload": {},
-            },
+                "report_date": report_date,
+                "rows": [rows_by_hour[hour] for hour in range(24)],
+                "source_row_count": source_row_count,
+            }
         )
     return {
         "headers": headers,
         "mapped_headers": header_map,
-        "rows": [rows_by_hour[hour] for hour in range(24)],
+        "rows": days[0]["rows"],
+        "days": days,
     }
 
 
@@ -966,101 +991,116 @@ def _weekly_totals(
     }
 
 
-def import_resource_csv(db, report_date_value: str, content: bytes, filename: str, user_id: Optional[int]) -> Dict[str, Any]:
-    report_date = _parse_report_date(report_date_value)
+def import_resource_csv(db, content: bytes, filename: str, user_id: Optional[int]) -> Dict[str, Any]:
     parsed = parse_resource_csv(content)
     content_hash = hashlib.sha256(content).hexdigest()
+    uploaded_dates = []
+    upload_ids = []
 
     with db._get_cursor() as cursor:
         settings = _get_settings_tx(cursor)
-        schedule_fte = _shift_hourly_fte_tx(cursor, report_date, settings)
-        cursor.execute(
-            """
-            INSERT INTO raw_resource_uploads (
-                report_date, filename, content_sha256, headers, row_count,
-                uploaded_by, uploaded_at, updated_at
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            ON CONFLICT (report_date)
-            DO UPDATE SET
-                filename = EXCLUDED.filename,
-                content_sha256 = EXCLUDED.content_sha256,
-                headers = EXCLUDED.headers,
-                row_count = EXCLUDED.row_count,
-                uploaded_by = EXCLUDED.uploaded_by,
-                updated_at = CURRENT_TIMESTAMP
-            RETURNING id
-            """,
-            (report_date, filename, content_hash, Json(parsed["headers"]), len(parsed["rows"]), user_id),
-        )
-        upload_id = cursor.fetchone()[0]
-        values = []
-        for row in parsed["rows"]:
-            hour = int(row["hour"])
-            values.append(
+        for day in parsed["days"]:
+            report_date = _parse_report_date(day["report_date"])
+            uploaded_dates.append(report_date)
+            schedule_fte = _shift_hourly_fte_tx(cursor, report_date, settings)
+            cursor.execute(
+                """
+                INSERT INTO raw_resource_uploads (
+                    report_date, filename, content_sha256, headers, row_count,
+                    uploaded_by, uploaded_at, updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT (report_date)
+                DO UPDATE SET
+                    filename = EXCLUDED.filename,
+                    content_sha256 = EXCLUDED.content_sha256,
+                    headers = EXCLUDED.headers,
+                    row_count = EXCLUDED.row_count,
+                    uploaded_by = EXCLUDED.uploaded_by,
+                    updated_at = CURRENT_TIMESTAMP
+                RETURNING id
+                """,
                 (
                     report_date,
-                    hour,
-                    row["received_calls"],
-                    row["accepted_calls"],
-                    row["lost_calls"],
-                    row["no_answer_rate"],
-                    row["talk_time_seconds"],
-                    row["avg_talk_seconds"],
-                    row["success_wait_seconds"],
-                    row["avg_success_wait_seconds"],
-                    row["total_time_seconds"],
-                    row["greeting_abandoned"],
-                    row["greeting_time_seconds"],
-                    row["queue_abandoned"],
-                    row["queue_wait_seconds"],
-                    row["avg_lost_wait_seconds"],
-                    row["avg_wait_seconds"],
-                    float(schedule_fte.get(hour, 0.0)),
-                    Json(row["raw_payload"]),
+                    filename,
+                    content_hash,
+                    Json(parsed["headers"]),
+                    int(day.get("source_row_count") or len(day["rows"])),
+                    user_id,
+                ),
+            )
+            upload_ids.append(cursor.fetchone()[0])
+            values = []
+            for row in day["rows"]:
+                hour = int(row["hour"])
+                values.append(
+                    (
+                        report_date,
+                        hour,
+                        row["received_calls"],
+                        row["accepted_calls"],
+                        row["lost_calls"],
+                        row["no_answer_rate"],
+                        row["talk_time_seconds"],
+                        row["avg_talk_seconds"],
+                        row["success_wait_seconds"],
+                        row["avg_success_wait_seconds"],
+                        row["total_time_seconds"],
+                        row["greeting_abandoned"],
+                        row["greeting_time_seconds"],
+                        row["queue_abandoned"],
+                        row["queue_wait_seconds"],
+                        row["avg_lost_wait_seconds"],
+                        row["avg_wait_seconds"],
+                        float(schedule_fte.get(hour, 0.0)),
+                        Json(row["raw_payload"]),
+                    )
                 )
+            execute_values(
+                cursor,
+                """
+                INSERT INTO daily_resource_hours (
+                    report_date, hour, received_calls, accepted_calls, lost_calls,
+                    no_answer_rate, talk_time_seconds, avg_talk_seconds,
+                    success_wait_seconds, avg_success_wait_seconds, total_time_seconds,
+                    greeting_abandoned, greeting_time_seconds, queue_abandoned,
+                    queue_wait_seconds, avg_lost_wait_seconds, avg_wait_seconds,
+                    actual_fte, raw_payload
+                )
+                VALUES %s
+                ON CONFLICT (report_date, hour)
+                DO UPDATE SET
+                    received_calls = EXCLUDED.received_calls,
+                    accepted_calls = EXCLUDED.accepted_calls,
+                    lost_calls = EXCLUDED.lost_calls,
+                    no_answer_rate = EXCLUDED.no_answer_rate,
+                    talk_time_seconds = EXCLUDED.talk_time_seconds,
+                    avg_talk_seconds = EXCLUDED.avg_talk_seconds,
+                    success_wait_seconds = EXCLUDED.success_wait_seconds,
+                    avg_success_wait_seconds = EXCLUDED.avg_success_wait_seconds,
+                    total_time_seconds = EXCLUDED.total_time_seconds,
+                    greeting_abandoned = EXCLUDED.greeting_abandoned,
+                    greeting_time_seconds = EXCLUDED.greeting_time_seconds,
+                    queue_abandoned = EXCLUDED.queue_abandoned,
+                    queue_wait_seconds = EXCLUDED.queue_wait_seconds,
+                    avg_lost_wait_seconds = EXCLUDED.avg_lost_wait_seconds,
+                    avg_wait_seconds = EXCLUDED.avg_wait_seconds,
+                    actual_fte = EXCLUDED.actual_fte,
+                    raw_payload = EXCLUDED.raw_payload,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                values,
             )
-        execute_values(
-            cursor,
-            """
-            INSERT INTO daily_resource_hours (
-                report_date, hour, received_calls, accepted_calls, lost_calls,
-                no_answer_rate, talk_time_seconds, avg_talk_seconds,
-                success_wait_seconds, avg_success_wait_seconds, total_time_seconds,
-                greeting_abandoned, greeting_time_seconds, queue_abandoned,
-                queue_wait_seconds, avg_lost_wait_seconds, avg_wait_seconds,
-                actual_fte, raw_payload
-            )
-            VALUES %s
-            ON CONFLICT (report_date, hour)
-            DO UPDATE SET
-                received_calls = EXCLUDED.received_calls,
-                accepted_calls = EXCLUDED.accepted_calls,
-                lost_calls = EXCLUDED.lost_calls,
-                no_answer_rate = EXCLUDED.no_answer_rate,
-                talk_time_seconds = EXCLUDED.talk_time_seconds,
-                avg_talk_seconds = EXCLUDED.avg_talk_seconds,
-                success_wait_seconds = EXCLUDED.success_wait_seconds,
-                avg_success_wait_seconds = EXCLUDED.avg_success_wait_seconds,
-                total_time_seconds = EXCLUDED.total_time_seconds,
-                greeting_abandoned = EXCLUDED.greeting_abandoned,
-                greeting_time_seconds = EXCLUDED.greeting_time_seconds,
-                queue_abandoned = EXCLUDED.queue_abandoned,
-                queue_wait_seconds = EXCLUDED.queue_wait_seconds,
-                avg_lost_wait_seconds = EXCLUDED.avg_lost_wait_seconds,
-                avg_wait_seconds = EXCLUDED.avg_wait_seconds,
-                actual_fte = EXCLUDED.actual_fte,
-                raw_payload = EXCLUDED.raw_payload,
-                updated_at = CURRENT_TIMESTAMP
-            """,
-            values,
-        )
-        _refresh_daily_summary_tx(cursor, report_date)
+            _refresh_daily_summary_tx(cursor, report_date)
         _refresh_all_historical_forecasts_tx(cursor, settings)
-    day_payload = get_resource_day(db, report_date.isoformat())
+    primary_report_date = max(uploaded_dates)
+    day_payload = get_resource_day(db, primary_report_date.isoformat())
     return {
-        "upload_id": upload_id,
-        "report_date": report_date.isoformat(),
+        "upload_id": upload_ids[-1] if upload_ids else None,
+        "upload_ids": upload_ids,
+        "report_date": primary_report_date.isoformat(),
+        "uploaded_dates": [report_date.isoformat() for report_date in uploaded_dates],
+        "uploaded_days_count": len(uploaded_dates),
         "mapped_headers": parsed["mapped_headers"],
         "day": day_payload,
     }
@@ -1073,7 +1113,7 @@ def recalculate_resource_forecast(db, as_of_date_value: Optional[str] = None) ->
             as_of_date = _parse_report_date(as_of_date_value)
         else:
             cursor.execute("SELECT CURRENT_DATE")
-        as_of_date = cursor.fetchone()[0]
+            as_of_date = cursor.fetchone()[0]
         _refresh_all_actual_fte_tx(cursor, settings)
         _refresh_all_historical_forecasts_tx(cursor, settings)
     return get_resource_overview(db, as_of_date_value=as_of_date.isoformat())
