@@ -774,6 +774,8 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
     return profiles.find((item) => Number(item.weekday) === Number(activeWeekday)) || profiles[0] || null;
   }, [activeWeekday, overview?.profiles]);
 
+  const selectedSummary = selectedDay?.summary;
+
   const dayChartData = useMemo(
     () =>
       (selectedDay?.hours || []).map((row) => ({
@@ -802,6 +804,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
         .slice(0, 21)
         .reverse()
         .map((item) => ({
+          reportDate: item.report_date,
           date: formatDate(item.report_date).slice(0, 5),
           calls: Number(item.total_received || 0),
           accepted: Number(item.total_accepted || 0),
@@ -883,6 +886,30 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
       })),
     [selectedDay?.hours],
   );
+
+  const selectedLossSummary = useMemo(() => {
+    if (!selectedSummary) return null;
+    const peakLossHour = dayLossHotspots[0] || null;
+    return {
+      reportDate: selectedSummary.report_date,
+      weekday: selectedSummary.weekday_short,
+      received: Number(selectedSummary.total_received || 0),
+      accepted: Number(selectedSummary.total_accepted || 0),
+      lost: Number(selectedSummary.total_lost || 0),
+      lossRate: Number(selectedSummary.no_answer_rate || 0),
+      peakLossHour,
+    };
+  }, [dayLossHotspots, selectedSummary]);
+
+  const selectedLossTrendPoint = useMemo(
+    () => historyTrendData.find((item) => item.reportDate === selectedDate) || null,
+    [historyTrendData, selectedDate],
+  );
+
+  const selectLossChartDay = useCallback((state) => {
+    const reportDate = state?.activePayload?.[0]?.payload?.reportDate;
+    if (reportDate) setSelectedDate(reportDate);
+  }, []);
 
   const nextWeekForecast = overview?.next_week_forecast || {
     days: [],
@@ -1110,7 +1137,6 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
 
   const weekly = overview?.weekly_totals || {};
   const resourceDirections = overview?.directions || [];
-  const selectedSummary = selectedDay?.summary;
   const loadedReportDates = useMemo(
     () => Array.from(new Set([
       ...loadedDateCache,
@@ -1393,14 +1419,34 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                 {historyTrendData.length ? (
                   <div className="h-72">
                     <ResponsiveContainer width="100%" height="100%">
-                      <ComposedChart data={historyTrendData} margin={{ top: 10, right: 18, left: 0, bottom: 0 }}>
+                      <ComposedChart
+                        data={historyTrendData}
+                        margin={{ top: 10, right: 18, left: 0, bottom: 0 }}
+                        onClick={selectLossChartDay}
+                        className="cursor-pointer"
+                      >
                         <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                         <XAxis dataKey="date" tick={{ fontSize: 11 }} />
                         <YAxis yAxisId="left" tick={{ fontSize: 11 }} />
                         <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} />
                         <Tooltip formatter={(value, name) => [name === 'lossRate' ? `${formatNumber(value, 1)}%` : formatNumber(value, 0), name === 'lost' ? 'Потеряно' : name === 'accepted' ? 'Принято' : 'Доля потерь']} />
-                        {displayOptions.chartCalls && <Bar yAxisId="left" dataKey="accepted" stackId="calls" fill="#bbf7d0" radius={[0, 0, 0, 0]} />}
-                        {displayOptions.chartLosses && <Bar yAxisId="left" dataKey="lost" stackId="calls" fill="#fecdd3" radius={[4, 4, 0, 0]} />}
+                        {selectedLossTrendPoint ? (
+                          <ReferenceLine yAxisId="left" x={selectedLossTrendPoint.date} stroke="#0f172a" strokeDasharray="4 4" />
+                        ) : null}
+                        {displayOptions.chartCalls && (
+                          <Bar yAxisId="left" dataKey="accepted" stackId="calls" fill="#bbf7d0" radius={[0, 0, 0, 0]}>
+                            {historyTrendData.map((item) => (
+                              <Cell key={`accepted-${item.reportDate}`} fill={item.reportDate === selectedDate ? '#22c55e' : '#bbf7d0'} />
+                            ))}
+                          </Bar>
+                        )}
+                        {displayOptions.chartLosses && (
+                          <Bar yAxisId="left" dataKey="lost" stackId="calls" fill="#fecdd3" radius={[4, 4, 0, 0]}>
+                            {historyTrendData.map((item) => (
+                              <Cell key={`lost-${item.reportDate}`} fill={item.reportDate === selectedDate ? '#fb7185' : '#fecdd3'} />
+                            ))}
+                          </Bar>
+                        )}
                         {displayOptions.chartLossRate && <Line yAxisId="right" type="monotone" dataKey="lossRate" stroke="#e11d48" strokeWidth={2} dot={false} />}
                       </ComposedChart>
                     </ResponsiveContainer>
@@ -1428,6 +1474,33 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
             </div>
 
             {selectedSummary ? (
+              <>
+              <div className="mt-5 rounded-lg border border-slate-200 bg-slate-50 p-4">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <div className="text-sm font-semibold text-slate-950">Сводка выбранного дня</div>
+                    <div className="text-sm text-slate-500">{formatDate(selectedSummary.report_date)} · {selectedSummary.weekday_short}</div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setActiveDashboardView('day')}
+                    className="inline-flex h-9 w-fit items-center justify-center rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-100"
+                  >
+                    Открыть день
+                  </button>
+                </div>
+                <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+                  <div className="rounded-lg bg-white px-3 py-2"><div className="text-xs text-slate-500">Поступило</div><b>{formatInt(selectedLossSummary?.received)}</b></div>
+                  <div className="rounded-lg bg-white px-3 py-2"><div className="text-xs text-emerald-700">Принято</div><b>{formatInt(selectedLossSummary?.accepted)}</b></div>
+                  <div className="rounded-lg bg-white px-3 py-2"><div className="text-xs text-rose-700">Потеряно</div><b>{formatInt(selectedLossSummary?.lost)}</b></div>
+                  <div className="rounded-lg bg-white px-3 py-2"><div className="text-xs text-rose-700">Доля потерь</div><b>{formatPercent(selectedLossSummary?.lossRate)}</b></div>
+                  <div className="rounded-lg bg-white px-3 py-2">
+                    <div className="text-xs text-slate-500">Пиковый час потерь</div>
+                    <b>{selectedLossSummary?.peakLossHour ? `${selectedLossSummary.peakLossHour.hour_label} · ${formatInt(selectedLossSummary.peakLossHour.lost_calls)}` : '-'}</b>
+                  </div>
+                </div>
+              </div>
+
               <div className="mt-5 grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
                 <div className="rounded-lg border border-slate-200 bg-white p-3">
                   <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-900">
@@ -1477,6 +1550,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                   </div>
                 </div>
               </div>
+              </>
             ) : null}
           </section>
         )}
