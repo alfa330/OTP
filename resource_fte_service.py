@@ -970,7 +970,6 @@ def get_resource_overview(db, date_from: Optional[str] = None, date_to: Optional
         else:
             cursor.execute("SELECT CURRENT_DATE")
             as_of_date = cursor.fetchone()[0]
-        _refresh_all_historical_forecasts_tx(cursor, settings)
         next_week_start = _next_week_start_date(as_of_date)
         profiles = _fetch_latest_profiles_tx(cursor, as_of_date, settings)
         next_week_forecast = _build_week_forecast_payload(next_week_start, profiles, settings)

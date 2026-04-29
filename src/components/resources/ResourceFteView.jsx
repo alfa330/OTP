@@ -119,6 +119,12 @@ const formatSeconds = (seconds) => {
   return `${minutes}:${String(rest).padStart(2, '0')}`;
 };
 
+const formatPreciseNumber = (value, digits = 6) =>
+  new Intl.NumberFormat('ru-RU', {
+    maximumFractionDigits: digits,
+    minimumFractionDigits: 0,
+  }).format(Number(value || 0));
+
 const formatSourceCallsTooltip = (sources = []) => {
   if (!sources.length) return 'Нет исторических значений для расчета среднего';
   const total = sources.reduce((sum, item) => sum + Number(item.calls || 0), 0);
@@ -127,6 +133,26 @@ const formatSourceCallsTooltip = (sources = []) => {
     'Использовано для среднего:',
     ...sources.map((item) => `${formatDate(item.date)}: ${formatInt(item.calls)} звонков`),
     `Среднее: ${formatNumber(avg, 1)}`,
+  ].join('\n');
+};
+
+const formatAhtTooltip = (seconds) => [
+  `AHT отображается как ${formatSeconds(seconds)}`,
+  `Точное значение: ${formatPreciseNumber(seconds, 6)} сек`,
+].join('\n');
+
+const formatWorkloadTooltip = (row, answerRate) => {
+  const calls = Number(row.forecast_calls || 0);
+  const aht = Number(row.forecast_aht_seconds || 0);
+  const acceptedRate = Number(answerRate || 0);
+  const calculated = calls * acceptedRate * aht / 60;
+  return [
+    'Минуты нагрузки считаются без визуального округления:',
+    `звонки: ${formatPreciseNumber(calls, 6)}`,
+    `AHT: ${formatPreciseNumber(aht, 6)} сек`,
+    `процент принятых: ${formatPreciseNumber(acceptedRate, 6)}`,
+    `${formatPreciseNumber(calls, 6)} * ${formatPreciseNumber(aht, 6)} * ${formatPreciseNumber(acceptedRate, 6)} / 60 = ${formatPreciseNumber(calculated, 6)}`,
+    `значение из расчета: ${formatPreciseNumber(row.forecast_workload_minutes, 6)} мин`,
   ].join('\n');
 };
 
@@ -1427,8 +1453,22 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                                         {formatNumber(row.forecast_calls, 1)}
                                       </span>
                                     </td>
-                                    <td className="px-3 py-2 text-right">{formatSeconds(row.forecast_aht_seconds)}</td>
-                                    <td className="px-3 py-2 text-right">{formatNumber(row.forecast_workload_minutes, 1)}</td>
+                                    <td className="px-3 py-2 text-right">
+                                      <span
+                                        title={formatAhtTooltip(row.forecast_aht_seconds)}
+                                        className="inline-flex cursor-help items-center justify-end rounded-md border border-transparent px-2 py-1 transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700"
+                                      >
+                                        {formatSeconds(row.forecast_aht_seconds)}
+                                      </span>
+                                    </td>
+                                    <td className="px-3 py-2 text-right">
+                                      <span
+                                        title={formatWorkloadTooltip(row, nextWeekForecast.answerRate)}
+                                        className="inline-flex cursor-help items-center justify-end rounded-md border border-transparent px-2 py-1 transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700"
+                                      >
+                                        {formatNumber(row.forecast_workload_minutes, 1)}
+                                      </span>
+                                    </td>
                                     <td className="px-3 py-2 text-right font-semibold text-blue-700">{formatNumber(row.forecast_fte, 2)}</td>
                                   </tr>
                                 ))}
