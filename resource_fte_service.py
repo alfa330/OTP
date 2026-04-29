@@ -384,19 +384,25 @@ def parse_resource_csv(content: bytes) -> Dict[str, Any]:
     }
 
 
-def _shift_hourly_fte_tx(cursor, report_date) -> Dict[int, float]:
+def _shift_hourly_fte_tx(cursor, report_date, settings: Optional[Dict[str, Any]] = None) -> Dict[int, float]:
     report_date = _parse_report_date(report_date) if isinstance(report_date, str) else report_date
     prev_date = report_date - timedelta(days=1)
+    selected_direction_ids = _coerce_int_list((settings or {}).get("selected_direction_ids"))
+    direction_filter = "AND u.direction_id = ANY(%s)" if selected_direction_ids else ""
+    params = [report_date, prev_date]
+    if selected_direction_ids:
+        params.append(selected_direction_ids)
     cursor.execute(
-        """
+        f"""
         SELECT ws.id, ws.shift_date, ws.start_time, ws.end_time
         FROM work_shifts ws
         JOIN users u ON u.id = ws.operator_id
         WHERE ws.shift_date IN (%s, %s)
           AND u.role = 'operator'
-          AND (u.status IS NULL OR u.status NOT IN ('fired', 'dismissal'))
+          AND COALESCE(u.status, 'working') = 'working'
+          {direction_filter}
         """,
-        (report_date, prev_date),
+        params,
     )
     shifts = cursor.fetchall()
     if not shifts:
@@ -442,8 +448,8 @@ def _shift_hourly_fte_tx(cursor, report_date) -> Dict[int, float]:
     return hourly
 
 
-def _refresh_actual_fte_for_day_tx(cursor, report_date) -> None:
-    schedule_fte = _shift_hourly_fte_tx(cursor, report_date)
+def _refresh_actual_fte_for_day_tx(cursor, report_date, settings: Optional[Dict[str, Any]] = None) -> None:
+    schedule_fte = _shift_hourly_fte_tx(cursor, report_date, settings)
     for hour, actual_fte in schedule_fte.items():
         cursor.execute(
             """
@@ -458,10 +464,10 @@ def _refresh_actual_fte_for_day_tx(cursor, report_date) -> None:
     _refresh_daily_summary_tx(cursor, report_date)
 
 
-def _refresh_all_actual_fte_tx(cursor) -> None:
+def _refresh_all_actual_fte_tx(cursor, settings: Optional[Dict[str, Any]] = None) -> None:
     cursor.execute("SELECT report_date FROM daily_resource_summary ORDER BY report_date ASC")
     for (report_date,) in cursor.fetchall():
-        _refresh_actual_fte_for_day_tx(cursor, report_date)
+        _refresh_actual_fte_for_day_tx(cursor, report_date, settings)
 
 
 def _current_operator_fte_tx(cursor, settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -473,8 +479,7 @@ def _current_operator_fte_tx(cursor, settings: Optional[Dict[str, Any]] = None) 
         SELECT COUNT(*), COALESCE(SUM(COALESCE(u.rate, 1.0)), 0)
         FROM users u
         WHERE u.role = 'operator'
-          AND COALESCE(u.is_active, FALSE) = TRUE
-          AND (u.status IS NULL OR u.status NOT IN ('fired', 'dismissal'))
+          AND COALESCE(u.status, 'working') = 'working'
           {direction_filter}
         """,
         params,
@@ -908,7 +913,7 @@ def import_resource_csv(db, report_date_value: str, content: bytes, filename: st
 
     with db._get_cursor() as cursor:
         settings = _get_settings_tx(cursor)
-        schedule_fte = _shift_hourly_fte_tx(cursor, report_date)
+        schedule_fte = _shift_hourly_fte_tx(cursor, report_date, settings)
         cursor.execute(
             """
             INSERT INTO raw_resource_uploads (
@@ -1038,7 +1043,7 @@ def recalculate_resource_forecast(db, as_of_date_value: Optional[str] = None) ->
         else:
             cursor.execute("SELECT CURRENT_DATE")
             as_of_date = cursor.fetchone()[0]
-        _refresh_all_actual_fte_tx(cursor)
+        _refresh_all_actual_fte_tx(cursor, settings)
         _refresh_all_historical_forecasts_tx(cursor, settings)
         profiles = _compute_week_forecast_profiles_tx(cursor, _next_week_start_date(as_of_date), settings)
     return get_resource_overview(db, as_of_date_value=as_of_date.isoformat())
@@ -1134,7 +1139,7 @@ def get_resource_day(db, report_date_value: str) -> Dict[str, Any]:
     report_date = _parse_report_date(report_date_value)
     with db._get_cursor() as cursor:
         settings = _get_settings_tx(cursor)
-        _refresh_actual_fte_for_day_tx(cursor, report_date)
+        _refresh_actual_fte_for_day_tx(cursor, report_date, settings)
         profile = _refresh_historical_forecast_for_day_tx(cursor, report_date, settings)
         cursor.execute(
             """
