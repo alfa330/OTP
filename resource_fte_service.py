@@ -604,6 +604,10 @@ def _week_start_date(value):
     return value - timedelta(days=value.weekday())
 
 
+def _next_week_start_date(value):
+    return _week_start_date(value) + timedelta(days=7)
+
+
 def _weekly_aht_from_profiles(profiles: List[Dict[str, Any]]) -> float:
     total_calls = sum(_to_float(profile.get("avg_daily_calls")) for profile in profiles)
     if total_calls <= 0:
@@ -644,7 +648,7 @@ def _apply_weekly_aht_to_profile(profile: Dict[str, Any], weekly_aht_seconds: fl
 
 
 def _compute_week_forecast_profiles_tx(cursor, target_week_start, settings: Dict[str, Any]) -> List[Dict[str, Any]]:
-    as_of_date = target_week_start - timedelta(days=1)
+    as_of_date = target_week_start - timedelta(days=8)
     base_profiles = [
         _compute_profile_for_weekday_tx(cursor, weekday_meta["index"], as_of_date, settings)
         for weekday_meta in WEEKDAYS_RU
@@ -880,17 +884,16 @@ def recalculate_resource_forecast(db, as_of_date_value: Optional[str] = None) ->
         if as_of_date_value:
             as_of_date = _parse_report_date(as_of_date_value)
         else:
-            cursor.execute("SELECT COALESCE(MAX(report_date), CURRENT_DATE) FROM daily_resource_summary")
+            cursor.execute("SELECT CURRENT_DATE")
             as_of_date = cursor.fetchone()[0]
         _refresh_all_actual_fte_tx(cursor)
         _refresh_all_historical_forecasts_tx(cursor, settings)
-        profiles = _upsert_profiles_tx(cursor, as_of_date, settings)
+        profiles = _compute_week_forecast_profiles_tx(cursor, _next_week_start_date(as_of_date), settings)
     return get_resource_overview(db, as_of_date_value=as_of_date.isoformat())
 
 
 def _fetch_latest_profiles_tx(cursor, as_of_date, settings: Dict[str, Any]) -> List[Dict[str, Any]]:
-    profiles = _upsert_profiles_tx(cursor, as_of_date, settings)
-    return profiles
+    return _compute_week_forecast_profiles_tx(cursor, _next_week_start_date(as_of_date), settings)
 
 
 def get_resource_overview(db, date_from: Optional[str] = None, date_to: Optional[str] = None, as_of_date_value: Optional[str] = None) -> Dict[str, Any]:
@@ -899,7 +902,7 @@ def get_resource_overview(db, date_from: Optional[str] = None, date_to: Optional
         if as_of_date_value:
             as_of_date = _parse_report_date(as_of_date_value)
         else:
-            cursor.execute("SELECT COALESCE(MAX(report_date), CURRENT_DATE) FROM daily_resource_summary")
+            cursor.execute("SELECT CURRENT_DATE")
             as_of_date = cursor.fetchone()[0]
         _refresh_all_historical_forecasts_tx(cursor, settings)
         profiles = _fetch_latest_profiles_tx(cursor, as_of_date, settings)
