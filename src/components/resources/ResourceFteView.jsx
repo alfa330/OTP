@@ -118,6 +118,34 @@ const addDaysIso = (iso, days) => {
   return `${nextYear}-${nextMonth}-${nextDay}`;
 };
 
+const getWeekStartIso = (iso) => {
+  const date = parseIsoDate(iso) || new Date();
+  const dayOffset = (date.getDay() + 6) % 7;
+  date.setDate(date.getDate() - dayOffset);
+  return toIsoDate(date);
+};
+
+const getNextWeekStartIso = (iso = todayIso()) => addDaysIso(getWeekStartIso(iso), 7);
+
+const getForecastWeekDates = (weekStartIso) =>
+  Array.from({ length: 7 }, (_, index) => addDaysIso(weekStartIso, index));
+
+const getForecastHistoryWeeks = (weekStartIso) => [
+  { start: addDaysIso(weekStartIso, -21), end: addDaysIso(weekStartIso, -15) },
+  { start: addDaysIso(weekStartIso, -14), end: addDaysIso(weekStartIso, -8) },
+];
+
+const getForecastHistoryDatesForDay = (forecastDateIso) => [
+  addDaysIso(forecastDateIso, -21),
+  addDaysIso(forecastDateIso, -14),
+];
+
+const isForecastDayHistoryComplete = (forecastDateIso, loadedSet) =>
+  getForecastHistoryDatesForDay(forecastDateIso).every((date) => loadedSet.has(date));
+
+const isForecastWeekHistoryComplete = (weekStartIso, loadedSet) =>
+  getForecastWeekDates(weekStartIso).every((date) => isForecastDayHistoryComplete(date, loadedSet));
+
 const formatSeconds = (seconds) => {
   const total = Math.round(Number(seconds || 0));
   const minutes = Math.floor(total / 60);
@@ -170,7 +198,7 @@ const DISPLAY_PREFERENCES_STORAGE_KEY = 'otp_resource_fte_display_v1';
 const VIEW_TABS = [
   { key: 'overview', label: 'Обзор', icon: LayoutDashboard },
   { key: 'day', label: 'День', icon: CalendarDays },
-  { key: 'next_week', label: 'След. неделя', icon: TrendingUp },
+  { key: 'next_week', label: 'Прогнозы', icon: TrendingUp },
   { key: 'losses', label: 'Потери', icon: PhoneMissed },
   { key: 'profiles', label: 'Профили', icon: BarChart3 },
   { key: 'settings', label: 'Настройки', icon: SlidersHorizontal },
@@ -472,6 +500,138 @@ const CalendarPicker = ({
   );
 };
 
+const WeekForecastPicker = ({ value, onChange, loadedDates = [] }) => {
+  const [open, setOpen] = useState(false);
+  const anchorRef = useRef(null);
+  const loadedSet = useMemo(() => new Set(loadedDates), [loadedDates]);
+  const selectedWeekStart = getWeekStartIso(value || getNextWeekStartIso());
+  const selectedWeekEnd = addDaysIso(selectedWeekStart, 6);
+  const selectedWeekComplete = isForecastWeekHistoryComplete(selectedWeekStart, loadedSet);
+  const initialDate = parseIsoDate(selectedWeekStart) || new Date();
+  const [visibleMonth, setVisibleMonth] = useState(new Date(initialDate.getFullYear(), initialDate.getMonth(), 1));
+  const historyWeeks = getForecastHistoryWeeks(selectedWeekStart);
+
+  useEffect(() => {
+    const next = parseIsoDate(selectedWeekStart);
+    if (next) setVisibleMonth(new Date(next.getFullYear(), next.getMonth(), 1));
+  }, [selectedWeekStart]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const handlePointerDown = (event) => {
+      if (anchorRef.current && !anchorRef.current.contains(event.target)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => document.removeEventListener('mousedown', handlePointerDown);
+  }, [open]);
+
+  const moveMonth = (delta) => {
+    setVisibleMonth((current) => new Date(current.getFullYear(), current.getMonth() + delta, 1));
+  };
+
+  const calendarDays = useMemo(() => buildCalendarDays(visibleMonth), [visibleMonth]);
+
+  const selectWeek = (iso) => {
+    onChange?.(getWeekStartIso(iso));
+    setOpen(false);
+  };
+
+  return (
+    <div ref={anchorRef} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        className={`flex min-h-16 w-full items-center justify-between gap-3 rounded-xl border-2 bg-white px-4 py-3 text-left text-sm shadow-sm transition hover:bg-slate-50 ${
+          selectedWeekComplete ? 'border-emerald-200 hover:border-emerald-300' : 'border-slate-200 hover:border-slate-300'
+        }`}
+      >
+        <span className="min-w-0">
+          <span className="block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Неделя прогноза</span>
+          <span className="block truncate font-semibold text-slate-900">
+            {formatDate(selectedWeekStart)} - {formatDate(selectedWeekEnd)}
+          </span>
+          <span className={`mt-1 inline-flex rounded-md px-2 py-0.5 text-[11px] font-semibold ${
+            selectedWeekComplete ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'
+          }`}>
+            {selectedWeekComplete ? 'истории хватает' : 'истории не хватает'}
+          </span>
+        </span>
+        <CalendarDays size={17} className={selectedWeekComplete ? 'shrink-0 text-emerald-600' : 'shrink-0 text-blue-600'} />
+      </button>
+
+      <div className="mt-2 rounded-xl border border-slate-200 bg-slate-100 px-3 py-2 text-xs text-slate-600">
+        <div className="font-semibold text-slate-700">История для расчета</div>
+        <div className="mt-1 grid gap-1">
+          {historyWeeks.map((week, index) => (
+            <div key={`${week.start}-${week.end}`}>
+              {index + 1}. {formatDate(week.start)} - {formatDate(week.end)}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {open && (
+        <div className="absolute left-0 z-40 mt-2 w-[330px] rounded-2xl border-2 border-slate-200 bg-white p-4 shadow-xl">
+          <div className="flex items-center justify-between gap-2">
+            <button type="button" onClick={() => moveMonth(-1)} className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-600 hover:bg-slate-100">
+              <ChevronLeft size={16} />
+            </button>
+            <div className="text-sm font-semibold capitalize text-slate-950">{monthLabel(visibleMonth)}</div>
+            <button type="button" onClick={() => moveMonth(1)} className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-600 hover:bg-slate-100">
+              <ChevronRight size={16} />
+            </button>
+          </div>
+
+          <div className="mt-3 grid grid-cols-7 gap-1 text-center text-[11px] font-semibold uppercase text-slate-400">
+            {['ПН', 'ВТ', 'СР', 'ЧТ', 'ПТ', 'СБ', 'ВС'].map((day) => (
+              <div key={day} className="py-1">{day}</div>
+            ))}
+          </div>
+
+          <div className="mt-1 grid grid-cols-7 gap-1">
+            {calendarDays.map((date) => {
+              const iso = toIsoDate(date);
+              const weekStart = getWeekStartIso(iso);
+              const weekComplete = isForecastWeekHistoryComplete(weekStart, loadedSet);
+              const dayComplete = isForecastDayHistoryComplete(iso, loadedSet);
+              const isOutside = date.getMonth() !== visibleMonth.getMonth();
+              const isSelectedWeek = weekStart === selectedWeekStart;
+              return (
+                <button
+                  key={iso}
+                  type="button"
+                  title={`${formatDate(iso)}: ${dayComplete ? 'истории хватает' : 'истории не хватает'}`}
+                  onClick={() => selectWeek(iso)}
+                  className={`relative flex h-10 items-center justify-center rounded-lg border text-sm font-semibold transition ${
+                    isSelectedWeek
+                      ? weekComplete
+                        ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
+                        : 'border-blue-200 bg-blue-50 text-blue-800'
+                      : dayComplete
+                        ? 'border-emerald-100 bg-emerald-50 text-emerald-700 hover:border-emerald-300'
+                        : isOutside
+                          ? 'border-transparent text-slate-300 hover:bg-slate-50'
+                          : 'border-transparent text-slate-700 hover:bg-slate-100'
+                  }`}
+                >
+                  {date.getDate()}
+                  {weekComplete && (
+                    <span className={`absolute top-1 h-1.5 w-1.5 rounded-full ${isSelectedWeek ? 'bg-emerald-600' : 'bg-emerald-500'}`} />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="mt-3 rounded-lg bg-slate-100 px-3 py-2 text-xs text-slate-600">
+            Зеленый день означает, что для него загружены оба исторических дня: минус 21 и минус 14 дней.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast }) => {
   const apiRoot = String(apiBaseUrl || '').replace(/\/+$/, '');
   const fileInputRef = useRef(null);
@@ -492,6 +652,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
   const [savingHourKey, setSavingHourKey] = useState('');
   const [activeDashboardView, setActiveDashboardView] = useState('overview');
   const [displayOptions, setDisplayOptions] = useState(loadDisplayOptions);
+  const [selectedForecastWeekStart, setSelectedForecastWeekStart] = useState(() => getNextWeekStartIso());
   const [selectedForecastWeekday, setSelectedForecastWeekday] = useState(0);
   const [loadedDateCache, setLoadedDateCache] = useState([]);
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
@@ -519,7 +680,11 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
     setIsLoading(true);
     try {
       const response = await axios.get(`${apiRoot}/api/resource_fte/overview`, {
-        params: { date_from: dateFrom || undefined, date_to: dateTo || undefined },
+        params: {
+          date_from: dateFrom || undefined,
+          date_to: dateTo || undefined,
+          forecast_week_start: selectedForecastWeekStart || undefined,
+        },
         headers: buildHeaders(),
       });
       const payload = response.data || {};
@@ -527,6 +692,9 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
       setSettingsDraft(payload.settings || null);
       setLoadedDateCache((current) => {
         const next = new Set(current);
+        (payload.loaded_report_dates || []).forEach((reportDate) => {
+          if (reportDate) next.add(reportDate);
+        });
         (payload.history || []).forEach((item) => {
           if (item?.report_date) next.add(item.report_date);
         });
@@ -539,7 +707,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
     } finally {
       setIsLoading(false);
     }
-  }, [apiRoot, buildHeaders, dateFrom, dateTo, notify]);
+  }, [apiRoot, buildHeaders, dateFrom, dateTo, notify, selectedForecastWeekStart]);
 
   const fetchDay = useCallback(
     async (date) => {
@@ -702,6 +870,8 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
     operatorsWithShrinkage: 0,
     currentOperatorFte: 0,
     operatorFteGap: 0,
+    historyComplete: false,
+    history_weeks: getForecastHistoryWeeks(selectedForecastWeekStart),
   };
 
   const selectedForecastDay = useMemo(
@@ -850,10 +1020,15 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
   const loadedReportDates = useMemo(
     () => Array.from(new Set([
       ...loadedDateCache,
+      ...(overview?.loaded_report_dates || []),
       ...(overview?.history || []).map((item) => item.report_date).filter(Boolean),
     ])).sort(),
-    [loadedDateCache, overview?.history],
+    [loadedDateCache, overview?.history, overview?.loaded_report_dates],
   );
+  const loadedReportDateSet = useMemo(() => new Set(loadedReportDates), [loadedReportDates]);
+  const forecastHistoryWeeks = nextWeekForecast.history_weeks || getForecastHistoryWeeks(selectedForecastWeekStart);
+  const forecastWeekComplete = Boolean(nextWeekForecast.historyComplete) ||
+    isForecastWeekHistoryComplete(nextWeekForecast.week_start || selectedForecastWeekStart, loadedReportDateSet);
   const uploadDateAlreadyLoaded = loadedReportDates.includes(uploadDate);
   const selectedFileName = uploadFile?.name || 'Файл не выбран';
   const selectedDirectionIds = (settingsDraft?.selected_direction_ids || []).map((item) => Number(item)).filter(Boolean);
@@ -1388,8 +1563,10 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
               <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
                 <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                   <div>
-                    <h2 className="text-lg font-semibold text-slate-950">Прогноз FTE на следующую неделю</h2>
-                    <p className="text-sm text-slate-500">Один AHT недели и единые коэффициенты применяются ко всем дням ПН-ВС.</p>
+                    <h2 className="text-lg font-semibold text-slate-950">Прогноз FTE по выбранной неделе</h2>
+                    <p className="text-sm text-slate-500">
+                      Для выбранной недели берутся две исторические недели до нее, один AHT недели и единые коэффициенты ПН-ВС.
+                    </p>
                   </div>
                   <button
                     type="button"
@@ -1419,7 +1596,25 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
 
                 <div className="mt-5 grid gap-5 xl:grid-cols-[300px_minmax(0,1fr)]">
                   <aside className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                    <div className="mb-3 text-sm font-semibold text-slate-900">Выберите день</div>
+                    <WeekForecastPicker
+                      value={nextWeekForecast.week_start || selectedForecastWeekStart}
+                      onChange={(weekStart) => setSelectedForecastWeekStart(weekStart)}
+                      loadedDates={loadedReportDates}
+                    />
+                    <div className={`mt-3 rounded-xl border px-3 py-2 text-xs ${
+                      forecastWeekComplete
+                        ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                        : 'border-amber-200 bg-amber-50 text-amber-800'
+                    }`}>
+                      <div className="flex items-center gap-1 font-semibold">
+                        {forecastWeekComplete ? <CheckCircle2 size={13} /> : <AlertTriangle size={13} />}
+                        {forecastWeekComplete ? 'Неделе хватает истории' : 'Неделе не хватает истории'}
+                      </div>
+                      <div className="mt-1 text-slate-600">
+                        Исторические периоды: {(forecastHistoryWeeks || []).map((week) => `${formatDate(week.start)}-${formatDate(week.end)}`).join(', ')}
+                      </div>
+                    </div>
+                    <div className="mb-3 mt-5 text-sm font-semibold text-slate-900">Выберите день</div>
                     <div className="space-y-2">
                       {(nextWeekForecast.days || []).map((profile) => (
                         <button
@@ -1428,8 +1623,12 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                           onClick={() => setSelectedForecastWeekday(profile.weekday)}
                           className={`w-full rounded-lg border p-3 text-left transition ${
                             Number(selectedForecastWeekday) === Number(profile.weekday)
-                              ? 'border-blue-300 bg-blue-50'
-                              : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50'
+                              ? profile.insufficient_history
+                                ? 'border-amber-300 bg-amber-50'
+                                : 'border-emerald-300 bg-emerald-50'
+                              : profile.insufficient_history
+                                ? 'border-slate-200 bg-white hover:border-amber-200 hover:bg-amber-50'
+                                : 'border-emerald-100 bg-white hover:border-emerald-200 hover:bg-emerald-50'
                           }`}
                         >
                           <div className="flex items-center justify-between gap-2">
@@ -1438,7 +1637,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                               <div className="text-xs text-slate-500">{formatDate(profile.forecast_date)}</div>
                             </div>
                             <div className="text-right">
-                              <div className="text-sm font-semibold text-blue-700">{formatNumber(profile.forecast_daily_fte, 2)}</div>
+                              <div className={`text-sm font-semibold ${profile.insufficient_history ? 'text-amber-700' : 'text-emerald-700'}`}>{formatNumber(profile.forecast_daily_fte, 2)}</div>
                               <div className="text-[11px] text-slate-500">FTE</div>
                             </div>
                           </div>
@@ -1560,7 +1759,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                         </div>
                       </>
                     ) : (
-                      <EmptyState title="Нет прогноза" text="Загрузите исторические отчеты, чтобы построить прогноз следующей недели." />
+                      <EmptyState title="Нет прогноза" text="Загрузите исторические отчеты, чтобы построить прогноз выбранной недели." />
                     )}
                   </div>
                 </div>
