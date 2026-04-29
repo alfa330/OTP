@@ -579,12 +579,12 @@ def _build_profile_from_history_dates_tx(
         hourly_profile.append(
             {
                 "hour": hour,
-                "avg_calls": round(avg_calls, 4),
-                "aht_seconds": round(aht_seconds, 4),
-                "distribution": round(distribution, 6),
-                "workload_minutes": round(workload_minutes, 4),
-                "effective_fte_minutes": round(effective_minutes, 4),
-                "fte": round(fte, 4),
+                "avg_calls": avg_calls,
+                "aht_seconds": aht_seconds,
+                "distribution": distribution,
+                "workload_minutes": workload_minutes,
+                "effective_fte_minutes": effective_minutes,
+                "fte": fte,
                 "fte_rounded": round(fte_rounded, 4),
                 "source_calls": source_calls_by_hour.get(hour, []),
             }
@@ -594,9 +594,9 @@ def _build_profile_from_history_dates_tx(
         "history_dates": [item.isoformat() for item in history_dates],
         "history_count": len(history_dates),
         "insufficient_history": len(history_dates) < 2,
-        "avg_daily_calls": round(avg_daily_calls, 4),
-        "aht_seconds": round(profile_aht_seconds, 4),
-        "daily_fte": round(daily_fte, 4),
+        "avg_daily_calls": avg_daily_calls,
+        "aht_seconds": profile_aht_seconds,
+        "daily_fte": daily_fte,
         "hourly_profile": hourly_profile,
     }
 
@@ -650,17 +650,17 @@ def _apply_weekly_aht_to_profile(profile: Dict[str, Any], weekly_aht_seconds: fl
         hourly_profile.append(
             {
                 **row,
-                "aht_seconds": round(weekly_aht_seconds, 4),
-                "workload_minutes": round(workload_minutes, 4),
-                "effective_fte_minutes": round(effective_minutes, 4),
-                "fte": round(fte, 4),
+                "aht_seconds": weekly_aht_seconds,
+                "workload_minutes": workload_minutes,
+                "effective_fte_minutes": effective_minutes,
+                "fte": fte,
                 "fte_rounded": round(fte_rounded, 4),
             }
         )
     return {
         **profile,
-        "forecast_aht_seconds": round(weekly_aht_seconds, 4),
-        "daily_fte": round(daily_fte, 4),
+        "forecast_aht_seconds": weekly_aht_seconds,
+        "daily_fte": daily_fte,
         "hourly_profile": hourly_profile,
     }
 
@@ -676,6 +676,54 @@ def _compute_week_forecast_profiles_tx(cursor, target_week_start, settings: Dict
         {**WEEKDAYS_RU[index], **_apply_weekly_aht_to_profile(profile, weekly_aht_seconds, settings)}
         for index, profile in enumerate(base_profiles)
     ]
+
+
+def _build_week_forecast_payload(target_week_start, profiles: List[Dict[str, Any]], settings: Dict[str, Any]) -> Dict[str, Any]:
+    weekly_aht_seconds = _weekly_aht_from_profiles(profiles)
+    weekly_totals = _weekly_totals(profiles, settings)
+    effective_minutes = 60 * settings["occ"] * settings["ur"]
+    days = []
+    for profile in profiles:
+        weekday = int(profile.get("weekday", 0))
+        hourly_forecast = []
+        for row in profile.get("hourly_profile", []):
+            hourly_forecast.append(
+                {
+                    **row,
+                    "forecast_calls": _to_float(row.get("avg_calls")),
+                    "forecast_aht_seconds": _to_float(row.get("aht_seconds")),
+                    "forecast_workload_minutes": _to_float(row.get("workload_minutes")),
+                    "forecast_fte": _to_float(row.get("fte")),
+                }
+            )
+        days.append(
+            {
+                **profile,
+                "forecast_date": (target_week_start + timedelta(days=weekday)).isoformat(),
+                "forecast_calls": _to_float(profile.get("avg_daily_calls")),
+                "forecast_aht_seconds": weekly_aht_seconds,
+                "forecast_workload_minutes": sum(_to_float(row.get("workload_minutes")) for row in profile.get("hourly_profile", [])),
+                "forecast_daily_fte": _to_float(profile.get("daily_fte")),
+                "operators_equivalent": _to_float(profile.get("daily_fte")) / 8,
+                "hourly_forecast": hourly_forecast,
+            }
+        )
+    return {
+        "week_start": target_week_start.isoformat(),
+        "week_end": (target_week_start + timedelta(days=6)).isoformat(),
+        "days": days,
+        "weeklyAhtSeconds": weekly_aht_seconds,
+        "answerRate": settings["answer_rate"],
+        "occ": settings["occ"],
+        "ur": settings["ur"],
+        "shrinkage": settings["shrinkage_coeff"],
+        "weeklyHours": settings["weekly_hours_per_operator"],
+        "effectiveMinutes": effective_minutes,
+        "weeklyFteHours": weekly_totals["weekly_fte_hours"],
+        "baseOperators": weekly_totals["base_operators"],
+        "operatorsWithShrinkage": weekly_totals["operators_with_shrinkage"],
+        "operatorsRounded": weekly_totals["operators_rounded"],
+    }
 
 
 def _compute_historical_forecast_profile_for_day_tx(cursor, report_date, settings: Dict[str, Any]) -> Dict[str, Any]:
@@ -923,7 +971,9 @@ def get_resource_overview(db, date_from: Optional[str] = None, date_to: Optional
             cursor.execute("SELECT CURRENT_DATE")
             as_of_date = cursor.fetchone()[0]
         _refresh_all_historical_forecasts_tx(cursor, settings)
+        next_week_start = _next_week_start_date(as_of_date)
         profiles = _fetch_latest_profiles_tx(cursor, as_of_date, settings)
+        next_week_forecast = _build_week_forecast_payload(next_week_start, profiles, settings)
 
         where = []
         params = []
@@ -973,6 +1023,7 @@ def get_resource_overview(db, date_from: Optional[str] = None, date_to: Optional
         "weekdays": WEEKDAYS_RU,
         "profiles": _json_safe(profiles),
         "weekly_totals": _weekly_totals(profiles, settings),
+        "next_week_forecast": _json_safe(next_week_forecast),
         "history": history,
     }
 
