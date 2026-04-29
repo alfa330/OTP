@@ -2413,10 +2413,7 @@ def api_resource_fte_upload():
     if guard_response is not None:
         return guard_response, guard_status
     try:
-        report_date = (request.form.get('report_date') or request.form.get('date') or '').strip()
         file_storage = request.files.get('file')
-        if not report_date:
-            return jsonify({"error": "report_date is required"}), 400
         if not file_storage:
             return jsonify({"error": "CSV file is required"}), 400
         filename = secure_filename(file_storage.filename or 'resource_report.csv')
@@ -2425,7 +2422,7 @@ def api_resource_fte_upload():
         content = file_storage.read()
         if not content:
             return jsonify({"error": "CSV file is empty"}), 400
-        payload = import_resource_csv(db, report_date, content, filename, requester_id)
+        payload = import_resource_csv(db, content, filename, requester_id)
         return jsonify({"status": "success", **payload}), 200
     except Exception as error:
         return _resource_fte_error_response(error)

@@ -626,7 +626,6 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
   const [selectedDay, setSelectedDay] = useState(null);
   const [dateFrom, setDateFrom] = useState(monthStartIso);
   const [dateTo, setDateTo] = useState(todayIso);
-  const [uploadDate, setUploadDate] = useState(todayIso);
   const [uploadFile, setUploadFile] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
@@ -967,22 +966,22 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
 
   const handleUpload = async (event) => {
     event.preventDefault();
-    if (!uploadFile || !uploadDate) {
-      notify('Выберите дату и CSV-файл', 'error');
+    if (!uploadFile) {
+      notify('Выберите CSV-файл', 'error');
       return;
     }
     const formData = new FormData();
-    formData.append('report_date', uploadDate);
     formData.append('file', uploadFile);
     setIsUploading(true);
     try {
       const response = await axios.post(`${apiRoot}/api/resource_fte/upload`, formData, {
         headers: buildHeaders(),
       });
-      notify('Отчет загружен и пересчитан');
+      const uploadedDaysCount = Number(response.data?.uploaded_days_count || 0);
+      notify(uploadedDaysCount > 1 ? `Загружено дней: ${uploadedDaysCount}` : 'Отчет загружен и пересчитан');
       setUploadFile(null);
       if (fileInputRef.current) fileInputRef.current.value = '';
-      setSelectedDate(response.data?.report_date || uploadDate);
+      setSelectedDate(response.data?.report_date || '');
       setIsUploadModalOpen(false);
       await fetchOverview();
     } catch (error) {
@@ -1041,7 +1040,6 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
   const forecastHistoryWeeks = nextWeekForecast.history_weeks || getForecastHistoryWeeks(selectedForecastWeekStart);
   const forecastWeekComplete = Boolean(nextWeekForecast.historyComplete) ||
     isForecastWeekHistoryComplete(nextWeekForecast.week_start || selectedForecastWeekStart, loadedReportDateSet);
-  const uploadDateAlreadyLoaded = loadedReportDates.includes(uploadDate);
   const selectedFileName = uploadFile?.name || 'Файл не выбран';
   const selectedDirectionIds = (settingsDraft?.selected_direction_ids || []).map((item) => Number(item)).filter(Boolean);
   const selectedDirectionSet = new Set(selectedDirectionIds);
@@ -1079,18 +1077,21 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
               />
             </div>
             <div className="w-full sm:w-[240px]">
-              <CalendarPicker
-                label="Загрузить отчет"
-                value={uploadDate}
-                onChange={(date) => {
-                  setUploadDate(date);
+              <button
+                type="button"
+                onClick={() => {
                   setUploadFile(null);
                   if (fileInputRef.current) fileInputRef.current.value = '';
                   setIsUploadModalOpen(true);
                 }}
-                loadedDates={loadedReportDates}
-                hint="выберите день"
-              />
+                className="flex h-14 w-full items-center justify-between gap-3 rounded-xl border-2 border-slate-200 bg-white px-4 text-left text-sm shadow-sm transition hover:border-slate-300 hover:bg-slate-50"
+              >
+                <span className="min-w-0">
+                  <span className="block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Загрузка</span>
+                  <span className="block truncate font-semibold text-slate-900">CSV по датам</span>
+                </span>
+                <UploadCloud size={17} className="shrink-0 text-blue-600" />
+              </button>
             </div>
             <button
               type="button"
@@ -1113,7 +1114,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                   <UploadCloud size={19} className="text-blue-600" />
                   Загрузка отчета
                 </div>
-                <p className="mt-1 text-sm text-slate-500">Дата выбрана в календаре. Приложите CSV-отчет за 24 часа.</p>
+                <p className="mt-1 text-sm text-slate-500">Загрузите CSV, где каждая строка содержит дату и час. Система сама обновит все даты из файла.</p>
               </div>
               <button
                 type="button"
@@ -1131,20 +1132,18 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
             <div className="mt-6 rounded-xl border-2 border-slate-200 bg-slate-50 px-4 py-5">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div>
-                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Дата отчета</div>
-                  <div className="mt-1 text-xl font-semibold text-slate-950">{formatDate(uploadDate)}</div>
+                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Формат файла</div>
+                  <div className="mt-1 text-xl font-semibold text-slate-950">Дата + час</div>
                 </div>
-                <div className={`inline-flex w-fit items-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold ${
-                  uploadDateAlreadyLoaded ? 'bg-emerald-50 text-emerald-700' : 'bg-white text-slate-600'
-                }`}>
-                  {uploadDateAlreadyLoaded ? <CheckCircle2 size={14} /> : <CalendarDays size={14} />}
-                  {uploadDateAlreadyLoaded ? 'Отчет уже есть, можно обновить' : 'Новая дата отчета'}
+                <div className="inline-flex w-fit items-center gap-2 rounded-lg bg-white px-3 py-2 text-xs font-semibold text-slate-600">
+                  <CalendarDays size={14} />
+                  Старый формат без колонки Дата не принимается
                 </div>
               </div>
             </div>
 
             <div className="mt-4">
-              <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">CSV-отчет за 24 часа</div>
+              <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">CSV-отчет за период</div>
               <div className="flex min-h-20 items-center justify-between gap-3 rounded-xl border-2 border-dashed border-slate-300 bg-slate-50 px-4 py-5">
                 <div className="min-w-0">
                   <div className="truncate text-sm font-semibold text-slate-900">{selectedFileName}</div>
@@ -1186,7 +1185,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                 className="inline-flex h-12 items-center justify-center gap-2 rounded-xl bg-blue-600 px-5 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300"
               >
                 <FileUp size={16} />
-                {isUploading ? 'Загрузка...' : uploadDateAlreadyLoaded ? 'Обновить отчет' : 'Загрузить отчет'}
+                {isUploading ? 'Загрузка...' : 'Загрузить отчет'}
               </button>
             </div>
           </form>
