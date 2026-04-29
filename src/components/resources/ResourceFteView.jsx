@@ -741,7 +741,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
           lost: Number(item.total_lost || 0),
           lossRate: Number(item.no_answer_rate || 0) * 100,
           forecastFte: Number(item.forecast_fte_total || 0),
-          actualFte: Number(item.actual_fte_total || 0),
+          actualFte: Number(item.actual_report_fte_total || 0),
         })),
     [overview?.history],
   );
@@ -767,7 +767,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
   const overviewPeriodSummary = useMemo(() => {
     const rows = overview?.history || [];
     const forecastFteTotal = rows.reduce((sum, row) => sum + Number(row.forecast_fte_total || 0), 0);
-    const actualFteTotal = rows.reduce((sum, row) => sum + Number(row.actual_fte_total || 0), 0);
+    const actualFteTotal = rows.reduce((sum, row) => sum + Number(row.actual_report_fte_total || 0), 0);
     return {
       days: rows.length,
       forecastFteTotal,
@@ -1236,7 +1236,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
               />
             )}
             {displayOptions.metricWeeklyFte && (
-              <StatCard icon={Users} label="Факт FTE периода" value={formatNumber(overviewPeriodSummary.actualFteTotal, 1)} hint="Сумма фактических смен по загруженным дням" tone="emerald" />
+              <StatCard icon={Users} label="Факт FTE периода" value={formatNumber(overviewPeriodSummary.actualFteTotal, 1)} hint="Из разговорной нагрузки отчетов, без смен" tone="emerald" />
             )}
             {displayOptions.metricBaseOperators && (
               <StatCard
@@ -1277,7 +1277,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                     <YAxis yAxisId="left" tick={{ fontSize: 11 }} />
                     <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} />
                     <Tooltip formatter={(value, name) => {
-                      const labelMap = { calls: 'Звонки', lost: 'Потеряно', lossRate: 'Доля потерь', actualFte: 'Факт FTE', forecastFte: 'Прогноз FTE' };
+                      const labelMap = { calls: 'Звонки', lost: 'Потеряно', lossRate: 'Доля потерь', actualFte: 'Факт FTE из отчета', forecastFte: 'Прогноз FTE' };
                       return [name === 'lossRate' ? `${formatNumber(value, 1)}%` : formatNumber(value, name === 'calls' || name === 'lost' ? 0 : 2), labelMap[name] || name];
                     }} />
                     {displayOptions.chartCalls && <Bar yAxisId="left" dataKey="calls" fill="#bfdbfe" radius={[4, 4, 0, 0]} />}

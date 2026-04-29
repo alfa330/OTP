@@ -1136,14 +1136,21 @@ def get_resource_overview(
             where.append("s.report_date <= %s")
             params.append(_parse_report_date(date_to))
         where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+        effective_minutes = 60 * settings["occ"] * settings["ur"]
         cursor.execute(
             f"""
             SELECT s.report_date, s.weekday, s.total_received, s.total_accepted,
                    s.total_lost, s.no_answer_rate, s.forecast_fte_total,
                    s.planned_fte_total, s.actual_fte_total,
-                   s.fact_forecast_delta_total, u.filename, u.updated_at
+                   s.fact_forecast_delta_total, u.filename, u.updated_at,
+                   COALESCE(h.actual_talk_time_seconds, 0)
             FROM daily_resource_summary s
             LEFT JOIN raw_resource_uploads u ON u.report_date = s.report_date
+            LEFT JOIN (
+                SELECT report_date, SUM(talk_time_seconds) AS actual_talk_time_seconds
+                FROM daily_resource_hours
+                GROUP BY report_date
+            ) h ON h.report_date = s.report_date
             {where_sql}
             ORDER BY s.report_date DESC
             LIMIT 120
@@ -1165,6 +1172,8 @@ def get_resource_overview(
                 "fact_forecast_delta_total": _to_float(row[9]),
                 "filename": row[10],
                 "updated_at": row[11].isoformat() if row[11] else None,
+                "actual_report_fte_total": (_to_float(row[12]) / 60 / effective_minutes) if effective_minutes > 0 else 0.0,
+                "actual_report_workload_minutes": _to_float(row[12]) / 60,
             }
             for row in cursor.fetchall()
         ]
