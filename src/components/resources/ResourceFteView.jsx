@@ -27,11 +27,13 @@ import {
 import {
   Bar,
   CartesianGrid,
+  Cell,
   ComposedChart,
   Line,
   LineChart,
   Area,
   AreaChart,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -116,6 +118,13 @@ const addDaysIso = (iso, days) => {
   const nextMonth = String(date.getMonth() + 1).padStart(2, '0');
   const nextDay = String(date.getDate()).padStart(2, '0');
   return `${nextYear}-${nextMonth}-${nextDay}`;
+};
+
+const hourFromChartLabel = (label) => {
+  const match = String(label || '').match(/^(\d{1,2})/);
+  if (!match) return null;
+  const hour = Number(match[1]);
+  return Number.isFinite(hour) ? hour : null;
 };
 
 const getWeekStartIso = (iso) => {
@@ -671,6 +680,8 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
   const [selectedForecastWeekStart, setSelectedForecastWeekStart] = useState(() => getNextWeekStartIso());
   const [selectedForecastWeekday, setSelectedForecastWeekday] = useState(0);
   const [showForecastActualLoad, setShowForecastActualLoad] = useState(false);
+  const [hoveredForecastHour, setHoveredForecastHour] = useState(null);
+  const [pinnedForecastHour, setPinnedForecastHour] = useState(null);
   const [loadedDateCache, setLoadedDateCache] = useState([]);
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
   const userId = user?.id || '';
@@ -902,6 +913,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
   const selectedForecastHourlyData = useMemo(
     () =>
       (selectedForecastDay?.hourly_forecast || []).map((row) => ({
+        hourNumber: Number(row.hour),
         hour: `${String(row.hour).padStart(2, '0')}:00`,
         calls: Number(row.forecast_calls || 0),
         fte: Number(row.forecast_fte || 0),
@@ -918,6 +930,60 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
         .sort((a, b) => Number(b.forecast_fte || 0) - Number(a.forecast_fte || 0))
         .slice(0, 5),
     [selectedForecastDay],
+  );
+
+  const todayValue = todayIso();
+  const selectedForecastHasActualLoad = Boolean(
+    selectedForecastDay?.has_actual_report && selectedForecastDay?.forecast_date <= todayValue,
+  );
+  const forecastActualLoadAvailable = (nextWeekForecast.days || []).some(
+    (day) => day?.has_actual_report && day?.forecast_date <= todayValue,
+  );
+  const activeForecastHour = hoveredForecastHour ?? pinnedForecastHour;
+  const activeForecastHourLabel = activeForecastHour !== null ? `${String(activeForecastHour).padStart(2, '0')}:00` : null;
+  useEffect(() => {
+    setHoveredForecastHour(null);
+    setPinnedForecastHour(null);
+  }, [selectedForecastDay?.forecast_date]);
+
+  const hoverForecastSlice = useCallback((label) => {
+    const hour = hourFromChartLabel(label);
+    setHoveredForecastHour(hour);
+  }, []);
+
+  const togglePinnedForecastSlice = useCallback((labelOrHour) => {
+    const hour = typeof labelOrHour === 'number' ? labelOrHour : hourFromChartLabel(labelOrHour);
+    if (hour === null) return;
+    setPinnedForecastHour((current) => (Number(current) === Number(hour) ? null : hour));
+  }, []);
+
+  const ForecastHourlyTooltip = useCallback(
+    ({ active, label }) => {
+      if (!active) return null;
+      const hour = hourFromChartLabel(label);
+      const row = (selectedForecastDay?.hourly_forecast || []).find((item) => Number(item.hour) === Number(hour));
+      if (!row) return null;
+      return (
+        <div className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs shadow-lg">
+          <div className="mb-2 font-semibold text-slate-900">{String(row.hour).padStart(2, '0')}:00</div>
+          <div className="space-y-1 text-slate-600">
+            <div className="flex justify-between gap-6"><span>Прогноз звонков</span><b className="text-slate-900">{formatNumber(row.forecast_calls, 1)}</b></div>
+            <div className="flex justify-between gap-6"><span>Прогноз минут</span><b className="text-blue-700">{formatNumber(row.forecast_workload_minutes, 1)}</b></div>
+            <div className="flex justify-between gap-6"><span>Прогноз FTE</span><b className="text-blue-700">{formatNumber(row.forecast_fte, 2)}</b></div>
+            {showForecastActualLoad && selectedForecastHasActualLoad ? (
+              <>
+                <div className="flex justify-between gap-6"><span>Факт минут</span><b className="text-emerald-700">{row.has_actual_report ? formatNumber(row.actual_workload_minutes, 1) : '-'}</b></div>
+                <div className="flex justify-between gap-6"><span>FTE из отчета</span><b className="text-emerald-700">{row.has_actual_report ? formatNumber(row.actual_report_fte, 2) : '-'}</b></div>
+              </>
+            ) : null}
+          </div>
+          {pinnedForecastHour !== null && Number(pinnedForecastHour) === Number(row.hour) ? (
+            <div className="mt-2 rounded bg-slate-100 px-2 py-1 font-medium text-slate-600">Срез закреплен</div>
+          ) : null}
+        </div>
+      );
+    },
+    [pinnedForecastHour, selectedForecastDay?.hourly_forecast, selectedForecastHasActualLoad, showForecastActualLoad],
   );
 
   const visibleMetricCount = [
@@ -1052,13 +1118,6 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
   const selectedFileName = uploadFile?.name || 'Файл не выбран';
   const selectedDirectionIds = (settingsDraft?.selected_direction_ids || []).map((item) => Number(item)).filter(Boolean);
   const selectedDirectionSet = new Set(selectedDirectionIds);
-  const todayValue = todayIso();
-  const selectedForecastHasActualLoad = Boolean(
-    selectedForecastDay?.has_actual_report && selectedForecastDay?.forecast_date <= todayValue,
-  );
-  const forecastActualLoadAvailable = (nextWeekForecast.days || []).some(
-    (day) => day?.has_actual_report && day?.forecast_date <= todayValue,
-  );
 
   const toggleResourceDirection = (directionId, checked) => {
     setSettingsDraft((current) => {
@@ -1746,31 +1805,35 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
 
                           <div className="mt-5 h-72">
                             <ResponsiveContainer width="100%" height="100%">
-                              <ComposedChart data={selectedForecastHourlyData} margin={{ top: 10, right: 18, left: 0, bottom: 0 }}>
+                              <ComposedChart
+                                data={selectedForecastHourlyData}
+                                margin={{ top: 10, right: 18, left: 0, bottom: 0 }}
+                                onMouseMove={(state) => hoverForecastSlice(state?.activeLabel)}
+                                onMouseLeave={() => setHoveredForecastHour(null)}
+                                onClick={(state) => togglePinnedForecastSlice(state?.activeLabel)}
+                              >
                                 <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                                 <XAxis dataKey="hour" tick={{ fontSize: 11 }} interval={2} />
                                 <YAxis yAxisId="left" tick={{ fontSize: 11 }} />
                                 <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} />
-                                <Tooltip
-                                  formatter={(value, name) => [
-                                    formatNumber(value, name === 'calls' ? 0 : 2),
-                                    name === 'calls'
-                                      ? 'Прогноз звонков'
-                                      : name === 'workload'
-                                        ? 'Прогноз минут'
-                                        : name === 'actualWorkload'
-                                          ? 'Факт минут'
-                                          : name === 'actualFte'
-                                            ? 'FTE из отчета'
-                                            : 'Прогноз FTE',
-                                  ]}
-                                />
-                                <Bar yAxisId="left" dataKey="calls" fill="#bfdbfe" radius={[4, 4, 0, 0]} />
-                                <Line yAxisId="right" type="monotone" dataKey="fte" stroke="#2563eb" strokeWidth={2} dot={false} />
+                                <Tooltip content={<ForecastHourlyTooltip />} />
+                                {activeForecastHourLabel ? (
+                                  <ReferenceLine yAxisId="left" x={activeForecastHourLabel} stroke={pinnedForecastHour !== null ? '#0f172a' : '#64748b'} strokeDasharray="4 4" />
+                                ) : null}
+                                <Bar yAxisId="left" dataKey="calls" fill="#bfdbfe" radius={[4, 4, 0, 0]}>
+                                  {selectedForecastHourlyData.map((item) => (
+                                    <Cell
+                                      key={item.hour}
+                                      fill={activeForecastHour !== null && Number(item.hourNumber) === Number(activeForecastHour) ? '#60a5fa' : '#bfdbfe'}
+                                    />
+                                  ))}
+                                </Bar>
+                                <Line yAxisId="left" type="monotone" dataKey="workload" stroke="#3b82f6" strokeWidth={2} dot={false} activeDot={{ r: 5 }} />
+                                <Line yAxisId="right" type="monotone" dataKey="fte" stroke="#2563eb" strokeWidth={2} dot={false} activeDot={{ r: 5 }} />
                                 {showForecastActualLoad && selectedForecastHasActualLoad && (
                                   <>
-                                    <Line yAxisId="left" type="monotone" dataKey="actualWorkload" stroke="#10b981" strokeWidth={2} dot={false} />
-                                    <Line yAxisId="right" type="monotone" dataKey="actualFte" stroke="#059669" strokeWidth={2} strokeDasharray="5 4" dot={false} />
+                                    <Line yAxisId="left" type="monotone" dataKey="actualWorkload" stroke="#10b981" strokeWidth={2} dot={false} activeDot={{ r: 5 }} />
+                                    <Line yAxisId="right" type="monotone" dataKey="actualFte" stroke="#059669" strokeWidth={2} strokeDasharray="5 4" dot={false} activeDot={{ r: 5 }} />
                                   </>
                                 )}
                               </ComposedChart>
@@ -1802,51 +1865,77 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                                 </tr>
                               </thead>
                               <tbody className="divide-y divide-slate-100 bg-white">
-                                {(selectedForecastDay.hourly_forecast || []).map((row) => (
-                                  <tr key={row.hour} className="hover:bg-slate-50/60">
-                                    <td className="px-3 py-2 font-medium text-slate-900">{String(row.hour).padStart(2, '0')}:00</td>
-                                    <td className="px-3 py-2 text-right">
-                                      <span
-                                        title={formatSourceCallsTooltip(row.source_calls)}
-                                        className="inline-flex cursor-help items-center justify-end rounded-md border border-transparent px-2 py-1 font-medium text-slate-900 transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700"
-                                      >
-                                        {formatNumber(row.forecast_calls, 1)}
-                                      </span>
-                                    </td>
-                                    <td className="px-3 py-2 text-right">
-                                      <span
-                                        title={formatAhtTooltip(row.forecast_aht_seconds)}
-                                        className="inline-flex cursor-help items-center justify-end rounded-md border border-transparent px-2 py-1 transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700"
-                                      >
-                                        {formatSeconds(row.forecast_aht_seconds)}
-                                      </span>
-                                    </td>
-                                    <td className="px-3 py-2 text-right">
-                                      <span
-                                        title={formatWorkloadTooltip(row, nextWeekForecast.answerRate)}
-                                        className="inline-flex cursor-help items-center justify-end rounded-md border border-transparent px-2 py-1 transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700"
-                                      >
-                                        {formatNumber(row.forecast_workload_minutes, 1)}
-                                      </span>
-                                    </td>
-                                    <td className="px-3 py-2 text-right font-semibold text-blue-700">{formatNumber(row.forecast_fte, 2)}</td>
-                                    {showForecastActualLoad && selectedForecastHasActualLoad ? (
-                                      <>
-                                        <td className="px-3 py-2 text-right">
-                                          <span
-                                            title={formatActualLoadTooltip(row, nextWeekForecast.effectiveMinutes)}
-                                            className="inline-flex cursor-help items-center justify-end rounded-md border border-transparent px-2 py-1 font-medium text-emerald-700 transition hover:border-emerald-200 hover:bg-emerald-50"
-                                          >
-                                            {row.has_actual_report ? formatNumber(row.actual_workload_minutes, 1) : '-'}
-                                          </span>
-                                        </td>
-                                        <td className="px-3 py-2 text-right font-semibold text-emerald-700">
-                                          {row.has_actual_report ? formatNumber(row.actual_report_fte, 2) : '-'}
-                                        </td>
-                                      </>
-                                    ) : null}
-                                  </tr>
-                                ))}
+                                {(selectedForecastDay.hourly_forecast || []).map((row) => {
+                                  const rowIsActive = activeForecastHour !== null && Number(row.hour) === Number(activeForecastHour);
+                                  const rowIsPinned = pinnedForecastHour !== null && Number(row.hour) === Number(pinnedForecastHour);
+                                  return (
+                                    <tr
+                                      key={row.hour}
+                                      onMouseEnter={() => setHoveredForecastHour(Number(row.hour))}
+                                      onMouseLeave={() => setHoveredForecastHour(null)}
+                                      onClick={() => togglePinnedForecastSlice(Number(row.hour))}
+                                      className={`cursor-pointer transition ${
+                                        rowIsPinned
+                                          ? 'bg-slate-100 ring-1 ring-inset ring-slate-300'
+                                          : rowIsActive
+                                            ? 'bg-blue-50/80'
+                                            : 'hover:bg-slate-50/60'
+                                      }`}
+                                    >
+                                      <td className="px-3 py-2 font-medium text-slate-900">
+                                        <span className={rowIsPinned ? 'rounded-md bg-slate-900 px-2 py-1 text-white' : ''}>{String(row.hour).padStart(2, '0')}:00</span>
+                                      </td>
+                                      <td className="px-3 py-2 text-right">
+                                        <span
+                                          title={formatSourceCallsTooltip(row.source_calls)}
+                                          className={`inline-flex cursor-help items-center justify-end rounded-md border px-2 py-1 font-medium transition ${
+                                            rowIsActive ? 'border-blue-200 bg-blue-50 text-blue-700' : 'border-transparent text-slate-900 hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700'
+                                          }`}
+                                        >
+                                          {formatNumber(row.forecast_calls, 1)}
+                                        </span>
+                                      </td>
+                                      <td className="px-3 py-2 text-right">
+                                        <span
+                                          title={formatAhtTooltip(row.forecast_aht_seconds)}
+                                          className={`inline-flex cursor-help items-center justify-end rounded-md border px-2 py-1 transition ${
+                                            rowIsActive ? 'border-blue-200 bg-blue-50 text-blue-700' : 'border-transparent hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700'
+                                          }`}
+                                        >
+                                          {formatSeconds(row.forecast_aht_seconds)}
+                                        </span>
+                                      </td>
+                                      <td className="px-3 py-2 text-right">
+                                        <span
+                                          title={formatWorkloadTooltip(row, nextWeekForecast.answerRate)}
+                                          className={`inline-flex cursor-help items-center justify-end rounded-md border px-2 py-1 transition ${
+                                            rowIsActive ? 'border-blue-200 bg-blue-50 text-blue-700' : 'border-transparent hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700'
+                                          }`}
+                                        >
+                                          {formatNumber(row.forecast_workload_minutes, 1)}
+                                        </span>
+                                      </td>
+                                      <td className="px-3 py-2 text-right font-semibold text-blue-700">{formatNumber(row.forecast_fte, 2)}</td>
+                                      {showForecastActualLoad && selectedForecastHasActualLoad ? (
+                                        <>
+                                          <td className="px-3 py-2 text-right">
+                                            <span
+                                              title={formatActualLoadTooltip(row, nextWeekForecast.effectiveMinutes)}
+                                              className={`inline-flex cursor-help items-center justify-end rounded-md border px-2 py-1 font-medium text-emerald-700 transition ${
+                                                rowIsActive ? 'border-emerald-200 bg-emerald-50' : 'border-transparent hover:border-emerald-200 hover:bg-emerald-50'
+                                              }`}
+                                            >
+                                              {row.has_actual_report ? formatNumber(row.actual_workload_minutes, 1) : '-'}
+                                            </span>
+                                          </td>
+                                          <td className="px-3 py-2 text-right font-semibold text-emerald-700">
+                                            {row.has_actual_report ? formatNumber(row.actual_report_fte, 2) : '-'}
+                                          </td>
+                                        </>
+                                      ) : null}
+                                    </tr>
+                                  );
+                                })}
                               </tbody>
                             </table>
                           </div>
