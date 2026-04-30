@@ -58,6 +58,25 @@ ROLE_HIERARCHY = {
     'super_admin': 50
 }
 
+CALCULATION_MODEL_OPERATOR = 'operator'
+CALCULATION_MODEL_CHAT_MANAGER = 'chat_manager'
+CALCULATION_MODEL_ALLOWED = {
+    CALCULATION_MODEL_OPERATOR,
+    CALCULATION_MODEL_CHAT_MANAGER
+}
+CALCULATION_MODEL_DESCRIPTIONS = {
+    CALCULATION_MODEL_OPERATOR: {
+        'code': CALCULATION_MODEL_OPERATOR,
+        'name': 'Операторская модель',
+        'description': 'Звонковая модель: рабочие часы по операторским статусам, звонки в час, качество, стандартная формула зарплаты.'
+    },
+    CALCULATION_MODEL_CHAT_MANAGER: {
+        'code': CALCULATION_MODEL_CHAT_MANAGER,
+        'name': 'Модель чат-менеджера',
+        'description': 'Чат-модель: рабочие часы по Chat2Desk-статусам, чаты в час, средняя оценка, время ответа, формула зарплаты чат-менеджера.'
+    }
+}
+
 
 def normalize_role_value(role_value: Optional[str]) -> str:
     role_norm = str(role_value or '').strip().lower()
@@ -78,6 +97,26 @@ def role_is_any(role_value: Optional[str], allowed_roles: List[str]) -> bool:
         return False
     allowed = {normalize_role_value(item) for item in (allowed_roles or [])}
     return role_norm in allowed
+
+
+def _normalize_direction_name_key(direction_name: Optional[str]) -> str:
+    return ' '.join(str(direction_name or '').strip().lower().split())
+
+
+def normalize_calculation_model_code(model_code: Optional[str], direction_name: Optional[str] = None) -> str:
+    code = str(model_code or '').strip().lower()
+    if code in CALCULATION_MODEL_ALLOWED:
+        return code
+    if _normalize_direction_name_key(direction_name) in ('чат менеджер', 'chat manager'):
+        return CALCULATION_MODEL_CHAT_MANAGER
+    return CALCULATION_MODEL_OPERATOR
+
+
+def get_calculation_model_catalog() -> List[Dict[str, str]]:
+    return [
+        dict(CALCULATION_MODEL_DESCRIPTIONS[CALCULATION_MODEL_OPERATOR]),
+        dict(CALCULATION_MODEL_DESCRIPTIONS[CALCULATION_MODEL_CHAT_MANAGER]),
+    ]
 
 # Вставьте/адаптируйте этот helper в ваш модуль
 def _normalize_phone(phone: Optional[str]) -> Optional[str]:
@@ -310,6 +349,13 @@ SCHEDULE_AUTO_TALK_STATUS_KEYS = {'занят', 'занята'}
 SCHEDULE_AUTO_BREAK_STATUS_KEYS = {'перерыв', 'авто'}
 SCHEDULE_AUTO_NO_PHONE_STATUS_KEY = 'без телефона'
 SCHEDULE_AUTO_TRAINING_STATUS_KEY = 'тренинг'
+CHAT_MANAGER_WORK_STATUS_KEYS = {'online', 'holiday', 'онлайн', 'закрытие чатов'}
+CHAT_MANAGER_BREAK_STATUS_KEYS = {'break', 'перерыв'}
+CHAT_MANAGER_NON_WORK_STATUS_KEYS = {'busy', 'занят', 'занята'}
+CHAT_MANAGER_TRAINING_STATUS_KEYS = {'study', 'training', 'тренинг'}
+CHAT_MANAGER_LOGIN_STATUS_KEYS = {'login', 'вход', 'подключение'}
+CHAT_MANAGER_LOGOUT_STATUS_KEYS = {'logout', 'выход', 'отключение'}
+CHAT_MANAGER_ACTION_STATUS_KEYS = {'transfer chat', 'передача чата'}
 SCHEDULE_STATUS_KEY_LABELS = {
     'готов': 'Готов',
     'занят': 'Занят',
@@ -324,7 +370,15 @@ SCHEDULE_STATUS_KEY_LABELS = {
     'нет статуса': 'Нет статуса',
     'отключен': 'Отключен',
     'отключена': 'Отключена',
-    'отключено': 'Отключено'
+    'отключено': 'Отключено',
+    'online': 'Online',
+    'holiday': 'Закрытие чатов',
+    'break': 'Обеденный перерыв',
+    'busy': 'Busy',
+    'study': 'Тренинг',
+    'login': 'Вход в систему',
+    'logout': 'Выход из системы',
+    'transfer chat': 'Передача чата'
 }
 SCHEDULE_AUTO_FINE_RATE_PER_MINUTE = float(os.getenv('SCHEDULE_AUTO_FINE_RATE_PER_MINUTE', '50'))
 
@@ -498,11 +552,39 @@ class Database:
                     name VARCHAR(255) NOT NULL,
                     has_file_upload BOOLEAN NOT NULL DEFAULT TRUE,
                     criteria JSONB NOT NULL DEFAULT '[]',
+                    calculation_model_code VARCHAR(32) NOT NULL DEFAULT 'operator',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     is_active BOOLEAN NOT NULL DEFAULT TRUE,
                     version INTEGER NOT NULL DEFAULT 1,
                     previous_version_id INTEGER REFERENCES directions(id)
                 );
+            """)
+            cursor.execute("""
+                DO $$
+                DECLARE column_missing BOOLEAN;
+                BEGIN
+                    SELECT NOT EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_name = 'directions'
+                          AND column_name = 'calculation_model_code'
+                    ) INTO column_missing;
+
+                    IF column_missing THEN
+                        ALTER TABLE directions
+                            ADD COLUMN calculation_model_code VARCHAR(32) NOT NULL DEFAULT 'operator';
+
+                        UPDATE directions
+                        SET calculation_model_code = 'chat_manager'
+                        WHERE LOWER(TRIM(name)) IN ('чат менеджер', 'chat manager');
+                    END IF;
+                END $$;
+            """)
+            cursor.execute("""
+                UPDATE directions
+                SET calculation_model_code = 'operator'
+                WHERE calculation_model_code IS NULL
+                   OR calculation_model_code NOT IN ('operator', 'chat_manager');
             """)
 
             # Добавляем direction_id в users после создания directions
@@ -968,6 +1050,27 @@ class Database:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_daily_bonuses_daily_hours_id
                 ON daily_bonuses(daily_hours_id);
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS chat_manager_daily_metrics (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    day DATE NOT NULL,
+                    chats_count INTEGER NOT NULL DEFAULT 0,
+                    avg_score FLOAT,
+                    avg_response_time_seconds FLOAT,
+                    transfer_chat_count INTEGER NOT NULL DEFAULT 0,
+                    imported_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    source_batch_id UUID,
+                    raw_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(operator_id, day)
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_chat_manager_daily_metrics_operator_day
+                ON chat_manager_daily_metrics(operator_id, day);
             """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS operator_technical_issues (
@@ -1779,6 +1882,7 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_work_hours_month ON work_hours(month);
                 CREATE INDEX IF NOT EXISTS idx_directions_name ON directions(name);
                 CREATE INDEX IF NOT EXISTS idx_directions_is_active ON directions(is_active);
+                CREATE INDEX IF NOT EXISTS idx_directions_calculation_model ON directions(calculation_model_code);
                 CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
                 CREATE INDEX IF NOT EXISTS idx_users_supervisor_id ON users(supervisor_id);
                 CREATE INDEX IF NOT EXISTS idx_users_login ON users(login);
@@ -2599,7 +2703,7 @@ class Database:
         """Получить все направления из таблицы directions."""
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT id, name, has_file_upload, criteria, is_active
+                SELECT id, name, has_file_upload, criteria, is_active, calculation_model_code
                 FROM directions
                 WHERE is_active = TRUE  -- Added filter for performance
                 ORDER BY name
@@ -2610,7 +2714,9 @@ class Database:
                     "name": row[1],
                     "hasFileUpload": row[2],
                     "criteria": row[3],
-                    "isActive": row[4]
+                    "isActive": row[4],
+                    "calculationModelCode": normalize_calculation_model_code(row[5], row[1]),
+                    "calculation_model_code": normalize_calculation_model_code(row[5], row[1])
                 } for row in cursor.fetchall()
             ]
 
@@ -2895,6 +3001,192 @@ class Database:
 
         return result, totals
 
+    def _load_chat_manager_metrics_by_operator_day_tx(self, cursor, operator_ids, start_date, end_date):
+        op_ids = sorted({int(v) for v in (operator_ids or []) if v is not None})
+        result = {op_id: {} for op_id in op_ids}
+        totals = {
+            op_id: {
+                'chats_count': 0,
+                'transfer_chat_count': 0,
+                'avg_score': None,
+                'avg_response_time_seconds': None
+            }
+            for op_id in op_ids
+        }
+        if not op_ids:
+            return result, totals
+
+        cursor.execute(
+            """
+            SELECT
+                operator_id,
+                day,
+                COALESCE(chats_count, 0),
+                avg_score,
+                avg_response_time_seconds,
+                COALESCE(transfer_chat_count, 0)
+            FROM chat_manager_daily_metrics
+            WHERE operator_id = ANY(%s)
+              AND day >= %s
+              AND day <= %s
+            ORDER BY operator_id, day
+            """,
+            (op_ids, start_date, end_date)
+        )
+
+        score_acc = {op_id: {'sum': 0.0, 'count': 0} for op_id in op_ids}
+        response_acc = {op_id: {'sum': 0.0, 'count': 0} for op_id in op_ids}
+        for op_id, day_obj, chats_count, avg_score, avg_response_time_seconds, transfer_chat_count in cursor.fetchall() or []:
+            op_id_int = int(op_id)
+            if op_id_int not in result or day_obj is None:
+                continue
+            chats_int = max(0, int(chats_count or 0))
+            transfer_int = max(0, int(transfer_chat_count or 0))
+            payload = {
+                "date": day_obj.strftime('%Y-%m-%d'),
+                "chats_count": chats_int,
+                "avg_score": float(avg_score) if avg_score is not None else None,
+                "avg_response_time_seconds": float(avg_response_time_seconds) if avg_response_time_seconds is not None else None,
+                "avg_response_time_minutes": round(float(avg_response_time_seconds) / 60.0, 2) if avg_response_time_seconds is not None else None,
+                "transfer_chat_count": transfer_int
+            }
+            day_key = str(int(day_obj.day))
+            result.setdefault(op_id_int, {})[day_key] = payload
+            totals[op_id_int]['chats_count'] += chats_int
+            totals[op_id_int]['transfer_chat_count'] += transfer_int
+            if avg_score is not None:
+                score_acc[op_id_int]['sum'] += float(avg_score)
+                score_acc[op_id_int]['count'] += 1
+            if avg_response_time_seconds is not None:
+                response_acc[op_id_int]['sum'] += float(avg_response_time_seconds)
+                response_acc[op_id_int]['count'] += 1
+
+        for op_id in op_ids:
+            score_count = score_acc[op_id]['count']
+            response_count = response_acc[op_id]['count']
+            if score_count > 0:
+                totals[op_id]['avg_score'] = round(score_acc[op_id]['sum'] / score_count, 2)
+            if response_count > 0:
+                totals[op_id]['avg_response_time_seconds'] = round(response_acc[op_id]['sum'] / response_count, 2)
+
+        return result, totals
+
+    def save_chat_manager_daily_metrics(self, metrics, imported_by=None):
+        if not isinstance(metrics, list):
+            raise ValueError("metrics must be a list")
+
+        rows = []
+        batch_id = uuid.uuid4()
+        imported_by_id = int(imported_by) if imported_by is not None else None
+
+        for item in metrics:
+            if not isinstance(item, dict):
+                continue
+            try:
+                operator_id = int(item.get('operator_id'))
+            except Exception:
+                continue
+
+            day_raw = item.get('day') or item.get('date')
+            if isinstance(day_raw, date):
+                day_obj = day_raw
+            else:
+                try:
+                    day_obj = datetime.strptime(str(day_raw or '').strip(), '%Y-%m-%d').date()
+                except Exception:
+                    continue
+
+            def _optional_float(raw):
+                if raw in (None, ''):
+                    return None
+                try:
+                    value = float(str(raw).replace(',', '.'))
+                except Exception:
+                    return None
+                return value if math.isfinite(value) else None
+
+            def _optional_int(raw):
+                if raw in (None, ''):
+                    return 0
+                try:
+                    return max(0, int(round(float(str(raw).replace(',', '.')))))
+                except Exception:
+                    return 0
+
+            avg_response_seconds = _optional_float(
+                item.get('avg_response_time_seconds')
+                if item.get('avg_response_time_seconds') not in (None, '')
+                else item.get('response_time_seconds')
+            )
+            avg_response_minutes = _optional_float(
+                item.get('avg_response_time_minutes')
+                if item.get('avg_response_time_minutes') not in (None, '')
+                else item.get('response_time_minutes')
+            )
+            if avg_response_seconds is None and avg_response_minutes is not None:
+                avg_response_seconds = avg_response_minutes * 60.0
+
+            rows.append((
+                operator_id,
+                day_obj,
+                _optional_int(item.get('chats_count') if item.get('chats_count') not in (None, '') else item.get('chats')),
+                _optional_float(item.get('avg_score') if item.get('avg_score') not in (None, '') else item.get('score')),
+                avg_response_seconds,
+                _optional_int(item.get('transfer_chat_count') if item.get('transfer_chat_count') not in (None, '') else item.get('transfers')),
+                imported_by_id,
+                str(batch_id),
+                Json(item)
+            ))
+
+        if not rows:
+            return {'batch_id': str(batch_id), 'processed': 0}
+
+        with self._get_cursor() as cursor:
+            execute_values(
+                cursor,
+                """
+                INSERT INTO chat_manager_daily_metrics (
+                    operator_id,
+                    day,
+                    chats_count,
+                    avg_score,
+                    avg_response_time_seconds,
+                    transfer_chat_count,
+                    imported_by,
+                    source_batch_id,
+                    raw_payload
+                )
+                VALUES %s
+                ON CONFLICT (operator_id, day)
+                DO UPDATE SET
+                    chats_count = EXCLUDED.chats_count,
+                    avg_score = EXCLUDED.avg_score,
+                    avg_response_time_seconds = EXCLUDED.avg_response_time_seconds,
+                    transfer_chat_count = EXCLUDED.transfer_chat_count,
+                    imported_by = EXCLUDED.imported_by,
+                    source_batch_id = EXCLUDED.source_batch_id,
+                    raw_payload = EXCLUDED.raw_payload,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                rows,
+                page_size=2000
+            )
+
+            affected_months = sorted({(int(row[0]), row[1].strftime('%Y-%m')) for row in rows})
+            aggregations = {}
+            for operator_id, month_key in affected_months:
+                aggregations.setdefault(operator_id, {})[month_key] = self._aggregate_month_from_daily_tx(
+                    cursor,
+                    operator_id,
+                    month_key
+                )
+
+        return {
+            'batch_id': str(batch_id),
+            'processed': len(rows),
+            'aggregations': aggregations
+        }
+
     def get_daily_hours_for_operator_month(self, operator_id: int, month: str):
         """
         Возвращает daily_hours для одного оператора за месяц YYYY-MM,
@@ -3022,12 +3314,19 @@ class Database:
                 start_date=start,
                 end_date=end
             )
+            chat_metrics_by_operator, chat_totals_by_operator = self._load_chat_manager_metrics_by_operator_day_tx(
+                cursor=cursor,
+                operator_ids=[operator_id],
+                start_date=start,
+                end_date=end
+            )
 
             # 2) Получаем имя/ставку + данные work_hours одним LEFT JOIN запросом (включая fines)
             cursor.execute(
                 """
                 SELECT u.name, u.rate,
                     d.name as direction_name,
+                    d.calculation_model_code,
                     COALESCE(w.norm_hours, 0) AS norm_hours,
                     COALESCE(w.regular_hours, 0) AS regular_hours,
                     COALESCE(w.total_break_time, 0) AS total_break_time,
@@ -3051,28 +3350,55 @@ class Database:
         technical_issue_hours = float(technical_totals_by_operator.get(int(operator_id), 0.0)) if isinstance(technical_totals_by_operator, dict) else 0.0
         offline_activities_by_day = offline_map_by_operator.get(int(operator_id), {}) if isinstance(offline_map_by_operator, dict) else {}
         offline_activity_hours = float(offline_totals_by_operator.get(int(operator_id), 0.0)) if isinstance(offline_totals_by_operator, dict) else 0.0
+        chat_metrics_by_day = chat_metrics_by_operator.get(int(operator_id), {}) if isinstance(chat_metrics_by_operator, dict) else {}
+        chat_metric_totals = chat_totals_by_operator.get(int(operator_id), {}) if isinstance(chat_totals_by_operator, dict) else {}
 
         # default values if user / work_hours not found
         if row:
-            name, rate, direction_name, norm_hours, regular_hours, total_break_time, total_talk_time, \
+            name, rate, direction_name, calculation_model_raw, norm_hours, regular_hours, total_break_time, total_talk_time, \
                 total_calls, total_efficiency_hours, calls_per_hour, fines = row
             rate = float(rate) if rate is not None else 0.0
         else:
             name = None
             rate = 0.0
             direction_name = None
+            calculation_model_raw = None
             norm_hours = regular_hours = total_break_time = total_talk_time = 0.0
             total_calls = 0
             total_efficiency_hours = calls_per_hour = fines = 0.0
+        calculation_model_code = self._normalize_calculation_model_code(calculation_model_raw, direction_name)
+        if calculation_model_code == CALCULATION_MODEL_CHAT_MANAGER:
+            total_calls = int(chat_metric_totals.get("chats_count") or 0)
+            regular_hours_for_rate = max(0.0, float(regular_hours or 0.0))
+            calls_per_hour = (float(total_calls) / regular_hours_for_rate) if regular_hours_for_rate > 0 else 0.0
+            for day_key, metrics in (chat_metrics_by_day or {}).items():
+                entry = daily_map.setdefault(str(day_key), {
+                    "work_time": 0.0,
+                    "break_time": 0.0,
+                    "talk_time": 0.0,
+                    "calls": 0,
+                    "efficiency": 0.0,
+                    "fine_amount": 0.0,
+                    "fine_reason": None,
+                    "fine_comment": None,
+                    "fines": [],
+                    "bonuses": []
+                })
+                entry["chat_metrics"] = metrics
+                entry["calls"] = int(metrics.get("chats_count") or 0)
 
         operator_obj = {
             "operator_id": operator_id,
             "name": name,
             "direction": direction_name,
+            "calculation_model_code": calculation_model_code,
+            "calculationModelCode": calculation_model_code,
             "rate": rate,
             "norm_hours": float(norm_hours),
             "fines": float(fines),
             "daily": daily_map,
+            "chat_metrics_by_day": chat_metrics_by_day,
+            "chat_metrics": chat_metric_totals,
             "technical_issues_by_day": technical_issues_by_day,
             "technical_issue_hours": round(float(technical_issue_hours), 2),
             "offline_activities_by_day": offline_activities_by_day,
@@ -3084,6 +3410,9 @@ class Database:
                 "total_calls": int(total_calls),
                 "total_efficiency_hours": float(total_efficiency_hours),
                 "calls_per_hour": float(calls_per_hour),
+                "chat_avg_score": chat_metric_totals.get("avg_score"),
+                "chat_avg_response_time_seconds": chat_metric_totals.get("avg_response_time_seconds"),
+                "chat_transfer_count": int(chat_metric_totals.get("transfer_chat_count") or 0),
             },
         }
 
@@ -3111,6 +3440,7 @@ class Database:
             cursor.execute("""
                 SELECT u.id, u.name, u.rate, u.status, u.supervisor_id,
                     d.name as direction_name,
+                    d.calculation_model_code,
                     COALESCE(w.norm_hours, 0) as norm_hours,
                     COALESCE(w.regular_hours, 0) as regular_hours,
                     COALESCE(w.total_break_time, 0) as total_break_time,
@@ -3218,23 +3548,56 @@ class Database:
                 start_date=start,
                 end_date=end
             )
+            chat_metrics_by_operator, chat_totals_by_operator = self._load_chat_manager_metrics_by_operator_day_tx(
+                cursor=cursor,
+                operator_ids=op_ids,
+                start_date=start,
+                end_date=end
+            )
 
             # Сбор финального списка операторов
             operators = []
             for row in operator_rows:
-                (op_id, op_name, rate, status, sup_id, direction_name, norm_hours,
+                (op_id, op_name, rate, status, sup_id, direction_name, calculation_model_raw, norm_hours,
                 regular_hours, total_break_time, total_talk_time,
                 total_calls, total_efficiency_hours, calls_per_hour, fines) = row
+                calculation_model_code = self._normalize_calculation_model_code(calculation_model_raw, direction_name)
+                op_daily = daily_map.get(op_id, {})
+                chat_metrics_by_day = chat_metrics_by_operator.get(op_id, {}) if isinstance(chat_metrics_by_operator, dict) else {}
+                chat_metric_totals = chat_totals_by_operator.get(op_id, {}) if isinstance(chat_totals_by_operator, dict) else {}
+                if calculation_model_code == CALCULATION_MODEL_CHAT_MANAGER:
+                    total_calls = int(chat_metric_totals.get("chats_count") or 0)
+                    regular_hours_for_rate = max(0.0, float(regular_hours or 0.0))
+                    calls_per_hour = (float(total_calls) / regular_hours_for_rate) if regular_hours_for_rate > 0 else 0.0
+                    for day_key, metrics in (chat_metrics_by_day or {}).items():
+                        entry = op_daily.setdefault(str(day_key), {
+                            "work_time": 0.0,
+                            "break_time": 0.0,
+                            "talk_time": 0.0,
+                            "calls": 0,
+                            "efficiency": 0.0,
+                            "fine_amount": 0.0,
+                            "fine_reason": None,
+                            "fine_comment": None,
+                            "fines": [],
+                            "bonuses": []
+                        })
+                        entry["chat_metrics"] = metrics
+                        entry["calls"] = int(metrics.get("chats_count") or 0)
 
                 operators.append({
                     "operator_id": op_id,
                     "name": op_name,
                     "direction": direction_name,
+                    "calculation_model_code": calculation_model_code,
+                    "calculationModelCode": calculation_model_code,
                     "supervisor_id": sup_id,
                     "rate": float(rate) if rate is not None else 0.0,
                     "status": status,
                     "norm_hours": float(norm_hours) if norm_hours is not None else 0.0,
-                    "daily": daily_map.get(op_id, {}),
+                    "daily": op_daily,
+                    "chat_metrics_by_day": chat_metrics_by_day,
+                    "chat_metrics": chat_metric_totals,
                     "technical_issues_by_day": technical_map_by_operator.get(op_id, {}) if isinstance(technical_map_by_operator, dict) else {},
                     "technical_issue_hours": round(float(technical_totals_by_operator.get(op_id, 0.0)), 2) if isinstance(technical_totals_by_operator, dict) else 0.0,
                     "offline_activities_by_day": offline_map_by_operator.get(op_id, {}) if isinstance(offline_map_by_operator, dict) else {},
@@ -3246,7 +3609,10 @@ class Database:
                         "total_calls": int(total_calls),
                         "total_efficiency_hours": float(total_efficiency_hours),
                         "calls_per_hour": float(calls_per_hour),
-                        "fines": float(fines)
+                        "fines": float(fines),
+                        "chat_avg_score": chat_metric_totals.get("avg_score"),
+                        "chat_avg_response_time_seconds": chat_metric_totals.get("avg_response_time_seconds"),
+                        "chat_transfer_count": int(chat_metric_totals.get("transfer_chat_count") or 0),
                     }
                 })
 
@@ -3272,6 +3638,7 @@ class Database:
             cursor.execute("""
                 SELECT u.id, u.name, u.rate, u.status, u.supervisor_id,
                     d.name as direction_name,
+                    d.calculation_model_code,
                     COALESCE(w.norm_hours, 0) as norm_hours,
                     COALESCE(w.regular_hours, 0) as regular_hours,
                     COALESCE(w.total_break_time, 0) as total_break_time,
@@ -3376,22 +3743,55 @@ class Database:
                 start_date=start,
                 end_date=end
             )
+            chat_metrics_by_operator, chat_totals_by_operator = self._load_chat_manager_metrics_by_operator_day_tx(
+                cursor=cursor,
+                operator_ids=op_ids,
+                start_date=start,
+                end_date=end
+            )
 
             operators = []
             for row in operator_rows:
-                (op_id, op_name, rate, status, sup_id, direction_name, norm_hours,
+                (op_id, op_name, rate, status, sup_id, direction_name, calculation_model_raw, norm_hours,
                 regular_hours, total_break_time, total_talk_time,
                 total_calls, total_efficiency_hours, calls_per_hour, fines) = row
+                calculation_model_code = self._normalize_calculation_model_code(calculation_model_raw, direction_name)
+                op_daily = daily_map.get(op_id, {})
+                chat_metrics_by_day = chat_metrics_by_operator.get(op_id, {}) if isinstance(chat_metrics_by_operator, dict) else {}
+                chat_metric_totals = chat_totals_by_operator.get(op_id, {}) if isinstance(chat_totals_by_operator, dict) else {}
+                if calculation_model_code == CALCULATION_MODEL_CHAT_MANAGER:
+                    total_calls = int(chat_metric_totals.get("chats_count") or 0)
+                    regular_hours_for_rate = max(0.0, float(regular_hours or 0.0))
+                    calls_per_hour = (float(total_calls) / regular_hours_for_rate) if regular_hours_for_rate > 0 else 0.0
+                    for day_key, metrics in (chat_metrics_by_day or {}).items():
+                        entry = op_daily.setdefault(str(day_key), {
+                            "work_time": 0.0,
+                            "break_time": 0.0,
+                            "talk_time": 0.0,
+                            "calls": 0,
+                            "efficiency": 0.0,
+                            "fine_amount": 0.0,
+                            "fine_reason": None,
+                            "fine_comment": None,
+                            "fines": [],
+                            "bonuses": []
+                        })
+                        entry["chat_metrics"] = metrics
+                        entry["calls"] = int(metrics.get("chats_count") or 0)
 
                 operators.append({
                     "operator_id": op_id,
                     "name": op_name,
                     "direction": direction_name,
+                    "calculation_model_code": calculation_model_code,
+                    "calculationModelCode": calculation_model_code,
                     "supervisor_id": sup_id,
                     "rate": float(rate) if rate is not None else 0.0,
                     "status": status,
                     "norm_hours": float(norm_hours) if norm_hours is not None else 0.0,
-                    "daily": daily_map.get(op_id, {}),
+                    "daily": op_daily,
+                    "chat_metrics_by_day": chat_metrics_by_day,
+                    "chat_metrics": chat_metric_totals,
                     "technical_issues_by_day": technical_map_by_operator.get(op_id, {}) if isinstance(technical_map_by_operator, dict) else {},
                     "technical_issue_hours": round(float(technical_totals_by_operator.get(op_id, 0.0)), 2) if isinstance(technical_totals_by_operator, dict) else 0.0,
                     "offline_activities_by_day": offline_map_by_operator.get(op_id, {}) if isinstance(offline_map_by_operator, dict) else {},
@@ -3403,7 +3803,10 @@ class Database:
                         "total_calls": int(total_calls),
                         "total_efficiency_hours": float(total_efficiency_hours),
                         "calls_per_hour": float(calls_per_hour),
-                        "fines": float(fines)
+                        "fines": float(fines),
+                        "chat_avg_score": chat_metric_totals.get("avg_score"),
+                        "chat_avg_response_time_seconds": chat_metric_totals.get("avg_response_time_seconds"),
+                        "chat_transfer_count": int(chat_metric_totals.get("transfer_chat_count") or 0),
                     }
                 })
 
@@ -3458,7 +3861,7 @@ class Database:
         with self._get_cursor() as cursor:
             # 1. Получаем текущие активные направления (только нужные поля)
             cursor.execute("""
-                SELECT id, name, has_file_upload, criteria, version
+                SELECT id, name, has_file_upload, criteria, version, calculation_model_code
                 FROM directions
                 WHERE is_active = TRUE
             """)
@@ -3466,35 +3869,43 @@ class Database:
                 row[1]: {
                     "id": row[0],
                     "has_file_upload": row[2],
-                    "criteria": row[3],
-                    "version": row[4]
+                    "criteria": json.dumps(row[3] or [], ensure_ascii=False, sort_keys=True),
+                    "version": row[4],
+                    "calculation_model_code": normalize_calculation_model_code(row[5], row[1])
                 } for row in cursor.fetchall()
             }
             
-            new_direction_names = {d['name'] for d in directions}
+            new_direction_names = {str(d.get('name') or '').strip() for d in directions if str(d.get('name') or '').strip()}
             directions_to_deactivate = []
             insert_values = []
             
             # 2. Подготовка данных для пакетной обработки
             for direction in directions:
-                name = direction['name']
-                has_file_upload = direction['hasFileUpload']
-                criteria = json.dumps(direction['criteria'])
+                name = str(direction.get('name') or '').strip()
+                if not name:
+                    continue
+                has_file_upload = bool(direction.get('hasFileUpload', True))
+                criteria = json.dumps(direction.get('criteria') or [], ensure_ascii=False, sort_keys=True)
+                calculation_model_code = normalize_calculation_model_code(
+                    direction.get('calculationModelCode') or direction.get('calculation_model_code'),
+                    name
+                )
                 
                 if name in existing_directions:
                     existing = existing_directions[name]
                     if (existing['has_file_upload'] == has_file_upload and
-                        existing['criteria'] == criteria):
+                        existing['criteria'] == criteria and
+                        existing['calculation_model_code'] == calculation_model_code):
                         continue  # Ничего не изменилось, пропускаем
                     
                     directions_to_deactivate.append(existing['id'])
                     insert_values.append((
-                        name, has_file_upload, criteria,
+                        name, has_file_upload, criteria, calculation_model_code,
                         existing['version'] + 1, existing['id']
                     ))
                 else:
                     insert_values.append((
-                        name, has_file_upload, criteria,
+                        name, has_file_upload, criteria, calculation_model_code,
                         1, None  # version=1, no previous version
                     ))
             
@@ -3510,10 +3921,10 @@ class Database:
             if insert_values:
                 cursor.executemany("""
                     INSERT INTO directions (
-                        name, has_file_upload, criteria,
+                        name, has_file_upload, criteria, calculation_model_code,
                         version, previous_version_id
                     )
-                    VALUES (%s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s)
                 """, insert_values)
             
             # 5. Деактивируем направления, которых нет в новом списке
@@ -4456,6 +4867,7 @@ class Database:
         with self._get_cursor() as cursor:
             # Текущий месяц в формате YYYY-MM
             current_month = datetime.now().strftime('%Y-%m')
+            calculation_model_code = self._get_operator_calculation_model_tx(cursor, operator_id)
 
             # 1) Берём агрегаты из work_hours (regular_hours, total_calls, fines, norm_hours)
             cursor.execute("""
@@ -4557,6 +4969,26 @@ class Database:
             call_count = int(calls_row[0] or 0)
             avg_score = float(calls_row[1]) if calls_row[1] is not None else 0.0
 
+            chat_avg_response_time_seconds = None
+            chat_transfer_count = 0
+            if calculation_model_code == CALCULATION_MODEL_CHAT_MANAGER:
+                cursor.execute("""
+                    SELECT
+                        COALESCE(SUM(chats_count), 0),
+                        AVG(avg_score) FILTER (WHERE avg_score IS NOT NULL),
+                        AVG(avg_response_time_seconds) FILTER (WHERE avg_response_time_seconds IS NOT NULL),
+                        COALESCE(SUM(transfer_chat_count), 0)
+                    FROM chat_manager_daily_metrics
+                    WHERE operator_id = %s
+                    AND TO_CHAR(day, 'YYYY-MM') = %s
+                """, (operator_id, current_month))
+                chat_row = cursor.fetchone() or (0, None, None, 0)
+                total_calls = int(chat_row[0] or 0)
+                call_count = total_calls
+                avg_score = float(chat_row[1]) if chat_row[1] is not None else 0.0
+                chat_avg_response_time_seconds = float(chat_row[2]) if chat_row[2] is not None else None
+                chat_transfer_count = int(chat_row[3] or 0)
+
             # 5) calls_per_hour: total_calls / regular_hours (время в работе из статусов).
             effective_call_hours = max(0.0, float(regular_hours))
             if effective_call_hours > 0:
@@ -4574,6 +5006,8 @@ class Database:
             return {
                 'operator_id': operator_id,
                 'month': current_month,
+                'calculation_model_code': calculation_model_code,
+                'calculationModelCode': calculation_model_code,
                 'regular_hours': round(float(regular_hours), 2),
                 'training_hours': round(float(training_hours), 2),
                 'technical_issue_hours': round(float(technical_issue_hours), 2),
@@ -4585,7 +5019,10 @@ class Database:
                 'call_count': int(call_count),
                 'avg_score': round(float(avg_score), 2),
                 'total_calls': int(total_calls),
-                'calls_per_hour': round(float(calls_per_hour), 2)
+                'calls_per_hour': round(float(calls_per_hour), 2),
+                'chat_avg_score': round(float(avg_score), 2) if calculation_model_code == CALCULATION_MODEL_CHAT_MANAGER else None,
+                'chat_avg_response_time_seconds': chat_avg_response_time_seconds,
+                'chat_transfer_count': int(chat_transfer_count or 0)
             }
 
 
@@ -4805,6 +5242,8 @@ class Database:
                 u.id AS operator_id,
                 u.name AS operator_name,
                 u.direction_id,
+                d.name AS direction_name,
+                d.calculation_model_code,
 
                 COALESCE(wh.regular_hours, 0) AS regular_hours,
                 COALESCE(wh.fines, 0) AS fines,
@@ -4864,16 +5303,34 @@ class Database:
                     FROM operator_offline_activities oa
                     WHERE oa.operator_id = u.id
                     AND (%s IS NULL OR TO_CHAR(oa.activity_date, 'YYYY-MM') = %s)
-                ), 0) AS offline_activity_hours
+                ), 0) AS offline_activity_hours,
+
+                COALESCE(cmm.chats_count, 0) AS chat_chats_count,
+                cmm.avg_score AS chat_avg_score,
+                cmm.avg_response_time_seconds AS chat_avg_response_time_seconds,
+                COALESCE(cmm.transfer_chat_count, 0) AS chat_transfer_chat_count
 
             FROM users u
+            LEFT JOIN directions d
+                ON u.direction_id = d.id
+            LEFT JOIN (
+                SELECT
+                    operator_id,
+                    COALESCE(SUM(chats_count), 0) AS chats_count,
+                    AVG(avg_score) FILTER (WHERE avg_score IS NOT NULL) AS avg_score,
+                    AVG(avg_response_time_seconds) FILTER (WHERE avg_response_time_seconds IS NOT NULL) AS avg_response_time_seconds,
+                    COALESCE(SUM(transfer_chat_count), 0) AS transfer_chat_count
+                FROM chat_manager_daily_metrics
+                WHERE (%s IS NULL OR TO_CHAR(day, 'YYYY-MM') = %s)
+                GROUP BY operator_id
+            ) cmm ON cmm.operator_id = u.id
             LEFT JOIN work_hours wh
                 ON u.id = wh.operator_id
             AND (%s IS NULL OR wh.month = %s)
             WHERE u.role = 'operator'
         """
 
-        params = [month, month, month, month, month, month, month, month, month, month]
+        params = [month, month, month, month, month, month, month, month, month, month, month, month]
 
         if operator_id:
             query += " AND u.id = %s"
@@ -4885,11 +5342,18 @@ class Database:
 
             result = []
             for row in rows:
-                regular_hours = float(row[3])
-                total_calls = int(row[6])
-                training_hours = round(float(row[7]), 2)
-                technical_issue_hours = round(float(row[8]), 2)
-                offline_activity_hours = round(float(row[9]), 2)
+                calculation_model_code = self._normalize_calculation_model_code(row[4], row[3])
+                regular_hours = float(row[5])
+                total_calls = int(row[8])
+                training_hours = round(float(row[9]), 2)
+                technical_issue_hours = round(float(row[10]), 2)
+                offline_activity_hours = round(float(row[11]), 2)
+                chat_chats_count = int(row[12] or 0)
+                chat_avg_score = float(row[13]) if row[13] is not None else None
+                chat_avg_response_time_seconds = float(row[14]) if row[14] is not None else None
+                chat_transfer_chat_count = int(row[15] or 0)
+                if calculation_model_code == CALCULATION_MODEL_CHAT_MANAGER:
+                    total_calls = chat_chats_count
                 accounted_hours = round(regular_hours + training_hours + technical_issue_hours + offline_activity_hours, 2)
 
                 effective_call_hours = max(0.0, float(regular_hours))
@@ -4902,14 +5366,22 @@ class Database:
                     "operator_id": row[0],
                     "operator_name": row[1],
                     "direction": row[2],
+                    "direction_id": row[2],
+                    "direction_name": row[3],
+                    "calculation_model_code": calculation_model_code,
+                    "calculationModelCode": calculation_model_code,
                     "regular_hours": regular_hours,
                     "training_hours": training_hours,
                     "technical_issue_hours": technical_issue_hours,
                     "offline_activity_hours": offline_activity_hours,
                     "accounted_hours": accounted_hours,
-                    "fines": float(row[4]),
-                    "norm_hours": float(row[5]),
-                    "calls_per_hour": calls_per_hour
+                    "fines": float(row[6]),
+                    "norm_hours": float(row[7]),
+                    "total_calls": int(total_calls),
+                    "calls_per_hour": calls_per_hour,
+                    "chat_avg_score": chat_avg_score,
+                    "chat_avg_response_time_seconds": chat_avg_response_time_seconds,
+                    "chat_transfer_count": chat_transfer_chat_count
                 })
 
             return result
@@ -9847,6 +10319,53 @@ class Database:
         key = self._normalize_direction_key(direction_name)
         return key in ('чат менеджер', 'chat manager')
 
+    def _normalize_calculation_model_code(self, model_code=None, direction_name=None):
+        return normalize_calculation_model_code(model_code, direction_name)
+
+    def _status_profile_for_calculation_model(self, model_code):
+        code = self._normalize_calculation_model_code(model_code)
+        if code == CALCULATION_MODEL_CHAT_MANAGER:
+            return {
+                'code': CALCULATION_MODEL_CHAT_MANAGER,
+                'work': CHAT_MANAGER_WORK_STATUS_KEYS,
+                'talk': set(),
+                'break': CHAT_MANAGER_BREAK_STATUS_KEYS,
+                'training': CHAT_MANAGER_TRAINING_STATUS_KEYS,
+                'late_start': CHAT_MANAGER_WORK_STATUS_KEYS | CHAT_MANAGER_LOGIN_STATUS_KEYS,
+                'ignored': CHAT_MANAGER_NON_WORK_STATUS_KEYS | CHAT_MANAGER_LOGOUT_STATUS_KEYS | CHAT_MANAGER_ACTION_STATUS_KEYS,
+            }
+        return {
+            'code': CALCULATION_MODEL_OPERATOR,
+            'work': SCHEDULE_AUTO_WORK_STATUS_KEYS,
+            'talk': SCHEDULE_AUTO_TALK_STATUS_KEYS,
+            'break': SCHEDULE_AUTO_BREAK_STATUS_KEYS,
+            'training': {SCHEDULE_AUTO_TRAINING_STATUS_KEY, 'training', 'study'},
+            'late_start': SCHEDULE_AUTO_WORK_STATUS_KEYS,
+            'ignored': set(),
+        }
+
+    def _load_operator_calculation_models_tx(self, cursor, operator_ids):
+        op_ids = sorted({int(v) for v in (operator_ids or []) if v is not None})
+        result = {op_id: CALCULATION_MODEL_OPERATOR for op_id in op_ids}
+        if not op_ids:
+            return result
+        cursor.execute(
+            """
+            SELECT u.id, d.name, d.calculation_model_code
+            FROM users u
+            LEFT JOIN directions d ON d.id = u.direction_id
+            WHERE u.id = ANY(%s)
+            """,
+            (op_ids,)
+        )
+        for op_id, direction_name, model_code in cursor.fetchall() or []:
+            result[int(op_id)] = self._normalize_calculation_model_code(model_code, direction_name)
+        return result
+
+    def _get_operator_calculation_model_tx(self, cursor, operator_id):
+        model_map = self._load_operator_calculation_models_tx(cursor, [operator_id])
+        return model_map.get(int(operator_id), CALCULATION_MODEL_OPERATOR)
+
     def _is_smz_direction(self, direction_name):
         key = self._normalize_direction_key(direction_name)
         if not key:
@@ -10364,7 +10883,7 @@ class Database:
         key = self._normalize_import_status_key(status_key_value)
         if not key:
             return False
-        if key in (SCHEDULE_AUTO_TRAINING_STATUS_KEY, 'training'):
+        if key in (SCHEDULE_AUTO_TRAINING_STATUS_KEY, 'training', 'study'):
             return True
         return self._schedule_auto_is_tech_reason_status_key(key)
 
@@ -10674,6 +11193,7 @@ class Database:
         year, mon = map(int, str(month).split('-'))
         start = date(year, mon, 1)
         end = date(year, mon, calendar.monthrange(year, mon)[1])
+        calculation_model_code = self._get_operator_calculation_model_tx(cursor, operator_id)
 
         cursor.execute("""
             SELECT
@@ -10688,6 +11208,27 @@ class Database:
         """, (operator_id, start, end))
         row = cursor.fetchone()
         total_work_time, total_training_time, total_break_time, total_talk_time, total_calls, total_efficiency_hours = row
+
+        chat_avg_score = None
+        chat_avg_response_time_seconds = None
+        chat_transfer_count = 0
+        if calculation_model_code == CALCULATION_MODEL_CHAT_MANAGER:
+            cursor.execute("""
+                SELECT
+                    COALESCE(SUM(chats_count), 0),
+                    AVG(avg_score) FILTER (WHERE avg_score IS NOT NULL),
+                    AVG(avg_response_time_seconds) FILTER (WHERE avg_response_time_seconds IS NOT NULL),
+                    COALESCE(SUM(transfer_chat_count), 0)
+                FROM chat_manager_daily_metrics
+                WHERE operator_id = %s
+                  AND day >= %s
+                  AND day <= %s
+            """, (operator_id, start, end))
+            chat_row = cursor.fetchone() or (0, None, None, 0)
+            total_calls = int(chat_row[0] or 0)
+            chat_avg_score = float(chat_row[1]) if chat_row[1] is not None else None
+            chat_avg_response_time_seconds = float(chat_row[2]) if chat_row[2] is not None else None
+            chat_transfer_count = int(chat_row[3] or 0)
 
         cursor.execute("""
             SELECT COALESCE(SUM(df.amount), 0)
@@ -10750,6 +11291,7 @@ class Database:
         ))
 
         return {
+            "calculation_model_code": calculation_model_code,
             "regular_hours": float(total_work_time or 0.0),
             "training_hours": float(total_training_time or 0.0),
             "total_break_time": float(total_break_time or 0.0),
@@ -10758,7 +11300,10 @@ class Database:
             "total_efficiency_hours": float(total_efficiency_hours or 0.0),
             "calls_per_hour": float(calls_per_hour or 0.0),
             "fines": float(total_fines or 0.0),
-            "offline_activity_hours": float(total_offline_hours or 0.0)
+            "offline_activity_hours": float(total_offline_hours or 0.0),
+            "chat_avg_score": chat_avg_score,
+            "chat_avg_response_time_seconds": chat_avg_response_time_seconds,
+            "chat_transfer_count": int(chat_transfer_count or 0)
         }
 
     def _recalculate_auto_daily_hours_tx(self, cursor, operator_ids, start_date, end_date):
@@ -10779,6 +11324,8 @@ class Database:
         )
         if calc_start_date_obj is None or calc_end_date_obj is None:
             return {'updated_days': 0, 'aggregated_months': 0}
+
+        calculation_model_by_operator = self._load_operator_calculation_models_tx(cursor, op_ids)
 
         # Для корректного расчета текущего дня учитываем смены, начавшиеся днем ранее
         # и перешедшие через полночь.
@@ -10939,6 +11486,14 @@ class Database:
 
         for op_id, day_value in sorted(target_days, key=lambda x: (x[0], x[1])):
             day_statuses = statuses_by_day.get((op_id, day_value)) or []
+            status_profile = self._status_profile_for_calculation_model(
+                calculation_model_by_operator.get(int(op_id), CALCULATION_MODEL_OPERATOR)
+            )
+            work_status_keys = set(status_profile.get('work') or set())
+            talk_status_keys = set(status_profile.get('talk') or set())
+            break_status_keys = set(status_profile.get('break') or set())
+            training_status_keys = set(status_profile.get('training') or set())
+            late_start_status_keys = set(status_profile.get('late_start') or work_status_keys)
 
             def pick_status_intervals(source_items, predicate_fn):
                 return self._merge_break_intervals([
@@ -10949,19 +11504,23 @@ class Database:
 
             day_work_status = pick_status_intervals(
                 day_statuses,
-                lambda seg: str(seg.get('status_key') or '') in SCHEDULE_AUTO_WORK_STATUS_KEYS
+                lambda seg: str(seg.get('status_key') or '') in work_status_keys
             )
             day_talk_status = pick_status_intervals(
                 day_statuses,
-                lambda seg: str(seg.get('status_key') or '') in SCHEDULE_AUTO_TALK_STATUS_KEYS
+                lambda seg: str(seg.get('status_key') or '') in talk_status_keys
             )
             day_break_status = pick_status_intervals(
                 day_statuses,
-                lambda seg: str(seg.get('status_key') or '') in SCHEDULE_AUTO_BREAK_STATUS_KEYS
+                lambda seg: str(seg.get('status_key') or '') in break_status_keys
             )
             day_training_status = pick_status_intervals(
                 day_statuses,
-                lambda seg: str(seg.get('status_key') or '') == SCHEDULE_AUTO_TRAINING_STATUS_KEY
+                lambda seg: str(seg.get('status_key') or '') in training_status_keys
+            )
+            day_late_start_status = pick_status_intervals(
+                day_statuses,
+                lambda seg: str(seg.get('status_key') or '') in late_start_status_keys
             )
             day_practice_shift_intervals = self._merge_break_intervals(
                 practice_shift_segments_by_day.get((op_id, day_value)) or []
@@ -10996,7 +11555,11 @@ class Database:
                 next_day_statuses = statuses_by_day.get((op_id, day_value + timedelta(days=1))) or []
                 next_day_work_status = pick_status_intervals(
                     next_day_statuses,
-                    lambda seg: str(seg.get('status_key') or '') in SCHEDULE_AUTO_WORK_STATUS_KEYS
+                    lambda seg: str(seg.get('status_key') or '') in work_status_keys
+                )
+                next_day_late_start_status = pick_status_intervals(
+                    next_day_statuses,
+                    lambda seg: str(seg.get('status_key') or '') in late_start_status_keys
                 )
                 next_day_late_excused_status = pick_status_intervals(
                     next_day_statuses,
@@ -11010,6 +11573,14 @@ class Database:
                     for seg in (next_day_work_status or [])
                     if int(seg.get('end', 0)) > int(seg.get('start', 0))
                 ]
+                shifted_next_day_late_start_status = [
+                    {
+                        'start': int(seg.get('start', 0)) + 86400,
+                        'end': int(seg.get('end', 0)) + 86400
+                    }
+                    for seg in (next_day_late_start_status or [])
+                    if int(seg.get('end', 0)) > int(seg.get('start', 0))
+                ]
                 shifted_next_day_late_excused_status = [
                     {
                         'start': int(seg.get('start', 0)) + 86400,
@@ -11020,6 +11591,9 @@ class Database:
                 ]
                 work_status_for_shift = self._merge_break_intervals(
                     (day_work_status or []) + shifted_next_day_work_status
+                )
+                late_start_status_for_shift = self._merge_break_intervals(
+                    (day_late_start_status or []) + shifted_next_day_late_start_status
                 )
                 late_excused_status_for_shift = self._merge_break_intervals(
                     (day_late_excused_status or []) + shifted_next_day_late_excused_status
@@ -11032,7 +11606,11 @@ class Database:
                     )
                     if not shift_work_status:
                         continue
-                    first_work_start = int(shift_work_status[0].get('start', shift_interval['start']))
+                    shift_late_start_status = self._schedule_auto_intersect_interval_with_list(
+                        shift_interval,
+                        late_start_status_for_shift
+                    )
+                    first_work_start = int((shift_late_start_status or shift_work_status)[0].get('start', shift_interval['start']))
                     last_work_end = int(shift_work_status[-1].get('end', shift_interval['end']))
                     shift_excused_status = self._schedule_auto_intersect_interval_with_list(
                         shift_interval,
@@ -11991,6 +12569,8 @@ class Database:
         if not operator_ids:
             return result
 
+        calculation_model_by_operator = self._load_operator_calculation_models_tx(cursor, operator_ids)
+
         min_day = start_date_obj - timedelta(days=1) if start_date_obj else None
         max_day = end_date_obj + timedelta(days=1) if end_date_obj else None
 
@@ -12006,9 +12586,12 @@ class Database:
             status_key_norm = self._normalize_import_status_key(status_key)
             if not status_key_norm:
                 return
+            status_profile = self._status_profile_for_calculation_model(
+                calculation_model_by_operator.get(int(op_id), CALCULATION_MODEL_OPERATOR)
+            )
             state_label_value = self._status_label_from_key(status_key_norm)
-            is_work = status_key_norm in SCHEDULE_AUTO_WORK_STATUS_KEYS
-            is_break = status_key_norm in SCHEDULE_AUTO_BREAK_STATUS_KEYS
+            is_work = status_key_norm in set(status_profile.get('work') or set())
+            is_break = status_key_norm in set(status_profile.get('break') or set())
             is_no_phone = status_key_norm == SCHEDULE_AUTO_NO_PHONE_STATUS_KEY
 
             target.setdefault(day_key, []).append({

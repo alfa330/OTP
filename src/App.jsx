@@ -7548,6 +7548,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [plannerStatusAnomalyError, setPlannerStatusAnomalyError] = useState('');
             const [plannerStatusAnomalyFileName, setPlannerStatusAnomalyFileName] = useState('');
             const [plannerStatusImportSummary, setPlannerStatusImportSummary] = useState(null);
+            const [plannerChatMetricsImportState, setPlannerChatMetricsImportState] = useState({
+                loading: false,
+                summary: null,
+                error: ''
+            });
             const [plannerStatusAnomalyAnalysis, setPlannerStatusAnomalyAnalysis] = useState(null);
             const [plannerStatusAnomalyExpandedDays, setPlannerStatusAnomalyExpandedDays] = useState({});
             const [plannerStatusAnomalyOnly, setPlannerStatusAnomalyOnly] = useState(false);
@@ -7698,6 +7703,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const plannerUiStateLoadedRef = useRef(false);
             const plannerExcelImportInputRef = useRef(null);
             const plannerStatusAnomalyInputRef = useRef(null);
+            const plannerChatMetricsInputRef = useRef(null);
             const plannerTopActionsMenuRef = useRef(null);
             const swapExchangePromptHandledRef = useRef(new Set());
             const swapExchangeChoiceResolveRef = useRef(null);
@@ -10094,6 +10100,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 plannerStatusAnomalyInputRef.current?.click?.();
             };
 
+            const triggerPlannerChatMetricsImportSelect = () => {
+                if (plannerChatMetricsImportState.loading) return;
+                plannerChatMetricsInputRef.current?.click?.();
+            };
+
             const changePlannerStatusTimelineZoom = (delta) => {
                 setPlannerStatusTimelineZoom(prev => {
                     const next = Math.max(0.5, Math.min(4, Math.round((Number(prev || 1) + delta) * 100) / 100));
@@ -10206,6 +10217,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const analysis = analyzePlannerStatusTransitionsCsv(csvText);
                     const formData = new FormData();
                     formData.append('file', file);
+                    formData.append('source', 'chat2desk_statuses');
                     const saveResponse = await fetch(`${API_BASE_URL}/api/work_schedules/import_statuses_csv`, {
                         method: 'POST',
                         credentials: 'include',
@@ -10253,6 +10265,42 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setPlannerStatusAnomalyError(error?.message || 'Не удалось обработать CSV');
                 } finally {
                     setPlannerStatusAnomalyLoading(false);
+                    if (event?.target) event.target.value = '';
+                }
+            };
+
+            const handlePlannerChatMetricsFileChange = async (event) => {
+                const file = event?.target?.files?.[0];
+                if (!file) return;
+                setPlannerChatMetricsImportState({ loading: true, summary: null, error: '' });
+                try {
+                    const formData = new FormData();
+                    formData.append('file', file);
+                    formData.append('source', 'chat2desk_metrics');
+
+                    const response = await fetch(`${API_BASE_URL}/api/chat_manager/metrics/import_csv`, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: withAccessTokenHeader(),
+                        body: formData
+                    });
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(payload?.error || `HTTP ${response.status}`);
+                    }
+
+                    const summary = {
+                        ...(payload?.import || {}),
+                        message: payload?.message || ''
+                    };
+                    setPlannerChatMetricsImportState({ loading: false, summary, error: '' });
+                    emitAppToast(payload?.message || 'Метрики чат-менеджеров загружены', 'success');
+                } catch (error) {
+                    console.error('Error importing chat manager metrics csv:', error);
+                    const message = error?.message || 'Не удалось импортировать метрики чат-менеджеров';
+                    setPlannerChatMetricsImportState({ loading: false, summary: null, error: message });
+                    emitAppToast(message, 'error');
+                } finally {
                     if (event?.target) event.target.value = '';
                 }
             };
@@ -16758,6 +16806,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 className="hidden"
                                 onChange={handlePlannerStatusAnomalyFileChange}
                             />
+                            <input
+                                ref={plannerChatMetricsInputRef}
+                                type="file"
+                                accept=".csv,text/csv"
+                                className="hidden"
+                                onChange={handlePlannerChatMetricsFileChange}
+                            />
                             <div className="relative" ref={plannerTopActionsMenuRef}>
                                 <button
                                     type="button"
@@ -16815,6 +16870,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             >
                                                 <FaIcon className={`fas ${plannerStatusAnomalyLoading ? 'fa-spinner fa-spin' : 'fa-upload'}`}></FaIcon>
                                                 {plannerStatusAnomalyLoading ? 'Загрузка...' : 'Загрузить статусы'}
+                                            </button>
+
+                                            <button
+                                                onClick={() => {
+                                                    setShowPlannerTopActionsMenu(false);
+                                                    triggerPlannerChatMetricsImportSelect();
+                                                }}
+                                                disabled={plannerChatMetricsImportState.loading}
+                                                className="w-full px-3 py-2 rounded-xl border border-cyan-200 bg-cyan-50 hover:bg-cyan-100 text-cyan-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
+                                                title="Загрузить CSV дневных метрик чат-менеджеров: чаты, оценка, время ответа, передачи"
+                                            >
+                                                <FaIcon className={`fas ${plannerChatMetricsImportState.loading ? 'fa-spinner fa-spin' : 'fa-comments'}`}></FaIcon>
+                                                {plannerChatMetricsImportState.loading ? 'Загрузка...' : 'Метрики чатов'}
                                             </button>
 
                                             <button
@@ -16978,6 +17046,27 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     ) : (
                                         <span className="ml-2 text-rose-700/80">• включите «Режим статусов» в режиме День</span>
                                     )}
+                                </>
+                            )}
+                        </div>
+                    )}
+                    {(plannerChatMetricsImportState.summary || plannerChatMetricsImportState.error) && (
+                        <div className={`mb-2 p-2 rounded text-xs border ${plannerChatMetricsImportState.error ? 'bg-cyan-50 border-cyan-200 text-cyan-800' : 'bg-cyan-50 border-cyan-200 text-cyan-800'}`}>
+                            {plannerChatMetricsImportState.error ? (
+                                <>
+                                    <FaIcon className="fas fa-triangle-exclamation mr-1"></FaIcon>
+                                    Ошибка метрик чатов: {plannerChatMetricsImportState.error}
+                                </>
+                            ) : (
+                                <>
+                                    <FaIcon className="fas fa-comments mr-1"></FaIcon>
+                                    Метрики чатов сохранены:
+                                    <span className="ml-2">
+                                        {Number(plannerChatMetricsImportState.summary?.processed || 0)} строк
+                                    </span>
+                                    <span className="ml-2">
+                                        из {Number(plannerChatMetricsImportState.summary?.source_rows || 0)} в CSV
+                                    </span>
                                 </>
                             )}
                         </div>
@@ -27823,6 +27912,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const [showModal, setShowModal] = useState(false);
                 const [showLegend, setShowLegend] = useState(false);
                 const REQUEST_MESSAGE_MAX_LENGTH = 500;
+                const calculationModelCode = String(
+                    hoursData?.calculation_model_code ||
+                    hoursData?.calculationModelCode ||
+                    ''
+                ).trim();
+                const isChatModel = calculationModelCode === 'chat_manager';
 
                 const formatFixed2 = (value) => {
                     const n = Number(value);
@@ -28335,8 +28430,51 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 const work = Number(normalize("work_time") ?? 0);
                                 const effPercent =
                                     work > 0 && Number.isFinite(eff) ? ((eff / work) * 100).toFixed(2) + "%" : "—";
+                                const chatMetrics = d?.chat_metrics || {};
+                                const fmtSeconds = (value) => {
+                                    const n = Number(value);
+                                    if (!Number.isFinite(n) || n <= 0) return "—";
+                                    if (n < 60) return `${Math.round(n)} сек`;
+                                    return `${(n / 60).toFixed(2)} мин`;
+                                };
 
-                                const metrics = [
+                                const metrics = isChatModel ? [
+                                    {
+                                    key: "break_time",
+                                    label: "Перерыв",
+                                    icon: "fas fa-coffee",
+                                    value: fmtTimeLike(normalize("break_time")),
+                                    hint: "Нерабочий статус break",
+                                    },
+                                    {
+                                    key: "total_chats",
+                                    label: "Чаты",
+                                    icon: "fas fa-comments",
+                                    value: fmtNumber(chatMetrics.chats_count ?? normalize("calls"), 0),
+                                    hint: "Всего чатов",
+                                    },
+                                    {
+                                    key: "avg_score",
+                                    label: "Оценка",
+                                    icon: "fas fa-star",
+                                    value: fmtNumber(chatMetrics.avg_score, 2),
+                                    hint: "Средняя оценка",
+                                    },
+                                    {
+                                    key: "response_time",
+                                    label: "Ответ",
+                                    icon: "fas fa-reply",
+                                    value: fmtSeconds(chatMetrics.avg_response_time_seconds),
+                                    hint: "Среднее время ответа",
+                                    },
+                                    {
+                                    key: "transfer_chat",
+                                    label: "Передачи",
+                                    icon: "fas fa-share",
+                                    value: fmtNumber(chatMetrics.transfer_chat_count, 0),
+                                    hint: "Передача чата",
+                                    },
+                                ] : [
                                     {
                                     key: "break_time",
                                     label: "Перерыв",
@@ -35296,6 +35434,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             // На входе ожидаем стабильный формат от бекенда:
                                             // { status, month, days_in_month, operators: [ { operator_id, name, rate, norm_hours, fines, daily, aggregates, training_hours? } ] }
                                             const op = hoursData.operators.find(o => Number(o.operator_id) === Number(user.id)) || hoursData.operators[0];
+                                            const calculationModelCode = String(
+                                                op?.calculation_model_code ||
+                                                op?.calculationModelCode ||
+                                                ''
+                                            ).trim();
+                                            const isChatModel = calculationModelCode === 'chat_manager';
+                                            const interactionLabel = isChatModel ? 'Чаты' : 'Звонки';
+                                            const interactionPerHourLabel = isChatModel ? 'Чаты в час' : 'Звонки в час';
+                                            const interactionIcon = isChatModel ? 'fas fa-comments' : 'fas fa-phone';
 
                                             // --- базовые метрики из оператора ---
                                             const regularBase = Number(op.aggregates?.regular_hours ?? 0);
@@ -35314,7 +35461,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 }
                                                 return Number(total) || 0;
                                             })();
-                                            const totalCalls = Number(op.aggregates?.total_calls ?? 0);
+                                            const totalCalls = Number(
+                                                op.aggregates?.total_calls ??
+                                                op.chat_metrics?.chats_count ??
+                                                0
+                                            );
                                             const opTechnicalField = Number(op.technical_issue_hours ?? 0);
                                             const opOfflineField = Number(op.offline_activity_hours ?? 0);
 
@@ -35463,6 +35614,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 safeNum(norm) <= 0 ? 'норма' : null,
                                             ].filter(Boolean);
                                             const openSalaryCalculatorWithHours = () => {
+                                                if (isChatModel) {
+                                                    setCalculatorType('chat');
+                                                    navigateToView('salary');
+                                                    return;
+                                                }
                                                 const nextSalaryData = {
                                                     experience: salaryExperience,
                                                     quality: salaryEvaluations.length > 0 ? salaryQuality.toFixed(2) : '',
@@ -35571,8 +35727,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <div className="space-y-3">
                                                         <div className="flex items-center justify-between rounded-lg bg-white border border-gray-200 px-3 py-2.5">
                                                         <span className="text-sm text-gray-600 flex items-center gap-2">
-                                                            <FaIcon className="fas fa-phone-alt text-gray-400"></FaIcon>
-                                                            Звонки в час
+                                                            <FaIcon className={`${interactionIcon} text-gray-400`}></FaIcon>
+                                                            {interactionPerHourLabel}
                                                         </span>
                                                         <span className={`text-lg font-bold ${getCallsPerHourColor(callsPerHour)}`}>
                                                             {safeNum(callsPerHour).toFixed(2)}
@@ -35580,8 +35736,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         </div>
                                                         <div className="flex items-center justify-between rounded-lg bg-white border border-gray-200 px-3 py-2.5">
                                                         <span className="text-sm text-gray-600 flex items-center gap-2">
-                                                            <FaIcon className="fas fa-phone text-gray-400"></FaIcon>
-                                                            Всего звонков
+                                                            <FaIcon className={`${interactionIcon} text-gray-400`}></FaIcon>
+                                                            Всего: {interactionLabel.toLowerCase()}
                                                         </span>
                                                         <span className="text-lg font-bold text-gray-900">{safeNum(totalCalls).toFixed(0)}</span>
                                                         </div>
@@ -35609,14 +35765,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 Примерная зарплата
                                                             </span>
                                                             <div className="mt-1 text-xs text-gray-500">
-                                                                По формуле калькулятора{missingSalaryInputs.length > 0 ? `, не хватает: ${missingSalaryInputs.join(', ')}` : ''}
+                                                                {isChatModel
+                                                                    ? 'Для чат-модели используется отдельный калькулятор.'
+                                                                    : `По формуле калькулятора${missingSalaryInputs.length > 0 ? `, не хватает: ${missingSalaryInputs.join(', ')}` : ''}`}
                                                             </div>
                                                             <div className="mt-1 text-[11px] text-gray-400">
-                                                                Штрафы в формуле калькулятора не вычитаются.
+                                                                {isChatModel
+                                                                    ? 'Чаты, оценка и время ответа уже подтянуты в часы работы.'
+                                                                    : 'Штрафы в формуле калькулятора не вычитаются.'}
                                                             </div>
                                                             </div>
                                                             <span className="text-lg font-bold text-green-600 whitespace-nowrap">
-                                                            {formatEstimatedSalaryMoney(estimatedSalary.finalSalary)}
+                                                            {isChatModel ? 'Чат' : formatEstimatedSalaryMoney(estimatedSalary.finalSalary)}
                                                             </span>
                                                         </div>
                                                         <button
@@ -35625,7 +35785,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             className="mt-3 w-full inline-flex items-center justify-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-100 transition"
                                                         >
                                                             <FaIcon className="fas fa-arrow-right"></FaIcon>
-                                                            Открыть в калькуляторе
+                                                            {isChatModel ? 'Открыть чат-калькулятор' : 'Открыть в калькуляторе'}
                                                         </button>
                                                         </div>
                                                     </div>

@@ -31,7 +31,7 @@ import xlsxwriter
 import json
 import html
 from concurrent.futures import ThreadPoolExecutor
-from database import db, TECHNICAL_ISSUE_REASONS, normalize_role_value
+from database import db, TECHNICAL_ISSUE_REASONS, normalize_role_value, get_calculation_model_catalog
 from resource_fte_service import (
     get_resource_day,
     get_resource_overview,
@@ -7736,10 +7736,34 @@ def get_directions():
             return jsonify({"error": "Only admins, supervisors and operators can access directions"}), 403
 
         directions = db.get_directions()
-        return jsonify({"status": "success", "directions": directions}), 200
+        return jsonify({
+            "status": "success",
+            "directions": directions,
+            "calculation_models": get_calculation_model_catalog()
+        }), 200
     except Exception as e:
         logging.error(f"Error fetching directions: {e}", exc_info=True)
         return jsonify({"error": f"Internal server error"}), 500
+
+
+@app.route('/api/admin/calculation_models', methods=['GET'])
+@require_api_key
+def get_calculation_models():
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        role = _normalize_user_role(requester[3])
+        if not (_is_admin_role(role) or _is_supervisor_role(role) or role == 'operator'):
+            return jsonify({"error": "Forbidden"}), 403
+        return jsonify({
+            "status": "success",
+            "calculation_models": get_calculation_model_catalog()
+        }), 200
+    except Exception as e:
+        logging.error(f"Error fetching calculation models: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
 
 @app.route('/api/admin/save_directions', methods=['POST'])
 @require_api_key
@@ -7765,7 +7789,8 @@ def save_directions():
         return jsonify({
             "status": "success",
             "message": "Directions saved successfully",
-            "directions": updated_directions
+            "directions": updated_directions,
+            "calculation_models": get_calculation_model_catalog()
         }), 200
 
     except Exception as e:
@@ -12372,6 +12397,7 @@ STATUS_IMPORT_MAX_FILE_SIZE_BYTES = STATUS_IMPORT_MAX_FILE_SIZE_MB * 1024 * 1024
 STATUS_IMPORT_MAX_SOURCE_ROWS = max(1, int(os.getenv('STATUS_IMPORT_MAX_SOURCE_ROWS', '120000')))
 STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT = max(1, int(os.getenv('STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT', '30')))
 STATUS_IMPORT_LOCK = threading.Lock()
+CHAT_MANAGER_METRICS_IMPORT_LOCK = threading.Lock()
 
 
 def _status_import_normalize_key(value):
@@ -12393,8 +12419,12 @@ def _status_import_parse_datetime(value):
     formats = (
         '%d.%m.%Y %H:%M:%S',
         '%d.%m.%Y %H:%M',
+        '%d/%m/%Y %H:%M:%S',
+        '%d/%m/%Y %H:%M',
         '%Y-%m-%d %H:%M:%S',
         '%Y-%m-%d %H:%M',
+        '%Y/%m/%d %H:%M:%S',
+        '%Y/%m/%d %H:%M',
         '%Y-%m-%dT%H:%M:%S',
         '%Y-%m-%dT%H:%M'
     )
@@ -12490,8 +12520,18 @@ def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, in
     if not isinstance(csv_text, str):
         raise ValueError("CSV text is required")
 
-    reader = csv.reader(StringIO(csv_text), delimiter=';', quotechar='"')
-    header = next(reader, None)
+    try:
+        dialect = csv.Sniffer().sniff(csv_text[:4096], delimiters=';,\t')
+    except Exception:
+        dialect = csv.excel()
+        dialect.delimiter = ';'
+
+    reader = csv.reader(StringIO(csv_text), dialect)
+    header = None
+    for candidate_header in reader:
+        if any(str(cell or '').strip() for cell in candidate_header):
+            header = candidate_header
+            break
     if not header:
         raise ValueError("Файл пустой")
 
@@ -12503,12 +12543,24 @@ def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, in
                 return normalized_header.index(candidate)
         return None
 
-    operator_col = _find_col(['operatorname', 'operator', 'name'])
-    state_col = _find_col(['statename', 'state', 'status'])
-    time_col = _find_col(['timechange', 'time', 'datetime'])
+    operator_col = _find_col([
+        'operatorname', 'operator', 'name', 'employee', 'manager', 'agent', 'user',
+        'fio', 'fullname', 'оператор', 'сотрудник', 'фио', 'имя', 'менеджер',
+        'чатменеджер', 'чатменеджеры'
+    ])
+    state_col = _find_col([
+        'statename', 'state', 'status', 'statusname', 'action', 'event', 'eventname',
+        'статус', 'состояние', 'действие', 'событие'
+    ])
+    time_col = _find_col([
+        'timechange', 'datetime', 'createdat', 'changedat', 'timestamp',
+        'датавремя', 'времяизменения', 'датаизменения'
+    ])
+    date_col = _find_col(['date', 'day', 'дата', 'день'])
+    time_of_day_col = _find_col(['time', 'время'])
     note_col = _find_col(['statenote', 'statusnote', 'note'])
 
-    if operator_col is None or state_col is None or time_col is None:
+    if operator_col is None or state_col is None or (time_col is None and (date_col is None or time_of_day_col is None)):
         raise ValueError("CSV должен содержать колонки OperatorName;StateName;TimeChange")
 
     max_rows_value = None
@@ -12564,6 +12616,10 @@ def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, in
         source_state_name = _cell(cols, state_col)
         state_note = _cell(cols, note_col)
         time_change = _cell(cols, time_col)
+        if not time_change and date_col is not None and time_of_day_col is not None:
+            date_value = _cell(cols, date_col)
+            time_value = _cell(cols, time_of_day_col)
+            time_change = f"{date_value} {time_value}".strip()
 
         if not operator_name and not source_state_name and not state_note and not time_change:
             continue
@@ -12705,6 +12761,241 @@ def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, in
         'zero_or_negative_transitions': int(zero_or_negative_transitions),
         'events': events_for_db,
         'segments': segments
+    }
+
+
+def _chat_metrics_parse_date(value, default_date=None):
+    text = str(value or '').strip()
+    if not text and default_date:
+        text = str(default_date or '').strip()
+    if not text:
+        return None
+    parsed_dt = _status_import_parse_datetime(text)
+    if isinstance(parsed_dt, datetime):
+        return parsed_dt.date()
+    for fmt in ('%Y-%m-%d', '%d.%m.%Y', '%d/%m/%Y', '%Y/%m/%d'):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except Exception:
+            continue
+    return None
+
+
+def _chat_metrics_parse_number(value):
+    if value is None:
+        return None
+    text = str(value).strip().replace('\xa0', '').replace(' ', '')
+    if not text:
+        return None
+    try:
+        return float(text.replace(',', '.'))
+    except Exception:
+        return None
+
+
+def _chat_metrics_parse_duration_seconds(value, unit_hint='seconds'):
+    text = str(value or '').strip()
+    if not text:
+        return None
+    if ':' in text:
+        try:
+            parts = [float(part.replace(',', '.')) for part in text.split(':')]
+        except Exception:
+            parts = []
+        if len(parts) == 3:
+            return parts[0] * 3600.0 + parts[1] * 60.0 + parts[2]
+        if len(parts) == 2:
+            return parts[0] * 60.0 + parts[1]
+    value_num = _chat_metrics_parse_number(text)
+    if value_num is None:
+        return None
+    hint = str(unit_hint or '').lower()
+    if hint in ('minutes', 'minute', 'min'):
+        return value_num * 60.0
+    return value_num
+
+
+def _chat_metrics_import_parse_csv(csv_text, operator_lookup, default_date=None, max_source_rows=None, invalid_rows_preview_limit=None):
+    if not isinstance(csv_text, str):
+        raise ValueError("CSV text is required")
+
+    try:
+        dialect = csv.Sniffer().sniff(csv_text[:4096], delimiters=';,\t')
+    except Exception:
+        dialect = csv.excel()
+        dialect.delimiter = ';'
+
+    reader = csv.reader(StringIO(csv_text), dialect)
+    header = None
+    for candidate_header in reader:
+        if any(str(cell or '').strip() for cell in candidate_header):
+            header = candidate_header
+            break
+    if not header:
+        raise ValueError("Файл пустой")
+
+    normalized_header = [_status_import_normalize_header(h) for h in header]
+
+    def _find_col(candidates):
+        for candidate in candidates:
+            if candidate in normalized_header:
+                return normalized_header.index(candidate)
+        return None
+
+    def _find_first_contains(tokens):
+        for idx, header_key in enumerate(normalized_header):
+            if all(token in header_key for token in tokens):
+                return idx
+        return None
+
+    def _first_non_none(*values):
+        for value in values:
+            if value is not None:
+                return value
+        return None
+
+    operator_col = _find_col([
+        'operatorname', 'operator', 'name', 'employee', 'manager', 'agent', 'user',
+        'fio', 'fullname', 'оператор', 'сотрудник', 'фио', 'имя', 'менеджер',
+        'чатменеджер', 'чатменеджеры'
+    ])
+    date_col = _find_col(['date', 'day', 'period', 'дата', 'день', 'период'])
+    chats_col = _find_col([
+        'chats', 'chatscount', 'chatcount', 'totalchats', 'dialogs', 'dialogscount',
+        'conversations', 'conversationcount', 'обращения', 'чаты', 'колвочатов',
+        'количествочатов', 'диалоги', 'колводиалогов'
+    ])
+    if chats_col is None:
+        chats_col = _first_non_none(_find_first_contains(['chat']), _find_first_contains(['чат']))
+    avg_score_col = _find_col([
+        'avgscore', 'averagescore', 'score', 'rating', 'avgrating',
+        'средняяоценка', 'среднийбалл', 'оценка', 'рейтинг'
+    ])
+    avg_response_seconds_col = _find_col([
+        'avgresponsetimeseconds', 'averageresponsetimeseconds', 'responsetimeseconds',
+        'firstresponsetimeseconds', 'среднеевремяответасек', 'времяответасек'
+    ])
+    avg_response_minutes_col = _find_col([
+        'avgresponsetimeminutes', 'averageresponsetimeminutes', 'responsetimeminutes',
+        'firstresponsetimeminutes', 'среднеевремяответамин', 'времяответамин'
+    ])
+    avg_response_col = None
+    avg_response_unit = 'seconds'
+    if avg_response_seconds_col is not None:
+        avg_response_col = avg_response_seconds_col
+        avg_response_unit = 'seconds'
+    elif avg_response_minutes_col is not None:
+        avg_response_col = avg_response_minutes_col
+        avg_response_unit = 'minutes'
+    else:
+        avg_response_col = _first_non_none(
+            _find_col(['avgresponsetime', 'averageresponsetime', 'responsetime', 'firstresponsetime']),
+            _find_first_contains(['ответ'])
+        )
+        if avg_response_col is not None:
+            header_key = normalized_header[avg_response_col]
+            avg_response_unit = 'minutes' if ('min' in header_key or 'мин' in header_key) else 'seconds'
+
+    transfer_col = _find_col([
+        'transferchat', 'transferchatcount', 'transfers', 'transfercount',
+        'передачачата', 'передачичата', 'передачи', 'колвопередач'
+    ])
+    if transfer_col is None:
+        transfer_col = _first_non_none(_find_first_contains(['transfer']), _find_first_contains(['передач']))
+
+    if operator_col is None:
+        raise ValueError("CSV должен содержать колонку оператора/менеджера")
+    if date_col is None and not default_date:
+        raise ValueError("CSV должен содержать колонку даты или параметр date=YYYY-MM-DD")
+    if chats_col is None and avg_score_col is None and avg_response_col is None and transfer_col is None:
+        raise ValueError("CSV должен содержать хотя бы одну метрику: чаты, оценка, время ответа или передачи")
+
+    max_rows_value = None
+    if max_source_rows is not None:
+        try:
+            max_rows_value = int(max_source_rows)
+        except Exception:
+            max_rows_value = None
+        if max_rows_value is not None and max_rows_value <= 0:
+            max_rows_value = None
+
+    preview_limit_value = STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT
+    if invalid_rows_preview_limit is not None:
+        try:
+            preview_limit_value = max(1, int(invalid_rows_preview_limit))
+        except Exception:
+            preview_limit_value = STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT
+
+    def _cell(cols, idx):
+        if idx is None or idx < 0 or idx >= len(cols):
+            return ''
+        return str(cols[idx] or '').strip()
+
+    metrics = []
+    source_rows = 0
+    invalid_rows_count = 0
+    invalid_rows_preview = []
+
+    def _push_invalid(row_num, reason, operator_name, date_value):
+        nonlocal invalid_rows_count
+        invalid_rows_count += 1
+        if len(invalid_rows_preview) >= preview_limit_value:
+            return
+        invalid_rows_preview.append({
+            'row': int(row_num),
+            'reason': str(reason or '').strip() or 'Некорректная строка',
+            'operator_name': str(operator_name or '').strip(),
+            'date': str(date_value or '').strip()
+        })
+
+    for row_num, cols in enumerate(reader, start=2):
+        source_rows += 1
+        if max_rows_value is not None and source_rows > max_rows_value:
+            raise OverflowError(f"Лимит строк CSV превышен ({max_rows_value})")
+
+        operator_name = _cell(cols, operator_col)
+        date_value = _cell(cols, date_col)
+        if not operator_name and not date_value and not any(str(cell or '').strip() for cell in cols):
+            continue
+
+        day_obj = _chat_metrics_parse_date(date_value, default_date=default_date)
+        if not operator_name or day_obj is None:
+            _push_invalid(row_num, 'Отсутствует оператор или дата', operator_name, date_value or default_date)
+            continue
+
+        operator_key = _status_import_normalize_operator_name(operator_name)
+        operator_matches = operator_lookup.get(operator_key) or []
+        if len(operator_matches) != 1:
+            _push_invalid(
+                row_num,
+                'Оператор не найден' if len(operator_matches) == 0 else 'Найдено несколько операторов с таким именем',
+                operator_name,
+                date_value or default_date
+            )
+            continue
+
+        chats_value = _chat_metrics_parse_number(_cell(cols, chats_col))
+        transfer_value = _chat_metrics_parse_number(_cell(cols, transfer_col))
+        avg_score_value = _chat_metrics_parse_number(_cell(cols, avg_score_col))
+        avg_response_seconds = _chat_metrics_parse_duration_seconds(_cell(cols, avg_response_col), avg_response_unit)
+
+        metrics.append({
+            'operator_id': int(operator_matches[0]['id']),
+            'operator_name': operator_matches[0].get('name') or operator_name,
+            'day': day_obj.strftime('%Y-%m-%d'),
+            'chats_count': int(round(chats_value or 0)),
+            'avg_score': avg_score_value,
+            'avg_response_time_seconds': avg_response_seconds,
+            'transfer_chat_count': int(round(transfer_value or 0)),
+            'source_row': int(row_num)
+        })
+
+    return {
+        'source_rows': int(source_rows),
+        'matched_rows': len(metrics),
+        'invalid_rows_count': int(invalid_rows_count),
+        'invalid_rows_preview': invalid_rows_preview,
+        'metrics': metrics
     }
 
 
@@ -14663,6 +14954,12 @@ def import_work_schedules_statuses_csv():
         file_name = secure_filename(file_storage.filename or 'statuses.csv')
         if not file_name.lower().endswith('.csv'):
             return jsonify({"error": "Only .csv files are supported"}), 400
+        source_system = (
+            request.form.get('source')
+            or request.args.get('source')
+            or 'operator_statuses'
+        )
+        source_system = str(source_system or 'operator_statuses').strip()[:80] or 'operator_statuses'
 
         content_length = request.content_length
         if content_length is not None and int(content_length) > STATUS_IMPORT_MAX_FILE_SIZE_BYTES:
@@ -14743,6 +15040,8 @@ def import_work_schedules_statuses_csv():
                 'zero_or_negative_transitions': int(parsed.get('zero_or_negative_transitions') or 0),
                 'meta': {
                     'api': 'import_statuses_csv',
+                    'source': source_system,
+                    'file_name': file_name,
                     'file_size_bytes': len(raw_bytes or b'')
                 }
             }
@@ -14766,6 +15065,126 @@ def import_work_schedules_statuses_csv():
     finally:
         if lock_acquired:
             STATUS_IMPORT_LOCK.release()
+
+
+@app.route('/api/chat_manager/metrics/import_csv', methods=['POST'])
+@require_api_key
+def import_chat_manager_metrics_csv():
+    lock_acquired = False
+    raw_bytes = b''
+    try:
+        requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+        requester_id = int(requester_id)
+
+        user_data = db.get_user(id=requester_id)
+        if not user_data:
+            return jsonify({"error": "User not found"}), 404
+        if not (_is_admin_role(user_data[3]) or _is_supervisor_role(user_data[3])):
+            return jsonify({"error": "Forbidden"}), 403
+
+        file_storage = request.files.get('file')
+        if not file_storage:
+            return jsonify({"error": "file is required"}), 400
+
+        file_name = secure_filename(file_storage.filename or 'chat_manager_metrics.csv')
+        if not file_name.lower().endswith('.csv'):
+            return jsonify({"error": "Only .csv files are supported"}), 400
+
+        default_date = request.form.get('date') or request.args.get('date')
+        if default_date:
+            if _chat_metrics_parse_date(default_date) is None:
+                return jsonify({"error": "date must be in YYYY-MM-DD format"}), 400
+
+        content_length = request.content_length
+        if content_length is not None and int(content_length) > STATUS_IMPORT_MAX_FILE_SIZE_BYTES:
+            return jsonify({
+                "error": f"Файл слишком большой. Лимит: {STATUS_IMPORT_MAX_FILE_SIZE_MB} MB"
+            }), 413
+
+        if not CHAT_MANAGER_METRICS_IMPORT_LOCK.acquire(blocking=False):
+            return jsonify({
+                "error": "Импорт метрик чат-менеджеров уже выполняется другим пользователем. Повторите через несколько секунд."
+            }), 429
+        lock_acquired = True
+
+        read_limit = int(STATUS_IMPORT_MAX_FILE_SIZE_BYTES) + 1
+        if getattr(file_storage, 'stream', None) is not None:
+            raw_bytes = file_storage.stream.read(read_limit)
+        else:
+            raw_bytes = file_storage.read(read_limit)
+        if not raw_bytes:
+            return jsonify({"error": "Файл пустой"}), 400
+        if len(raw_bytes) > STATUS_IMPORT_MAX_FILE_SIZE_BYTES:
+            return jsonify({
+                "error": f"Файл слишком большой. Лимит: {STATUS_IMPORT_MAX_FILE_SIZE_MB} MB"
+            }), 413
+
+        csv_text = None
+        for enc in ('utf-8-sig', 'cp1251'):
+            try:
+                csv_text = raw_bytes.decode(enc)
+                break
+            except Exception:
+                continue
+        if csv_text is None:
+            return jsonify({"error": "Не удалось декодировать CSV (поддерживаются UTF-8 и CP1251)"}), 400
+
+        operator_lookup = _status_import_build_operator_lookup()
+        parsed = _chat_metrics_import_parse_csv(
+            csv_text,
+            operator_lookup,
+            default_date=default_date,
+            max_source_rows=STATUS_IMPORT_MAX_SOURCE_ROWS,
+            invalid_rows_preview_limit=STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT
+        )
+
+        if not parsed.get('metrics'):
+            return jsonify({
+                "message": "Нет валидных метрик для сохранения",
+                "import": {
+                    "batch_id": None,
+                    "source_rows": int(parsed.get('source_rows') or 0),
+                    "matched_rows": 0,
+                    "processed": 0,
+                    "invalid_rows_count": int(parsed.get('invalid_rows_count') or 0)
+                },
+                "warnings": {
+                    "invalid_rows_preview": parsed.get('invalid_rows_preview') or []
+                }
+            }), 200
+
+        save_summary = db.save_chat_manager_daily_metrics(
+            metrics=parsed.get('metrics') or [],
+            imported_by=requester_id
+        )
+
+        return jsonify({
+            "message": "Метрики чат-менеджеров сохранены",
+            "import": {
+                **(save_summary or {}),
+                "source_rows": int(parsed.get('source_rows') or 0),
+                "matched_rows": int(parsed.get('matched_rows') or 0),
+                "invalid_rows_count": int(parsed.get('invalid_rows_count') or 0),
+                "file_name": file_name,
+                "file_size_bytes": len(raw_bytes or b'')
+            },
+            "warnings": {
+                "invalid_rows_preview": parsed.get('invalid_rows_preview') or []
+            }
+        }), 200
+
+    except OverflowError as e:
+        return jsonify({"error": str(e)}), 413
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error importing chat manager metrics csv: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+    finally:
+        if lock_acquired:
+            CHAT_MANAGER_METRICS_IMPORT_LOCK.release()
 
 
 def run_flask():

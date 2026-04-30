@@ -2,6 +2,25 @@ import React, { useEffect, useState } from 'react';
 import axios from 'axios';
 import FaIcon from '../common/FaIcon';
 
+const CALCULATION_MODEL_OPERATOR = 'operator';
+const CALCULATION_MODEL_CHAT_MANAGER = 'chat_manager';
+const CALCULATION_MODELS = [
+  {
+    code: CALCULATION_MODEL_OPERATOR,
+    name: 'Операторская модель',
+    description: 'Статусы операторов, звонки в час, качество звонков и стандартная зарплатная формула.',
+    icon: 'fa-headset',
+    chip: 'blue',
+  },
+  {
+    code: CALCULATION_MODEL_CHAT_MANAGER,
+    name: 'Модель чат-менеджера',
+    description: 'Chat2Desk-статусы, чаты в час, средняя оценка, время ответа и формула чат-менеджера.',
+    icon: 'fa-comments',
+    chip: 'emerald',
+  },
+];
+
 const EMPTY_DESCRIPTION = 'Нет описания';
 
 const TONE_STYLES = {
@@ -35,6 +54,17 @@ const normalizeCriterion = (criterion = {}) => ({
     : null,
 });
 
+const normalizeCalculationModelCode = (value, directionName = '') => {
+  const code = String(value || '').trim().toLowerCase();
+  if (CALCULATION_MODELS.some((model) => model.code === code)) return code;
+  const nameKey = String(directionName || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  if (nameKey === 'чат менеджер' || nameKey === 'chat manager') return CALCULATION_MODEL_CHAT_MANAGER;
+  return CALCULATION_MODEL_OPERATOR;
+};
+
+const getCalculationModelMeta = (code) =>
+  CALCULATION_MODELS.find((model) => model.code === code) || CALCULATION_MODELS[0];
+
 const normalizeDirections = (items) =>
   (Array.isArray(items) ? items : [])
     .filter(Boolean)
@@ -43,6 +73,10 @@ const normalizeDirections = (items) =>
       ...direction,
       name: String(direction?.name || ''),
       hasFileUpload: direction?.hasFileUpload !== false,
+      calculationModelCode: normalizeCalculationModelCode(
+        direction?.calculationModelCode || direction?.calculation_model_code,
+        direction?.name
+      ),
       criteria: Array.isArray(direction?.criteria) ? direction.criteria.map(normalizeCriterion) : [],
     }));
 
@@ -145,6 +179,7 @@ export default function MonitoringScaleView({
   const [selectedCrit, setSelectedCrit] = useState(0);
   const [dirName, setDirName] = useState('');
   const [dirFile, setDirFile] = useState(true);
+  const [dirCalculationModel, setDirCalculationModel] = useState(CALCULATION_MODEL_OPERATOR);
   const [editingDir, setEditingDir] = useState(null);
   const [criterionMode, setCriterionMode] = useState('view');
   const [editingCrit, setEditingCrit] = useState(null);
@@ -193,6 +228,7 @@ export default function MonitoringScaleView({
   const resetDirectionForm = () => {
     setDirName('');
     setDirFile(true);
+    setDirCalculationModel(CALCULATION_MODEL_OPERATOR);
     setEditingDir(null);
   };
 
@@ -306,7 +342,12 @@ export default function MonitoringScaleView({
       setDirections((prev) =>
         prev.map((direction, index) =>
           index === editingDir
-            ? { ...direction, name: dirName.trim(), hasFileUpload: dirFile }
+            ? {
+                ...direction,
+                name: dirName.trim(),
+                hasFileUpload: dirFile,
+                calculationModelCode: normalizeCalculationModelCode(dirCalculationModel, dirName),
+              }
             : direction
         )
       );
@@ -314,7 +355,12 @@ export default function MonitoringScaleView({
     } else {
       setDirections((prev) => [
         ...prev,
-        { name: dirName.trim(), hasFileUpload: dirFile, criteria: [] },
+        {
+          name: dirName.trim(),
+          hasFileUpload: dirFile,
+          calculationModelCode: normalizeCalculationModelCode(dirCalculationModel, dirName),
+          criteria: [],
+        },
       ]);
       setSelectedDir(directions.length);
       setSelectedCrit(0);
@@ -330,6 +376,7 @@ export default function MonitoringScaleView({
     if (!targetDirection) return;
     setDirName(targetDirection.name);
     setDirFile(targetDirection.hasFileUpload);
+    setDirCalculationModel(normalizeCalculationModelCode(targetDirection.calculationModelCode, targetDirection.name));
     setEditingDir(index);
     setSelectedDir(index);
   };
@@ -539,6 +586,10 @@ export default function MonitoringScaleView({
   };
 
   const selectedDirection = directions[selectedDir] || null;
+  const selectedDirectionModel = selectedDirection
+    ? getCalculationModelMeta(selectedDirection.calculationModelCode)
+    : null;
+  const formCalculationModel = getCalculationModelMeta(dirCalculationModel);
   const selectedDirectionWeight = selectedDirection ? totalWeight(selectedDir) : 0;
   const hasNonCritical = Boolean(selectedDirection?.criteria?.some((criterion) => !criterion.isCritical));
   const activeCriterion = selectedDirection?.criteria?.[selectedCrit] || null;
@@ -840,6 +891,26 @@ export default function MonitoringScaleView({
           font-size: 12px;
           color: #6b7280;
           line-height: 1.5;
+        }
+
+        .model-hint {
+          display: flex;
+          gap: 10px;
+          align-items: flex-start;
+          padding: 12px 14px;
+          border-radius: 14px;
+          border: 1px solid #e5e7eb;
+          background: #f8fafc;
+          color: #475569;
+          font-size: 12px;
+          line-height: 1.5;
+        }
+
+        .model-hint strong {
+          display: block;
+          color: #111827;
+          font-size: 13px;
+          margin-bottom: 2px;
         }
 
         .msv-list {
@@ -1591,6 +1662,29 @@ export default function MonitoringScaleView({
                   </div>
                 </label>
 
+                <div>
+                  <label className="field-label">Модель расчетов</label>
+                  <select
+                    value={dirCalculationModel}
+                    onChange={(event) => setDirCalculationModel(event.target.value)}
+                    disabled={!canEdit}
+                  >
+                    {CALCULATION_MODELS.map((model) => (
+                      <option key={model.code} value={model.code}>
+                        {model.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="model-hint">
+                  <Icon icon={formCalculationModel.icon} size={14} />
+                  <div>
+                    <strong>{formCalculationModel.name}</strong>
+                    <span>{formCalculationModel.description}</span>
+                  </div>
+                </div>
+
                 <div className="msv-form-actions">
                   <button type="button" className="btn-primary" onClick={submitDirection} disabled={!canEdit}>
                     <Icon icon={editingDir !== null ? 'fa-check' : 'fa-circle-plus'} size={14} />
@@ -1669,6 +1763,10 @@ export default function MonitoringScaleView({
                             <span className={`chip ${direction.hasFileUpload ? 'blue' : 'slate'}`}>
                               <Icon icon={direction.hasFileUpload ? 'fa-file-arrow-up' : 'fa-ban'} size={10} />
                               {direction.hasFileUpload ? 'Файл обязателен' : 'Без файла'}
+                            </span>
+                            <span className={`chip ${getCalculationModelMeta(direction.calculationModelCode).chip}`}>
+                              <Icon icon={getCalculationModelMeta(direction.calculationModelCode).icon} size={10} />
+                              {getCalculationModelMeta(direction.calculationModelCode).name}
                             </span>
                             <span className="chip emerald">
                               <Icon icon="fa-list-check" size={10} />
@@ -1757,6 +1855,7 @@ export default function MonitoringScaleView({
                   {selectedDirection.hasFileUpload
                     ? ' требует загрузку подтверждающего файла.'
                     : ' не требует загрузку файла.'}
+                  {selectedDirectionModel ? ` ${selectedDirectionModel.name}: ${selectedDirectionModel.description}` : ''}
                 </span>
               </div>
             ) : null}
