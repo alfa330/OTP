@@ -6432,12 +6432,28 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 case 'занят':
                 case 'занята':
                 case 'перезвон':
+                case 'online':
+                case 'онлайн':
+                case 'busy':
+                case 'take chat':
+                case 'взятие чата':
+                case 'transfer chat':
+                case 'передача чата':
                     return byKey({
                         chip: 'border-sky-200 bg-sky-50 text-sky-700',
                         row: 'border-sky-100 bg-sky-50/60 text-sky-800',
                         bar: '#0ea5e9'
                     });
+                case 'holiday':
+                case 'закрытие чатов':
+                    return byKey({
+                        chip: 'border-fuchsia-200 bg-fuchsia-50 text-fuchsia-700',
+                        row: 'border-fuchsia-100 bg-fuchsia-50/60 text-fuchsia-800',
+                        bar: '#d946ef'
+                    });
                 case 'отключен':
+                case 'отключена':
+                case 'отключено':
                     return byKey({
                         chip: 'border-slate-300 bg-slate-100 text-slate-700',
                         row: 'border-slate-200 bg-slate-100/70 text-slate-700',
@@ -6445,22 +6461,39 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     });
                 case 'перерыв':
                 case 'авто':
+                case 'break':
+                case 'обеденный перерыв':
                     return byKey({
                         chip: 'border-amber-200 bg-amber-50 text-amber-800',
                         row: 'border-amber-100 bg-amber-50/60 text-amber-900',
                         bar: '#f59e0b'
                     });
                 case 'вышел':
+                case 'logout':
+                case 'выход':
+                case 'выход из системы':
+                case 'отключение':
                     return byKey({
                         chip: 'border-orange-200 bg-orange-50 text-orange-700',
                         row: 'border-orange-100 bg-orange-50/60 text-orange-800',
                         bar: '#f97316'
                     });
                 case 'тренинг':
+                case 'training':
+                case 'study':
                     return byKey({
                         chip: 'border-teal-200 bg-teal-50 text-teal-700',
                         row: 'border-teal-100 bg-teal-50/60 text-teal-800',
                         bar: '#14b8a6'
+                    });
+                case 'login':
+                case 'вход':
+                case 'вход в систему':
+                case 'подключение':
+                    return byKey({
+                        chip: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+                        row: 'border-emerald-100 bg-emerald-50/60 text-emerald-800',
+                        bar: '#10b981'
                     });
                 default:
                     return byKey({
