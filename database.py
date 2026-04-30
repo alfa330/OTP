@@ -107,8 +107,6 @@ def normalize_calculation_model_code(model_code: Optional[str], direction_name: 
     code = str(model_code or '').strip().lower()
     if code in CALCULATION_MODEL_ALLOWED:
         return code
-    if _normalize_direction_name_key(direction_name) in ('чат менеджер', 'chat manager'):
-        return CALCULATION_MODEL_CHAT_MANAGER
     return CALCULATION_MODEL_OPERATOR
 
 
@@ -355,7 +353,7 @@ CHAT_MANAGER_NON_WORK_STATUS_KEYS = {'busy', 'занят', 'занята'}
 CHAT_MANAGER_TRAINING_STATUS_KEYS = {'study', 'training', 'тренинг'}
 CHAT_MANAGER_LOGIN_STATUS_KEYS = {'login', 'вход', 'подключение'}
 CHAT_MANAGER_LOGOUT_STATUS_KEYS = {'logout', 'выход', 'отключение'}
-CHAT_MANAGER_ACTION_STATUS_KEYS = {'transfer chat', 'передача чата'}
+CHAT_MANAGER_ACTION_STATUS_KEYS = {'transfer chat', 'take chat', 'передача чата', 'взятие чата'}
 SCHEDULE_STATUS_KEY_LABELS = {
     'готов': 'Готов',
     'занят': 'Занят',
@@ -378,7 +376,8 @@ SCHEDULE_STATUS_KEY_LABELS = {
     'study': 'Тренинг',
     'login': 'Вход в систему',
     'logout': 'Выход из системы',
-    'transfer chat': 'Передача чата'
+    'transfer chat': 'Передача чата',
+    'take chat': 'Взятие чата'
 }
 SCHEDULE_AUTO_FINE_RATE_PER_MINUTE = float(os.getenv('SCHEDULE_AUTO_FINE_RATE_PER_MINUTE', '50'))
 
@@ -573,10 +572,6 @@ class Database:
                     IF column_missing THEN
                         ALTER TABLE directions
                             ADD COLUMN calculation_model_code VARCHAR(32) NOT NULL DEFAULT 'operator';
-
-                        UPDATE directions
-                        SET calculation_model_code = 'chat_manager'
-                        WHERE LOWER(TRIM(name)) IN ('чат менеджер', 'chat manager');
                     END IF;
                 END $$;
             """)
@@ -3071,7 +3066,7 @@ class Database:
 
         return result, totals
 
-    def save_chat_manager_daily_metrics(self, metrics, imported_by=None):
+    def save_chat_manager_daily_metrics(self, metrics, imported_by=None, preserve_missing=False):
         if not isinstance(metrics, list):
             raise ValueError("metrics must be a list")
 
@@ -3141,10 +3136,21 @@ class Database:
         if not rows:
             return {'batch_id': str(batch_id), 'processed': 0}
 
+        avg_score_update_sql = (
+            "COALESCE(EXCLUDED.avg_score, chat_manager_daily_metrics.avg_score)"
+            if preserve_missing else
+            "EXCLUDED.avg_score"
+        )
+        avg_response_update_sql = (
+            "COALESCE(EXCLUDED.avg_response_time_seconds, chat_manager_daily_metrics.avg_response_time_seconds)"
+            if preserve_missing else
+            "EXCLUDED.avg_response_time_seconds"
+        )
+
         with self._get_cursor() as cursor:
             execute_values(
                 cursor,
-                """
+                f"""
                 INSERT INTO chat_manager_daily_metrics (
                     operator_id,
                     day,
@@ -3160,8 +3166,8 @@ class Database:
                 ON CONFLICT (operator_id, day)
                 DO UPDATE SET
                     chats_count = EXCLUDED.chats_count,
-                    avg_score = EXCLUDED.avg_score,
-                    avg_response_time_seconds = EXCLUDED.avg_response_time_seconds,
+                    avg_score = {avg_score_update_sql},
+                    avg_response_time_seconds = {avg_response_update_sql},
                     transfer_chat_count = EXCLUDED.transfer_chat_count,
                     imported_by = EXCLUDED.imported_by,
                     source_batch_id = EXCLUDED.source_batch_id,

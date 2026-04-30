@@ -50,6 +50,8 @@ import time
 import math
 from urllib.parse import quote, urlparse, parse_qs
 from zoneinfo import ZoneInfo
+from zipfile import ZipFile
+from xml.etree import ElementTree as ET
 from ai_feed_back_service import generate_monthly_feedback_with_ai, generate_birthday_greeting_with_ai
 from recruiting_parser import crawl_resumes_as_dicts
 try:
@@ -12412,6 +12414,41 @@ def _status_import_normalize_operator_name(value):
     return re.sub(r'\s+', ' ', str(value or '').strip()).replace('ё', 'е').replace('Ё', 'Е').lower()
 
 
+def _status_import_operator_name_variants(value):
+    normalized = _status_import_normalize_operator_name(value)
+    if not normalized:
+        return []
+    tokens = re.findall(r"[a-zа-яёәғқңөұүһі]+", normalized, flags=re.IGNORECASE)
+    variants = {normalized}
+    if len(tokens) >= 2:
+        variants.add(f"{tokens[0]} {tokens[1]}")
+        variants.add(f"{tokens[1]} {tokens[0]}")
+    if len(tokens) >= 3:
+        variants.add(f"{tokens[0]} {tokens[1]} {tokens[2]}")
+        variants.add(f"{tokens[1]} {tokens[0]} {tokens[2]}")
+        variants.add(f"{tokens[1]} {tokens[0]}")
+    return [item for item in variants if item]
+
+
+CHAT2DESK_STATUS_EVENT_MAP = {
+    'status.online': ('online', 'Online'),
+    'status.holiday': ('holiday', 'Закрытие чатов'),
+    'status.break': ('break', 'Обеденный перерыв'),
+    'status.busy': ('busy', 'Busy'),
+    'status.study': ('study', 'Тренинг'),
+    'status.training': ('study', 'Тренинг'),
+    'status.offline': ('logout', 'Выход из системы'),
+    'login': ('login', 'Вход в систему'),
+    'logout': ('logout', 'Выход из системы'),
+}
+
+
+CHAT2DESK_ACTION_EVENT_MAP = {
+    'transfer.chat': ('transfer chat', 'Передача чата'),
+    'take.chat': ('take chat', 'Взятие чата'),
+}
+
+
 def _status_import_parse_datetime(value):
     text = str(value or '').strip()
     if not text:
@@ -12458,19 +12495,41 @@ def _status_import_resolve_break_note_label(state_note_raw):
 def _status_import_resolve_display_state(state_name_raw, state_note_raw):
     base_name = str(state_name_raw or '').strip()
     base_key = _status_import_normalize_key(base_name)
+    event_key = re.sub(r'[\s_]+', '.', base_key)
+    event_key = re.sub(r'\.+', '.', event_key).strip('.')
+    if event_key in CHAT2DESK_STATUS_EVENT_MAP:
+        status_key, label = CHAT2DESK_STATUS_EVENT_MAP[event_key]
+        return {
+            'label': label,
+            'key': status_key,
+            'base_key': base_key,
+            'base_name': base_name,
+            'kind': 'status'
+        }
+    if event_key in CHAT2DESK_ACTION_EVENT_MAP:
+        status_key, label = CHAT2DESK_ACTION_EVENT_MAP[event_key]
+        return {
+            'label': label,
+            'key': status_key,
+            'base_key': base_key,
+            'base_name': base_name,
+            'kind': 'action'
+        }
     if base_key == 'перерыв':
         label = _status_import_resolve_break_note_label(state_note_raw)
         return {
             'label': label,
             'key': _status_import_normalize_key(label),
             'base_key': base_key,
-            'base_name': base_name
+            'base_name': base_name,
+            'kind': 'status'
         }
     return {
         'label': base_name or '—',
         'key': base_key,
         'base_key': base_key,
-        'base_name': base_name
+        'base_name': base_name,
+        'kind': 'status'
     }
 
 
@@ -12506,13 +12565,14 @@ def _status_import_build_operator_lookup():
         except Exception:
             continue
         operator_name = str(row[1] or '').strip()
-        key = _status_import_normalize_operator_name(operator_name)
-        if not key:
-            continue
-        lookup.setdefault(key, []).append({
+        operator_info = {
             'id': operator_id,
             'name': operator_name
-        })
+        }
+        for key in _status_import_operator_name_variants(operator_name):
+            lookup.setdefault(key, [])
+            if not any(int(item.get('id')) == operator_id for item in lookup[key]):
+                lookup[key].append(operator_info)
     return lookup
 
 
@@ -12553,7 +12613,7 @@ def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, in
         'статус', 'состояние', 'действие', 'событие'
     ])
     time_col = _find_col([
-        'timechange', 'datetime', 'createdat', 'changedat', 'timestamp',
+        'timechange', 'datetime', 'date', 'eventdate', 'createdat', 'changedat', 'timestamp',
         'датавремя', 'времяизменения', 'датаизменения'
     ])
     date_col = _find_col(['date', 'day', 'дата', 'день'])
@@ -12592,6 +12652,8 @@ def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, in
     invalid_rows_preview = []
     events_by_operator = {}
     source_order_stats = {}
+    action_events_count = 0
+    chat_metrics_by_operator_day = {}
 
     def _push_invalid(row_num, reason, operator_name, source_state_name, state_note, time_change):
         nonlocal invalid_rows_count
@@ -12616,9 +12678,9 @@ def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, in
         source_state_name = _cell(cols, state_col)
         state_note = _cell(cols, note_col)
         time_change = _cell(cols, time_col)
+        date_value = _cell(cols, date_col)
+        time_value = _cell(cols, time_of_day_col)
         if not time_change and date_col is not None and time_of_day_col is not None:
-            date_value = _cell(cols, date_col)
-            time_value = _cell(cols, time_of_day_col)
             time_change = f"{date_value} {time_value}".strip()
 
         if not operator_name and not source_state_name and not state_note and not time_change:
@@ -12636,6 +12698,11 @@ def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, in
             continue
 
         ts = _status_import_parse_datetime(time_change)
+        if not ts and date_col is not None and time_of_day_col is not None:
+            combined_time_change = f"{date_value} {time_value}".strip()
+            if combined_time_change and combined_time_change != time_change:
+                time_change = combined_time_change
+                ts = _status_import_parse_datetime(time_change)
         if not ts:
             _push_invalid(
                 row_num=row_num,
@@ -12665,6 +12732,23 @@ def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, in
         resolved = _status_import_resolve_display_state(source_state_name, state_note)
         operator_info = operator_matches[0]
         operator_id = int(operator_info['id'])
+        event_kind = str(resolved.get('kind') or 'status')
+        status_key = resolved.get('key') or _status_import_normalize_key(source_state_name)
+        if event_kind == 'action':
+            action_events_count += 1
+            metric_key = (operator_id, ts.date().strftime('%Y-%m-%d'))
+            metric_row = chat_metrics_by_operator_day.setdefault(metric_key, {
+                'operator_id': operator_id,
+                'operator_name': operator_info.get('name') or operator_name,
+                'day': ts.date().strftime('%Y-%m-%d'),
+                'chats_count': 0,
+                'transfer_chat_count': 0,
+                'source': 'chat2desk_events'
+            })
+            if status_key == 'take chat':
+                metric_row['chats_count'] = int(metric_row.get('chats_count') or 0) + 1
+            elif status_key == 'transfer chat':
+                metric_row['transfer_chat_count'] = int(metric_row.get('transfer_chat_count') or 0) + 1
 
         order_stats = source_order_stats.setdefault(operator_id, {'asc': 0, 'desc': 0, 'last_ts': None})
         prev_ts = order_stats.get('last_ts')
@@ -12679,9 +12763,10 @@ def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, in
         events_by_operator.setdefault(operator_id, []).append({
             'operator_id': operator_id,
             'event_at': ts,
-            'status_key': resolved.get('key') or _status_import_normalize_key(source_state_name),
+            'status_key': status_key,
             'state_note': state_note,
-            'source_row': int(row_num)
+            'source_row': int(row_num),
+            'event_kind': event_kind
         })
 
     open_tail_events = 0
@@ -12705,10 +12790,13 @@ def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, in
             )
 
         events_for_db.extend(events_list)
+        segment_events_list = [ev for ev in events_list if str(ev.get('event_kind') or 'status') != 'action']
+        if not segment_events_list:
+            continue
 
-        for idx in range(len(events_list) - 1):
-            cur = events_list[idx]
-            nxt = events_list[idx + 1]
+        for idx in range(len(segment_events_list) - 1):
+            cur = segment_events_list[idx]
+            nxt = segment_events_list[idx + 1]
             cur_ts = cur['event_at']
             next_ts = nxt['event_at']
             if next_ts <= cur_ts:
@@ -12726,7 +12814,7 @@ def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, in
                     'state_note': cur.get('state_note')
                 })
 
-        last_event = events_list[-1]
+        last_event = segment_events_list[-1]
         last_event_at = last_event.get('event_at')
         tail_anchor_dt = last_event_at
         if isinstance(last_event_at, datetime) and (now_dt - last_event_at) <= timedelta(hours=48):
@@ -12757,11 +12845,86 @@ def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, in
         'invalid_rows_preview': invalid_rows_preview,
         'parse_errors_count': 0,
         'operators_count': len(events_by_operator),
+        'action_events_count': int(action_events_count),
         'open_tail_events': int(open_tail_events),
         'zero_or_negative_transitions': int(zero_or_negative_transitions),
         'events': events_for_db,
-        'segments': segments
+        'segments': segments,
+        'chat_metrics': list(chat_metrics_by_operator_day.values())
     }
+
+
+def _xlsx_cell_ref_to_index(ref):
+    letters = ''.join(ch for ch in str(ref or '') if ch.isalpha())
+    index = 0
+    for ch in letters.upper():
+        index = index * 26 + (ord(ch) - ord('A') + 1)
+    return max(0, index - 1)
+
+
+def _status_import_xlsx_rows(raw_bytes):
+    if not raw_bytes:
+        raise ValueError("XLSX file is required")
+    ns = {'x': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+    with ZipFile(BytesIO(raw_bytes)) as archive:
+        names = set(archive.namelist())
+        shared_strings = []
+        if 'xl/sharedStrings.xml' in names:
+            shared_root = ET.fromstring(archive.read('xl/sharedStrings.xml'))
+            for item in shared_root.findall('x:si', ns):
+                parts = [node.text or '' for node in item.findall('.//x:t', ns)]
+                shared_strings.append(''.join(parts))
+
+        sheet_name = 'xl/worksheets/sheet1.xml'
+        if sheet_name not in names:
+            sheet_candidates = sorted(name for name in names if name.startswith('xl/worksheets/sheet') and name.endswith('.xml'))
+            if not sheet_candidates:
+                raise ValueError("XLSX does not contain worksheets")
+            sheet_name = sheet_candidates[0]
+
+        sheet_root = ET.fromstring(archive.read(sheet_name))
+        rows = []
+        for row in sheet_root.findall('.//x:sheetData/x:row', ns):
+            values = []
+            for cell in row.findall('x:c', ns):
+                col_index = _xlsx_cell_ref_to_index(cell.attrib.get('r'))
+                while len(values) <= col_index:
+                    values.append('')
+                cell_type = cell.attrib.get('t')
+                value_node = cell.find('x:v', ns)
+                if cell_type == 'inlineStr':
+                    text_parts = [node.text or '' for node in cell.findall('.//x:t', ns)]
+                    values[col_index] = ''.join(text_parts).strip()
+                    continue
+                if value_node is None:
+                    values[col_index] = ''
+                    continue
+                raw_value = value_node.text or ''
+                if cell_type == 's':
+                    try:
+                        values[col_index] = shared_strings[int(raw_value)].strip()
+                    except Exception:
+                        values[col_index] = raw_value.strip()
+                else:
+                    values[col_index] = raw_value.strip()
+            if any(str(value or '').strip() for value in values):
+                rows.append(values)
+    return rows
+
+
+def _status_import_parse_xlsx(raw_bytes, operator_lookup, max_source_rows=None, invalid_rows_preview_limit=None):
+    rows = _status_import_xlsx_rows(raw_bytes)
+    if not rows:
+        raise ValueError("Файл пустой")
+    buf = StringIO()
+    writer = csv.writer(buf, delimiter=';', quotechar='"', lineterminator='\n')
+    writer.writerows(rows)
+    return _status_import_parse_csv(
+        buf.getvalue(),
+        operator_lookup,
+        max_source_rows=max_source_rows,
+        invalid_rows_preview_limit=invalid_rows_preview_limit
+    )
 
 
 def _chat_metrics_parse_date(value, default_date=None):
@@ -14952,8 +15115,9 @@ def import_work_schedules_statuses_csv():
             return jsonify({"error": "file is required"}), 400
 
         file_name = secure_filename(file_storage.filename or 'statuses.csv')
-        if not file_name.lower().endswith('.csv'):
-            return jsonify({"error": "Only .csv files are supported"}), 400
+        file_ext = os.path.splitext(file_name.lower())[1]
+        if file_ext not in ('.csv', '.xlsx', '.xlsm'):
+            return jsonify({"error": "Only .csv, .xlsx and .xlsm files are supported"}), 400
         source_system = (
             request.form.get('source')
             or request.args.get('source')
@@ -14985,23 +15149,30 @@ def import_work_schedules_statuses_csv():
                 "error": f"Файл слишком большой. Лимит: {STATUS_IMPORT_MAX_FILE_SIZE_MB} MB"
             }), 413
 
-        csv_text = None
-        for enc in ('utf-8-sig', 'cp1251'):
-            try:
-                csv_text = raw_bytes.decode(enc)
-                break
-            except Exception:
-                continue
-        if csv_text is None:
-            return jsonify({"error": "Не удалось декодировать CSV (поддерживаются UTF-8 и CP1251)"}), 400
-
         operator_lookup = _status_import_build_operator_lookup()
-        parsed = _status_import_parse_csv(
-            csv_text,
-            operator_lookup,
-            max_source_rows=STATUS_IMPORT_MAX_SOURCE_ROWS,
-            invalid_rows_preview_limit=STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT
-        )
+        if file_ext in ('.xlsx', '.xlsm'):
+            parsed = _status_import_parse_xlsx(
+                raw_bytes,
+                operator_lookup,
+                max_source_rows=STATUS_IMPORT_MAX_SOURCE_ROWS,
+                invalid_rows_preview_limit=STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT
+            )
+        else:
+            csv_text = None
+            for enc in ('utf-8-sig', 'cp1251'):
+                try:
+                    csv_text = raw_bytes.decode(enc)
+                    break
+                except Exception:
+                    continue
+            if csv_text is None:
+                return jsonify({"error": "Не удалось декодировать CSV (поддерживаются UTF-8 и CP1251)"}), 400
+            parsed = _status_import_parse_csv(
+                csv_text,
+                operator_lookup,
+                max_source_rows=STATUS_IMPORT_MAX_SOURCE_ROWS,
+                invalid_rows_preview_limit=STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT
+            )
 
         if not parsed.get('events'):
             return jsonify({
@@ -15038,14 +15209,22 @@ def import_work_schedules_statuses_csv():
                 'parse_errors_count': int(parsed.get('parse_errors_count') or 0),
                 'open_tail_events': int(parsed.get('open_tail_events') or 0),
                 'zero_or_negative_transitions': int(parsed.get('zero_or_negative_transitions') or 0),
+                'action_events_count': int(parsed.get('action_events_count') or 0),
                 'meta': {
                     'api': 'import_statuses_csv',
                     'source': source_system,
                     'file_name': file_name,
+                    'file_ext': file_ext,
                     'file_size_bytes': len(raw_bytes or b'')
                 }
             }
         )
+        if parsed.get('chat_metrics'):
+            save_summary['chat_metrics'] = db.save_chat_manager_daily_metrics(
+                metrics=parsed.get('chat_metrics') or [],
+                imported_by=requester_id,
+                preserve_missing=True
+            )
 
         return jsonify({
             "message": "Статусы операторов сохранены в БД",

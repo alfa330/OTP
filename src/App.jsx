@@ -10209,12 +10209,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setPlannerStatusImportSummary(null);
                 setPlannerStatusAnomalyOnly(false);
                 try {
-                    const csvText = await file.text();
-                    if (!String(csvText || '').trim()) {
-                        throw new Error('Файл пустой');
+                    const isSpreadsheet = /\.(xlsx|xlsm)$/i.test(String(file.name || ''));
+                    let analysis = null;
+                    if (!isSpreadsheet) {
+                        const csvText = await file.text();
+                        if (!String(csvText || '').trim()) {
+                            throw new Error('Файл пустой');
+                        }
+                        analysis = analyzePlannerStatusTransitionsCsv(csvText);
                     }
-
-                    const analysis = analyzePlannerStatusTransitionsCsv(csvText);
                     const formData = new FormData();
                     formData.append('file', file);
                     formData.append('source', 'chat2desk_statuses');
@@ -10239,7 +10242,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setPlannerStatusHourlyDayKey('');
                     setPlannerStatusHourlyExpandedKey('');
                     setPlannerStatusGroupingDirectionKeys(['all']);
-                    setPlannerStatusSpecialViewEnabled(true);
+                    setPlannerStatusSpecialViewEnabled(Boolean(analysis));
                     plannerLoadedStatusRangeKeysRef.current = new Set();
                     plannerLoadingStatusRangeKeysRef.current = new Set();
                     plannerActiveStatusWindowKeyRef.current = '';
@@ -10262,7 +10265,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setPlannerStatusGroupingDirectionKeys(['all']);
                     setPlannerStatusSpecialViewEnabled(false);
                     setPlannerStatusAnomalyExpandedDays({});
-                    setPlannerStatusAnomalyError(error?.message || 'Не удалось обработать CSV');
+                    setPlannerStatusAnomalyError(error?.message || 'Не удалось обработать файл');
                 } finally {
                     setPlannerStatusAnomalyLoading(false);
                     if (event?.target) event.target.value = '';
@@ -16802,7 +16805,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             <input
                                 ref={plannerStatusAnomalyInputRef}
                                 type="file"
-                                accept=".csv,text/csv"
+                                accept=".csv,.xlsx,.xlsm,text/csv"
                                 className="hidden"
                                 onChange={handlePlannerStatusAnomalyFileChange}
                             />
@@ -16866,7 +16869,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 }}
                                                 disabled={plannerStatusAnomalyLoading}
                                                 className="w-full px-3 py-2 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
-                                                title="Загрузить CSV переключений статусов операторов и построить таймлайн/аномалии"
+                                                title="Загрузить CSV/XLSX переключений статусов операторов"
                                             >
                                                 <FaIcon className={`fas ${plannerStatusAnomalyLoading ? 'fa-spinner fa-spin' : 'fa-upload'}`}></FaIcon>
                                                 {plannerStatusAnomalyLoading ? 'Загрузка...' : 'Загрузить статусы'}
@@ -21089,7 +21092,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             Загрузка статусов операторов
                                         </h3>
                                         <div className="text-sm text-slate-600 mt-1">
-                                            CSV с колонками <span className="font-medium">OperatorName;StateName;TimeChange</span> и опционально <span className="font-medium">StateNote</span>
+                                            CSV/XLSX с колонками <span className="font-medium">Name;Event;Date</span> или <span className="font-medium">OperatorName;StateName;TimeChange</span>
                                         </div>
                                         <div className="text-xs text-slate-500 mt-1">
                                             Поддерживается <span className="font-medium">StateNote</span> (для «Перерыв»: Вышел / Авто / Перезвон / Тех причина / Тренинг / пусто = Перерыв)
@@ -21122,7 +21125,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         className="px-3 py-2 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
                                     >
                                         <FaIcon className={`fas ${plannerStatusAnomalyLoading ? 'fa-spinner fa-spin' : 'fa-file-csv'}`}></FaIcon>
-                                        {plannerStatusAnomalyLoading ? 'Анализируем...' : (hasAnalysis ? 'Загрузить другой CSV' : 'Загрузить CSV')}
+                                        {plannerStatusAnomalyLoading ? 'Анализируем...' : (hasAnalysis ? 'Загрузить другой файл' : 'Загрузить файл')}
                                     </button>
                                     {hasAnalysis && (
                                         <div className="flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-1 py-1">

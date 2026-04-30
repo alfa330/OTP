@@ -54,11 +54,9 @@ const normalizeCriterion = (criterion = {}) => ({
     : null,
 });
 
-const normalizeCalculationModelCode = (value, directionName = '') => {
+const normalizeCalculationModelCode = (value) => {
   const code = String(value || '').trim().toLowerCase();
   if (CALCULATION_MODELS.some((model) => model.code === code)) return code;
-  const nameKey = String(directionName || '').trim().toLowerCase().replace(/\s+/g, ' ');
-  if (nameKey === 'чат менеджер' || nameKey === 'chat manager') return CALCULATION_MODEL_CHAT_MANAGER;
   return CALCULATION_MODEL_OPERATOR;
 };
 
@@ -73,10 +71,7 @@ const normalizeDirections = (items) =>
       ...direction,
       name: String(direction?.name || ''),
       hasFileUpload: direction?.hasFileUpload !== false,
-      calculationModelCode: normalizeCalculationModelCode(
-        direction?.calculationModelCode || direction?.calculation_model_code,
-        direction?.name
-      ),
+      calculationModelCode: normalizeCalculationModelCode(direction?.calculationModelCode || direction?.calculation_model_code),
       criteria: Array.isArray(direction?.criteria) ? direction.criteria.map(normalizeCriterion) : [],
     }));
 
@@ -346,7 +341,7 @@ export default function MonitoringScaleView({
                 ...direction,
                 name: dirName.trim(),
                 hasFileUpload: dirFile,
-                calculationModelCode: normalizeCalculationModelCode(dirCalculationModel, dirName),
+                calculationModelCode: normalizeCalculationModelCode(dirCalculationModel),
               }
             : direction
         )
@@ -358,7 +353,7 @@ export default function MonitoringScaleView({
         {
           name: dirName.trim(),
           hasFileUpload: dirFile,
-          calculationModelCode: normalizeCalculationModelCode(dirCalculationModel, dirName),
+          calculationModelCode: normalizeCalculationModelCode(dirCalculationModel),
           criteria: [],
         },
       ]);
@@ -376,7 +371,7 @@ export default function MonitoringScaleView({
     if (!targetDirection) return;
     setDirName(targetDirection.name);
     setDirFile(targetDirection.hasFileUpload);
-    setDirCalculationModel(normalizeCalculationModelCode(targetDirection.calculationModelCode, targetDirection.name));
+    setDirCalculationModel(normalizeCalculationModelCode(targetDirection.calculationModelCode));
     setEditingDir(index);
     setSelectedDir(index);
   };
