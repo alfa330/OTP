@@ -6469,14 +6469,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         bar: '#f59e0b'
                     });
                 case 'вышел':
+                    return byKey({
+                        chip: 'border-orange-200 bg-orange-50 text-orange-700',
+                        row: 'border-orange-100 bg-orange-50/60 text-orange-800',
+                        bar: '#f97316'
+                    });
                 case 'logout':
                 case 'выход':
                 case 'выход из системы':
                 case 'отключение':
                     return byKey({
-                        chip: 'border-orange-200 bg-orange-50 text-orange-700',
-                        row: 'border-orange-100 bg-orange-50/60 text-orange-800',
-                        bar: '#f97316'
+                        chip: 'border-slate-300 bg-slate-100 text-slate-700',
+                        row: 'border-slate-200 bg-slate-100/70 text-slate-700',
+                        bar: '#64748b'
                     });
                 case 'тренинг':
                 case 'training':
