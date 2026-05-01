@@ -6408,13 +6408,22 @@ class Database:
                      OR c.appeal_date = lv.appeal_date
                  )
                  AND c.created_at = lv.latest_date
+            ),
+            call_aggregates AS (
+                SELECT
+                    operator_id,
+                    COUNT(*) AS evaluation_row_count,
+                    COUNT(*) FILTER (WHERE score IS NOT NULL) AS call_count,
+                    AVG(score)::float AS avg_score
+                FROM latest_calls
+                GROUP BY operator_id
             )
             SELECT
                 operator_id,
-                COUNT(*) FILTER (WHERE score IS NOT NULL) AS call_count,
-                AVG(score)::float AS avg_score
-            FROM latest_calls
-            GROUP BY operator_id
+                call_count,
+                avg_score,
+                evaluation_row_count
+            FROM call_aggregates ca
         """
 
         with self._get_cursor() as cursor:
@@ -6422,11 +6431,14 @@ class Database:
             rows = cursor.fetchall()
 
         result = {}
-        for operator_id, call_count, avg_score in rows:
+        for operator_id, call_count, avg_score, evaluation_row_count in rows:
             op_id = int(operator_id)
+            evaluation_rows = int(evaluation_row_count or 0)
             result[op_id] = {
                 "call_count": int(call_count or 0),
-                "avg_score": round(float(avg_score), 2) if avg_score is not None else None
+                "avg_score": round(float(avg_score), 2) if avg_score is not None else None,
+                "evaluation_row_count": evaluation_rows,
+                "has_evaluation_data": evaluation_rows > 0
             }
         return result
 
@@ -6873,6 +6885,7 @@ class Database:
             -- считаем количество последних версий звонков по оператору
             SELECT
                 operator_id,
+                COUNT(*) AS evaluation_row_count,
                 COUNT(*) FILTER (WHERE score IS NOT NULL) AS call_count,
                 AVG(score)::float AS avg_score
             FROM latest_calls
@@ -6889,7 +6902,8 @@ class Database:
             u.hire_date,
             COALESCE(c.call_count, 0) AS call_count,
             c.avg_score,
-            LOWER(COALESCE(u.role, '')) AS role_norm
+            LOWER(COALESCE(u.role, '')) AS role_norm,
+            COALESCE(c.evaluation_row_count, 0) AS evaluation_row_count
         FROM users u
         LEFT JOIN directions d ON u.direction_id = d.id
         LEFT JOIN users su ON u.supervisor_id = su.id
@@ -6924,6 +6938,7 @@ class Database:
             result = []
             for row in rows:
                 role_norm = str(row[10] or '').strip().lower()
+                evaluation_row_count = int(row[11] or 0)
                 is_supervisor_row = role_norm in ('sv', 'supervisor')
                 effective_supervisor_id = row[5]
                 effective_supervisor_name = row[6]
@@ -6942,7 +6957,9 @@ class Database:
                     "hire_date": row[7].strftime('%d-%m-%Y') if row[7] else None,
                     "call_count": int(row[8] or 0),
                     "avg_score": round(float(row[9]), 2) if row[9] is not None else None,
-                    "role": role_norm
+                    "role": role_norm,
+                    "evaluation_row_count": evaluation_row_count,
+                    "has_evaluation_data": evaluation_row_count > 0
                 })
             return result
 
