@@ -3320,6 +3320,12 @@ class Database:
                 start_date=start,
                 end_date=end
             )
+            training_totals_by_operator = self._load_training_hours_by_operator_tx(
+                cursor=cursor,
+                operator_ids=[operator_id],
+                start_date=start,
+                end_date=end
+            )
             chat_metrics_by_operator, chat_totals_by_operator = self._load_chat_manager_metrics_by_operator_day_tx(
                 cursor=cursor,
                 operator_ids=[operator_id],
@@ -3356,6 +3362,7 @@ class Database:
         technical_issue_hours = float(technical_totals_by_operator.get(int(operator_id), 0.0)) if isinstance(technical_totals_by_operator, dict) else 0.0
         offline_activities_by_day = offline_map_by_operator.get(int(operator_id), {}) if isinstance(offline_map_by_operator, dict) else {}
         offline_activity_hours = float(offline_totals_by_operator.get(int(operator_id), 0.0)) if isinstance(offline_totals_by_operator, dict) else 0.0
+        training_hours = float(training_totals_by_operator.get(int(operator_id), 0.0)) if isinstance(training_totals_by_operator, dict) else 0.0
         chat_metrics_by_day = chat_metrics_by_operator.get(int(operator_id), {}) if isinstance(chat_metrics_by_operator, dict) else {}
         chat_metric_totals = chat_totals_by_operator.get(int(operator_id), {}) if isinstance(chat_totals_by_operator, dict) else {}
 
@@ -3393,6 +3400,12 @@ class Database:
                 entry["chat_metrics"] = metrics
                 entry["calls"] = int(metrics.get("chats_count") or 0)
 
+        accounted_hours = (
+            float(regular_hours or 0.0)
+            + float(training_hours or 0.0)
+            + float(technical_issue_hours or 0.0)
+            + float(offline_activity_hours or 0.0)
+        )
         operator_obj = {
             "operator_id": operator_id,
             "name": name,
@@ -3402,6 +3415,9 @@ class Database:
             "rate": rate,
             "norm_hours": float(norm_hours),
             "fines": float(fines),
+            "training_hours": round(float(training_hours), 2),
+            "accounted_hours": round(float(accounted_hours), 2),
+            "worked_hours_used": round(float(accounted_hours), 2),
             "daily": daily_map,
             "chat_metrics_by_day": chat_metrics_by_day,
             "chat_metrics": chat_metric_totals,
@@ -3554,6 +3570,12 @@ class Database:
                 start_date=start,
                 end_date=end
             )
+            training_totals_by_operator = self._load_training_hours_by_operator_tx(
+                cursor=cursor,
+                operator_ids=op_ids,
+                start_date=start,
+                end_date=end
+            )
             chat_metrics_by_operator, chat_totals_by_operator = self._load_chat_manager_metrics_by_operator_day_tx(
                 cursor=cursor,
                 operator_ids=op_ids,
@@ -3569,6 +3591,10 @@ class Database:
                 total_calls, total_efficiency_hours, calls_per_hour, fines) = row
                 calculation_model_code = self._normalize_calculation_model_code(calculation_model_raw, direction_name)
                 op_daily = daily_map.get(op_id, {})
+                training_hours = float(training_totals_by_operator.get(op_id, 0.0)) if isinstance(training_totals_by_operator, dict) else 0.0
+                technical_issue_hours = float(technical_totals_by_operator.get(op_id, 0.0)) if isinstance(technical_totals_by_operator, dict) else 0.0
+                offline_activity_hours = float(offline_totals_by_operator.get(op_id, 0.0)) if isinstance(offline_totals_by_operator, dict) else 0.0
+                accounted_hours = float(regular_hours or 0.0) + training_hours + technical_issue_hours + offline_activity_hours
                 chat_metrics_by_day = chat_metrics_by_operator.get(op_id, {}) if isinstance(chat_metrics_by_operator, dict) else {}
                 chat_metric_totals = chat_totals_by_operator.get(op_id, {}) if isinstance(chat_totals_by_operator, dict) else {}
                 if calculation_model_code == CALCULATION_MODEL_CHAT_MANAGER:
@@ -3601,13 +3627,16 @@ class Database:
                     "rate": float(rate) if rate is not None else 0.0,
                     "status": status,
                     "norm_hours": float(norm_hours) if norm_hours is not None else 0.0,
+                    "training_hours": round(float(training_hours), 2),
+                    "accounted_hours": round(float(accounted_hours), 2),
+                    "worked_hours_used": round(float(accounted_hours), 2),
                     "daily": op_daily,
                     "chat_metrics_by_day": chat_metrics_by_day,
                     "chat_metrics": chat_metric_totals,
                     "technical_issues_by_day": technical_map_by_operator.get(op_id, {}) if isinstance(technical_map_by_operator, dict) else {},
-                    "technical_issue_hours": round(float(technical_totals_by_operator.get(op_id, 0.0)), 2) if isinstance(technical_totals_by_operator, dict) else 0.0,
+                    "technical_issue_hours": round(float(technical_issue_hours), 2),
                     "offline_activities_by_day": offline_map_by_operator.get(op_id, {}) if isinstance(offline_map_by_operator, dict) else {},
-                    "offline_activity_hours": round(float(offline_totals_by_operator.get(op_id, 0.0)), 2) if isinstance(offline_totals_by_operator, dict) else 0.0,
+                    "offline_activity_hours": round(float(offline_activity_hours), 2),
                     "aggregates": {
                         "regular_hours": float(regular_hours),
                         "total_break_time": float(total_break_time),
@@ -3749,6 +3778,12 @@ class Database:
                 start_date=start,
                 end_date=end
             )
+            training_totals_by_operator = self._load_training_hours_by_operator_tx(
+                cursor=cursor,
+                operator_ids=op_ids,
+                start_date=start,
+                end_date=end
+            )
             chat_metrics_by_operator, chat_totals_by_operator = self._load_chat_manager_metrics_by_operator_day_tx(
                 cursor=cursor,
                 operator_ids=op_ids,
@@ -3763,6 +3798,10 @@ class Database:
                 total_calls, total_efficiency_hours, calls_per_hour, fines) = row
                 calculation_model_code = self._normalize_calculation_model_code(calculation_model_raw, direction_name)
                 op_daily = daily_map.get(op_id, {})
+                training_hours = float(training_totals_by_operator.get(op_id, 0.0)) if isinstance(training_totals_by_operator, dict) else 0.0
+                technical_issue_hours = float(technical_totals_by_operator.get(op_id, 0.0)) if isinstance(technical_totals_by_operator, dict) else 0.0
+                offline_activity_hours = float(offline_totals_by_operator.get(op_id, 0.0)) if isinstance(offline_totals_by_operator, dict) else 0.0
+                accounted_hours = float(regular_hours or 0.0) + training_hours + technical_issue_hours + offline_activity_hours
                 chat_metrics_by_day = chat_metrics_by_operator.get(op_id, {}) if isinstance(chat_metrics_by_operator, dict) else {}
                 chat_metric_totals = chat_totals_by_operator.get(op_id, {}) if isinstance(chat_totals_by_operator, dict) else {}
                 if calculation_model_code == CALCULATION_MODEL_CHAT_MANAGER:
@@ -3795,13 +3834,16 @@ class Database:
                     "rate": float(rate) if rate is not None else 0.0,
                     "status": status,
                     "norm_hours": float(norm_hours) if norm_hours is not None else 0.0,
+                    "training_hours": round(float(training_hours), 2),
+                    "accounted_hours": round(float(accounted_hours), 2),
+                    "worked_hours_used": round(float(accounted_hours), 2),
                     "daily": op_daily,
                     "chat_metrics_by_day": chat_metrics_by_day,
                     "chat_metrics": chat_metric_totals,
                     "technical_issues_by_day": technical_map_by_operator.get(op_id, {}) if isinstance(technical_map_by_operator, dict) else {},
-                    "technical_issue_hours": round(float(technical_totals_by_operator.get(op_id, 0.0)), 2) if isinstance(technical_totals_by_operator, dict) else 0.0,
+                    "technical_issue_hours": round(float(technical_issue_hours), 2),
                     "offline_activities_by_day": offline_map_by_operator.get(op_id, {}) if isinstance(offline_map_by_operator, dict) else {},
-                    "offline_activity_hours": round(float(offline_totals_by_operator.get(op_id, 0.0)), 2) if isinstance(offline_totals_by_operator, dict) else 0.0,
+                    "offline_activity_hours": round(float(offline_activity_hours), 2),
                     "aggregates": {
                         "regular_hours": float(regular_hours),
                         "total_break_time": float(total_break_time),
@@ -4616,6 +4658,58 @@ class Database:
 
     def _get_full_rate_norm_hours(self, month: Optional[str]) -> float:
         return float(self._get_month_work_days(month) * 8.0)
+
+    def _load_training_hours_by_operator_tx(self, cursor, operator_ids, start_date, end_date):
+        normalized_ids = []
+        seen_ids = set()
+        for raw_id in (operator_ids or []):
+            try:
+                op_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            if op_id in seen_ids:
+                continue
+            seen_ids.add(op_id)
+            normalized_ids.append(op_id)
+
+        if not normalized_ids:
+            return {}
+
+        cursor.execute("""
+            SELECT source.operator_id, COALESCE(SUM(source.duration_seconds), 0) / 3600.0 AS training_hours
+            FROM (
+                SELECT
+                    t.operator_id,
+                    CASE
+                        WHEN t.end_time <= t.start_time
+                            THEN EXTRACT(EPOCH FROM (t.end_time + INTERVAL '24 hours' - t.start_time))
+                        ELSE EXTRACT(EPOCH FROM (t.end_time - t.start_time))
+                    END AS duration_seconds
+                FROM trainings t
+                WHERE t.operator_id = ANY(%s)
+                  AND t.count_in_hours = TRUE
+                  AND t.training_date >= %s
+                  AND t.training_date <= %s
+
+                UNION ALL
+
+                SELECT
+                    ws.operator_id,
+                    CASE
+                        WHEN ws.end_time <= ws.start_time
+                            THEN EXTRACT(EPOCH FROM (ws.end_time + INTERVAL '24 hours' - ws.start_time))
+                        ELSE EXTRACT(EPOCH FROM (ws.end_time - ws.start_time))
+                    END AS duration_seconds
+                FROM work_shifts ws
+                WHERE ws.operator_id = ANY(%s)
+                  AND COALESCE(ws.shift_type, 'regular') = 'office_practice'
+                  AND ws.shift_date >= %s
+                  AND ws.shift_date <= %s
+            ) source
+            GROUP BY source.operator_id
+        """, (normalized_ids, start_date, end_date, normalized_ids, start_date, end_date))
+
+        return {int(op_id): float(hours or 0.0) for op_id, hours in cursor.fetchall()}
 
     def _get_tenure_months_for_reference(self, hire_date_value, reference_date: Optional[date]) -> Optional[int]:
         if not hire_date_value or not reference_date:

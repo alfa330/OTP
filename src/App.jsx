@@ -35310,6 +35310,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                           
                                           const hoursOp = hoursData?.operators?.find(o => Number(o.operator_id) === Number(user.id)) || hoursData?.operators?.[0];
                                           const totalHoursBase = Number(hoursOp?.aggregates?.regular_hours ?? hoursOp?.aggregates?.regular ?? 0);
+                                          const totalHoursFromServer = Number(hoursOp?.worked_hours_used ?? hoursOp?.accounted_hours);
                                           const parseHMToMinutes = (hm) => {
                                             if (!hm || typeof hm !== 'string') return null;
                                             const parts = hm.split(':');
@@ -35329,7 +35330,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                           );
                                           const totalHoursTechnical = Number(hoursOp?.technical_issue_hours ?? 0);
                                           const totalHoursOffline = Number(hoursOp?.offline_activity_hours ?? 0);
-                                          const totalHours = totalHoursBase + totalHoursTraining + totalHoursTechnical + totalHoursOffline;
+                                          const totalHours = Number.isFinite(totalHoursFromServer)
+                                            ? totalHoursFromServer
+                                            : totalHoursBase + totalHoursTraining + totalHoursTechnical + totalHoursOffline;
                                           const normHours = Number(hoursOp?.norm_hours ?? 0);
                                           const hasHoursData = hoursData?.operators?.length > 0;
                                           
@@ -35545,7 +35548,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                             // --- считаем только уникальный зачтенный интервал тренингов ---
                                             const trainingHoursFromList = computeUniqueTrainingDurationHours(trainingsForOp, t => t && t.count_in_hours !== false);
-                                            const trainingHours = safeNum(trainingHoursFromList);
+                                            const trainingHoursFromServer = Number(op.training_hours);
+                                            const trainingHours = Number.isFinite(trainingHoursFromServer)
+                                                ? trainingHoursFromServer
+                                                : safeNum(trainingHoursFromList);
 
                                             const technicalByDayMap = (op && typeof op.technical_issues_by_day === 'object' && !Array.isArray(op.technical_issues_by_day))
                                                 ? op.technical_issues_by_day
@@ -35594,7 +35600,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 : safeNum(offlineHoursFromMap);
 
                                             // --- итоговые отработанные часы (с учётом зачтённых тренингов, техсбоев и офлайн-активности) ---
-                                            const regular = safeNum(regularBase) + trainingHours + technicalIssueHours + offlineActivityHours;
+                                            const accountedHoursFromServer = Number(op.worked_hours_used ?? op.accounted_hours);
+                                            const regular = Number.isFinite(accountedHoursFromServer)
+                                                ? accountedHoursFromServer
+                                                : safeNum(regularBase) + trainingHours + technicalIssueHours + offlineActivityHours;
                                             const effectiveCallHours = Math.max(0, safeNum(regularBase));
                                             const callsPerHour = effectiveCallHours > 0
                                                 ? (safeNum(totalCalls) / effectiveCallHours)
