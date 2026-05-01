@@ -1418,8 +1418,35 @@ class Database:
                     event_date DATE NOT NULL,
                     status_key VARCHAR(128) NOT NULL,
                     state_note VARCHAR(255) NULL,
+                    event_kind VARCHAR(16) NOT NULL DEFAULT 'status',
                     imported_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL
                 );
+            """)
+            cursor.execute("""
+                ALTER TABLE operator_status_events
+                ADD COLUMN IF NOT EXISTS event_kind VARCHAR(16);
+            """)
+            cursor.execute("""
+                UPDATE operator_status_events
+                SET event_kind = 'status'
+                WHERE event_kind IS NULL;
+            """)
+            cursor.execute("""
+                ALTER TABLE operator_status_events
+                ALTER COLUMN event_kind SET DEFAULT 'status';
+            """)
+            cursor.execute("""
+                ALTER TABLE operator_status_events
+                ALTER COLUMN event_kind SET NOT NULL;
+            """)
+            cursor.execute("""
+                ALTER TABLE operator_status_events
+                DROP CONSTRAINT IF EXISTS operator_status_events_event_kind_check;
+            """)
+            cursor.execute("""
+                ALTER TABLE operator_status_events
+                ADD CONSTRAINT operator_status_events_event_kind_check
+                CHECK (event_kind IN ('status', 'action'));
             """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS operator_status_segments (
@@ -10974,6 +11001,217 @@ class Database:
     def _normalize_import_status_key(self, status_key_value):
         return ' '.join(str(status_key_value or '').strip().lower().split())
 
+    def _status_import_event_kind_from_key(self, status_key_value, event_kind_value=None):
+        kind = str(event_kind_value or '').strip().lower()
+        if kind in ('status', 'action'):
+            return kind
+        status_key = self._normalize_import_status_key(status_key_value)
+        if status_key in CHAT_MANAGER_ACTION_STATUS_KEYS:
+            return 'action'
+        return 'status'
+
+    def _split_status_segment_datetimes_by_day(self, start_at_value, end_at_value):
+        if not isinstance(start_at_value, datetime) or not isinstance(end_at_value, datetime):
+            return []
+        if end_at_value <= start_at_value:
+            return []
+
+        parts = []
+        cursor = start_at_value
+        while cursor < end_at_value:
+            day_start = cursor.replace(hour=0, minute=0, second=0, microsecond=0)
+            day_end = day_start + timedelta(days=1)
+            seg_end = end_at_value if end_at_value <= day_end else day_end
+            if seg_end <= cursor:
+                break
+            duration_sec = int(round((seg_end - cursor).total_seconds()))
+            if duration_sec <= 0:
+                duration_sec = 1
+            parts.append({
+                'status_date': cursor.date(),
+                'start_at': cursor,
+                'end_at': seg_end,
+                'duration_sec': duration_sec
+            })
+            cursor = seg_end
+        return parts
+
+    def _rebuild_operator_status_segments_tx(self, cursor, operator_ids, start_date, end_date, imported_by=None):
+        op_ids = sorted({int(v) for v in (operator_ids or []) if v is not None})
+        if not op_ids:
+            return {'segments_saved': 0, 'deleted_segments': 0}
+
+        start_date_obj = self._normalize_schedule_date(start_date)
+        end_date_obj = self._normalize_schedule_date(end_date)
+        if end_date_obj < start_date_obj:
+            start_date_obj, end_date_obj = end_date_obj, start_date_obj
+
+        window_start = datetime.combine(start_date_obj, dt_time.min)
+        window_end = datetime.combine(end_date_obj + timedelta(days=1), dt_time.min)
+        imported_by_id = int(imported_by) if imported_by is not None else None
+        action_status_keys = sorted({
+            self._normalize_import_status_key(item)
+            for item in CHAT_MANAGER_ACTION_STATUS_KEYS
+            if self._normalize_import_status_key(item)
+        })
+
+        cursor.execute(
+            """
+            WITH candidates AS (
+                SELECT
+                    id,
+                    operator_id,
+                    event_at,
+                    status_key,
+                    state_note,
+                    COALESCE(event_kind, 'status') AS event_kind
+                FROM operator_status_events
+                WHERE operator_id = ANY(%s)
+                  AND COALESCE(event_kind, 'status') <> 'action'
+                  AND NOT (LOWER(TRIM(status_key)) = ANY(%s))
+            ),
+            previous_events AS (
+                SELECT DISTINCT ON (operator_id)
+                    id, operator_id, event_at, status_key, state_note, event_kind
+                FROM candidates
+                WHERE event_at < %s
+                ORDER BY operator_id, event_at DESC, id DESC
+            ),
+            main_events AS (
+                SELECT id, operator_id, event_at, status_key, state_note, event_kind
+                FROM candidates
+                WHERE event_at >= %s
+                  AND event_at < %s
+            ),
+            next_events AS (
+                SELECT DISTINCT ON (operator_id)
+                    id, operator_id, event_at, status_key, state_note, event_kind
+                FROM candidates
+                WHERE event_at >= %s
+                ORDER BY operator_id, event_at ASC, id ASC
+            )
+            SELECT id, operator_id, event_at, status_key, state_note, event_kind
+            FROM (
+                SELECT * FROM previous_events
+                UNION ALL
+                SELECT * FROM main_events
+                UNION ALL
+                SELECT * FROM next_events
+            ) e
+            ORDER BY operator_id, event_at, id
+            """,
+            (op_ids, action_status_keys, window_start, window_start, window_end, window_end)
+        )
+        rows = cursor.fetchall() or []
+
+        events_by_operator = {}
+        for event_id, operator_id, event_at_value, status_key, state_note, event_kind in rows:
+            if not isinstance(event_at_value, datetime):
+                continue
+            status_key_norm = self._normalize_import_status_key(status_key)
+            if not status_key_norm:
+                continue
+            if self._status_import_event_kind_from_key(status_key_norm, event_kind) == 'action':
+                continue
+            events_by_operator.setdefault(int(operator_id), []).append({
+                'id': int(event_id),
+                'event_at': event_at_value,
+                'status_key': status_key_norm,
+                'state_note': str(state_note or '').strip() or None
+            })
+
+        segment_values = []
+        now_dt = datetime.now()
+        for op_id in op_ids:
+            events_list = events_by_operator.get(int(op_id)) or []
+            if not events_list:
+                continue
+
+            for idx in range(len(events_list) - 1):
+                cur = events_list[idx]
+                nxt = events_list[idx + 1]
+                cur_at = cur.get('event_at')
+                next_at = nxt.get('event_at')
+                if not isinstance(cur_at, datetime) or not isinstance(next_at, datetime):
+                    continue
+                if next_at <= cur_at:
+                    continue
+
+                for part in self._split_status_segment_datetimes_by_day(cur_at, next_at):
+                    status_date_obj = part.get('status_date')
+                    if status_date_obj < start_date_obj or status_date_obj > end_date_obj:
+                        continue
+                    segment_values.append((
+                        int(op_id),
+                        status_date_obj,
+                        part.get('start_at'),
+                        part.get('end_at'),
+                        int(part.get('duration_sec') or 0),
+                        cur.get('status_key'),
+                        cur.get('state_note'),
+                        imported_by_id
+                    ))
+
+            last_event = events_list[-1]
+            last_event_at = last_event.get('event_at')
+            if (
+                isinstance(last_event_at, datetime)
+                and now_dt >= last_event_at
+                and (now_dt - last_event_at) <= timedelta(hours=48)
+            ):
+                for part in self._split_status_segment_datetimes_by_day(last_event_at, now_dt):
+                    status_date_obj = part.get('status_date')
+                    if status_date_obj < start_date_obj or status_date_obj > end_date_obj:
+                        continue
+                    segment_values.append((
+                        int(op_id),
+                        status_date_obj,
+                        part.get('start_at'),
+                        part.get('end_at'),
+                        int(part.get('duration_sec') or 0),
+                        last_event.get('status_key'),
+                        last_event.get('state_note'),
+                        imported_by_id
+                    ))
+
+        cursor.execute(
+            """
+            DELETE FROM operator_status_segments
+            WHERE operator_id = ANY(%s)
+              AND status_date >= %s
+              AND status_date <= %s
+            """,
+            (op_ids, start_date_obj, end_date_obj)
+        )
+        deleted_segments = max(0, int(cursor.rowcount or 0))
+
+        if segment_values:
+            execute_values(
+                cursor,
+                """
+                INSERT INTO operator_status_segments (
+                    operator_id,
+                    status_date,
+                    start_at,
+                    end_at,
+                    duration_sec,
+                    status_key,
+                    state_note,
+                    imported_by
+                )
+                VALUES %s
+                """,
+                segment_values,
+                page_size=STATUS_IMPORT_INSERT_PAGE_SIZE
+            )
+
+        return {
+            'segments_saved': len(segment_values),
+            'deleted_segments': int(deleted_segments),
+            'range_start': start_date_obj.strftime('%Y-%m-%d'),
+            'range_end': end_date_obj.strftime('%Y-%m-%d')
+        }
+
     def _status_label_from_key(self, status_key_value, fallback_name=None):
         key = self._normalize_import_status_key(status_key_value)
         if not key:
@@ -11887,13 +12125,29 @@ class Database:
         }
 
     def recalculate_auto_daily_hours(self, operator_ids, start_date, end_date):
+        op_ids = sorted({int(v) for v in (operator_ids or []) if v is not None})
+        start_date_obj = self._normalize_schedule_date(start_date)
+        end_date_obj = self._normalize_schedule_date(end_date)
+        if end_date_obj < start_date_obj:
+            start_date_obj, end_date_obj = end_date_obj, start_date_obj
+
         with self._get_cursor() as cursor:
-            return self._recalculate_auto_daily_hours_tx(
+            segment_rebuild_summary = self._rebuild_operator_status_segments_tx(
                 cursor=cursor,
-                operator_ids=operator_ids,
-                start_date=start_date,
-                end_date=end_date
+                operator_ids=op_ids,
+                start_date=start_date_obj - timedelta(days=1),
+                end_date=end_date_obj + timedelta(days=1),
+                imported_by=None
             )
+            result = self._recalculate_auto_daily_hours_tx(
+                cursor=cursor,
+                operator_ids=op_ids,
+                start_date=start_date_obj,
+                end_date=end_date_obj
+            )
+            if isinstance(result, dict):
+                result['segment_rebuild'] = segment_rebuild_summary
+            return result
 
     def _schedule_auto_flag_columns(self, flag_type):
         flag_key = str(flag_type or '').strip().lower()
@@ -15767,6 +16021,10 @@ class Database:
             if not status_key:
                 continue
             state_note = str(item.get('state_note') or '').strip() or None
+            event_kind = self._status_import_event_kind_from_key(
+                status_key,
+                item.get('event_kind') or item.get('kind')
+            )
 
             normalized_events.append({
                 'operator_id': operator_id,
@@ -15774,6 +16032,7 @@ class Database:
                 'event_date': event_date_obj,
                 'status_key': status_key,
                 'state_note': state_note,
+                'event_kind': event_kind,
                 'imported_by': imported_by_id
             })
             affected_operator_ids.add(operator_id)
@@ -15890,12 +16149,26 @@ class Database:
             key=lambda x: (x[0], x[1], x[2])
         )
 
+        segment_rebuild_ranges_map = {}
+        for op_id, bounds in segment_delete_ranges_map.items():
+            op_id_int = int(op_id)
+            segment_rebuild_ranges_map[op_id_int] = [
+                bounds[0] - timedelta(days=1),
+                bounds[1] + timedelta(days=1)
+            ]
+        segment_rebuild_ranges = sorted(
+            [(int(op_id), bounds[0], bounds[1]) for op_id, bounds in segment_rebuild_ranges_map.items()],
+            key=lambda x: (x[0], x[1], x[2])
+        )
+
         range_source = segment_delete_ranges if segment_delete_ranges else event_ranges
         date_from_obj = min((r[1] for r in range_source), default=None)
         date_to_obj = max((r[2] for r in range_source), default=None)
 
         deleted_events = 0
         deleted_segments = 0
+        segments_saved_count = len(normalized_segments)
+        segment_rebuild_summary = None
         auto_aggregation_summary = {
             'updated_days': 0,
             'aggregated_months': 0,
@@ -15961,7 +16234,7 @@ class Database:
                     _safe_int(summary_payload.get('source_rows'), default=0),
                     _safe_int(summary_payload.get('valid_events'), default=0),
                     len(normalized_events),
-                    len(normalized_segments),
+                    segments_saved_count,
                     deleted_events,
                     deleted_segments,
                     _safe_int(summary_payload.get('invalid_rows_count'), default=0),
@@ -15982,6 +16255,7 @@ class Database:
                     'event_date',
                     'status_key',
                     'state_note',
+                    'event_kind',
                     'imported_by'
                 ]
                 event_values = []
@@ -16003,7 +16277,29 @@ class Database:
                     page_size=STATUS_IMPORT_INSERT_PAGE_SIZE
                 )
 
-            if normalized_segments:
+            if normalized_events and segment_rebuild_ranges:
+                rebuild_start_obj = min(r[1] for r in segment_rebuild_ranges)
+                rebuild_end_obj = max(r[2] for r in segment_rebuild_ranges)
+                rebuilt = self._rebuild_operator_status_segments_tx(
+                    cursor=cursor,
+                    operator_ids=[r[0] for r in segment_rebuild_ranges],
+                    start_date=rebuild_start_obj,
+                    end_date=rebuild_end_obj,
+                    imported_by=imported_by_id
+                )
+                rebuild_saved = int(rebuilt.get('segments_saved') or 0)
+                rebuild_deleted = int(rebuilt.get('deleted_segments') or 0)
+                segments_saved_count = int(rebuild_saved)
+                deleted_segments += int(rebuild_deleted)
+                segment_rebuild_summary = {
+                    'segments_saved': int(rebuild_saved),
+                    'deleted_segments': int(rebuild_deleted),
+                    'range_start': rebuild_start_obj.strftime('%Y-%m-%d'),
+                    'range_end': rebuild_end_obj.strftime('%Y-%m-%d'),
+                    'operator_ids': [int(r[0]) for r in segment_rebuild_ranges]
+                }
+
+            if normalized_segments and not normalized_events:
                 segment_insert_columns = [
                     'operator_id',
                     'status_date',
@@ -16033,12 +16329,28 @@ class Database:
                     page_size=STATUS_IMPORT_INSERT_PAGE_SIZE
                 )
 
+            cursor.execute(
+                """
+                UPDATE operator_status_import_batches
+                SET segments_saved = %s,
+                    deleted_segments = %s
+                WHERE id = %s
+                """,
+                (int(segments_saved_count), int(deleted_segments), str(batch_id))
+            )
+
             if affected_operator_ids and date_from_obj and date_to_obj:
+                if normalized_events and segment_rebuild_ranges:
+                    recalc_start_obj = min(r[1] for r in segment_rebuild_ranges)
+                    recalc_end_obj = max(r[2] for r in segment_rebuild_ranges)
+                else:
+                    recalc_start_obj = date_from_obj - timedelta(days=1)
+                    recalc_end_obj = date_to_obj
                 auto_aggregation_summary = self._recalculate_auto_daily_hours_tx(
                     cursor=cursor,
                     operator_ids=sorted(int(v) for v in affected_operator_ids),
-                    start_date=(date_from_obj - timedelta(days=1)),
-                    end_date=date_to_obj
+                    start_date=recalc_start_obj,
+                    end_date=recalc_end_obj
                 )
 
         return {
@@ -16046,7 +16358,7 @@ class Database:
             'source_rows': _safe_int(summary_payload.get('source_rows'), default=0),
             'valid_events': _safe_int(summary_payload.get('valid_events'), default=0),
             'matched_events': len(normalized_events),
-            'segments_saved': len(normalized_segments),
+            'segments_saved': int(segments_saved_count),
             'deleted_events': int(deleted_events),
             'deleted_segments': int(deleted_segments),
             'invalid_rows_count': _safe_int(summary_payload.get('invalid_rows_count'), default=0),
@@ -16056,6 +16368,7 @@ class Database:
             'zero_or_negative_transitions': _safe_int(summary_payload.get('zero_or_negative_transitions'), default=0),
             'date_from': date_from_obj.strftime('%Y-%m-%d') if date_from_obj else None,
             'date_to': date_to_obj.strftime('%Y-%m-%d') if date_to_obj else None,
+            'segment_rebuild': segment_rebuild_summary,
             'auto_aggregation': auto_aggregation_summary
         }
 
