@@ -8044,6 +8044,8 @@ def get_sv_data():
             feedback_stats = feedback_stats_by_operator.get(operator_id_int, {}) if operator_id_int is not None else {}
             eval_count = int(metrics.get("call_count") or 0)
             avg_score = metrics.get("avg_score")
+            evaluation_row_count = int(metrics.get("evaluation_row_count") or eval_count or 0)
+            has_evaluation_data = bool(metrics.get("has_evaluation_data") or evaluation_row_count > 0)
             if operator_id_int is not None:
                 seen_response_ids.add(operator_id_int)
 
@@ -8065,6 +8067,8 @@ def get_sv_data():
                 # number of actual evaluated calls (with scores)
                 "call_count": eval_count,
                 "avg_score": avg_score,
+                "evaluation_row_count": evaluation_row_count,
+                "has_evaluation_data": has_evaluation_data,
                 "evaluation_target": evaluation_target,
                 "feedback_stats": feedback_stats,
                 "feedback_count": int(feedback_stats.get("feedback_count") or 0),
@@ -8095,7 +8099,12 @@ def get_sv_data():
             sv_evaluation_target = operator_targets.get(supervisor_id_int)
             sv_feedback_stats = feedback_stats_by_operator.get(supervisor_id_int, {})
             sv_call_count = int(sv_metrics.get("call_count") or 0)
-            if sv_call_count <= 0:
+            sv_evaluation_row_count = int(sv_metrics.get("evaluation_row_count") or sv_call_count or 0)
+            sv_has_evaluation_data = bool(
+                sv_metrics.get("has_evaluation_data")
+                or sv_evaluation_row_count > 0
+            )
+            if not sv_has_evaluation_data:
                 continue
 
             sv_name = sv_row[1]
@@ -8125,6 +8134,8 @@ def get_sv_data():
                 "role": "sv",
                 "call_count": sv_call_count,
                 "avg_score": sv_metrics.get("avg_score"),
+                "evaluation_row_count": sv_evaluation_row_count,
+                "has_evaluation_data": sv_has_evaluation_data,
                 "evaluation_target": sv_evaluation_target,
                 "feedback_stats": sv_feedback_stats,
                 "feedback_count": int(sv_feedback_stats.get("feedback_count") or 0),
@@ -9686,28 +9697,55 @@ def handle_monthly_report():
                         SELECT c.score
                         FROM calls c
                         JOIN (
-                            SELECT phone_number, MAX(created_at) as max_date
+                            SELECT phone_number, appeal_date, MAX(created_at) as max_date
                             FROM calls
                             WHERE operator_id = %s AND month = %s AND is_draft = FALSE
-                            GROUP BY phone_number
-                        ) lv ON c.phone_number = lv.phone_number AND c.created_at = lv.max_date
-                        WHERE c.is_draft = FALSE
+                            GROUP BY phone_number, appeal_date
+                        ) lv ON c.phone_number = lv.phone_number
+                            AND (
+                                (c.appeal_date IS NULL AND lv.appeal_date IS NULL)
+                                OR c.appeal_date = lv.appeal_date
+                            )
+                            AND c.created_at = lv.max_date
+                        WHERE c.is_draft = FALSE AND c.operator_id = %s AND c.month = %s
                         ORDER BY c.created_at ASC
-                    """, (target_user_id, target_month))
+                    """, (target_user_id, target_month, target_user_id, target_month))
                 else:
                     cursor.execute("""
                         SELECT c.score
                         FROM calls c
                         JOIN (
-                            SELECT phone_number, MAX(created_at) as max_date
+                            SELECT phone_number, appeal_date, MAX(created_at) as max_date
                             FROM calls
                             WHERE operator_id = %s AND month = %s AND is_draft = FALSE AND evaluator_id = %s
-                            GROUP BY phone_number
-                        ) lv ON c.phone_number = lv.phone_number AND c.created_at = lv.max_date
+                            GROUP BY phone_number, appeal_date
+                        ) lv ON c.phone_number = lv.phone_number
+                            AND (
+                                (c.appeal_date IS NULL AND lv.appeal_date IS NULL)
+                                OR c.appeal_date = lv.appeal_date
+                            )
+                            AND c.created_at = lv.max_date
                         WHERE c.is_draft = FALSE AND c.operator_id = %s AND c.month = %s AND c.evaluator_id = %s
                         ORDER BY c.created_at ASC
                     """, (target_user_id, target_month, evaluator_id, target_user_id, target_month, evaluator_id))
                 return [row[0] for row in cursor.fetchall()]
+
+        def _has_monthly_evaluation_data(target_user_id, target_month):
+            try:
+                with db._get_cursor() as cursor:
+                    cursor.execute("""
+                        SELECT EXISTS (
+                            SELECT 1
+                            FROM calls
+                            WHERE operator_id = %s
+                              AND month = %s
+                        )
+                    """, (target_user_id, target_month))
+                    row = cursor.fetchone()
+                    return bool(row and row[0])
+            except Exception:
+                logging.exception("Failed to check monthly evaluation data for user %s", target_user_id)
+                return False
 
         for sv in svs:
             sv_id, sv_name = sv[0], sv[1]
@@ -9729,8 +9767,8 @@ def handle_monthly_report():
                 special_scores = _fetch_latest_scores_for_user(op_id, month, evaluator_id=special_evaluator_id)
 
                 is_dismissed_operator = op_status in ('fired', 'dismissal')
-                # Keep dismissed operators in export only when they have monthly scores.
-                if is_dismissed_operator and not scores and not special_scores:
+                # Keep dismissed operators in export only when they have monthly journal data.
+                if is_dismissed_operator and not scores and not special_scores and not _has_monthly_evaluation_data(op_id, month):
                     continue
 
                 report_rows.append({

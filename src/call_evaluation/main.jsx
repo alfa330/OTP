@@ -541,7 +541,26 @@ const calibrationScoreLabel = (value) => {
 const normalizeStatus = (status) => String(status ?? '').trim().toLowerCase();
 const isFiredStatus = (status) => {
     const s = normalizeStatus(status);
-    return s === 'fired' || s === 'dismissed' || s === 'terminated' || s === 'уволен';
+    return s === 'fired' || s === 'dismissal' || s === 'dismissed' || s === 'terminated' || s === 'уволен';
+};
+const hasAnyEvaluationIndicators = (operatorRow) => {
+    if (!operatorRow || typeof operatorRow !== 'object') return false;
+    if (operatorRow.has_evaluation_data === true || operatorRow.hasEvaluationData === true) return true;
+
+    const numericKeys = [
+        'call_count',
+        'evaluation_row_count',
+        'feedback_count',
+        'feedback_overdue_count',
+        'feedback_pending_count',
+    ];
+    for (const key of numericKeys) {
+        const value = Number(operatorRow[key]);
+        if (Number.isFinite(value) && value > 0) return true;
+    }
+
+    const avgScore = Number(operatorRow.avg_score);
+    return Number.isFinite(avgScore) && avgScore > 0;
 };
 const compareByNameRu = (a, b) => String(a?.name ?? '').localeCompare(String(b?.name ?? ''), 'ru');
 const sortByFiredAndName = (list = []) => [...list].sort((a, b) => {
@@ -4740,8 +4759,8 @@ const App = ({ user, initialSelection }) => {
                         <div className="section-switch" style={{ marginBottom: 14 }}>
                             {(() => {
                                 const all = analyticsScopedOperators;
-                                const activeCount = all.filter(op => op.status === 'working' || op.status === 'unpaid_leave' || !op.status).length;
-                                const firedCount = all.filter(op => op.status === 'fired').length;
+                                const activeCount = all.filter(op => !isFiredStatus(op.status) || hasAnyEvaluationIndicators(op)).length;
+                                const firedCount = all.filter(op => isFiredStatus(op.status) && !hasAnyEvaluationIndicators(op)).length;
                                 return (
                                     <>
                                         <button className={`btn btn-sm ${analyticsActiveOperatorsTab === 'active' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setAnalyticsActiveOperatorsTab('active')}>
@@ -4761,8 +4780,8 @@ const App = ({ user, initialSelection }) => {
                         ) : analyticsScopedOperators.length > 0 ? (() => {
                             const allOps = analyticsScopedOperators;
                             const filteredOps = analyticsActiveOperatorsTab === 'active'
-                                ? allOps.filter(op => op.status === 'working' || op.status === 'unpaid_leave' || !op.status)
-                                : allOps.filter(op => op.status === 'fired');
+                                ? allOps.filter(op => !isFiredStatus(op.status) || hasAnyEvaluationIndicators(op))
+                                : allOps.filter(op => isFiredStatus(op.status) && !hasAnyEvaluationIndicators(op));
 
                             if (filteredOps.length === 0) return <p style={{ textAlign: 'center', color: 'var(--text-2)', padding: '32px 0', fontSize: 13 }}>Операторы не найдены.</p>;
 

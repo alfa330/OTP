@@ -4641,6 +4641,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     hire_date: op.hire_date || op.hireDate || null,
                     call_count: op.call_count,
                     avg_score: op.avg_score,
+                    evaluation_row_count: op.evaluation_row_count || 0,
+                    has_evaluation_data: !!op.has_evaluation_data,
                     feedback_count: op.feedback_count || 0,
                     feedback_overdue_count: op.feedback_overdue_count || 0,
                     feedback_pending_count: op.feedback_pending_count || 0
@@ -25445,6 +25447,31 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             return `Выбрано: ${selected.length}`;
             };
 
+            const isDismissedOperatorStatus = (status) => {
+            const normalized = String(status || '').trim().toLowerCase();
+            return normalized === 'fired' || normalized === 'dismissal';
+            };
+
+            const hasAnyEvaluationIndicators = (operatorRow) => {
+            if (!operatorRow || typeof operatorRow !== 'object') return false;
+            if (operatorRow.has_evaluation_data === true || operatorRow.hasEvaluationData === true) return true;
+
+            const numericKeys = [
+                'call_count',
+                'evaluation_row_count',
+                'feedback_count',
+                'feedback_overdue_count',
+                'feedback_pending_count',
+            ];
+            for (const key of numericKeys) {
+                const value = Number(operatorRow[key]);
+                if (Number.isFinite(value) && value > 0) return true;
+            }
+
+            const avgScore = Number(operatorRow.avg_score);
+            return Number.isFinite(avgScore) && avgScore > 0;
+            };
+
             const getEvaluationPlanMeta = (operatorRow) => {
             const target = operatorRow?.evaluation_target;
             if (!target || typeof target !== 'object') return null;
@@ -34830,8 +34857,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <div className="flex items-center space-x-3 mb-3">
                                     {(() => {
                                         const all = svData?.operators ?? [];
-                                        const activeCount = all.filter(op => op.status === 'working' || op.status === 'unpaid_leave' || !op.status).length;
-                                        const firedCount = all.filter(op => op.status === 'fired').length;
+                                        const activeCount = all.filter(op => !isDismissedOperatorStatus(op.status) || hasAnyEvaluationIndicators(op)).length;
+                                        const firedCount = all.filter(op => isDismissedOperatorStatus(op.status) && !hasAnyEvaluationIndicators(op)).length;
                                         return (
                                         <>
                                             <button
@@ -34963,8 +34990,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     (() => {
                                         const allOps = svData.operators;
                                         const byStatusOperators = activeOperatorsTab === 'active'
-                                        ? allOps.filter(op => op.status === 'working' || op.status === 'unpaid_leave' || !op.status)
-                                        : allOps.filter(op => op.status === 'fired');
+                                        ? allOps.filter(op => !isDismissedOperatorStatus(op.status) || hasAnyEvaluationIndicators(op))
+                                        : allOps.filter(op => isDismissedOperatorStatus(op.status) && !hasAnyEvaluationIndicators(op));
 
                                         const selectedSupervisorFilters = normalizeOperatorsFilterValues(operatorsSvFilter);
                                         const selectedDirectionFilters = normalizeOperatorsFilterValues(operatorsDirectionFilter);
