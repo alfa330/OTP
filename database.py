@@ -5518,7 +5518,7 @@ class Database:
             cursor.execute("""
                 SELECT id, name, hours_table_url, role, hire_date, status
                 FROM users 
-                WHERE role = 'sv'
+                WHERE LOWER(COALESCE(role, '')) IN ('sv', 'supervisor')
             """)
             return cursor.fetchall()
 

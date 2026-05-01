@@ -4644,7 +4644,7 @@ def get_sv_list():
             cursor.execute("""
                 SELECT id, name, hours_table_url, role, hire_date, status, gender, birth_date, avatar_bucket, avatar_blob_path
                 FROM users
-                WHERE role = 'sv'
+                WHERE LOWER(COALESCE(role, '')) IN ('sv', 'supervisor')
                 ORDER BY name
             """)
             supervisors = cursor.fetchall()

@@ -299,6 +299,44 @@ const persistBearerAuthTokens = (payload) => {
     return true;
 };
 
+const hydrateAuthSnapshot = (auth = null) => {
+    if (!auth || typeof auth !== 'object') return false;
+
+    const transport = normalizeClientAuthTransport(auth.transport || auth.auth_transport);
+    const accessToken = String(auth.accessToken || auth.access_token || '').trim();
+    const refreshToken = String(auth.refreshToken || auth.refresh_token || '').trim();
+    const sessionStorageRef = safeGetBrowserStorage('sessionStorage');
+    const localStorageRef = safeGetBrowserStorage('localStorage');
+
+    if (accessToken) {
+        authRuntimeState.accessToken = accessToken;
+        safeStorageSetItem(sessionStorageRef, ACCESS_TOKEN_STORAGE_KEY, accessToken);
+        if (shouldUseLegacyMobileBearerStorage()) {
+            safeStorageSetItem(localStorageRef, ACCESS_TOKEN_STORAGE_KEY, accessToken);
+        }
+    }
+
+    if (refreshToken) {
+        authRuntimeState.refreshToken = refreshToken;
+        safeStorageSetItem(sessionStorageRef, REFRESH_TOKEN_STORAGE_KEY, refreshToken);
+        if (shouldUseLegacyMobileBearerStorage()) {
+            safeStorageSetItem(localStorageRef, REFRESH_TOKEN_STORAGE_KEY, refreshToken);
+        }
+    }
+
+    if (accessToken || refreshToken) {
+        setStoredAuthTransport('bearer');
+        return true;
+    }
+
+    if (transport) {
+        setStoredAuthTransport(transport);
+        return true;
+    }
+
+    return false;
+};
+
 const stripLegacyAuthHeaders = (headers = {}) => {
     const nextHeaders = { ...(headers || {}) };
     delete nextHeaders['Authorization'];
@@ -2143,6 +2181,30 @@ const App = ({ user, initialSelection }) => {
     const calibrationDetailCacheRef = useRef(new Map());
     const DEFAULT_MAX_EVALS = 20;
 
+    const buildCurrentSupervisorOption = useCallback(() => {
+        if (!userId) return null;
+        return {
+            id: Number(userId),
+            name: userName || 'Мой профиль',
+            role: 'sv',
+            status: user?.status || user?.user_status || null
+        };
+    }, [userId, userName, user]);
+
+    const normalizeSupervisorList = useCallback((rows = []) => {
+        const normalized = Array.isArray(rows)
+            ? rows.filter(Boolean)
+            : [];
+
+        if (!isSupervisorRole || !userId) return normalized;
+
+        const hasCurrentSupervisor = normalized.some((sv) => Number(sv?.id) === Number(userId));
+        if (hasCurrentSupervisor) return normalized;
+
+        const currentSupervisor = buildCurrentSupervisorOption();
+        return currentSupervisor ? [currentSupervisor, ...normalized] : normalized;
+    }, [isSupervisorRole, userId, buildCurrentSupervisorOption]);
+
     // Analytics section state
     const [analyticsSelectedSvId, setAnalyticsSelectedSvId] = useState('');
     const [analyticsSelectedSvData, setAnalyticsSelectedSvData] = useState(null);
@@ -2308,9 +2370,27 @@ const App = ({ user, initialSelection }) => {
     // Supervisors
     useEffect(() => {
         if (!(isAdminRole || isSupervisorRole) || !userId) return;
+        let isCancelled = false;
+
         authFetch(`${API_BASE_URL}/api/admin/sv_list`, { headers:{'X-User-Id':userId} })
-            .then(r=>r.json()).then(d=>{ if(d.status==='success') setSupervisors(d.sv_list||[]); }).catch(console.error);
-    }, [isAdminRole, isSupervisorRole, userId]);
+            .then(async (r) => {
+                const d = await readJsonSafe(r);
+                if (!r.ok || d?.status !== 'success') {
+                    throw new Error(d?.error || `Failed to fetch supervisor list: ${r.status}`);
+                }
+                return normalizeSupervisorList(d.sv_list || []);
+            })
+            .then((nextSupervisors) => {
+                if (!isCancelled) setSupervisors(nextSupervisors);
+            })
+            .catch((error) => {
+                if (isCancelled) return;
+                console.error(error);
+                setSupervisors(normalizeSupervisorList([]));
+            });
+
+        return () => { isCancelled = true; };
+    }, [isAdminRole, isSupervisorRole, userId, normalizeSupervisorList]);
 
     useEffect(() => {
         if (!initialSelection) return;
@@ -4959,6 +5039,7 @@ if (isEmbedded) {
         if (event.origin !== window.location.origin) return;
         const data = event.data || {};
         if (data.type === 'CALL_EVALUATION_INIT') {
+            hydrateAuthSnapshot(data.auth || data.authentication || null);
             const nextState = { user: data.user || null, initialSelection: data.initialSelection || null };
             writeEmbedState(nextState);
             renderApp(nextState);
