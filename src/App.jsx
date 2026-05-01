@@ -369,6 +369,15 @@ const withAccessTokenHeader = (headers = {}, options = {}) => {
     return nextHeaders;
 };
 
+const getAuthSnapshotForEmbeddedFrame = () => {
+    const transport = getPreferredAuthTransport();
+    return {
+        transport,
+        accessToken: getStoredAuthToken(ACCESS_TOKEN_STORAGE_KEY),
+        refreshToken: getStoredAuthToken(REFRESH_TOKEN_STORAGE_KEY)
+    };
+};
+
 const buildDateKey = (date) => {
     const year = date.getFullYear();
     const month = String(date.getMonth() + 1).padStart(2, '0');
@@ -27684,7 +27693,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     role: user.role,
                     name: user.name
                 } : null,
-                initialSelection: callEvaluationContext || null
+                initialSelection: callEvaluationContext || null,
+                auth: getAuthSnapshotForEmbeddedFrame()
             }), [user, callEvaluationContext]);
 
             useEffect(() => {
