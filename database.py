@@ -158,6 +158,7 @@ def _minutes_to_time(minutes: int) -> str:
 
 WORK_SHIFT_TYPE_REGULAR = 'regular'
 WORK_SHIFT_TYPE_OFFICE_PRACTICE = 'office_practice'
+WORK_SHIFT_OFFICE_PRACTICE_OFFLINE_COMMENT = 'Практика в офисе'
 WORK_SHIFT_TYPE_ALLOWED = {
     WORK_SHIFT_TYPE_REGULAR,
     WORK_SHIFT_TYPE_OFFICE_PRACTICE
@@ -3021,6 +3022,62 @@ class Database:
             })
             totals[op_id_int] = round(float(totals.get(op_id_int, 0.0)) + float(duration_hours), 2)
 
+        cursor.execute(
+            """
+            SELECT
+                ws.id,
+                ws.operator_id,
+                ws.shift_date,
+                ws.start_time,
+                ws.end_time
+            FROM work_shifts ws
+            WHERE ws.operator_id = ANY(%s)
+              AND COALESCE(ws.shift_type, 'regular') = 'office_practice'
+              AND ws.shift_date >= %s
+              AND ws.shift_date <= %s
+            ORDER BY ws.operator_id, ws.shift_date, ws.start_time, ws.end_time, ws.id
+            """,
+            (op_ids, start_date, end_date),
+        )
+        for shift_id, op_id, shift_date, start_time, end_time in cursor.fetchall() or []:
+            try:
+                op_id_int = int(op_id)
+            except Exception:
+                continue
+            if op_id_int not in result or shift_date is None:
+                continue
+
+            start_text = start_time.strftime('%H:%M') if start_time else None
+            end_text = end_time.strftime('%H:%M') if end_time else None
+            duration_minutes = 0
+            try:
+                if start_time and end_time:
+                    start_min, end_min = self._schedule_interval_minutes(start_time, end_time)
+                    duration_minutes = max(0, int(end_min - start_min))
+            except Exception:
+                duration_minutes = 0
+            duration_hours = round(float(duration_minutes) / 60.0, 2)
+
+            day_key = str(int(shift_date.day))
+            result.setdefault(op_id_int, {}).setdefault(day_key, []).append({
+                "id": f"practice-shift-{int(shift_id)}",
+                "operator_id": op_id_int,
+                "date": shift_date.strftime('%Y-%m-%d'),
+                "start_time": start_text,
+                "end_time": end_text,
+                "time_range": f"{start_text} - {end_text}" if start_text and end_text else None,
+                "comment": WORK_SHIFT_OFFICE_PRACTICE_OFFLINE_COMMENT,
+                "created_by_name": "Планировщик",
+                "created_at": None,
+                "duration_minutes": int(duration_minutes),
+                "duration_hours": float(duration_hours),
+                "source": "work_shift",
+                "shift_type": WORK_SHIFT_TYPE_OFFICE_PRACTICE,
+                "is_practice_shift": True,
+                "read_only": True,
+            })
+            totals[op_id_int] = round(float(totals.get(op_id_int, 0.0)) + float(duration_hours), 2)
+
         return result, totals
 
     def _load_chat_manager_metrics_by_operator_day_tx(self, cursor, operator_ids, start_date, end_date):
@@ -4703,38 +4760,22 @@ class Database:
             return {}
 
         cursor.execute("""
-            SELECT source.operator_id, COALESCE(SUM(source.duration_seconds), 0) / 3600.0 AS training_hours
-            FROM (
-                SELECT
-                    t.operator_id,
+            SELECT
+                t.operator_id,
+                COALESCE(SUM(
                     CASE
                         WHEN t.end_time <= t.start_time
                             THEN EXTRACT(EPOCH FROM (t.end_time + INTERVAL '24 hours' - t.start_time))
                         ELSE EXTRACT(EPOCH FROM (t.end_time - t.start_time))
-                    END AS duration_seconds
-                FROM trainings t
-                WHERE t.operator_id = ANY(%s)
-                  AND t.count_in_hours = TRUE
-                  AND t.training_date >= %s
-                  AND t.training_date <= %s
-
-                UNION ALL
-
-                SELECT
-                    ws.operator_id,
-                    CASE
-                        WHEN ws.end_time <= ws.start_time
-                            THEN EXTRACT(EPOCH FROM (ws.end_time + INTERVAL '24 hours' - ws.start_time))
-                        ELSE EXTRACT(EPOCH FROM (ws.end_time - ws.start_time))
-                    END AS duration_seconds
-                FROM work_shifts ws
-                WHERE ws.operator_id = ANY(%s)
-                  AND COALESCE(ws.shift_type, 'regular') = 'office_practice'
-                  AND ws.shift_date >= %s
-                  AND ws.shift_date <= %s
-            ) source
-            GROUP BY source.operator_id
-        """, (normalized_ids, start_date, end_date, normalized_ids, start_date, end_date))
+                    END
+                ), 0) / 3600.0 AS training_hours
+            FROM trainings t
+            WHERE t.operator_id = ANY(%s)
+              AND t.count_in_hours = TRUE
+              AND t.training_date >= %s
+              AND t.training_date <= %s
+            GROUP BY t.operator_id
+        """, (normalized_ids, start_date, end_date))
 
         return {int(op_id): float(hours or 0.0) for op_id, hours in cursor.fetchall()}
 
@@ -4793,20 +4834,6 @@ class Database:
                       AND t.count_in_hours = TRUE
                       AND t.training_date >= %s
                       AND t.training_date < %s
-                ), 0)
-                + COALESCE((
-                    SELECT SUM(
-                        CASE
-                            WHEN ws.end_time <= ws.start_time
-                                THEN EXTRACT(EPOCH FROM (ws.end_time + INTERVAL '24 hours' - ws.start_time))
-                            ELSE EXTRACT(EPOCH FROM (ws.end_time - ws.start_time))
-                        END
-                    ) / 3600.0
-                    FROM work_shifts ws
-                    WHERE ws.operator_id = u.id
-                      AND COALESCE(ws.shift_type, 'regular') = 'office_practice'
-                      AND ws.shift_date >= %s
-                      AND ws.shift_date < %s
                 ), 0) AS training_hours,
                 COALESCE((
                     SELECT SUM(
@@ -4833,6 +4860,20 @@ class Database:
                     WHERE oa.operator_id = u.id
                       AND oa.activity_date >= %s
                       AND oa.activity_date < %s
+                ), 0)
+                + COALESCE((
+                    SELECT SUM(
+                        CASE
+                            WHEN ws.end_time <= ws.start_time
+                                THEN EXTRACT(EPOCH FROM (ws.end_time + INTERVAL '24 hours' - ws.start_time))
+                            ELSE EXTRACT(EPOCH FROM (ws.end_time - ws.start_time))
+                        END
+                    ) / 3600.0
+                    FROM work_shifts ws
+                    WHERE ws.operator_id = u.id
+                      AND COALESCE(ws.shift_type, 'regular') = 'office_practice'
+                      AND ws.shift_date >= %s
+                      AND ws.shift_date < %s
                 ), 0) AS offline_activity_hours
             FROM users u
             LEFT JOIN work_hours wh
@@ -5038,22 +5079,6 @@ class Database:
             tr_row = cursor.fetchone()
             training_hours = float(tr_row[0] or 0.0)
 
-            cursor.execute("""
-                SELECT COALESCE(SUM(
-                    CASE
-                    WHEN ws.end_time <= ws.start_time
-                        THEN EXTRACT(EPOCH FROM (ws.end_time + INTERVAL '24 hours' - ws.start_time))
-                    ELSE EXTRACT(EPOCH FROM (ws.end_time - ws.start_time))
-                    END
-                ) / 3600.0, 0) AS practice_shift_training_hours
-                FROM work_shifts ws
-                WHERE ws.operator_id = %s
-                AND COALESCE(ws.shift_type, 'regular') = 'office_practice'
-                AND TO_CHAR(ws.shift_date, 'YYYY-MM') = %s
-            """, (operator_id, current_month))
-            practice_row = cursor.fetchone()
-            training_hours += float(practice_row[0] or 0.0)
-
             # 3) Рассчитываем техсбои за месяц (учитываются в часах выполнения нормы)
             cursor.execute("""
                 SELECT COALESCE(SUM(
@@ -5085,6 +5110,22 @@ class Database:
             """, (operator_id, current_month))
             offline_row = cursor.fetchone()
             offline_activity_hours = float(offline_row[0] or 0.0)
+
+            cursor.execute("""
+                SELECT COALESCE(SUM(
+                    CASE
+                    WHEN ws.end_time <= ws.start_time
+                        THEN EXTRACT(EPOCH FROM (ws.end_time + INTERVAL '24 hours' - ws.start_time))
+                    ELSE EXTRACT(EPOCH FROM (ws.end_time - ws.start_time))
+                    END
+                ) / 3600.0, 0) AS practice_shift_offline_hours
+                FROM work_shifts ws
+                WHERE ws.operator_id = %s
+                AND COALESCE(ws.shift_type, 'regular') = 'office_practice'
+                AND TO_CHAR(ws.shift_date, 'YYYY-MM') = %s
+            """, (operator_id, current_month))
+            practice_row = cursor.fetchone()
+            offline_activity_hours += float(practice_row[0] or 0.0)
 
             # 4) Количество оценённых звонков и средняя оценка (как раньше)
             cursor.execute("""
@@ -5390,19 +5431,6 @@ class Database:
                     WHERE t.operator_id = u.id
                     AND t.count_in_hours = TRUE
                     AND (%s IS NULL OR TO_CHAR(t.training_date, 'YYYY-MM') = %s)
-                ), 0)
-                + COALESCE((
-                    SELECT SUM(
-                        CASE
-                            WHEN ws.end_time <= ws.start_time
-                                THEN EXTRACT(EPOCH FROM (ws.end_time + INTERVAL '24 hours' - ws.start_time))
-                            ELSE EXTRACT(EPOCH FROM (ws.end_time - ws.start_time))
-                        END
-                    ) / 3600.0
-                    FROM work_shifts ws
-                    WHERE ws.operator_id = u.id
-                    AND COALESCE(ws.shift_type, 'regular') = 'office_practice'
-                    AND (%s IS NULL OR TO_CHAR(ws.shift_date, 'YYYY-MM') = %s)
                 ), 0) AS training_hours,
 
                 -- technical issue hours считаем отдельно и учитываем в часах выполнения
@@ -5430,6 +5458,19 @@ class Database:
                     FROM operator_offline_activities oa
                     WHERE oa.operator_id = u.id
                     AND (%s IS NULL OR TO_CHAR(oa.activity_date, 'YYYY-MM') = %s)
+                ), 0)
+                + COALESCE((
+                    SELECT SUM(
+                        CASE
+                            WHEN ws.end_time <= ws.start_time
+                                THEN EXTRACT(EPOCH FROM (ws.end_time + INTERVAL '24 hours' - ws.start_time))
+                            ELSE EXTRACT(EPOCH FROM (ws.end_time - ws.start_time))
+                        END
+                    ) / 3600.0
+                    FROM work_shifts ws
+                    WHERE ws.operator_id = u.id
+                    AND COALESCE(ws.shift_type, 'regular') = 'office_practice'
+                    AND (%s IS NULL OR TO_CHAR(ws.shift_date, 'YYYY-MM') = %s)
                 ), 0) AS offline_activity_hours,
 
                 COALESCE(cmm.chats_count, 0) AS chat_chats_count,
@@ -11608,6 +11649,22 @@ class Database:
         """, (operator_id, start, end))
         total_offline_hours = float(cursor.fetchone()[0] or 0.0)
 
+        cursor.execute("""
+            SELECT COALESCE(SUM(
+                CASE
+                    WHEN ws.end_time <= ws.start_time
+                        THEN EXTRACT(EPOCH FROM (ws.end_time + INTERVAL '24 hours' - ws.start_time))
+                    ELSE EXTRACT(EPOCH FROM (ws.end_time - ws.start_time))
+                END
+            ) / 3600.0, 0)
+            FROM work_shifts ws
+            WHERE ws.operator_id = %s
+              AND COALESCE(ws.shift_type, 'regular') = 'office_practice'
+              AND ws.shift_date >= %s
+              AND ws.shift_date <= %s
+        """, (operator_id, start, end))
+        total_offline_hours += float(cursor.fetchone()[0] or 0.0)
+
         effective_hours_for_calls = max(0.0, float(total_work_time or 0.0))
 
         if effective_hours_for_calls > 0:
@@ -11699,13 +11756,11 @@ class Database:
 
         shifts_by_start_day = {}
         shifts_segments_by_day = {}
-        practice_shift_segments_by_day = {}
         for shift_id, op_id, shift_date_value, start_time_value, end_time_value, shift_type_value in shifts_rows:
             start_min, end_min = self._schedule_interval_minutes(start_time_value, end_time_value)
             start_sec = int(start_min) * 60
             end_sec = int(end_min) * 60
             shift_type_norm = self._normalize_work_shift_type(shift_type_value)
-            is_practice_shift = (shift_type_norm == WORK_SHIFT_TYPE_OFFICE_PRACTICE)
             item = {
                 'id': int(shift_id),
                 'start': int(start_sec),
@@ -11739,11 +11794,6 @@ class Database:
                     'start': local_start,
                     'end': local_end
                 })
-                if is_practice_shift:
-                    practice_shift_segments_by_day.setdefault((int(op_id), day_value), []).append({
-                        'start': local_start,
-                        'end': local_end
-                    })
 
         status_start_for_query = calc_start_date_obj - timedelta(days=1)
         status_end_for_query = calc_end_date_obj + timedelta(days=1)
@@ -11877,9 +11927,6 @@ class Database:
                 day_statuses,
                 lambda seg: str(seg.get('status_key') or '') in late_start_status_keys
             )
-            day_practice_shift_intervals = self._merge_break_intervals(
-                practice_shift_segments_by_day.get((op_id, day_value)) or []
-            )
             day_technical_reason_status = pick_status_intervals(
                 day_statuses,
                 lambda seg: self._schedule_auto_is_tech_reason_status_key(seg.get('status_key'))
@@ -11897,9 +11944,7 @@ class Database:
             # Перерывы считаем по фактическим статусам в пределах смены, независимо от
             # запланированных break-интервалов графика.
             break_seconds = self._schedule_auto_overlap_minutes(day_shift_intervals, day_break_status)
-            training_intervals_effective = self._merge_break_intervals(
-                (day_training_status or []) + (day_practice_shift_intervals or [])
-            )
+            training_intervals_effective = self._merge_break_intervals(day_training_status or [])
             training_seconds_in_shift = self._schedule_auto_overlap_minutes(day_shift_intervals, training_intervals_effective)
             technical_reason_seconds_in_shift = self._schedule_auto_overlap_minutes(day_shift_intervals, day_technical_reason_status)
 
@@ -13210,11 +13255,81 @@ class Database:
                     'comment': comment_text
                 })
 
+        shift_query = """
+            SELECT
+                id,
+                operator_id,
+                shift_date,
+                start_time,
+                end_time
+            FROM work_shifts
+            WHERE operator_id = ANY(%s)
+              AND COALESCE(shift_type, 'regular') = 'office_practice'
+        """
+        shift_params = [op_ids]
+        if start_date_obj:
+            shift_query += " AND shift_date >= %s"
+            shift_params.append(start_date_obj - timedelta(days=1))
+        if end_date_obj:
+            shift_query += " AND shift_date <= %s"
+            shift_params.append(end_date_obj + timedelta(days=1))
+
+        shift_query += " ORDER BY operator_id, shift_date, start_time, end_time, id"
+        cursor.execute(shift_query, shift_params)
+        shift_rows = cursor.fetchall() or []
+
+        for shift_id, operator_id, shift_date_value, start_time_value, end_time_value in shift_rows:
+            op_id = int(operator_id)
+            if op_id not in result or shift_date_value is None:
+                continue
+
+            start_min, end_min = self._schedule_interval_minutes(start_time_value, end_time_value)
+            day_chunks = self._split_absolute_minutes_intervals_by_day(
+                [{'start': int(start_min), 'end': int(end_min)}],
+                shift_date_value
+            )
+            for chunk in day_chunks:
+                chunk_date = chunk.get('date')
+                if not chunk_date:
+                    continue
+                if start_date_obj and chunk_date < start_date_obj:
+                    continue
+                if end_date_obj and chunk_date > end_date_obj:
+                    continue
+
+                day_key = chunk_date.strftime('%Y-%m-%d')
+                start_min_local = int(chunk.get('start_min') or 0)
+                end_min_local = int(chunk.get('end_min') or 0)
+                if end_min_local <= start_min_local:
+                    continue
+
+                result[op_id].setdefault(day_key, []).append({
+                    'id': f"practice-shift-{int(shift_id)}",
+                    'batch_id': None,
+                    'date': day_key,
+                    'start': chunk.get('start_time') or _minutes_to_time(start_min_local),
+                    'end': chunk.get('end_time') or _minutes_to_time(end_min_local),
+                    'startMin': start_min_local,
+                    'endMin': end_min_local,
+                    'comment': WORK_SHIFT_OFFICE_PRACTICE_OFFLINE_COMMENT,
+                    'source': 'work_shift',
+                    'shift_type': WORK_SHIFT_TYPE_OFFICE_PRACTICE,
+                    'isPracticeShift': True,
+                    'readOnly': True
+                })
+
+        def _segment_sort_id(value):
+            raw_id = value.get('id') if isinstance(value, dict) else None
+            try:
+                return int(raw_id)
+            except Exception:
+                return 0
+
         for op_id, days_map in result.items():
             for day_key, items in list(days_map.items()):
                 items_sorted = sorted(
                     (items or []),
-                    key=lambda seg: (int(seg.get('startMin', 0)), int(seg.get('endMin', 0)), int(seg.get('id', 0)))
+                    key=lambda seg: (int(seg.get('startMin', 0)), int(seg.get('endMin', 0)), _segment_sort_id(seg))
                 )
                 days_map[day_key] = items_sorted
 

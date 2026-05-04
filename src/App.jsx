@@ -1267,16 +1267,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             const trainingsList = Array.isArray(trainingsResp.data) ? trainingsResp.data : (trainingsResp.data?.trainings || []);
             const scheduleOperators = Array.isArray(schedulesResp?.data?.operators) ? schedulesResp.data.operators : [];
-            const trainingSignatureSet = new Set(
-                (trainingsList || []).map((t) => [
-                String(t?.operator_id || ''),
-                String(t?.date || ''),
-                String(t?.start_time || ''),
-                String(t?.end_time || ''),
-                String(t?.reason || '').trim().toLowerCase()
-                ].join('|'))
-            );
-            const syntheticPracticeTrainings = [];
+            const syntheticPracticeOfflineActivities = [];
             for (const op of scheduleOperators) {
                 const opId = Number(op?.id);
                 if (!Number.isFinite(opId) || opId <= 0) continue;
@@ -1291,34 +1282,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const startTime = String(shift?.start || '').trim();
                     const endTime = String(shift?.end || '').trim();
                     if (!startTime || !endTime) continue;
-                    const signature = [
-                    String(opId),
-                    dateKey,
-                    startTime,
-                    endTime,
-                    String('Практика в офисе таксопарка').toLowerCase()
-                    ].join('|');
-                    if (trainingSignatureSet.has(signature)) continue;
-                    trainingSignatureSet.add(signature);
-                    syntheticPracticeTrainings.push({
+                    syntheticPracticeOfflineActivities.push({
                     id: `practice-shift-${shift?.id ?? `${opId}-${dateKey}-${startTime}-${endTime}`}`,
                     operator_id: opId,
                     date: dateKey,
                     start_time: startTime,
                     end_time: endTime,
-                    reason: 'Практика в офисе таксопарка',
-                    comment: 'Автоматически из графика смен',
+                    comment: PLANNER_SHIFT_TYPE_OFFICE_PRACTICE_LABEL,
                     created_at: '',
                     created_by_name: 'Планировщик',
-                    count_in_hours: true,
                     is_practice_shift: true,
                     read_only: true,
+                    source: 'work_shift',
                     shift_type: PLANNER_SHIFT_TYPE_OFFICE_PRACTICE
                     });
                 }
                 }
             }
-            const mergedTrainingsList = [...trainingsList, ...syntheticPracticeTrainings];
+            const mergedTrainingsList = [...trainingsList];
             const tmap = {};
             for (const t of mergedTrainingsList) {
                 const op = t.operator_id;
@@ -1367,7 +1348,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 ? offlineActivitiesResp.data.items
                 : [];
             const offlineMap = {};
-            for (const item of offlineItems) {
+            const offlineSignatureSet = new Set();
+            for (const item of [...offlineItems, ...syntheticPracticeOfflineActivities]) {
                 const op = Number(item?.operator_id);
                 if (!Number.isFinite(op) || op <= 0) continue;
                 if (visibleOperatorIds.size > 0 && !visibleOperatorIds.has(op)) continue;
@@ -1379,6 +1361,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 dayNum = parseInt(String(item.date || '').slice(-2), 10);
                 }
                 if (!Number.isFinite(dayNum) || dayNum <= 0) continue;
+
+                const signature = [
+                String(op),
+                String(item?.date || ''),
+                String(item?.start_time || ''),
+                String(item?.end_time || ''),
+                String(item?.source || item?.comment || '').trim().toLowerCase()
+                ].join('|');
+                if (offlineSignatureSet.has(signature)) continue;
+                offlineSignatureSet.add(signature);
 
                 if (!offlineMap[op]) offlineMap[op] = {};
                 if (!offlineMap[op][dayNum]) offlineMap[op][dayNum] = [];
