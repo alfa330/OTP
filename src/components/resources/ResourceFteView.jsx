@@ -256,13 +256,21 @@ const DISPLAY_GROUPS = [
     title: 'Графики',
     items: [
       ['chartCalls', 'Звонки'],
-      ['chartFte', 'Прогноз FTE'],
-      ['chartActual', 'Факт FTE'],
+      ['chartFte', 'Сумма FTE в час - прогноз'],
+      ['chartActual', 'Сумма FTE в час - факт'],
       ['chartLosses', 'Потери'],
       ['chartLossRate', 'Доля потерь'],
     ],
   },
 ];
+
+const OVERVIEW_TREND_TOOLTIP_CONFIG = {
+  calls: { group: 'Звонки', label: 'Факт', digits: 0, groupOrder: 1, itemOrder: 1 },
+  lost: { group: 'Потери звонков', label: 'Факт', digits: 0, groupOrder: 2, itemOrder: 1 },
+  lossRate: { group: 'Доля потерь', label: 'Факт', percent: true, groupOrder: 3, itemOrder: 1 },
+  actualFte: { group: 'Сумма FTE в час', label: 'Факт', digits: 2, groupOrder: 4, itemOrder: 1 },
+  forecastFte: { group: 'Сумма FTE в час', label: 'Прогноз', digits: 2, groupOrder: 4, itemOrder: 2 },
+};
 
 const loadDisplayOptions = () => {
   if (typeof window === 'undefined') return { ...DEFAULT_DISPLAY_OPTIONS };
@@ -333,6 +341,62 @@ const ToggleSwitch = ({ checked, label, onChange }) => (
     </span>
   </button>
 );
+
+const OverviewTrendTooltip = ({ active, label, payload }) => {
+  if (!active || !payload?.length) return null;
+
+  const groups = payload.reduce((acc, entry) => {
+    const key = entry.dataKey || entry.name;
+    const config = OVERVIEW_TREND_TOOLTIP_CONFIG[key];
+    if (!config) return acc;
+    if (!acc[config.group]) {
+      acc[config.group] = {
+        order: config.groupOrder,
+        items: [],
+      };
+    }
+    acc[config.group].items.push({
+      ...config,
+      value: entry.value,
+      color: entry.color || entry.stroke || entry.fill || '#64748b',
+    });
+    return acc;
+  }, {});
+
+  const orderedGroups = Object.entries(groups)
+    .map(([group, groupData]) => ({
+      group,
+      ...groupData,
+      items: groupData.items.sort((a, b) => a.itemOrder - b.itemOrder),
+    }))
+    .sort((a, b) => a.order - b.order);
+
+  return (
+    <div className="min-w-56 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs shadow-lg">
+      <div className="mb-2 font-semibold text-slate-900">{label}</div>
+      <div className="space-y-2">
+        {orderedGroups.map(({ group, items }) => (
+          <div key={group} className="rounded-md bg-slate-50 px-2 py-1.5">
+            <div className="mb-1 font-medium text-slate-500">{group}</div>
+            <div className="space-y-1">
+              {items.map((item) => (
+                <div key={`${group}-${item.label}`} className="flex items-center justify-between gap-6">
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className="h-2 w-2 rounded-full" style={{ backgroundColor: item.color }} />
+                    {item.label}
+                  </span>
+                  <b className="text-slate-900">
+                    {item.percent ? `${formatNumber(item.value, 1)}%` : formatNumber(item.value, item.digits)}
+                  </b>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
 
 const CalendarPicker = ({
   label,
@@ -1292,10 +1356,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                     <XAxis dataKey="date" tick={{ fontSize: 11 }} />
                     <YAxis yAxisId="left" tick={{ fontSize: 11 }} />
                     <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} />
-                    <Tooltip formatter={(value, name) => {
-                      const labelMap = { calls: 'Звонки', lost: 'Потеряно', lossRate: 'Доля потерь', actualFte: 'Факт FTE из отчета', forecastFte: 'Прогноз FTE' };
-                      return [name === 'lossRate' ? `${formatNumber(value, 1)}%` : formatNumber(value, name === 'calls' || name === 'lost' ? 0 : 2), labelMap[name] || name];
-                    }} />
+                    <Tooltip content={<OverviewTrendTooltip />} />
                     {displayOptions.chartCalls && <Bar yAxisId="left" dataKey="calls" fill="#bfdbfe" radius={[4, 4, 0, 0]} />}
                     {displayOptions.chartLosses && <Bar yAxisId="left" dataKey="lost" fill="#fecdd3" radius={[4, 4, 0, 0]} />}
                     {displayOptions.chartFte && <Line yAxisId="right" type="monotone" dataKey="forecastFte" stroke="#2563eb" strokeWidth={2} dot={false} />}
