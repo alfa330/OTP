@@ -222,7 +222,7 @@ const DISPLAY_PREFERENCES_STORAGE_KEY = 'otp_resource_fte_display_v1';
 const VIEW_TABS = [
   { key: 'overview', label: 'Обзор', icon: LayoutDashboard },
   { key: 'next_week', label: 'Прогнозы', icon: TrendingUp },
-  { key: 'losses', label: 'Потери', icon: PhoneMissed },
+  { key: 'losses', label: 'Звонки', icon: PhoneCall },
   { key: 'settings', label: 'Настройки', icon: SlidersHorizontal },
 ];
 
@@ -703,6 +703,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
   const [showForecastActualLoad, setShowForecastActualLoad] = useState(false);
   const [hoveredForecastHour, setHoveredForecastHour] = useState(null);
   const [pinnedForecastHour, setPinnedForecastHour] = useState(null);
+  const [callsChartMode, setCallsChartMode] = useState('losses');
   const [loadedDateCache, setLoadedDateCache] = useState([]);
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
   const userId = user?.id || '';
@@ -809,6 +810,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
           accepted: Number(item.total_accepted || 0),
           lost: Number(item.total_lost || 0),
           lossRate: Number(item.no_answer_rate || 0) * 100,
+          forecastCalls: Number(item.forecast_calls_total || 0),
           forecastFte: Number(item.forecast_fte_total || 0),
           actualFte: Number(item.actual_report_fte_total || 0),
         })),
@@ -1143,20 +1145,22 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
             <h1 className="text-2xl font-semibold text-slate-950">Расчет ресурсов / FTE</h1>
           </div>
           <div className="flex flex-wrap items-center gap-3">
-            <div className="w-full sm:w-[330px]">
-              <CalendarPicker
-                mode="range"
-                label="Период анализа"
-                startValue={dateFrom}
-                endValue={dateTo}
-                onRangeChange={(start, end) => {
-                  setDateFrom(start);
-                  setDateTo(end);
-                }}
-                loadedDates={loadedReportDates}
-                hint="точка = есть отчет"
-              />
-            </div>
+            {activeDashboardView === 'overview' || activeDashboardView === 'losses' ? (
+              <div className="w-full sm:w-[330px]">
+                <CalendarPicker
+                  mode="range"
+                  label="Период анализа"
+                  startValue={dateFrom}
+                  endValue={dateTo}
+                  onRangeChange={(start, end) => {
+                    setDateFrom(start);
+                    setDateTo(end);
+                  }}
+                  loadedDates={loadedReportDates}
+                  hint="точка = есть отчет"
+                />
+              </div>
+            ) : null}
             <div className="w-full sm:w-[240px]">
               <button
                 type="button"
@@ -1375,8 +1379,8 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
           <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
             <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
               <div>
-                <h2 className="text-lg font-semibold text-slate-950">Аналитика потерь</h2>
-                <p className="text-sm text-slate-500">Потерянные звонки, доля неответов и часы с максимальным риском.</p>
+                <h2 className="text-lg font-semibold text-slate-950">Аналитика звонков</h2>
+                <p className="text-sm text-slate-500">Факт, прогноз, потери и принятые звонки в выбранном периоде.</p>
               </div>
               {periodLossSummary.worstDay ? (
                 <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">
@@ -1387,9 +1391,30 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
 
             <div className="mt-5 grid gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
               <div className="min-w-0 rounded-lg border border-slate-200 bg-white p-3">
-                <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-900">
-                  <PhoneMissed size={16} />
-                  Потери по дням
+                <div className="mb-3 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                  <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+                    <PhoneCall size={16} />
+                    Звонки по дням
+                  </div>
+                  <div className="inline-flex w-fit rounded-lg border border-slate-200 bg-slate-50 p-1">
+                    {[
+                      ['losses', 'Потери/Принятые'],
+                      ['forecastFact', 'Факт кол-во/Прогноз кол-во'],
+                    ].map(([mode, label]) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        onClick={() => setCallsChartMode(mode)}
+                        className={`h-8 rounded-md px-3 text-xs font-semibold transition ${
+                          callsChartMode === mode
+                            ? 'bg-slate-900 text-white shadow-sm'
+                            : 'text-slate-600 hover:bg-white hover:text-slate-900'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
                 {historyTrendData.length ? (
                   <div className="h-72">
@@ -1403,20 +1428,22 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                         <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                         <XAxis dataKey="date" tick={{ fontSize: 11 }} />
                         <YAxis yAxisId="left" tick={{ fontSize: 11 }} />
-                        <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} />
-                        <Tooltip formatter={(value, name) => [name === 'lossRate' ? `${formatNumber(value, 1)}%` : formatNumber(value, 0), name === 'lost' ? 'Потеряно' : name === 'accepted' ? 'Принято' : 'Доля потерь']} />
+                        {callsChartMode === 'losses' ? <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} /> : null}
+                        <Tooltip formatter={(value, name) => {
+                          const labelMap = {
+                            accepted: 'Принято',
+                            lost: 'Потеряно',
+                            lossRate: 'Доля потерь',
+                            forecastCalls: 'Прогноз кол-во',
+                            calls: 'Факт кол-во',
+                          };
+                          return [name === 'lossRate' ? `${formatNumber(value, 1)}%` : formatNumber(value, 0), labelMap[name] || name];
+                        }} />
                         {selectedLossTrendPoint ? (
                           <ReferenceLine yAxisId="left" x={selectedLossTrendPoint.date} stroke="#0f172a" strokeDasharray="4 4" />
                         ) : null}
-                        {displayOptions.chartCalls && (
-                          <Bar
-                            yAxisId="left"
-                            dataKey="accepted"
-                            stackId="calls"
-                            fill="#bbf7d0"
-                            radius={[0, 0, 0, 0]}
-                            onClick={selectLossChartDay}
-                          >
+                        {callsChartMode === 'losses' && displayOptions.chartCalls && (
+                          <Bar yAxisId="left" dataKey="accepted" stackId="calls" fill="#bbf7d0" radius={[0, 0, 0, 0]} onClick={selectLossChartDay}>
                             {historyTrendData.map((item) => (
                               <Cell
                                 key={`accepted-${item.reportDate}`}
@@ -1427,15 +1454,8 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                             ))}
                           </Bar>
                         )}
-                        {displayOptions.chartLosses && (
-                          <Bar
-                            yAxisId="left"
-                            dataKey="lost"
-                            stackId="calls"
-                            fill="#fecdd3"
-                            radius={[4, 4, 0, 0]}
-                            onClick={selectLossChartDay}
-                          >
+                        {callsChartMode === 'losses' && displayOptions.chartLosses && (
+                          <Bar yAxisId="left" dataKey="lost" stackId="calls" fill="#fecdd3" radius={[4, 4, 0, 0]} onClick={selectLossChartDay}>
                             {historyTrendData.map((item) => (
                               <Cell
                                 key={`lost-${item.reportDate}`}
@@ -1446,7 +1466,31 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                             ))}
                           </Bar>
                         )}
-                        {displayOptions.chartLossRate && (
+                        {callsChartMode === 'forecastFact' && displayOptions.chartCalls && (
+                          <>
+                            <Bar yAxisId="left" dataKey="forecastCalls" fill="#bfdbfe" radius={[4, 4, 0, 0]} onClick={selectLossChartDay}>
+                              {historyTrendData.map((item) => (
+                                <Cell
+                                  key={`forecast-calls-${item.reportDate}`}
+                                  fill={item.reportDate === selectedDate ? '#60a5fa' : '#bfdbfe'}
+                                  className="cursor-pointer"
+                                  onClick={() => selectLossReportDate(item.reportDate)}
+                                />
+                              ))}
+                            </Bar>
+                            <Bar yAxisId="left" dataKey="calls" fill="#cbd5e1" radius={[4, 4, 0, 0]} onClick={selectLossChartDay}>
+                              {historyTrendData.map((item) => (
+                                <Cell
+                                  key={`fact-calls-${item.reportDate}`}
+                                  fill={item.reportDate === selectedDate ? '#64748b' : '#cbd5e1'}
+                                  className="cursor-pointer"
+                                  onClick={() => selectLossReportDate(item.reportDate)}
+                                />
+                              ))}
+                            </Bar>
+                          </>
+                        )}
+                        {callsChartMode === 'losses' && displayOptions.chartLossRate && (
                           <Line
                             yAxisId="right"
                             type="monotone"
@@ -1478,7 +1522,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                     </ResponsiveContainer>
                   </div>
                 ) : (
-                  <EmptyState title="Нет данных по потерям" text="Загрузите ежедневные отчеты, чтобы увидеть динамику потерь." />
+                  <EmptyState title="Нет данных по звонкам" text="Загрузите ежедневные отчеты, чтобы увидеть динамику звонков." />
                 )}
               </div>
 
@@ -1781,19 +1825,17 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                       onChange={(weekStart) => setSelectedForecastWeekStart(weekStart)}
                       loadedDates={loadedReportDates}
                     />
-                    <div className={`mt-3 rounded-xl border px-3 py-2 text-xs ${
-                      forecastWeekComplete
-                        ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
-                        : 'border-amber-200 bg-amber-50 text-amber-800'
-                    }`}>
-                      <div className="flex items-center gap-1 font-semibold">
-                        {forecastWeekComplete ? <CheckCircle2 size={13} /> : <AlertTriangle size={13} />}
-                        {forecastWeekComplete ? 'Неделе хватает истории' : 'Неделе не хватает истории'}
+                    {!forecastWeekComplete ? (
+                      <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                        <div className="flex items-center gap-1 font-semibold">
+                          <AlertTriangle size={13} />
+                          Неделе не хватает истории
+                        </div>
+                        <div className="mt-1 text-slate-600">
+                          Исторические периоды: {(forecastHistoryWeeks || []).map((week) => `${formatDate(week.start)}-${formatDate(week.end)}`).join(', ')}
+                        </div>
                       </div>
-                      <div className="mt-1 text-slate-600">
-                        Исторические периоды: {(forecastHistoryWeeks || []).map((week) => `${formatDate(week.start)}-${formatDate(week.end)}`).join(', ')}
-                      </div>
-                    </div>
+                    ) : null}
                     <div className="mb-3 mt-5 text-sm font-semibold text-slate-900">Выберите день</div>
                     <div className="space-y-2">
                       {(nextWeekForecast.days || []).map((profile) => (
@@ -1943,11 +1985,14 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
 
                         <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_300px]">
                           <div className="overflow-x-auto rounded-lg border border-slate-200">
-                            <table className={`${showForecastActualLoad && selectedForecastHasActualLoad ? 'min-w-[980px]' : 'min-w-[760px]'} w-full divide-y divide-slate-200 text-sm`}>
+                            <table className={`${showForecastActualLoad && selectedForecastHasActualLoad ? 'min-w-[1080px]' : 'min-w-[760px]'} w-full divide-y divide-slate-200 text-sm`}>
                               <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
                                 <tr>
                                   <th className="px-3 py-3 text-left">Час</th>
                                   <th className="px-3 py-3 text-right">Звонки</th>
+                                  {showForecastActualLoad && selectedForecastHasActualLoad ? (
+                                    <th className="px-3 py-3 text-right">Факт звонков</th>
+                                  ) : null}
                                   <th className="px-3 py-3 text-right">AHT недели</th>
                                   <th className="px-3 py-3 text-right">Минут нагрузки</th>
                                   {showForecastActualLoad && selectedForecastHasActualLoad ? (
@@ -1990,6 +2035,17 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                                           {formatNumber(row.forecast_calls, 1)}
                                         </span>
                                       </td>
+                                      {showForecastActualLoad && selectedForecastHasActualLoad ? (
+                                        <td className="px-3 py-2 text-right">
+                                          <span
+                                            className={`inline-flex items-center justify-end rounded-md border px-2 py-1 font-medium text-emerald-700 transition ${
+                                              rowIsActive ? 'border-emerald-200 bg-emerald-50' : 'border-transparent'
+                                            }`}
+                                          >
+                                            {row.has_actual_report ? formatInt(row.actual_received_calls) : '-'}
+                                          </span>
+                                        </td>
+                                      ) : null}
                                       <td className="px-3 py-2 text-right">
                                         <span
                                           title={formatAhtTooltip(row.forecast_aht_seconds)}
