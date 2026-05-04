@@ -30064,6 +30064,50 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return (birthdaysToday || []).some((b) => Number(b?.id) === Number(user.id));
             }, [birthdaysToday, user?.id]);
 
+            const birthdayBannerSignature = useMemo(() => {
+                const list = Array.isArray(birthdaysToday) ? birthdaysToday : [];
+                return list
+                    .map((item, index) => {
+                        const rawId = item?.id;
+                        if (rawId !== undefined && rawId !== null && rawId !== '') {
+                            return `id:${rawId}`;
+                        }
+                        const name = String(item?.name || '').trim().toLowerCase();
+                        const date = String(item?.birth_date || item?.birthday || item?.date || '').trim();
+                        return `person:${name || index}:${date}`;
+                    })
+                    .sort()
+                    .join('|');
+            }, [birthdaysToday]);
+
+            const birthdayBannerDismissStorageKey = useMemo(() => {
+                const dateKey = birthdaysDate || getLocalDateKey();
+                if (!user?.id || !dateKey || !birthdayBannerSignature) return '';
+                return `otp.birthday.banner.dismissed.${user.id}.${dateKey}.${birthdayBannerSignature}`;
+            }, [birthdayBannerSignature, birthdaysDate, getLocalDateKey, user?.id]);
+
+            useEffect(() => {
+                if (!birthdayBannerDismissStorageKey) {
+                    setBirthdayBannerDismissed(false);
+                    return;
+                }
+                try {
+                    setBirthdayBannerDismissed(localStorage.getItem(birthdayBannerDismissStorageKey) === '1');
+                } catch (e) {
+                    setBirthdayBannerDismissed(false);
+                }
+            }, [birthdayBannerDismissStorageKey]);
+
+            const dismissBirthdayBanner = useCallback(() => {
+                setBirthdayBannerDismissed(true);
+                if (!birthdayBannerDismissStorageKey) return;
+                try {
+                    localStorage.setItem(birthdayBannerDismissStorageKey, '1');
+                } catch (e) {
+                    // ignore localStorage errors
+                }
+            }, [birthdayBannerDismissStorageKey]);
+
             useEffect(() => {
                 if (!user?.id || !isUserBirthdayToday) return;
                 const dateKey = birthdaysDate || getLocalDateKey();
@@ -32211,7 +32255,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const callEvaluationIframeUrl = `${APP_BASE_URL}call_evaluation.html`;
             const isCallEvaluationView = view === 'call_evaluation' && (isAdminLikeRoleFn(user?.role) || isSupervisorRole(user?.role));
             const canSeeCallEvaluation = isAdminLikeRoleFn(user?.role) || isSupervisorRole(user?.role);
-            const birthdayBannerVisible = !isCallEvaluationView && !birthdayBannerDismissed && Array.isArray(birthdaysToday) && birthdaysToday.length > 0;
+            const isBirthdayBannerSuppressedView = isCallEvaluationView || view === 'trainings';
+            const birthdayBannerVisible = !isBirthdayBannerSuppressedView && !birthdayBannerDismissed && Array.isArray(birthdaysToday) && birthdaysToday.length > 0;
             const birthdayBannerNames = (birthdaysToday || []).map((b) => {
                 const name = String(b?.name || 'Сотрудник').trim();
                 return Number(b?.id) === Number(user?.id) ? `${name} (вы)` : name;
@@ -32795,7 +32840,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </div>
                                 </div>
                                 <button
-                                    onClick={() => setBirthdayBannerDismissed(true)}
+                                    onClick={dismissBirthdayBanner}
                                     className="sm:ml-auto h-9 w-9 rounded-full bg-white/80 border border-amber-200/70 text-amber-700 hover:text-amber-900 hover:bg-white transition"
                                     aria-label="Скрыть уведомление"
                                 >
