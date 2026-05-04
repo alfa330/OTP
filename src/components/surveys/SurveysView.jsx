@@ -153,6 +153,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
     const [selectedSurveyId, setSelectedSurveyId] = useState('');
     const [showBuilder, setShowBuilder] = useState(false);
     const [repeatSourceSurveyId, setRepeatSourceSurveyId] = useState(null);
+    const [editingSurveyId, setEditingSurveyId] = useState(null);
     const [draft, setDraft] = useState(emptyDraft);
     const [operatorQuery, setOperatorQuery] = useState('');
     const [answers, setAnswers] = useState({});
@@ -169,6 +170,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
     const canManage = isManagerRole(user?.role);
     const isOperator = normalizeRole(user?.role) === 'operator';
     const isRepeatMode = repeatSourceSurveyId != null;
+    const isEditMode = editingSurveyId != null;
 
     useEffect(() => { showToastRef.current = showToast; }, [showToast]);
     useEffect(() => { onSurveyProgressChangedRef.current = onSurveyProgressChanged; }, [onSurveyProgressChanged]);
@@ -192,14 +194,36 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
         return map;
     }, [directions]);
 
+    const operatorSourceRows = useMemo(() => {
+        const map = new Map();
+        (operators || []).forEach((operator) => {
+            const id = Number(operator?.id);
+            if (Number.isFinite(id)) map.set(id, operator);
+        });
+        (surveys || []).forEach((survey) => {
+            (survey?.assignment?.operators || []).forEach((assignmentOperator) => {
+                const id = Number(assignmentOperator?.operator_id ?? assignmentOperator?.id);
+                if (!Number.isFinite(id) || map.has(id)) return;
+                map.set(id, {
+                    id,
+                    name: assignmentOperator?.operator_name || `#${id}`,
+                    status: assignmentOperator?.operator_status || '',
+                    direction: assignmentOperator?.direction || '',
+                    direction_id: assignmentOperator?.direction_id
+                });
+            });
+        });
+        return Array.from(map.values());
+    }, [operators, surveys]);
+
     const normalizedOperators = useMemo(() => {
-        return (operators || [])
+        return operatorSourceRows
             .map((operator) => {
                 const id = Number(operator?.id);
                 if (!Number.isFinite(id)) return null;
                 const status = String(operator?.status || '').trim().toLowerCase();
                 const statusPeriodCode = String(operator?.status_period_status_code || '').trim().toLowerCase();
-                if (isDismissedOperatorStatus(status) || isDismissedOperatorStatus(statusPeriodCode)) return null;
+                const isDismissed = isDismissedOperatorStatus(status) || isDismissedOperatorStatus(statusPeriodCode) || operator?.is_operator_dismissed === true;
                 const directionId = operator?.direction_id != null ? String(operator.direction_id) : 'none';
                 const weeks = getTenureWeeks(operator?.hire_date);
                 return {
@@ -208,27 +232,35 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                     directionId,
                     directionName: operator?.direction || directionNameById.get(directionId) || 'Без направления',
                     tenureWeeks: weeks,
-                    tenureLabel: tenureLabel(weeks)
+                    tenureLabel: tenureLabel(weeks),
+                    isDismissed,
+                    statusLabel: isDismissed ? 'Уволен' : 'Активен'
                 };
             })
             .filter(Boolean)
             .sort((a, b) => a.name.localeCompare(b.name, 'ru', { sensitivity: 'base' }));
-    }, [operators, directionNameById]);
+    }, [directionNameById, operatorSourceRows]);
     const availableOperatorIdSet = useMemo(
         () => new Set(normalizedOperators.map((operator) => Number(operator.id)).filter(Number.isFinite)),
         [normalizedOperators]
     );
-    const sanitizeOperatorIds = useCallback((sourceIds) => {
+    const dismissedOperatorIdSet = useMemo(
+        () => new Set(normalizedOperators.filter((operator) => operator.isDismissed).map((operator) => Number(operator.id))),
+        [normalizedOperators]
+    );
+    const sanitizeOperatorIds = useCallback((sourceIds, options = {}) => {
+        const excludeDismissed = !!options.excludeDismissed;
         const uniqueIds = [];
         const seen = new Set();
         (Array.isArray(sourceIds) ? sourceIds : []).forEach((rawId) => {
             const id = Number(rawId);
             if (!Number.isFinite(id) || !availableOperatorIdSet.has(id) || seen.has(id)) return;
+            if (excludeDismissed && dismissedOperatorIdSet.has(id)) return;
             seen.add(id);
             uniqueIds.push(id);
         });
         return uniqueIds;
-    }, [availableOperatorIdSet]);
+    }, [availableOperatorIdSet, dismissedOperatorIdSet]);
 
     useEffect(() => {
         setDraft((prev) => {
@@ -260,24 +292,31 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
         () => filteredOperators.map((operator) => Number(operator.id)).filter(Number.isFinite),
         [filteredOperators]
     );
-    const filteredOperatorIdSet = useMemo(() => new Set(filteredOperatorIds), [filteredOperatorIds]);
+    const filteredAssignableOperatorIds = useMemo(
+        () => filteredOperators
+            .filter((operator) => !operator.isDismissed)
+            .map((operator) => Number(operator.id))
+            .filter(Number.isFinite),
+        [filteredOperators]
+    );
+    const filteredAssignableOperatorIdSet = useMemo(() => new Set(filteredAssignableOperatorIds), [filteredAssignableOperatorIds]);
     const selectedFilteredOperatorsCount = useMemo(
         () => (draft.operatorIds || []).reduce(
-            (count, id) => count + (filteredOperatorIdSet.has(Number(id)) ? 1 : 0),
+            (count, id) => count + (filteredAssignableOperatorIdSet.has(Number(id)) ? 1 : 0),
             0
         ),
-        [draft.operatorIds, filteredOperatorIdSet]
+        [draft.operatorIds, filteredAssignableOperatorIdSet]
     );
-    const hasFilteredOperators = filteredOperatorIds.length > 0;
-    const allFilteredOperatorsSelected = hasFilteredOperators && selectedFilteredOperatorsCount === filteredOperatorIds.length;
+    const hasFilteredOperators = filteredAssignableOperatorIds.length > 0;
+    const allFilteredOperatorsSelected = hasFilteredOperators && selectedFilteredOperatorsCount === filteredAssignableOperatorIds.length;
 
     const selectAllFilteredOperators = useCallback(() => {
         setDraft((prev) => {
             const nextSelected = new Set((prev.operatorIds || []).map((id) => Number(id)).filter(Number.isFinite));
-            filteredOperatorIds.forEach((id) => nextSelected.add(id));
+            filteredAssignableOperatorIds.forEach((id) => nextSelected.add(id));
             return { ...prev, operatorIds: Array.from(nextSelected) };
         });
-    }, [filteredOperatorIds]);
+    }, [filteredAssignableOperatorIds]);
 
     const clearFilteredOperators = useCallback(() => {
         if (!hasFilteredOperators) return;
@@ -614,6 +653,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
 
     const resetBuilder = useCallback(() => {
         setRepeatSourceSurveyId(null);
+        setEditingSurveyId(null);
         setDraft(emptyDraft());
         setOperatorQuery('');
     }, []);
@@ -655,6 +695,61 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
             })
             : [emptyQuestion()];
 
+        const sourceOperatorIds = Array.isArray(survey?.assignment?.operator_ids) ? survey.assignment.operator_ids : [];
+        const activeOperatorIds = sanitizeOperatorIds(sourceOperatorIds, { excludeDismissed: true });
+        const removedDismissedCount = Math.max(0, sanitizeOperatorIds(sourceOperatorIds).length - activeOperatorIds.length);
+
+        setDraft({
+            title: String(survey?.title || ''),
+            description: String(survey?.description || ''),
+            isTest: !!survey?.is_test,
+            directionIds: (survey?.assignment?.direction_ids || []).map((id) => String(id)).filter(Boolean),
+            tenureWeeksMin: survey?.assignment?.tenure_weeks_min != null ? String(survey.assignment.tenure_weeks_min) : '',
+            tenureWeeksMax: survey?.assignment?.tenure_weeks_max != null ? String(survey.assignment.tenure_weeks_max) : '',
+            operatorIds: activeOperatorIds,
+            questions: clonedQuestions
+        });
+        setOperatorQuery('');
+        setEditingSurveyId(null);
+        setRepeatSourceSurveyId(sourceId);
+        setShowBuilder(true);
+        if (removedDismissedCount > 0) {
+            notify(`Из повтора исключены уволенные операторы: ${removedDismissedCount}`, 'success');
+        }
+    }, [canManage, notify, sanitizeOperatorIds]);
+
+    const startEditSurvey = useCallback((survey) => {
+        if (!survey || !canManage) return;
+        const surveyId = Number(survey?.id);
+        if (!Number.isFinite(surveyId)) return;
+
+        const sourceQuestions = Array.isArray(survey?.questions) ? survey.questions : [];
+        const clonedQuestions = sourceQuestions.length > 0
+            ? sourceQuestions.map((question) => {
+                const rawType = String(question?.type || 'single');
+                const isOtherOnlyQuestion = (
+                    rawType === 'single'
+                    && survey?.is_test !== true
+                    && question?.allow_other === true
+                    && (!Array.isArray(question?.options) || question.options.length === 0)
+                );
+                const type = isOtherOnlyQuestion
+                    ? QUESTION_TYPE_OTHER_ONLY
+                    : (survey?.is_test && rawType === 'rating' ? 'single' : rawType);
+                return {
+                    id: Number.isFinite(Number(question?.id)) ? Number(question.id) : `q_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+                    text: String(question?.text || ''),
+                    type,
+                    required: question?.required !== false,
+                    allowOther: type === QUESTION_TYPE_OTHER_ONLY ? true : (survey?.is_test ? false : (question?.allow_other === true)),
+                    options: (type === 'rating' || type === QUESTION_TYPE_OTHER_ONLY)
+                        ? []
+                        : (Array.isArray(question?.options) ? question.options.map((option) => String(option || '')) : ['', '']),
+                    correctOptions: type === QUESTION_TYPE_OTHER_ONLY ? [] : toUniqueTrimmedList(question?.correct_options)
+                };
+            })
+            : [emptyQuestion()];
+
         setDraft({
             title: String(survey?.title || ''),
             description: String(survey?.description || ''),
@@ -666,14 +761,15 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
             questions: clonedQuestions
         });
         setOperatorQuery('');
-        setRepeatSourceSurveyId(sourceId);
+        setRepeatSourceSurveyId(null);
+        setEditingSurveyId(surveyId);
         setShowBuilder(true);
     }, [canManage, sanitizeOperatorIds]);
 
     const createSurvey = async () => {
         if (!String(draft.title || '').trim()) return notify('Укажите название опроса', 'error');
-        const assignmentOperatorIds = sanitizeOperatorIds(draft.operatorIds);
-        if (!assignmentOperatorIds.length) return notify('Выберите минимум одного оператора', 'error');
+        const assignmentOperatorIds = sanitizeOperatorIds(draft.operatorIds, { excludeDismissed: true });
+        if (!assignmentOperatorIds.length) return notify('Выберите минимум одного действующего оператора', 'error');
         const minWeeks = parseWeeksInput(draft.tenureWeeksMin);
         const maxWeeks = parseWeeksInput(draft.tenureWeeksMax);
         if (minWeeks != null && maxWeeks != null && minWeeks > maxWeeks) return notify('Минимальный стаж не может быть больше максимального', 'error');
@@ -687,7 +783,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
             const normalizedCorrectOptions = isOtherOnlyQuestion
                 ? []
                 : toUniqueTrimmedList(question.correctOptions).filter((option) => normalizedOptions.includes(option));
-            return {
+            const normalizedQuestion = {
                 text: String(question.text || '').trim(),
                 type: payloadType,
                 required: !!question.required,
@@ -695,6 +791,11 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                 options: normalizedOptions,
                 correct_options: normalizedCorrectOptions
             };
+            const numericQuestionId = Number(question.id);
+            if (isEditMode && Number.isFinite(numericQuestionId) && numericQuestionId > 0) {
+                normalizedQuestion.id = numericQuestionId;
+            }
+            return normalizedQuestion;
         });
 
         for (let i = 0; i < draft.questions.length; i += 1) {
@@ -743,12 +844,17 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
 
         setIsSaving(true);
         try {
-            await axios.post(`${apiBaseUrl}/api/surveys`, payload, { headers });
-            notify('Опрос создан', 'success');
+            if (isEditMode) {
+                await axios.put(`${apiBaseUrl}/api/surveys/${editingSurveyId}`, payload, { headers });
+                notify('Опрос обновлен', 'success');
+            } else {
+                await axios.post(`${apiBaseUrl}/api/surveys`, payload, { headers });
+                notify(isRepeatMode ? 'Повтор опроса создан' : 'Опрос создан', 'success');
+            }
             closeBuilder();
             await loadSurveys();
         } catch (error) {
-            notify(error?.response?.data?.error || 'Не удалось создать опрос', 'error');
+            notify(error?.response?.data?.error || (isEditMode ? 'Не удалось обновить опрос' : 'Не удалось создать опрос'), 'error');
         } finally {
             setIsSaving(false);
         }
@@ -1040,7 +1146,9 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                         <div className="w-6 h-6 rounded-lg bg-blue-50 flex items-center justify-center">
                             <FaIcon className="fas fa-pencil-alt text-blue-500 text-xs" />
                         </div>
-                        <span className="font-semibold text-gray-800 text-sm">Новый опрос</span>
+                        <span className="font-semibold text-gray-800 text-sm">
+                            {isEditMode ? 'Редактирование опроса' : (isRepeatMode ? 'Повтор опроса' : 'Новый опрос')}
+                        </span>
                     </div>
 
                     <div className="p-6 space-y-6">
@@ -1149,7 +1257,12 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                             </div>
                             <div className="flex flex-wrap items-center justify-between gap-2">
                                 <div className="text-[11px] text-gray-500">
-                                    По фильтрам: {selectedFilteredOperatorsCount}/{filteredOperatorIds.length} выбрано
+                                    По фильтрам: {selectedFilteredOperatorsCount}/{filteredAssignableOperatorIds.length} выбрано
+                                    {filteredOperators.some((operator) => operator.isDismissed) && (
+                                        <span className="ml-1 text-amber-600">
+                                            · уволенные показаны только для контроля
+                                        </span>
+                                    )}
                                 </div>
                                 <div className="flex flex-wrap items-center gap-2">
                                     <button
@@ -1176,16 +1289,31 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                 )}
                                 {filteredOperators.map((operator) => {
                                     const checked = draft.operatorIds.includes(operator.id);
+                                    const canToggleOperator = !operator.isDismissed || checked;
                                     return (
                                         <label
                                             key={operator.id}
-                                            className={`flex items-center gap-3 px-3 py-2.5 cursor-pointer transition-colors ${checked ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
+                                            className={`flex items-center gap-3 px-3 py-2.5 transition-colors ${
+                                                checked ? 'bg-blue-50' : 'hover:bg-gray-50'
+                                            } ${canToggleOperator ? 'cursor-pointer' : 'cursor-not-allowed opacity-70'}`}
                                         >
                                             <div className={`w-4 h-4 rounded flex items-center justify-center shrink-0 border transition-all ${checked ? 'bg-blue-600 border-blue-600' : 'border-gray-300'}`}>
                                                 {checked && <FaIcon className="fas fa-check text-white text-[9px]" />}
                                             </div>
-                                            <input type="checkbox" className="hidden" checked={checked} onChange={() => toggleArrayValue(setDraft, 'operatorIds', operator.id)} />
+                                            <input
+                                                type="checkbox"
+                                                className="hidden"
+                                                checked={checked}
+                                                onChange={() => {
+                                                    if (!canToggleOperator) {
+                                                        notify('Уволенного оператора нельзя назначить в опрос', 'error');
+                                                        return;
+                                                    }
+                                                    toggleArrayValue(setDraft, 'operatorIds', operator.id);
+                                                }}
+                                            />
                                             <span className="text-sm font-medium text-gray-800 flex-1">{operator.name}</span>
+                                            {operator.isDismissed && <Badge color="amber">Уволен</Badge>}
                                             <span className="text-xs text-gray-400">{operator.directionName}</span>
                                             <span className="text-xs text-gray-400">{operator.tenureLabel}</span>
                                         </label>
@@ -1367,7 +1495,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                             >
                                 {isSaving
                                     ? <><FaIcon className="fas fa-spinner fa-spin" />Сохранение...</>
-                                    : <><FaIcon className="fas fa-check" />{draft.isTest ? 'Сохранить тест' : 'Сохранить опрос'}</>}
+                                    : <><FaIcon className="fas fa-check" />{isEditMode ? 'Обновить опрос' : (draft.isTest ? 'Сохранить тест' : 'Сохранить опрос')}</>}
                             </button>
                         </div>
                     </div>
@@ -1489,15 +1617,26 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                         )}
                                     </div>
                                     {canManage && (
-                                        <button
-                                            type="button"
-                                            onClick={() => startRepeatSurvey(selectedSurvey)}
-                                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 transition-colors"
-                                            title="Создать повтор опроса"
-                                        >
-                                            <FaIcon className="fas fa-redo" />
-                                            Повторить
-                                        </button>
+                                        <div className="flex items-center gap-2">
+                                            <button
+                                                type="button"
+                                                onClick={() => startEditSurvey(selectedSurvey)}
+                                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 transition-colors"
+                                                title="Редактировать опрос"
+                                            >
+                                                <FaIcon className="fas fa-edit" />
+                                                Редактировать
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={() => startRepeatSurvey(selectedSurvey)}
+                                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 transition-colors"
+                                                title="Создать повтор опроса"
+                                            >
+                                                <FaIcon className="fas fa-redo" />
+                                                Повторить
+                                            </button>
+                                        </div>
                                     )}
                                     {isOperator && (
                                         <Badge color={selectedSurvey?.my_assignment?.status === 'completed' ? 'green' : 'amber'}>
@@ -1952,7 +2091,10 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                                                 return (
                                                                     <tr key={`stats_score_row_${row?.operator_id}_${repeatSurveyId}`}>
                                                                         <td className="px-3 py-2.5 whitespace-nowrap text-gray-800 font-medium">
-                                                                            {row?.operator_name || `#${row?.operator_id || '—'}`}
+                                                                            <div className="flex items-center gap-1.5">
+                                                                                <span>{row?.operator_name || `#${row?.operator_id || '—'}`}</span>
+                                                                                {row?.is_operator_dismissed && <Badge color="amber">Уволен</Badge>}
+                                                                            </div>
                                                                         </td>
                                                                         <td className="px-3 py-2.5 whitespace-nowrap">
                                                                             <Badge color={isCompleted ? 'green' : 'amber'}>
@@ -2031,7 +2173,10 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                                                 return (
                                                                     <tr key={`stats_row_${row?.operator_id}_${repeatSurveyId}`}>
                                                                         <td className="px-3 py-2.5 whitespace-nowrap text-gray-800 font-medium">
-                                                                            {row?.operator_name || `#${row?.operator_id || '—'}`}
+                                                                            <div className="flex items-center gap-1.5">
+                                                                                <span>{row?.operator_name || `#${row?.operator_id || '—'}`}</span>
+                                                                                {row?.is_operator_dismissed && <Badge color="amber">Уволен</Badge>}
+                                                                            </div>
                                                                         </td>
                                                                         <td className="px-3 py-2.5 whitespace-nowrap">
                                                                             <Badge color={isCompleted ? 'green' : 'amber'}>

@@ -8264,6 +8264,7 @@ def handle_surveys():
             if parsed > 0 and parsed not in operator_ids:
                 operator_ids.append(parsed)
 
+        operator_ids = db.filter_active_survey_operator_ids(operator_ids)
         if not operator_ids:
             return jsonify({"error": "At least one operator must be assigned"}), 400
 
@@ -8333,7 +8334,7 @@ def handle_surveys():
         return jsonify({"error": f"Internal server error"}), 500
 
 
-@app.route('/api/surveys/<int:survey_id>', methods=['DELETE', 'OPTIONS'])
+@app.route('/api/surveys/<int:survey_id>', methods=['PUT', 'PATCH', 'DELETE', 'OPTIONS'])
 @require_api_key
 def delete_survey(survey_id):
     try:
@@ -8342,7 +8343,50 @@ def delete_survey(survey_id):
             return guard_response, guard_status
 
         if not (_is_admin_role(requester_role) or requester_role in ('sv', 'trainer')):
-            return jsonify({"error": "Only admin, sv and trainer can delete surveys"}), 403
+            return jsonify({"error": "Only admin, sv and trainer can manage surveys"}), 403
+
+        if request.method in ('PUT', 'PATCH'):
+            data = request.get_json() or {}
+            title = data.get('title')
+            description = data.get('description')
+            assignment = data.get('assignment') or {}
+            questions = data.get('questions') or []
+            is_test_raw = data.get('is_test', False)
+            if isinstance(is_test_raw, str):
+                is_test = is_test_raw.strip().lower() in ('1', 'true', 'yes', 'on')
+            else:
+                is_test = bool(is_test_raw)
+
+            operator_ids_raw = assignment.get('operator_ids') or []
+            operator_ids = []
+            for op_id in operator_ids_raw:
+                try:
+                    parsed = int(op_id)
+                except Exception:
+                    continue
+                if parsed > 0 and parsed not in operator_ids:
+                    operator_ids.append(parsed)
+            operator_ids = db.filter_active_survey_operator_ids(operator_ids)
+            if not operator_ids:
+                return jsonify({"error": "At least one active operator must be assigned"}), 400
+
+            updated = db.update_survey(
+                survey_id=survey_id,
+                requester_id=requester_id,
+                requester_role=requester_role,
+                title=title,
+                description=description,
+                assignment=assignment,
+                questions=questions,
+                operator_ids=operator_ids,
+                is_test=is_test
+            )
+            return jsonify({
+                "status": "success",
+                "message": "Survey updated",
+                "survey_id": updated.get('id'),
+                "updated_at": updated.get('updated_at')
+            }), 200
 
         db.delete_survey(
             survey_id=survey_id,
@@ -8351,11 +8395,34 @@ def delete_survey(survey_id):
         )
         return jsonify({"status": "success", "message": "Survey deleted"}), 200
     except ValueError as value_error:
-        if str(value_error) == 'SURVEY_NOT_FOUND':
+        code = str(value_error)
+        if code == 'SURVEY_NOT_FOUND':
             return jsonify({"error": "Survey not found"}), 404
-        return jsonify({"error": str(value_error)}), 400
+        if code == 'SURVEY_TITLE_REQUIRED':
+            return jsonify({"error": "Survey title is required"}), 400
+        if code == 'SURVEY_QUESTIONS_REQUIRED':
+            return jsonify({"error": "At least one question is required"}), 400
+        if code == 'SURVEY_OPERATORS_REQUIRED':
+            return jsonify({"error": "At least one operator is required"}), 400
+        if code in ('SURVEY_INVALID_TENURE_MIN', 'SURVEY_INVALID_TENURE_MAX', 'SURVEY_INVALID_TENURE_RANGE'):
+            return jsonify({"error": "Invalid tenure range"}), 400
+        if code.startswith('SURVEY_QUESTION_TEXT_REQUIRED_'):
+            return jsonify({"error": "Question text is required"}), 400
+        if code.startswith('SURVEY_INVALID_QUESTION_TYPE_'):
+            return jsonify({"error": "Invalid question type"}), 400
+        if code.startswith('SURVEY_OPTIONS_REQUIRED_'):
+            return jsonify({"error": "Question must have at least 2 options"}), 400
+        if code.startswith('SURVEY_TEST_RATING_NOT_ALLOWED_'):
+            return jsonify({"error": "Rating questions are not allowed in test mode"}), 400
+        if code.startswith('SURVEY_CORRECT_OPTIONS_REQUIRED_'):
+            return jsonify({"error": "Each test question must have at least one correct option"}), 400
+        if code.startswith('SURVEY_CORRECT_OPTION_INVALID_'):
+            return jsonify({"error": "Correct options must match question options"}), 400
+        if code.startswith('SURVEY_SINGLE_CORRECT_OPTION_REQUIRED_'):
+            return jsonify({"error": "Single-choice test questions must have exactly one correct option"}), 400
+        return jsonify({"error": code}), 400
     except PermissionError:
-        return jsonify({"error": "You do not have access to delete this survey"}), 403
+        return jsonify({"error": "You do not have access to manage this survey"}), 403
     except Exception as e:
         logging.error(f"Error in delete_survey: {e}", exc_info=True)
         return jsonify({"error": f"Internal server error"}), 500
