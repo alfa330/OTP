@@ -684,6 +684,8 @@ class Database:
                 );
                 ALTER TABLE calls
                     ADD COLUMN IF NOT EXISTS comment_visible_to_operator BOOLEAN NOT NULL DEFAULT TRUE,
+                    ADD COLUMN IF NOT EXISTS question_resolved BOOLEAN NOT NULL DEFAULT FALSE,
+                    ADD COLUMN IF NOT EXISTS resolved_first_contact BOOLEAN,
                     ADD COLUMN IF NOT EXISTS sv_request BOOLEAN NOT NULL DEFAULT FALSE,
                     ADD COLUMN IF NOT EXISTS sv_request_comment TEXT,
                     ADD COLUMN IF NOT EXISTS sv_request_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
@@ -4282,11 +4284,15 @@ class Database:
                             is_correction=False,
                             previous_version_id=None,
                             appeal_date=None,
+                            question_resolved=False,
+                            resolved_first_contact=None,
                             external_id=None):   # <-- NEW optional param
         """
         Создаёт/обновляет запись в calls и, если возможно, помечает связанную запись в imported_calls как evaluated.
         """
         month = month or datetime.now().strftime('%Y-%m')
+        question_resolved = bool(question_resolved)
+        resolved_first_contact = bool(resolved_first_contact) if question_resolved else None
 
         # Подготовка JSON данных один раз
         scores_json = json.dumps(scores) if scores else None
@@ -4348,6 +4354,8 @@ class Database:
                             score = %s,
                             comment = %s,
                             comment_visible_to_operator = %s,
+                            question_resolved = %s,
+                            resolved_first_contact = %s,
                             audio_path = COALESCE(%s, audio_path),
                             created_at = CURRENT_TIMESTAMP,
                             scores = %s,
@@ -4357,7 +4365,8 @@ class Database:
                         WHERE id = %s
                         RETURNING id
                     """, (
-                        phone_number, score, comment, bool(comment_visible_to_operator), audio_path,
+                        phone_number, score, comment, bool(comment_visible_to_operator),
+                        question_resolved, resolved_first_contact, audio_path,
                         scores_json, criterion_comments_json,
                         False,
                         direction_id,
@@ -4406,14 +4415,16 @@ class Database:
             cursor.execute("""
                 INSERT INTO calls (
                     evaluator_id, operator_id, month, phone_number, score, comment,
-                    comment_visible_to_operator, audio_path, is_draft, is_correction, previous_version_id,
+                    comment_visible_to_operator, question_resolved, resolved_first_contact,
+                    audio_path, is_draft, is_correction, previous_version_id,
                     scores, criterion_comments, direction_id, appeal_date
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, (
                 evaluator_id, operator_id, month, phone_number, score, comment,
-                bool(comment_visible_to_operator), audio_path, is_draft, is_correction, previous_version_id,
+                bool(comment_visible_to_operator), question_resolved, resolved_first_contact,
+                audio_path, is_draft, is_correction, previous_version_id,
                 scores_json, criterion_comments_json, direction_id, appeal_date
             ))
             call_id = cursor.fetchone()[0]
@@ -6084,7 +6095,9 @@ class Database:
                 cf.training_id,
                 TO_CHAR(cf.updated_at, 'YYYY-MM-DD HH24:MI') AS feedback_updated_at,
                 cf_creator.name AS feedback_created_by_name,
-                cf_updater.name AS feedback_updated_by_name
+                cf_updater.name AS feedback_updated_by_name,
+                COALESCE(c.question_resolved, FALSE) AS question_resolved,
+                c.resolved_first_contact
             FROM calls c
             JOIN latest_calls lc ON c.id::text = lc.id_text
             LEFT JOIN directions d ON c.direction_id = d.id  
@@ -6151,7 +6164,9 @@ class Database:
                 NULL::integer AS training_id,
                 NULL::text AS feedback_updated_at,
                 NULL::text AS feedback_created_by_name,
-                NULL::text AS feedback_updated_by_name
+                NULL::text AS feedback_updated_by_name,
+                FALSE::boolean AS question_resolved,
+                NULL::boolean AS resolved_first_contact
             FROM imported_calls ic
             WHERE ic.operator_id = %s AND ic.status = 'not_evaluated'
         """
@@ -6273,6 +6288,8 @@ class Database:
                         "duration": float(row[33]) if row[33] is not None else None,
                         "is_imported": bool(row[34]),
                         "comment_visible_to_operator": bool(row[35]) if row[35] is not None else True,
+                        "question_resolved": bool(row[46]) if row[46] is not None else False,
+                        "resolved_first_contact": bool(row[47]) if row[47] is not None else None,
                         "feedback": feedback_payload,
                         "feedback_sla": feedback_sla_payload
                     }
