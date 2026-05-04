@@ -10968,6 +10968,34 @@ def get_monthly_report_hours():
             offline_items = offline_items_raw if generate_all else []
 
         offline_activities_map = build_offline_activities_map(offline_items)
+        try:
+            operators_list_for_practice = operators.get("operators", []) if isinstance(operators, dict) else []
+            for op in operators_list_for_practice:
+                try:
+                    op_id = int(op.get("operator_id"))
+                except Exception:
+                    continue
+                by_day = op.get("offline_activities_by_day") if isinstance(op, dict) else None
+                if not isinstance(by_day, dict):
+                    continue
+                for day_key, day_items in by_day.items():
+                    try:
+                        day_num = int(day_key)
+                    except Exception:
+                        continue
+                    for item in (day_items if isinstance(day_items, list) else []):
+                        if not isinstance(item, dict):
+                            continue
+                        is_practice_shift = (
+                            item.get("source") == "work_shift"
+                            or item.get("shift_type") == "office_practice"
+                            or item.get("is_practice_shift") is True
+                        )
+                        if not is_practice_shift:
+                            continue
+                        offline_activities_map.setdefault(op_id, {}).setdefault(day_num, []).append(item)
+        except Exception:
+            logging.exception("Ошибка добавления практики в офисе в offline activities map")
 
         if generate_all:
             filename, content = db.generate_excel_report_all_operators_from_view(
