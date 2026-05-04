@@ -1754,11 +1754,9 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                           <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                           <XAxis dataKey="hour" tick={{ fontSize: 11 }} interval={2} />
                           <YAxis yAxisId="left" tick={{ fontSize: 11 }} />
-                          <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} domain={[0, 100]} tickFormatter={(value) => `${Math.round(value)}%`} />
                           <Tooltip content={<DayCallsTooltip />} />
-                          <Area yAxisId="left" type="monotone" dataKey="forecastCalls" stroke="#2563eb" fill="#dbeafe" fillOpacity={1} />
-                          <Area yAxisId="left" type="monotone" dataKey="factCalls" stroke="#16a34a" fill="#dcfce7" fillOpacity={1} />
-                          <Line yAxisId="right" type="monotone" dataKey="matchPercent" stroke="#7c3aed" strokeWidth={2} dot={false} activeDot={{ r: 5 }} />
+                          <Area yAxisId="left" type="monotone" dataKey="forecastCalls" stroke="#2563eb" strokeWidth={2} fill="#bfdbfe" fillOpacity={0.75} />
+                          <Area yAxisId="left" type="monotone" dataKey="factCalls" stroke="#16a34a" strokeWidth={2} fill="#22c55e" fillOpacity={0.38} />
                         </ComposedChart>
                       ) : (
                         <AreaChart data={dayAcceptedLostData} margin={{ top: 10, right: 18, left: 0, bottom: 0 }}>
