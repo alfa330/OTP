@@ -74,6 +74,28 @@ const AUTH_TRANSPORT_STORAGE_KEY = 'otp_auth_transport';
 const ACCESS_TOKEN_STORAGE_KEY = 'otp_access_token';
 const REFRESH_TOKEN_STORAGE_KEY = 'otp_refresh_token';
 const ADMIN_SESSIONS_PAGE_SIZE = 100;
+const DEFAULT_USERS_REPORT_OPTIONS = {
+    sheetMode: 'summary_and_supervisors',
+    includeFired: false,
+    includeDismissalDetails: true
+};
+const USERS_REPORT_SHEET_OPTIONS = [
+    {
+        value: 'summary_and_supervisors',
+        label: 'Сводка и листы СВ',
+        description: 'Один общий лист плюс отдельные листы по супервайзерам'
+    },
+    {
+        value: 'summary',
+        label: 'Только сводка',
+        description: 'Все сотрудники в одном листе'
+    },
+    {
+        value: 'supervisors',
+        label: 'Только листы СВ',
+        description: 'Отдельные листы без общей сводки'
+    }
+];
 const ORAZA_AIT_SPLASH_BASE_DATE = Object.freeze({ year: 2026, month: 2, day: 20 });
 const ORAZA_AIT_SPLASH_SHIFT_DAYS = 11;
 const ORAZA_AIT_SPLASH_LAST_SHOWN_KEY = 'otp_oraza_ait_splash_last_shown';
@@ -24896,6 +24918,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const adminSessionsRequestIdRef = useRef(0);
             const [showUserEditModal, setShowUserEditModal] = useState(false);
             const [userToEdit, setUserToEdit] = useState(null);
+            const [showUsersReportModal, setShowUsersReportModal] = useState(false);
+            const [usersReportOptions, setUsersReportOptions] = useState(DEFAULT_USERS_REPORT_OPTIONS);
             const [svOperators, setSvOperators] = useState([]);
             const [calculatorType, setCalculatorType] = useState('call');
             const [tableUrl, setTableUrl] = useState(''); // URL таблицы
@@ -29177,10 +29201,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             };
 
-            const handleGenerateReport = async () => {
+            const handleGenerateReport = async (options = usersReportOptions) => {
                     try {
                         setIsLoading(true);
-                        const response = await axios.get(`${API_BASE_URL}/api/admin/users_report`, {
+                        const exportOptions = {
+                            ...DEFAULT_USERS_REPORT_OPTIONS,
+                            ...(options || {})
+                        };
+                        const params = new URLSearchParams({
+                            sheet_mode: exportOptions.sheetMode || DEFAULT_USERS_REPORT_OPTIONS.sheetMode,
+                            include_fired: exportOptions.includeFired ? '1' : '0',
+                            include_dismissal_details: exportOptions.includeDismissalDetails ? '1' : '0'
+                        });
+                        const response = await axios.get(`${API_BASE_URL}/api/admin/users_report?${params.toString()}`, {
                             headers:  {'X-User-Id': user.id},
                             responseType: 'blob'
                         });
@@ -29189,15 +29222,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         const url = window.URL.createObjectURL(blob);
                         const link = document.createElement('a');
                         link.href = url;
-                        link.download = response.headers['content-disposition']?.split('filename=')[1] || 'users_report.xlsx';
+                        const disposition = response.headers['content-disposition'] || '';
+                        const filenameMatch = disposition.match(/filename\*?=(?:UTF-8''|")?([^";]+)/i);
+                        link.download = filenameMatch ? decodeURIComponent(filenameMatch[1].replace(/"/g, '')) : 'users_report.xlsx';
                         document.body.appendChild(link);
                         link.click();
                         document.body.removeChild(link);
                         window.URL.revokeObjectURL(url);
-                        showToast('Report generated and downloaded successfully', 'success');
+                        setShowUsersReportModal(false);
+                        showToast('Отчёт сформирован и скачан', 'success');
                     } catch (error) {
                         console.error('Error generating report:', error);
-                        showToast('Failed to generate report', 'error');
+                        showToast(error.response?.data?.error || 'Не удалось сформировать отчёт', 'error');
                     } finally {
                         setIsLoading(false);
                     }
@@ -33507,7 +33543,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                         {/* Generate Report Button */}
                                         <button
-                                        onClick={handleGenerateReport}
+                                        onClick={() => setShowUsersReportModal(true)}
                                         className={`bg-green-600 text-white px-6 py-3 rounded-lg hover:bg-green-700 transition-all duration-200 ${
                                             isLoading ? "opacity-50 cursor-not-allowed" : ""
                                         }`}
@@ -37134,6 +37170,164 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     setShowDisputeModal={setShowDisputeModal}
                                 />
                             </Suspense>
+                        )}
+                        {showUsersReportModal && (
+                            <SimpleModal
+                                open={showUsersReportModal}
+                                onClose={() => {
+                                    if (!isLoading) setShowUsersReportModal(false);
+                                }}
+                                panelClassName="w-[760px] max-w-[calc(100vw-1rem)] !bg-transparent !p-0"
+                            >
+                                <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
+                                    <div className="border-b border-slate-100 bg-slate-50 px-6 py-5">
+                                        <div className="flex items-start justify-between gap-4">
+                                            <div className="flex items-start gap-4">
+                                                <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-green-600 text-white shadow-sm">
+                                                    <FaIcon className="fas fa-file-excel text-xl" />
+                                                </div>
+                                                <div>
+                                                    <h3 className="text-xl font-semibold text-slate-900">Параметры выгрузки сотрудников</h3>
+                                                    <p className="mt-1 text-sm text-slate-500">
+                                                        Выберите листы отчёта и состав сотрудников перед скачиванием.
+                                                    </p>
+                                                </div>
+                                            </div>
+                                            <button
+                                                type="button"
+                                                onClick={() => setShowUsersReportModal(false)}
+                                                disabled={isLoading}
+                                                className="flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 transition hover:bg-white hover:text-slate-700 disabled:opacity-50"
+                                                aria-label="Закрыть"
+                                            >
+                                                <FaIcon className="fas fa-times" />
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    <div className="space-y-6 px-6 py-6">
+                                        <div>
+                                            <div className="mb-3 flex items-center justify-between gap-3">
+                                                <div>
+                                                    <div className="text-sm font-semibold text-slate-900">Какие листы выгружать</div>
+                                                    <div className="text-xs text-slate-500">Можно оставить общую сводку, листы по СВ или оба варианта.</div>
+                                                </div>
+                                            </div>
+                                            <div className="grid gap-3 sm:grid-cols-3">
+                                                {USERS_REPORT_SHEET_OPTIONS.map((option) => {
+                                                    const isSelected = usersReportOptions.sheetMode === option.value;
+                                                    return (
+                                                        <button
+                                                            key={option.value}
+                                                            type="button"
+                                                            onClick={() => setUsersReportOptions((prev) => ({ ...prev, sheetMode: option.value }))}
+                                                            className={`min-h-[112px] rounded-xl border p-4 text-left transition ${
+                                                                isSelected
+                                                                    ? 'border-green-500 bg-green-50 text-green-900 shadow-sm'
+                                                                    : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50'
+                                                            }`}
+                                                        >
+                                                            <span className="mb-3 flex items-center justify-between gap-2">
+                                                                <span className="text-sm font-semibold">{option.label}</span>
+                                                                <span className={`flex h-5 w-5 items-center justify-center rounded-full border ${
+                                                                    isSelected ? 'border-green-600 bg-green-600 text-white' : 'border-slate-300 text-transparent'
+                                                                }`}>
+                                                                    <FaIcon className="fas fa-check text-[10px]" />
+                                                                </span>
+                                                            </span>
+                                                            <span className="block text-xs leading-5 text-slate-500">{option.description}</span>
+                                                        </button>
+                                                    );
+                                                })}
+                                            </div>
+                                        </div>
+
+                                        <div className="divide-y divide-slate-100 rounded-xl border border-slate-200 bg-white">
+                                            <label className="flex cursor-pointer items-center justify-between gap-4 p-4">
+                                                <span>
+                                                    <span className="block text-sm font-semibold text-slate-900">Добавить уволенных</span>
+                                                    <span className="mt-0.5 block text-xs text-slate-500">
+                                                        В отчёт попадут сотрудники со статусом «Уволен» и «Увольнение».
+                                                    </span>
+                                                </span>
+                                                <input
+                                                    type="checkbox"
+                                                    checked={!!usersReportOptions.includeFired}
+                                                    onChange={(event) => {
+                                                        const checked = event.target.checked;
+                                                        setUsersReportOptions((prev) => ({
+                                                            ...prev,
+                                                            includeFired: checked,
+                                                            includeDismissalDetails: checked ? prev.includeDismissalDetails : true
+                                                        }));
+                                                    }}
+                                                    className="sr-only"
+                                                />
+                                                <span className={`relative h-7 w-12 shrink-0 rounded-full transition ${
+                                                    usersReportOptions.includeFired ? 'bg-green-600' : 'bg-slate-200'
+                                                }`}>
+                                                    <span className={`absolute left-1 top-1 h-5 w-5 rounded-full bg-white shadow transition ${
+                                                        usersReportOptions.includeFired ? 'translate-x-5' : 'translate-x-0'
+                                                    }`} />
+                                                </span>
+                                            </label>
+
+                                            <label className={`flex items-center justify-between gap-4 p-4 transition ${
+                                                usersReportOptions.includeFired ? 'cursor-pointer' : 'cursor-not-allowed opacity-55'
+                                            }`}>
+                                                <span>
+                                                    <span className="block text-sm font-semibold text-slate-900">Показать детали увольнения</span>
+                                                    <span className="mt-0.5 block text-xs text-slate-500">
+                                                        Добавит дату увольнения, дату окончания, причину, комментарий и признак ЧС.
+                                                    </span>
+                                                </span>
+                                                <input
+                                                    type="checkbox"
+                                                    checked={!!usersReportOptions.includeDismissalDetails}
+                                                    disabled={!usersReportOptions.includeFired}
+                                                    onChange={(event) => setUsersReportOptions((prev) => ({
+                                                        ...prev,
+                                                        includeDismissalDetails: event.target.checked
+                                                    }))}
+                                                    className="sr-only"
+                                                />
+                                                <span className={`relative h-7 w-12 shrink-0 rounded-full transition ${
+                                                    usersReportOptions.includeFired && usersReportOptions.includeDismissalDetails ? 'bg-green-600' : 'bg-slate-200'
+                                                }`}>
+                                                    <span className={`absolute left-1 top-1 h-5 w-5 rounded-full bg-white shadow transition ${
+                                                        usersReportOptions.includeFired && usersReportOptions.includeDismissalDetails ? 'translate-x-5' : 'translate-x-0'
+                                                    }`} />
+                                                </span>
+                                            </label>
+                                        </div>
+
+                                        <div className="rounded-xl border border-green-100 bg-green-50 px-4 py-3 text-sm text-green-900">
+                                            Будет выгружено: {usersReportOptions.includeFired ? 'активные и уволенные сотрудники' : 'только активные сотрудники'}.
+                                            {usersReportOptions.includeFired && usersReportOptions.includeDismissalDetails ? ' Для уволенных добавятся причины и даты увольнения.' : ''}
+                                        </div>
+                                    </div>
+
+                                    <div className="flex flex-col-reverse gap-3 border-t border-slate-100 bg-slate-50 px-6 py-4 sm:flex-row sm:items-center sm:justify-end">
+                                        <button
+                                            type="button"
+                                            onClick={() => setShowUsersReportModal(false)}
+                                            disabled={isLoading}
+                                            className="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-100 disabled:opacity-50"
+                                        >
+                                            Отмена
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => handleGenerateReport(usersReportOptions)}
+                                            disabled={isLoading}
+                                            className="inline-flex items-center justify-center gap-2 rounded-lg bg-green-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-60"
+                                        >
+                                            <FaIcon className={`fas ${isLoading ? 'fa-spinner fa-spin' : 'fa-download'}`} />
+                                            {isLoading ? 'Формирую...' : 'Скачать отчёт'}
+                                        </button>
+                                    </div>
+                                </div>
+                            </SimpleModal>
                         )}
                         {showUserEditModal && (
                             <Suspense fallback={null}>
