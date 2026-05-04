@@ -398,6 +398,75 @@ const OverviewTrendTooltip = ({ active, label, payload }) => {
   );
 };
 
+const CallsTrendTooltip = ({ active, label, payload, mode }) => {
+  if (!active || !payload?.length) return null;
+  const row = payload[0]?.payload || {};
+  const forecastCalls = Number(row.forecastCalls || 0);
+  const factCalls = Number(row.calls || 0);
+  const delta = factCalls - forecastCalls;
+  const completion = forecastCalls > 0 ? factCalls / forecastCalls : 0;
+
+  if (mode === 'forecastFact') {
+    return (
+      <div className="min-w-60 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs shadow-lg">
+        <div className="mb-2 font-semibold text-slate-900">{label}</div>
+        <div className="space-y-2">
+          <div className="rounded-md bg-slate-50 px-2 py-1.5">
+            <div className="mb-1 font-medium text-slate-500">Количество звонков</div>
+            <div className="flex items-center justify-between gap-6">
+              <span className="inline-flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-blue-400" />Прогноз</span>
+              <b className="text-blue-700">{formatNumber(forecastCalls, 0)}</b>
+            </div>
+            <div className="mt-1 flex items-center justify-between gap-6">
+              <span className="inline-flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-emerald-500" />Факт</span>
+              <b className="text-emerald-700">{formatInt(factCalls)}</b>
+            </div>
+          </div>
+          <div className="rounded-md bg-slate-50 px-2 py-1.5">
+            <div className="flex items-center justify-between gap-6">
+              <span className="text-slate-500">Разница факт - прогноз</span>
+              <b className={delta < 0 ? 'text-rose-700' : delta > 0 ? 'text-emerald-700' : 'text-slate-900'}>{formatSignedNumber(delta, 0)}</b>
+            </div>
+            <div className="mt-1 flex items-center justify-between gap-6">
+              <span className="text-slate-500">Выполнение</span>
+              <b className="text-slate-900">{forecastCalls > 0 ? formatPercent(completion, 0) : '-'}</b>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-w-56 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs shadow-lg">
+      <div className="mb-2 font-semibold text-slate-900">{label}</div>
+      <div className="space-y-1.5">
+        <div className="flex justify-between gap-6"><span className="text-slate-500">Принято</span><b className="text-emerald-700">{formatInt(row.accepted)}</b></div>
+        <div className="flex justify-between gap-6"><span className="text-slate-500">Потеряно</span><b className="text-rose-700">{formatInt(row.lost)}</b></div>
+        <div className="flex justify-between gap-6"><span className="text-slate-500">Доля потерь</span><b className="text-rose-700">{formatNumber(row.lossRate, 1)}%</b></div>
+      </div>
+    </div>
+  );
+};
+
+const DayCallsTooltip = ({ active, label, payload }) => {
+  if (!active || !payload?.length) return null;
+  const row = payload[0]?.payload || {};
+  const forecastCalls = Number(row.forecastCalls || 0);
+  const factCalls = Number(row.factCalls || 0);
+  const delta = factCalls - forecastCalls;
+  return (
+    <div className="min-w-56 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs shadow-lg">
+      <div className="mb-2 font-semibold text-slate-900">{label}</div>
+      <div className="space-y-1.5">
+        <div className="flex justify-between gap-6"><span className="text-blue-700">Прогноз</span><b>{formatNumber(forecastCalls, 0)}</b></div>
+        <div className="flex justify-between gap-6"><span className="text-emerald-700">Факт</span><b>{formatInt(factCalls)}</b></div>
+        <div className="flex justify-between gap-6"><span className="text-slate-500">Разница</span><b className={delta < 0 ? 'text-rose-700' : delta > 0 ? 'text-emerald-700' : 'text-slate-900'}>{formatSignedNumber(delta, 0)}</b></div>
+      </div>
+    </div>
+  );
+};
+
 const CalendarPicker = ({
   label,
   value,
@@ -822,6 +891,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
     const totalReceived = rows.reduce((sum, row) => sum + Number(row.total_received || 0), 0);
     const totalAccepted = rows.reduce((sum, row) => sum + Number(row.total_accepted || 0), 0);
     const totalLost = rows.reduce((sum, row) => sum + Number(row.total_lost || 0), 0);
+    const totalForecastCalls = rows.reduce((sum, row) => sum + Number(row.forecast_calls_total || 0), 0);
     const worstDay = rows.reduce((worst, row) => {
       if (!worst) return row;
       return Number(row.no_answer_rate || 0) > Number(worst.no_answer_rate || 0) ? row : worst;
@@ -830,6 +900,9 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
       totalReceived,
       totalAccepted,
       totalLost,
+      totalForecastCalls,
+      callsDelta: totalReceived - totalForecastCalls,
+      callsCompletion: totalForecastCalls > 0 ? totalReceived / totalForecastCalls : 0,
       lossRate: totalReceived > 0 ? totalLost / totalReceived : 0,
       worstDay,
     };
@@ -876,21 +949,60 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
     [selectedDayHours],
   );
 
+  const dayForecastFactData = useMemo(
+    () =>
+      selectedDayHours.map((row) => {
+        const forecastCalls = Number(row.forecast_calls || 0);
+        const factCalls = Number(row.received_calls || 0);
+        return {
+          hour: row.hour_label,
+          forecastCalls,
+          factCalls,
+          delta: factCalls - forecastCalls,
+        };
+      }),
+    [selectedDayHours],
+  );
+
+  const dayCallDeltaHotspots = useMemo(
+    () =>
+      dayForecastFactData
+        .filter((row) => row.forecastCalls > 0 || row.factCalls > 0)
+        .map((row) => ({
+          ...row,
+          absDelta: Math.abs(row.delta),
+          completion: row.forecastCalls > 0 ? row.factCalls / row.forecastCalls : 0,
+        }))
+        .sort((a, b) => b.absDelta - a.absDelta)
+        .slice(0, 5),
+    [dayForecastFactData],
+  );
+
   const selectedLossSummary = useMemo(() => {
     const overviewRow = (overview?.history || []).find((item) => item.report_date === selectedDate);
     const source = selectedSummary || overviewRow;
     if (!source) return null;
     const peakLossHour = dayLossHotspots[0] || null;
+    const forecastCalls = selectedSummary
+      ? selectedDayHours.reduce((sum, row) => sum + Number(row.forecast_calls || 0), 0)
+      : Number(source.forecast_calls_total || 0);
+    const received = Number(source.total_received || 0);
+    const callDelta = received - forecastCalls;
+    const peakCallDeltaHour = dayCallDeltaHotspots[0] || null;
     return {
       reportDate: source.report_date,
       weekday: source.weekday_short,
-      received: Number(source.total_received || 0),
+      forecastCalls,
+      received,
       accepted: Number(source.total_accepted || 0),
       lost: Number(source.total_lost || 0),
+      callDelta,
+      callsCompletion: forecastCalls > 0 ? received / forecastCalls : 0,
       lossRate: Number(source.no_answer_rate || 0),
       peakLossHour,
+      peakCallDeltaHour,
     };
-  }, [dayLossHotspots, overview?.history, selectedDate, selectedSummary]);
+  }, [dayCallDeltaHotspots, dayLossHotspots, overview?.history, selectedDate, selectedDayHours, selectedSummary]);
 
   const selectedLossTrendPoint = useMemo(
     () => historyTrendData.find((item) => item.reportDate === selectedDate) || null,
@@ -1429,16 +1541,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                         <XAxis dataKey="date" tick={{ fontSize: 11 }} />
                         <YAxis yAxisId="left" tick={{ fontSize: 11 }} />
                         {callsChartMode === 'losses' ? <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} /> : null}
-                        <Tooltip formatter={(value, name) => {
-                          const labelMap = {
-                            accepted: 'Принято',
-                            lost: 'Потеряно',
-                            lossRate: 'Доля потерь',
-                            forecastCalls: 'Прогноз кол-во',
-                            calls: 'Факт кол-во',
-                          };
-                          return [name === 'lossRate' ? `${formatNumber(value, 1)}%` : formatNumber(value, 0), labelMap[name] || name];
-                        }} />
+                        <Tooltip content={<CallsTrendTooltip mode={callsChartMode} />} />
                         {selectedLossTrendPoint ? (
                           <ReferenceLine yAxisId="left" x={selectedLossTrendPoint.date} stroke="#0f172a" strokeDasharray="4 4" />
                         ) : null}
@@ -1478,11 +1581,11 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                                 />
                               ))}
                             </Bar>
-                            <Bar yAxisId="left" dataKey="calls" fill="#cbd5e1" radius={[4, 4, 0, 0]} onClick={selectLossChartDay}>
+                            <Bar yAxisId="left" dataKey="calls" fill="#22c55e" radius={[4, 4, 0, 0]} onClick={selectLossChartDay}>
                               {historyTrendData.map((item) => (
                                 <Cell
                                   key={`fact-calls-${item.reportDate}`}
-                                  fill={item.reportDate === selectedDate ? '#64748b' : '#cbd5e1'}
+                                  fill={item.reportDate === selectedDate ? '#16a34a' : '#22c55e'}
                                   className="cursor-pointer"
                                   onClick={() => selectLossReportDate(item.reportDate)}
                                 />
@@ -1528,18 +1631,34 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
 
               <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
                 <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
-                  <ShieldAlert size={16} />
+                  {callsChartMode === 'forecastFact' ? <PhoneCall size={16} /> : <ShieldAlert size={16} />}
                   Сводка периода
                 </div>
-                <dl className="mt-4 space-y-3 text-sm">
-                  <div className="flex justify-between gap-3"><dt className="text-slate-500">Поступило</dt><dd className="font-medium text-slate-900">{formatInt(periodLossSummary.totalReceived)}</dd></div>
-                  <div className="flex justify-between gap-3"><dt className="text-slate-500">Принято</dt><dd className="font-medium text-emerald-700">{formatInt(periodLossSummary.totalAccepted)}</dd></div>
-                  <div className="flex justify-between gap-3"><dt className="text-slate-500">Потеряно</dt><dd className="font-medium text-rose-700">{formatInt(periodLossSummary.totalLost)}</dd></div>
-                  <div className="flex justify-between gap-3"><dt className="text-slate-500">Доля потерь</dt><dd className="font-medium text-rose-700">{formatPercent(periodLossSummary.lossRate)}</dd></div>
-                </dl>
-                <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-                  Высокая доля потерь в часы с большим входящим потоком обычно указывает на недобор факта или неверное распределение смен.
-                </div>
+                {callsChartMode === 'forecastFact' ? (
+                  <>
+                    <dl className="mt-4 space-y-3 text-sm">
+                      <div className="flex justify-between gap-3"><dt className="text-slate-500">Прогноз кол-во</dt><dd className="font-medium text-blue-700">{formatNumber(periodLossSummary.totalForecastCalls, 0)}</dd></div>
+                      <div className="flex justify-between gap-3"><dt className="text-slate-500">Факт кол-во</dt><dd className="font-medium text-emerald-700">{formatInt(periodLossSummary.totalReceived)}</dd></div>
+                      <div className="flex justify-between gap-3"><dt className="text-slate-500">Разница</dt><dd className={`font-medium ${periodLossSummary.callsDelta < 0 ? 'text-rose-700' : periodLossSummary.callsDelta > 0 ? 'text-emerald-700' : 'text-slate-900'}`}>{formatSignedNumber(periodLossSummary.callsDelta, 0)}</dd></div>
+                      <div className="flex justify-between gap-3"><dt className="text-slate-500">Выполнение</dt><dd className="font-medium text-slate-900">{periodLossSummary.totalForecastCalls > 0 ? formatPercent(periodLossSummary.callsCompletion, 0) : '-'}</dd></div>
+                    </dl>
+                    <div className="mt-4 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-800">
+                      Режим сравнивает фактически поступившие звонки с прогнозом по выбранному периоду.
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <dl className="mt-4 space-y-3 text-sm">
+                      <div className="flex justify-between gap-3"><dt className="text-slate-500">Поступило</dt><dd className="font-medium text-slate-900">{formatInt(periodLossSummary.totalReceived)}</dd></div>
+                      <div className="flex justify-between gap-3"><dt className="text-slate-500">Принято</dt><dd className="font-medium text-emerald-700">{formatInt(periodLossSummary.totalAccepted)}</dd></div>
+                      <div className="flex justify-between gap-3"><dt className="text-slate-500">Потеряно</dt><dd className="font-medium text-rose-700">{formatInt(periodLossSummary.totalLost)}</dd></div>
+                      <div className="flex justify-between gap-3"><dt className="text-slate-500">Доля потерь</dt><dd className="font-medium text-rose-700">{formatPercent(periodLossSummary.lossRate)}</dd></div>
+                    </dl>
+                    <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                      Высокая доля потерь в часы с большим входящим потоком обычно указывает на недобор факта или неверное распределение смен.
+                    </div>
+                  </>
+                )}
               </div>
             </div>
 
@@ -1556,14 +1675,29 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                   </span>
                 </div>
                 <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-                  <div className="rounded-lg bg-white px-3 py-2"><div className="text-xs text-slate-500">Поступило</div><b>{formatInt(selectedLossSummary?.received)}</b></div>
-                  <div className="rounded-lg bg-white px-3 py-2"><div className="text-xs text-emerald-700">Принято</div><b>{formatInt(selectedLossSummary?.accepted)}</b></div>
-                  <div className="rounded-lg bg-white px-3 py-2"><div className="text-xs text-rose-700">Потеряно</div><b>{formatInt(selectedLossSummary?.lost)}</b></div>
-                  <div className="rounded-lg bg-white px-3 py-2"><div className="text-xs text-rose-700">Доля потерь</div><b>{formatPercent(selectedLossSummary?.lossRate)}</b></div>
-                  <div className="rounded-lg bg-white px-3 py-2">
-                    <div className="text-xs text-slate-500">Пиковый час потерь</div>
-                    <b>{selectedLossSummary?.peakLossHour ? `${selectedLossSummary.peakLossHour.hour_label} · ${formatInt(selectedLossSummary.peakLossHour.lost_calls)}` : '-'}</b>
-                  </div>
+                  {callsChartMode === 'forecastFact' ? (
+                    <>
+                      <div className="rounded-lg bg-white px-3 py-2"><div className="text-xs text-blue-700">Прогноз кол-во</div><b>{formatNumber(selectedLossSummary?.forecastCalls, 0)}</b></div>
+                      <div className="rounded-lg bg-white px-3 py-2"><div className="text-xs text-emerald-700">Факт кол-во</div><b>{formatInt(selectedLossSummary?.received)}</b></div>
+                      <div className="rounded-lg bg-white px-3 py-2"><div className="text-xs text-slate-500">Разница</div><b className={selectedLossSummary.callDelta < 0 ? 'text-rose-700' : selectedLossSummary.callDelta > 0 ? 'text-emerald-700' : ''}>{formatSignedNumber(selectedLossSummary?.callDelta, 0)}</b></div>
+                      <div className="rounded-lg bg-white px-3 py-2"><div className="text-xs text-slate-500">Выполнение</div><b>{selectedLossSummary.forecastCalls > 0 ? formatPercent(selectedLossSummary?.callsCompletion, 0) : '-'}</b></div>
+                      <div className="rounded-lg bg-white px-3 py-2">
+                        <div className="text-xs text-slate-500">Макс. отклонение</div>
+                        <b>{selectedLossSummary?.peakCallDeltaHour ? `${selectedLossSummary.peakCallDeltaHour.hour} · ${formatSignedNumber(selectedLossSummary.peakCallDeltaHour.delta, 0)}` : '-'}</b>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="rounded-lg bg-white px-3 py-2"><div className="text-xs text-slate-500">Поступило</div><b>{formatInt(selectedLossSummary?.received)}</b></div>
+                      <div className="rounded-lg bg-white px-3 py-2"><div className="text-xs text-emerald-700">Принято</div><b>{formatInt(selectedLossSummary?.accepted)}</b></div>
+                      <div className="rounded-lg bg-white px-3 py-2"><div className="text-xs text-rose-700">Потеряно</div><b>{formatInt(selectedLossSummary?.lost)}</b></div>
+                      <div className="rounded-lg bg-white px-3 py-2"><div className="text-xs text-rose-700">Доля потерь</div><b>{formatPercent(selectedLossSummary?.lossRate)}</b></div>
+                      <div className="rounded-lg bg-white px-3 py-2">
+                        <div className="text-xs text-slate-500">Пиковый час потерь</div>
+                        <b>{selectedLossSummary?.peakLossHour ? `${selectedLossSummary.peakLossHour.hour_label} · ${formatInt(selectedLossSummary.peakLossHour.lost_calls)}` : '-'}</b>
+                      </div>
+                    </>
+                  )}
                 </div>
               </div>
 
@@ -1572,29 +1706,61 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                 <div className="rounded-lg border border-slate-200 bg-white p-3">
                   <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-900">
                     <PhoneCall size={16} />
-                    Принято / потеряно по часам: {formatDate(selectedSummary.report_date)}
+                    {callsChartMode === 'forecastFact' ? 'Прогноз / факт по часам' : 'Принято / потеряно по часам'}: {formatDate(selectedSummary.report_date)}
                   </div>
                   <div className="h-72">
                     <ResponsiveContainer width="100%" height="100%">
-                      <AreaChart data={dayAcceptedLostData} margin={{ top: 10, right: 18, left: 0, bottom: 0 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                        <XAxis dataKey="hour" tick={{ fontSize: 11 }} interval={2} />
-                        <YAxis tick={{ fontSize: 11 }} />
-                        <Tooltip formatter={(value, name) => [name === 'lossRate' ? `${formatNumber(value, 1)}%` : formatNumber(value, 0), name === 'accepted' ? 'Принято' : name === 'lost' ? 'Потеряно' : 'Доля потерь']} />
-                        <Area type="monotone" dataKey="accepted" stackId="1" stroke="#16a34a" fill="#bbf7d0" />
-                        <Area type="monotone" dataKey="lost" stackId="1" stroke="#e11d48" fill="#fecdd3" />
-                      </AreaChart>
+                      {callsChartMode === 'forecastFact' ? (
+                        <ComposedChart data={dayForecastFactData} margin={{ top: 10, right: 18, left: 0, bottom: 0 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                          <XAxis dataKey="hour" tick={{ fontSize: 11 }} interval={2} />
+                          <YAxis tick={{ fontSize: 11 }} />
+                          <Tooltip content={<DayCallsTooltip />} />
+                          <Bar dataKey="forecastCalls" fill="#bfdbfe" radius={[4, 4, 0, 0]} />
+                          <Bar dataKey="factCalls" fill="#22c55e" radius={[4, 4, 0, 0]} />
+                        </ComposedChart>
+                      ) : (
+                        <AreaChart data={dayAcceptedLostData} margin={{ top: 10, right: 18, left: 0, bottom: 0 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                          <XAxis dataKey="hour" tick={{ fontSize: 11 }} interval={2} />
+                          <YAxis tick={{ fontSize: 11 }} />
+                          <Tooltip formatter={(value, name) => [name === 'lossRate' ? `${formatNumber(value, 1)}%` : formatNumber(value, 0), name === 'accepted' ? 'Принято' : name === 'lost' ? 'Потеряно' : 'Доля потерь']} />
+                          <Area type="monotone" dataKey="accepted" stackId="1" stroke="#16a34a" fill="#bbf7d0" />
+                          <Area type="monotone" dataKey="lost" stackId="1" stroke="#e11d48" fill="#fecdd3" />
+                        </AreaChart>
+                      )}
                     </ResponsiveContainer>
                   </div>
                 </div>
 
                 <div className="rounded-lg border border-slate-200 bg-white p-4">
                   <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
-                    <AlertTriangle size={16} />
-                    Топ часов риска
+                    {callsChartMode === 'forecastFact' ? <BarChart3 size={16} /> : <AlertTriangle size={16} />}
+                    {callsChartMode === 'forecastFact' ? 'Отклонения факт/прогноз' : 'Топ часов риска'}
                   </div>
                   <div className="mt-4 space-y-3">
-                    {dayLossHotspots.length ? (
+                    {callsChartMode === 'forecastFact' ? (
+                      dayCallDeltaHotspots.length ? (
+                        dayCallDeltaHotspots.map((row) => (
+                          <div key={row.hour} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="font-semibold text-slate-900">{row.hour}</div>
+                              <div className={`rounded-md px-2 py-1 text-xs font-semibold ${row.delta < 0 ? 'bg-rose-100 text-rose-700' : row.delta > 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-700'}`}>{formatSignedNumber(row.delta, 0)}</div>
+                            </div>
+                            <div className="mt-2 grid grid-cols-3 gap-2 text-xs text-slate-500">
+                              <span>Прогноз: <b className="text-blue-700">{formatNumber(row.forecastCalls, 0)}</b></span>
+                              <span>Факт: <b className="text-emerald-700">{formatInt(row.factCalls)}</b></span>
+                              <span>Вып.: <b className="text-slate-800">{row.forecastCalls > 0 ? formatPercent(row.completion, 0) : '-'}</b></span>
+                            </div>
+                            <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-200">
+                              <div className={`h-full rounded-full ${row.delta < 0 ? 'bg-rose-500' : 'bg-emerald-500'}`} style={{ width: `${Math.min(100, row.absDelta)}%` }} />
+                            </div>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="rounded-lg border border-dashed border-slate-300 p-4 text-sm text-slate-500">По выбранному дню нет данных для сравнения прогноза и факта.</div>
+                      )
+                    ) : dayLossHotspots.length ? (
                       dayLossHotspots.map((row) => (
                         <div key={row.hour} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
                           <div className="flex items-center justify-between gap-3">
