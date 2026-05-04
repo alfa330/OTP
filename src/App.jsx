@@ -437,6 +437,8 @@ const canAccessLmsSectionForUser = (userLike) => {
     if (!Number.isFinite(userId)) return false;
     return (
         role === 'trainer' ||
+        isAdminLikeRoleFn(role) ||
+        isSupervisorRole(role) ||
         (role === 'super_admin' && userId === 2) ||
         (role === 'operator' && userId === 56)
     );
