@@ -1277,6 +1277,8 @@ const EvaluationModal = ({
     const [commentVisible, setCommentVisible] = useState([]);
     const [generalComment, setGeneralComment] = useState('');
     const [commentVisibleToOperator, setCommentVisibleToOperator] = useState(true);
+    const [questionResolved, setQuestionResolved] = useState(false);
+    const [resolvedFirstContact, setResolvedFirstContact] = useState(false);
     const [phoneNumber, setPhoneNumber] = useState('');
     const [phoneError, setPhoneError] = useState('');
     const [appealDate, setAppealDate] = useState('');
@@ -1431,6 +1433,8 @@ const EvaluationModal = ({
                 setCommentVisible(initDir?.criteria?.map(()=>false) || []);
                 setGeneralComment('');
                 setCommentVisibleToOperator(true);
+                setQuestionResolved(false);
+                setResolvedFirstContact(false);
                 setAssignedMonth(selectedMonth); setAudioUrl(null); setCallFile(null); setPhoneError('');
             } else {
                 setScores(existingEvaluation.scores || []);
@@ -1446,6 +1450,17 @@ const EvaluationModal = ({
                     ?? existingEvaluation._rawEvaluation?.comment_visible_to_operator
                     ?? true
                 );
+                const nextQuestionResolved = !!(
+                    existingEvaluation.questionResolved
+                    ?? existingEvaluation._rawEvaluation?.question_resolved
+                    ?? false
+                );
+                setQuestionResolved(nextQuestionResolved);
+                setResolvedFirstContact(nextQuestionResolved ? !!(
+                    existingEvaluation.resolvedFirstContact
+                    ?? existingEvaluation._rawEvaluation?.resolved_first_contact
+                    ?? false
+                ) : false);
                 setPhoneNumber(existingEvaluation.phoneNumber || '');
                 setAssignedMonth(existingEvaluation.assignedMonth || selectedMonth);
                 setAudioUrl(existingEvaluation.audioUrl || null);
@@ -1465,6 +1480,8 @@ const EvaluationModal = ({
             setCommentVisible(initDir?.criteria?.map(()=>false) || []);
             setGeneralComment('');
             setCommentVisibleToOperator(true);
+            setQuestionResolved(false);
+            setResolvedFirstContact(false);
             setCallFile(null); setAudioUrl(null); setPhoneNumber(''); setAppealDate(''); setPhoneError('');
             setAssignedMonth(selectedMonth);
         }
@@ -1585,6 +1602,8 @@ const EvaluationModal = ({
         fd.append('comment', submitComment);
         if (!isCalibrationAddCallMode) {
             fd.append('comment_visible_to_operator', String(!!commentVisibleToOperator));
+            fd.append('question_resolved', String(!!questionResolved));
+            fd.append('resolved_first_contact', String(!!questionResolved && !!resolvedFirstContact));
         }
         fd.append('month', assignedMonth);
         fd.append('is_draft', draft);
@@ -1628,6 +1647,8 @@ const EvaluationModal = ({
                     totalScore: totalScore.toFixed(2),
                     comment: fd.get('comment'),
                     commentVisibleToOperator: !!commentVisibleToOperator,
+                    questionResolved: !!questionResolved,
+                    resolvedFirstContact: questionResolved ? !!resolvedFirstContact : null,
                     selectedDirection: currentDir?.name,
                     directionId: currentDir?.id,
                     is_imported: false,
@@ -1850,6 +1871,32 @@ const EvaluationModal = ({
                                 />
                                 <span>Показывать оператору</span>
                             </label>
+                            <div className="resolution-flags">
+                                <label className={`resolution-flag ${questionResolved ? 'active' : ''}`}>
+                                    <input
+                                        type="checkbox"
+                                        checked={!!questionResolved}
+                                        onChange={e => {
+                                            const checked = e.target.checked;
+                                            setQuestionResolved(checked);
+                                            if (!checked) setResolvedFirstContact(false);
+                                        }}
+                                    />
+                                    <span className="resolution-flag-box"><FaIcon className="fas fa-check" /></span>
+                                    <span>Вопрос решен</span>
+                                </label>
+                                {questionResolved && (
+                                    <label className={`resolution-flag ${resolvedFirstContact ? 'active' : ''}`}>
+                                        <input
+                                            type="checkbox"
+                                            checked={!!resolvedFirstContact}
+                                            onChange={e => setResolvedFirstContact(e.target.checked)}
+                                        />
+                                        <span className="resolution-flag-box"><FaIcon className="fas fa-check" /></span>
+                                        <span>Решено с первого обращения</span>
+                                    </label>
+                                )}
+                            </div>
                         </>
                     )}
 
@@ -2247,6 +2294,36 @@ const App = ({ user, initialSelection }) => {
         return { label: '—', color: 'var(--text-2)' };
     };
 
+    const getResolutionStatusMeta = (call) => (
+        call?.questionResolved
+            ? { label: 'Решен', className: 'badge-green' }
+            : { label: 'Не решен', className: 'badge-amber' }
+    );
+
+    const getFirstContactStatusMeta = (call) => {
+        if (!call?.questionResolved) return { label: 'N/A', className: 'badge-muted' };
+        return call?.resolvedFirstContact
+            ? { label: '1 обращение', className: 'badge-blue' }
+            : { label: 'Повторно', className: 'badge-amber' };
+    };
+
+    const renderResolutionBadges = (call) => {
+        if (!call || call.is_imported) return <span style={{ color: 'var(--text-3)' }}>—</span>;
+        const resolutionMeta = getResolutionStatusMeta(call);
+        const firstContactMeta = getFirstContactStatusMeta(call);
+        return (
+            <div className="resolution-badges">
+                <span className={`badge ${resolutionMeta.className}`}>
+                    <span className="badge-dot" />
+                    {resolutionMeta.label}
+                </span>
+                <span className={`badge ${firstContactMeta.className}`}>
+                    {firstContactMeta.label}
+                </span>
+            </div>
+        );
+    };
+
     const months = Array.from({length:12},(_,i) => {
         const d = new Date(new Date().getFullYear(), new Date().getMonth()-i, 1);
         return { value: `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`, label: d.toLocaleString('ru',{month:'long',year:'numeric'}) };
@@ -2289,6 +2366,8 @@ const App = ({ user, initialSelection }) => {
         sv_request_rejected_at: ev.sv_request_rejected_at || null,
         sv_request_reject_comment: ev.sv_request_reject_comment || null,
         commentVisibleToOperator: ev.comment_visible_to_operator !== false,
+        questionResolved: !!ev.question_resolved,
+        resolvedFirstContact: ev.question_resolved ? !!ev.resolved_first_contact : null,
         feedback: ev.feedback || null,
         feedbackSla: ev.feedback_sla || ev?.feedback?.sla || null,
         _rawEvaluation: ev
@@ -2902,10 +2981,14 @@ const App = ({ user, initialSelection }) => {
                 phoneNumber: data.phoneNumber, assignedMonth: data.assignedMonth, isCorrection: data.isCorrection,
                 appeal_date: data.appeal_date, is_imported: false,
                 commentVisibleToOperator: data.commentVisibleToOperator !== false,
+                questionResolved: !!data.questionResolved,
+                resolvedFirstContact: data.questionResolved ? !!data.resolvedFirstContact : null,
                 feedback: null,
                 sv_request: false, sv_request_approved: false,
                 _rawEvaluation: {
-                    comment_visible_to_operator: data.commentVisibleToOperator !== false
+                    comment_visible_to_operator: data.commentVisibleToOperator !== false,
+                    question_resolved: !!data.questionResolved,
+                    resolved_first_contact: data.questionResolved ? !!data.resolvedFirstContact : null
                 }
             };
             let updated = data.isCorrection
@@ -3696,11 +3779,11 @@ const App = ({ user, initialSelection }) => {
                 <div className="table-wrap">
                     {isLoading ? (
                         <table>
-                            <thead><tr><th>#</th><th>Статус</th><th>Направление</th><th>Телефон</th><th>Балл</th><th>Дата обращения</th><th>Дата оценки</th></tr></thead>
+                            <thead><tr><th>#</th><th>Статус</th><th>Направление</th><th>Телефон</th><th>Балл</th><th>Решение</th><th>Дата обращения</th><th>Дата оценки</th></tr></thead>
                             <tbody>
                                 {[...Array(5)].map((_,i) => (
-                                    <tr key={i}><td colSpan={7}><div style={{display:'grid',gridTemplateColumns:'40px 80px 1fr 120px 60px 140px 1fr',gap:8,padding:'12px 16px 12px 20px'}}>
-                                        {[40,80,'1fr',120,60,140,'1fr'].map((w,j)=><div key={j} className="skeleton" style={{height:16,width:typeof w==='number'?w:'100%'}} />)}
+                                    <tr key={i}><td colSpan={8}><div style={{display:'grid',gridTemplateColumns:'40px 80px 1fr 120px 60px 150px 140px 1fr',gap:8,padding:'12px 16px 12px 20px'}}>
+                                        {[40,80,'1fr',120,60,150,140,'1fr'].map((w,j)=><div key={j} className="skeleton" style={{height:16,width:typeof w==='number'?w:'100%'}} />)}
                                     </div></td></tr>
                                 ))}
                             </tbody>
@@ -3720,6 +3803,7 @@ const App = ({ user, initialSelection }) => {
                                     <th>Направление</th>
                                     <th>Телефон</th>
                                     <th>Балл</th>
+                                    <th>Решение</th>
                                     <th>Дата обращения</th>
                                     <th>Дата оценки / Действия</th>
                                 </tr>
@@ -3751,6 +3835,7 @@ const App = ({ user, initialSelection }) => {
                                                     <span className={`score-chip ${getScoreClass(call.totalScore)}`}>{Math.round(call.totalScore)}</span>
                                                 ) : <span style={{color:'var(--text-3)'}}>—</span>}
                                             </td>
+                                            <td>{renderResolutionBadges(call)}</td>
                                             <td style={{fontSize:12,color:'var(--text-2)'}}>{fmtDate(call.appeal_date)}</td>
                                             <td>
                                                 <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}}>
@@ -3818,7 +3903,7 @@ const App = ({ user, initialSelection }) => {
                                         {/* Expanded row */}
                                         {expandedId === call.id && (
                                             <tr className="expanded-row">
-                                                <td colSpan={7}>
+                                                <td colSpan={8}>
                                                     <div className="expanded-content">
                                                         <h4>Детали оценки</h4>
                                                         <div className="expanded-meta">
@@ -3826,6 +3911,8 @@ const App = ({ user, initialSelection }) => {
                                                             <div className="expanded-meta-item"><strong>Дата оценки:</strong> {fmtDate(call._rawEvaluation?.evaluation_date||call.date)}</div>
                                                             <div className="expanded-meta-item"><strong>Дата обращения:</strong> {fmtDate(call._rawEvaluation?.appeal_date||call.appeal_date)}</div>
                                                             <div className="expanded-meta-item"><strong>Показ оператору:</strong> {call.commentVisibleToOperator !== false ? 'Да' : 'Нет'}</div>
+                                                            <div className="expanded-meta-item"><strong>Вопрос решен:</strong> {call.questionResolved ? 'Да' : 'Нет'}</div>
+                                                            <div className="expanded-meta-item"><strong>С первого обращения:</strong> {call.questionResolved ? (call.resolvedFirstContact ? 'Да' : 'Нет') : 'N/A'}</div>
                                                         </div>
                                                         <div style={{marginBottom:12, fontSize:13, color:'var(--text-2)'}}>
                                                             <strong style={{color:'var(--text)'}}>Общий комментарий:</strong> {call.combinedComment?.trim() || '—'}

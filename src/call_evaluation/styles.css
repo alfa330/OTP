@@ -487,7 +487,73 @@
         .badge-green { background: var(--green-light); color: var(--green); }
         .badge-amber { background: var(--amber-light); color: var(--amber); }
         .badge-blue { background: var(--accent-light); color: var(--accent); }
+        .badge-muted { background: var(--surface-2); color: var(--text-2); }
         .badge-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+        .resolution-badges {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            flex-wrap: wrap;
+            min-width: 140px;
+        }
+
+        .resolution-flags {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-top: 10px;
+        }
+        .resolution-flag {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            min-height: 30px;
+            padding: 5px 10px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: var(--surface);
+            color: var(--text-2);
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            user-select: none;
+            transition: border-color var(--transition), background var(--transition), color var(--transition);
+        }
+        .resolution-flag:hover {
+            border-color: var(--border-strong);
+            background: var(--surface-2);
+            color: var(--text);
+        }
+        .resolution-flag.active {
+            border-color: #bbf7d0;
+            background: var(--green-light);
+            color: var(--green);
+        }
+        .resolution-flag input {
+            position: absolute;
+            opacity: 0;
+            pointer-events: none;
+        }
+        .resolution-flag-box {
+            width: 16px;
+            height: 16px;
+            border-radius: 5px;
+            border: 1px solid var(--border-strong);
+            background: var(--surface);
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            color: transparent;
+            font-size: 9px;
+            transition: all var(--transition);
+            flex-shrink: 0;
+        }
+        .resolution-flag.active .resolution-flag-box {
+            border-color: var(--green);
+            background: var(--green);
+            color: #fff;
+        }
 
         /* ── Score chip ── */
         .score-chip {

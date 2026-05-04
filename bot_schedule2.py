@@ -10415,6 +10415,12 @@ def receive_call_evaluation():
         is_draft = request.form['is_draft'].lower() == 'true'
         comment_visible_to_operator_raw = str(request.form.get('comment_visible_to_operator', 'true')).strip().lower()
         comment_visible_to_operator = comment_visible_to_operator_raw in ('1', 'true', 'yes', 'on')
+        question_resolved_raw = str(request.form.get('question_resolved', 'false')).strip().lower()
+        question_resolved = question_resolved_raw in ('1', 'true', 'yes', 'on')
+        resolved_first_contact = None
+        if question_resolved:
+            resolved_first_contact_raw = str(request.form.get('resolved_first_contact', 'false')).strip().lower()
+            resolved_first_contact = resolved_first_contact_raw in ('1', 'true', 'yes', 'on')
         scores = json.loads(request.form.get('scores', '[]'))
         criterion_comments = json.loads(request.form.get('criterion_comments', '[]'))
         direction_id = request.form.get('direction')
@@ -10526,7 +10532,9 @@ def receive_call_evaluation():
             direction_id=direction_id,
             is_correction=is_correction,
             previous_version_id=previous_version_id if previous_version_id else None,
-            appeal_date=appeal_date
+            appeal_date=appeal_date,
+            question_resolved=question_resolved,
+            resolved_first_contact=resolved_first_contact
         )
 
         if has_new_audio or (not is_draft and audio_path):
