@@ -63,6 +63,12 @@ const formatInt = (value) => new Intl.NumberFormat('ru-RU').format(Math.round(Nu
 
 const formatPercent = (value, digits = 1) => `${formatNumber(Number(value || 0) * 100, digits)}%`;
 
+const calculateForecastMatchPercent = (fact, forecast) => {
+  const forecastNumber = Number(forecast || 0);
+  if (forecastNumber <= 0) return 0;
+  return Math.max(0, 100 - (Math.abs(Number(fact || 0) - forecastNumber) / forecastNumber) * 100);
+};
+
 const formatDate = (iso) => {
   if (!iso) return '-';
   const [year, month, day] = String(iso).split('-');
@@ -405,6 +411,7 @@ const CallsTrendTooltip = ({ active, label, payload, mode }) => {
   const factCalls = Number(row.calls || 0);
   const delta = factCalls - forecastCalls;
   const completion = forecastCalls > 0 ? factCalls / forecastCalls : 0;
+  const matchPercent = Number(row.forecastMatchPercent || 0);
 
   if (mode === 'forecastFact') {
     return (
@@ -431,6 +438,10 @@ const CallsTrendTooltip = ({ active, label, payload, mode }) => {
               <span className="text-slate-500">Выполнение</span>
               <b className="text-slate-900">{forecastCalls > 0 ? formatPercent(completion, 0) : '-'}</b>
             </div>
+            <div className="mt-1 flex items-center justify-between gap-6">
+              <span className="text-slate-500">Совпадение прогноза</span>
+              <b className="text-violet-700">{forecastCalls > 0 ? `${formatNumber(matchPercent, 1)}%` : '-'}</b>
+            </div>
           </div>
         </div>
       </div>
@@ -455,6 +466,7 @@ const DayCallsTooltip = ({ active, label, payload }) => {
   const forecastCalls = Number(row.forecastCalls || 0);
   const factCalls = Number(row.factCalls || 0);
   const delta = factCalls - forecastCalls;
+  const matchPercent = Number(row.matchPercent || 0);
   return (
     <div className="min-w-56 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs shadow-lg">
       <div className="mb-2 font-semibold text-slate-900">{label}</div>
@@ -462,6 +474,7 @@ const DayCallsTooltip = ({ active, label, payload }) => {
         <div className="flex justify-between gap-6"><span className="text-blue-700">Прогноз</span><b>{formatNumber(forecastCalls, 0)}</b></div>
         <div className="flex justify-between gap-6"><span className="text-emerald-700">Факт</span><b>{formatInt(factCalls)}</b></div>
         <div className="flex justify-between gap-6"><span className="text-slate-500">Разница</span><b className={delta < 0 ? 'text-rose-700' : delta > 0 ? 'text-emerald-700' : 'text-slate-900'}>{formatSignedNumber(delta, 0)}</b></div>
+        <div className="flex justify-between gap-6"><span className="text-slate-500">Совпадение</span><b className="text-violet-700">{forecastCalls > 0 ? `${formatNumber(matchPercent, 1)}%` : '-'}</b></div>
       </div>
     </div>
   );
@@ -872,17 +885,22 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
       (overview?.history || [])
         .slice(0, 21)
         .reverse()
-        .map((item) => ({
-          reportDate: item.report_date,
-          date: formatDate(item.report_date).slice(0, 5),
-          calls: Number(item.total_received || 0),
-          accepted: Number(item.total_accepted || 0),
-          lost: Number(item.total_lost || 0),
-          lossRate: Number(item.no_answer_rate || 0) * 100,
-          forecastCalls: Number(item.forecast_calls_total || 0),
-          forecastFte: Number(item.forecast_fte_total || 0),
-          actualFte: Number(item.actual_report_fte_total || 0),
-        })),
+        .map((item) => {
+          const calls = Number(item.total_received || 0);
+          const forecastCalls = Number(item.forecast_calls_total || 0);
+          return {
+            reportDate: item.report_date,
+            date: formatDate(item.report_date).slice(0, 5),
+            calls,
+            accepted: Number(item.total_accepted || 0),
+            lost: Number(item.total_lost || 0),
+            lossRate: Number(item.no_answer_rate || 0) * 100,
+            forecastCalls,
+            forecastMatchPercent: calculateForecastMatchPercent(calls, forecastCalls),
+            forecastFte: Number(item.forecast_fte_total || 0),
+            actualFte: Number(item.actual_report_fte_total || 0),
+          };
+        }),
     [overview?.history],
   );
 
@@ -903,6 +921,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
       totalForecastCalls,
       callsDelta: totalReceived - totalForecastCalls,
       callsCompletion: totalForecastCalls > 0 ? totalReceived / totalForecastCalls : 0,
+      callsMatchPercent: calculateForecastMatchPercent(totalReceived, totalForecastCalls),
       lossRate: totalReceived > 0 ? totalLost / totalReceived : 0,
       worstDay,
     };
@@ -959,6 +978,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
           forecastCalls,
           factCalls,
           delta: factCalls - forecastCalls,
+          matchPercent: calculateForecastMatchPercent(factCalls, forecastCalls),
         };
       }),
     [selectedDayHours],
@@ -998,6 +1018,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
       lost: Number(source.total_lost || 0),
       callDelta,
       callsCompletion: forecastCalls > 0 ? received / forecastCalls : 0,
+      callsMatchPercent: calculateForecastMatchPercent(received, forecastCalls),
       lossRate: Number(source.no_answer_rate || 0),
       peakLossHour,
       peakCallDeltaHour,
@@ -1540,7 +1561,13 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                         <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                         <XAxis dataKey="date" tick={{ fontSize: 11 }} />
                         <YAxis yAxisId="left" tick={{ fontSize: 11 }} />
-                        {callsChartMode === 'losses' ? <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} /> : null}
+                        <YAxis
+                          yAxisId="right"
+                          orientation="right"
+                          tick={{ fontSize: 11 }}
+                          domain={callsChartMode === 'forecastFact' ? [0, 100] : undefined}
+                          tickFormatter={callsChartMode === 'forecastFact' ? (value) => `${Math.round(value)}%` : undefined}
+                        />
                         <Tooltip content={<CallsTrendTooltip mode={callsChartMode} />} />
                         {selectedLossTrendPoint ? (
                           <ReferenceLine yAxisId="left" x={selectedLossTrendPoint.date} stroke="#0f172a" strokeDasharray="4 4" />
@@ -1593,6 +1620,17 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                             </Bar>
                           </>
                         )}
+                        {callsChartMode === 'forecastFact' && (
+                          <Line
+                            yAxisId="right"
+                            type="monotone"
+                            dataKey="forecastMatchPercent"
+                            stroke="#7c3aed"
+                            strokeWidth={2}
+                            dot={{ r: 3, strokeWidth: 2, fill: '#fff' }}
+                            activeDot={{ r: 5, strokeWidth: 2, onClick: selectLossChartDay }}
+                          />
+                        )}
                         {callsChartMode === 'losses' && displayOptions.chartLossRate && (
                           <Line
                             yAxisId="right"
@@ -1641,6 +1679,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                       <div className="flex justify-between gap-3"><dt className="text-slate-500">Факт кол-во</dt><dd className="font-medium text-emerald-700">{formatInt(periodLossSummary.totalReceived)}</dd></div>
                       <div className="flex justify-between gap-3"><dt className="text-slate-500">Разница</dt><dd className={`font-medium ${periodLossSummary.callsDelta < 0 ? 'text-rose-700' : periodLossSummary.callsDelta > 0 ? 'text-emerald-700' : 'text-slate-900'}`}>{formatSignedNumber(periodLossSummary.callsDelta, 0)}</dd></div>
                       <div className="flex justify-between gap-3"><dt className="text-slate-500">Выполнение</dt><dd className="font-medium text-slate-900">{periodLossSummary.totalForecastCalls > 0 ? formatPercent(periodLossSummary.callsCompletion, 0) : '-'}</dd></div>
+                      <div className="flex justify-between gap-3"><dt className="text-slate-500">Совпадение</dt><dd className="font-medium text-violet-700">{periodLossSummary.totalForecastCalls > 0 ? `${formatNumber(periodLossSummary.callsMatchPercent, 1)}%` : '-'}</dd></div>
                     </dl>
                     <div className="mt-4 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-800">
                       Режим сравнивает фактически поступившие звонки с прогнозом по выбранному периоду.
@@ -1682,8 +1721,8 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                       <div className="rounded-lg bg-white px-3 py-2"><div className="text-xs text-slate-500">Разница</div><b className={selectedLossSummary.callDelta < 0 ? 'text-rose-700' : selectedLossSummary.callDelta > 0 ? 'text-emerald-700' : ''}>{formatSignedNumber(selectedLossSummary?.callDelta, 0)}</b></div>
                       <div className="rounded-lg bg-white px-3 py-2"><div className="text-xs text-slate-500">Выполнение</div><b>{selectedLossSummary.forecastCalls > 0 ? formatPercent(selectedLossSummary?.callsCompletion, 0) : '-'}</b></div>
                       <div className="rounded-lg bg-white px-3 py-2">
-                        <div className="text-xs text-slate-500">Макс. отклонение</div>
-                        <b>{selectedLossSummary?.peakCallDeltaHour ? `${selectedLossSummary.peakCallDeltaHour.hour} · ${formatSignedNumber(selectedLossSummary.peakCallDeltaHour.delta, 0)}` : '-'}</b>
+                        <div className="text-xs text-violet-700">Совпадение</div>
+                        <b>{selectedLossSummary.forecastCalls > 0 ? `${formatNumber(selectedLossSummary?.callsMatchPercent, 1)}%` : '-'}</b>
                       </div>
                     </>
                   ) : (
@@ -1714,10 +1753,12 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                         <ComposedChart data={dayForecastFactData} margin={{ top: 10, right: 18, left: 0, bottom: 0 }}>
                           <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                           <XAxis dataKey="hour" tick={{ fontSize: 11 }} interval={2} />
-                          <YAxis tick={{ fontSize: 11 }} />
+                          <YAxis yAxisId="left" tick={{ fontSize: 11 }} />
+                          <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} domain={[0, 100]} tickFormatter={(value) => `${Math.round(value)}%`} />
                           <Tooltip content={<DayCallsTooltip />} />
-                          <Bar dataKey="forecastCalls" fill="#bfdbfe" radius={[4, 4, 0, 0]} />
-                          <Bar dataKey="factCalls" fill="#22c55e" radius={[4, 4, 0, 0]} />
+                          <Area yAxisId="left" type="monotone" dataKey="forecastCalls" stroke="#2563eb" fill="#dbeafe" fillOpacity={1} />
+                          <Area yAxisId="left" type="monotone" dataKey="factCalls" stroke="#16a34a" fill="#dcfce7" fillOpacity={1} />
+                          <Line yAxisId="right" type="monotone" dataKey="matchPercent" stroke="#7c3aed" strokeWidth={2} dot={false} activeDot={{ r: 5 }} />
                         </ComposedChart>
                       ) : (
                         <AreaChart data={dayAcceptedLostData} margin={{ top: 10, right: 18, left: 0, bottom: 0 }}>
