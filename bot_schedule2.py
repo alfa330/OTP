@@ -9905,8 +9905,24 @@ def get_users_report():
         requester = db.get_user(id=requester_id)
         if not requester or not _is_admin_role(requester[3]):
             return jsonify({"error": "Only admins can generate users report"}), 403
+
+        def _bool_query_arg(name, default=False):
+            raw = request.args.get(name)
+            if raw is None:
+                return bool(default)
+            return str(raw).strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
+
+        sheet_mode = str(request.args.get('sheet_mode') or 'summary_and_supervisors').strip().lower()
+        if sheet_mode not in {'summary', 'supervisors', 'summary_and_supervisors'}:
+            sheet_mode = 'summary_and_supervisors'
+        include_fired = _bool_query_arg('include_fired', False)
+        include_dismissal_details = _bool_query_arg('include_dismissal_details', True)
         
-        filename, content = db.generate_users_report()
+        filename, content = db.generate_users_report(
+            include_fired=include_fired,
+            include_dismissal_details=include_dismissal_details,
+            sheet_mode=sheet_mode
+        )
         if not filename or not content:
             return jsonify({"error": "Failed to generate report"}), 500
         

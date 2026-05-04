@@ -9037,12 +9037,21 @@ class Database:
             cursor.execute("DELETE FROM trainings WHERE id = %s RETURNING id", (training_id,))
             return cursor.fetchone() is not None
 
-    def generate_users_report(self, current_date=None):
+    def generate_users_report(
+        self,
+        current_date=None,
+        include_fired: bool = False,
+        include_dismissal_details: bool = True,
+        sheet_mode: str = 'summary_and_supervisors'
+    ):
         """
         Generates an Excel report of operators with extended profile fields:
         base data, contacts, study, corporate data, proxy/SIP, and two close contacts.
         
         :param current_date: Optional, current date for filename (defaults to today).
+        :param include_fired: Include operators with fired/dismissal status.
+        :param include_dismissal_details: Add dismissal date/reason/comment columns when fired operators are included.
+        :param sheet_mode: summary, supervisors, or summary_and_supervisors.
         :return: (filename, content) or (None, None) on error.
         """
         try:
@@ -9050,12 +9059,21 @@ class Database:
                 current_date = date.today()
             else:
                 current_date = datetime.strptime(current_date, "%Y-%m-%d").date() if isinstance(current_date, str) else current_date
+
+            include_fired = bool(include_fired)
+            include_dismissal_details = bool(include_dismissal_details) and include_fired
+            sheet_mode = str(sheet_mode or 'summary_and_supervisors').strip().lower()
+            if sheet_mode not in ('summary', 'supervisors', 'summary_and_supervisors'):
+                sheet_mode = 'summary_and_supervisors'
             
             filename = f"users_report_{current_date.strftime('%Y-%m-%d')}.xlsx"
             
             # Fetch operators with all export fields
             with self._get_cursor() as cursor:
-                cursor.execute("""
+                status_filter_sql = "" if include_fired else """
+                    AND COALESCE(NULLIF(LOWER(TRIM(u.status)), ''), 'working') NOT IN ('fired', 'dismissal')
+                """
+                cursor.execute(f"""
                     SELECT
                         u.name,
                         u.login,
@@ -9089,18 +9107,49 @@ class Database:
                         u.front_office_training_date,
                         u.taxipro_id,
                         u.supervisor_id,
-                        u.gender
+                        u.gender,
+                        dismissal_info.dismissal_start_date,
+                        dismissal_info.dismissal_end_date,
+                        dismissal_info.dismissal_reason,
+                        dismissal_info.dismissal_comment,
+                        dismissal_info.dismissal_is_blacklist,
+                        status_history.changed_at as status_fired_changed_at
                     FROM users u
                     LEFT JOIN directions d ON u.direction_id = d.id
                     LEFT JOIN users s ON u.supervisor_id = s.id
+                    LEFT JOIN LATERAL (
+                        SELECT
+                            p.start_date AS dismissal_start_date,
+                            p.end_date AS dismissal_end_date,
+                            p.dismissal_reason,
+                            p.comment AS dismissal_comment,
+                            COALESCE(p.is_blacklist, FALSE) AS dismissal_is_blacklist
+                        FROM operator_schedule_status_periods p
+                        WHERE p.operator_id = u.id
+                          AND p.status_code = 'dismissal'
+                        ORDER BY
+                            COALESCE(p.end_date, DATE '9999-12-31') DESC,
+                            p.start_date DESC,
+                            p.id DESC
+                        LIMIT 1
+                    ) dismissal_info ON TRUE
+                    LEFT JOIN LATERAL (
+                        SELECT uh.changed_at
+                        FROM user_history uh
+                        WHERE uh.user_id = u.id
+                          AND uh.field_changed = 'status'
+                          AND LOWER(TRIM(COALESCE(uh.new_value, ''))) IN ('fired', 'dismissal')
+                        ORDER BY uh.changed_at DESC, uh.id DESC
+                        LIMIT 1
+                    ) status_history ON TRUE
                     WHERE u.role = 'operator'
+                    {status_filter_sql}
                     ORDER BY s.name, u.name
                 """)
                 all_operators = cursor.fetchall()
             
             if not all_operators:
                 logging.warning("No operators found for users report")
-                return None, None
             
             def _format_date(value):
                 if not value:
@@ -9141,6 +9190,20 @@ class Database:
             def _format_proxy(value):
                 return 'Да' if bool(value) else 'Нет'
 
+            def _format_status(value):
+                normalized = str(value or '').strip().lower()
+                if normalized == 'working':
+                    return 'Работает'
+                if normalized in ('fired', 'dismissal'):
+                    return 'Уволен'
+                if normalized in ('bs', 'unpaid_leave'):
+                    return 'Б/С'
+                if normalized == 'sick_leave':
+                    return 'Больничный'
+                if normalized == 'annual_leave':
+                    return 'Ежегодный отпуск'
+                return value or ""
+
             headers = [
                 "ФИО",
                 "Пол",
@@ -9175,6 +9238,14 @@ class Database:
                 "Близкий 2: ФИО",
                 "Близкий 2: Номер"
             ]
+            if include_dismissal_details:
+                headers.extend([
+                    "Дата увольнения",
+                    "Дата окончания увольнения",
+                    "Причина увольнения",
+                    "Комментарий увольнения",
+                    "ЧС-увольнение"
+                ])
 
             # Group by supervisor and normalize rows for export
             operators_by_supervisor = defaultdict(list)
@@ -9188,9 +9259,13 @@ class Database:
                     has_proxy, proxy_card_number, has_driver_license, sip_number,
                     close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
                     close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
-                    card_number, internship_in_company, front_office_training, front_office_training_date, taxipro_id, sup_id, gender
+                    card_number, internship_in_company, front_office_training, front_office_training_date, taxipro_id, sup_id, gender,
+                    dismissal_start_date, dismissal_end_date, dismissal_reason, dismissal_comment, dismissal_is_blacklist,
+                    status_fired_changed_at
                 ) = row
 
+                is_fired_status = str(status or '').strip().lower() in ('fired', 'dismissal')
+                dismissal_date_value = dismissal_start_date or status_fired_changed_at
                 row_values = [
                     name or "",
                     _format_gender(gender),
@@ -9198,7 +9273,7 @@ class Database:
                     role or "",
                     direction or "N/A",
                     supervisor or "N/A",
-                    status or "",
+                    _format_status(status),
                     float(rate) if rate else 1.0,
                     _format_date(hire_date),
                     phone or "",
@@ -9225,6 +9300,14 @@ class Database:
                     close_contact_2_full_name or "",
                     close_contact_2_phone or ""
                 ]
+                if include_dismissal_details:
+                    row_values.extend([
+                        _format_date(dismissal_date_value) if is_fired_status else "",
+                        _format_date(dismissal_end_date) if is_fired_status and dismissal_end_date else "",
+                        (dismissal_reason or "") if is_fired_status else "",
+                        (dismissal_comment or "") if is_fired_status else "",
+                        _format_proxy(dismissal_is_blacklist) if is_fired_status else ""
+                    ])
 
                 summary_rows.append(row_values)
                 operators_by_supervisor[sup_id].append(row_values)
@@ -9234,7 +9317,7 @@ class Database:
             # Create workbook
             wb = Workbook()
             ws_summary = wb.active
-            ws_summary.title = "Summary"
+            ws_summary.title = "Summary" if sheet_mode != 'supervisors' else "Report"
 
             style = TableStyleInfo(
                 name="TableStyleMedium2",
@@ -9273,23 +9356,30 @@ class Database:
                             max_len = value_len
                     ws.column_dimensions[get_column_letter(col_idx)].width = min(60, max(12, max_len + 2))
 
-            _write_rows_to_sheet(ws_summary, summary_rows, "SummaryTable")
+            if sheet_mode in ('summary', 'summary_and_supervisors'):
+                _write_rows_to_sheet(ws_summary, summary_rows, "SummaryTable")
             
             # Create per-supervisor sheets
-            for sup_id, ops in operators_by_supervisor.items():
-                sup_name = supervisors.get(sup_id, "No Supervisor")
-                base_sheet_title = (sup_name or "No Supervisor")[:31]
-                sheet_title = base_sheet_title
-                if sheet_title in wb.sheetnames:
-                    suffix_counter = 2
-                    while sheet_title in wb.sheetnames:
-                        suffix = f"_{suffix_counter}"
-                        sheet_title = f"{base_sheet_title[:31 - len(suffix)]}{suffix}"
-                        suffix_counter += 1
-                ws = wb.create_sheet(title=sheet_title)
-                table_name = f"Table_sup_{sup_id if sup_id is not None else 'none'}"
-                table_name = re.sub(r'[^A-Za-z0-9_]', '_', table_name)
-                _write_rows_to_sheet(ws, ops, table_name)
+            if sheet_mode in ('supervisors', 'summary_and_supervisors'):
+                if sheet_mode == 'supervisors':
+                    if operators_by_supervisor:
+                        wb.remove(ws_summary)
+                    else:
+                        _write_rows_to_sheet(ws_summary, [], "ReportTable")
+                for sup_id, ops in operators_by_supervisor.items():
+                    sup_name = supervisors.get(sup_id, "No Supervisor")
+                    base_sheet_title = (sup_name or "No Supervisor")[:31]
+                    sheet_title = base_sheet_title
+                    if sheet_title in wb.sheetnames:
+                        suffix_counter = 2
+                        while sheet_title in wb.sheetnames:
+                            suffix = f"_{suffix_counter}"
+                            sheet_title = f"{base_sheet_title[:31 - len(suffix)]}{suffix}"
+                            suffix_counter += 1
+                    ws = wb.create_sheet(title=sheet_title)
+                    table_name = f"Table_sup_{sup_id if sup_id is not None else 'none'}"
+                    table_name = re.sub(r'[^A-Za-z0-9_]', '_', table_name)
+                    _write_rows_to_sheet(ws, ops, table_name)
             
             # Save to BytesIO
             output = BytesIO()
