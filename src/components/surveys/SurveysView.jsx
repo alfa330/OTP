@@ -278,15 +278,21 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
         const selectedDirections = new Set((draft.directionIds || []).map(String));
         const minWeeks = parseWeeksInput(draft.tenureWeeksMin);
         const maxWeeks = parseWeeksInput(draft.tenureWeeksMax);
+        const selectedOperatorIds = new Set((draft.operatorIds || []).map((id) => Number(id)).filter(Number.isFinite));
         return normalizedOperators.filter((operator) => {
-            const byDirection = selectedDirections.size === 0 || selectedDirections.has(operator.directionId);
+            const isAlreadySelected = selectedOperatorIds.has(Number(operator.id));
             const byQuery = !query || operator.name.toLowerCase().includes(query) || operator.directionName.toLowerCase().includes(query);
+            if (!byQuery) return false;
+            if (isEditMode && isAlreadySelected) return true;
+            if (isEditMode) return true;
+
+            const byDirection = selectedDirections.size === 0 || selectedDirections.has(operator.directionId);
             const hasTenure = Number.isFinite(operator.tenureWeeks);
             const byMin = minWeeks == null || (hasTenure && operator.tenureWeeks >= minWeeks);
             const byMax = maxWeeks == null || (hasTenure && operator.tenureWeeks <= maxWeeks);
             return byDirection && byQuery && byMin && byMax;
         });
-    }, [draft.directionIds, draft.tenureWeeksMax, draft.tenureWeeksMin, normalizedOperators, operatorQuery]);
+    }, [draft.directionIds, draft.operatorIds, draft.tenureWeeksMax, draft.tenureWeeksMin, isEditMode, normalizedOperators, operatorQuery]);
 
     const filteredOperatorIds = useMemo(
         () => filteredOperators.map((operator) => Number(operator.id)).filter(Number.isFinite),
