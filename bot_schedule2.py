@@ -3902,6 +3902,70 @@ def admin_promote_to_supervisor():
         logging.error(f"Error promoting user to supervisor: {e}", exc_info=True)
         return jsonify({"error": f"Internal server error"}), 500
     
+@app.route('/api/admin/departments', methods=['GET', 'POST', 'OPTIONS'])
+@require_api_key
+def api_admin_departments():
+    try:
+        if request.method == 'OPTIONS':
+            return _build_cors_preflight_response()
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        requester_role = _normalize_user_role(requester[3])
+        if not _is_super_admin_role(requester_role):
+            return jsonify({"error": "Only super admins can manage departments"}), 403
+
+        if request.method == 'GET':
+            departments = db.get_departments()
+            return jsonify({"status": "success", "departments": departments}), 200
+
+        # POST — create
+        data = request.get_json() or {}
+        code = str(data.get('code') or '').strip()
+        name = str(data.get('name') or '').strip()
+        if not code or not name:
+            return jsonify({"error": "code and name are required"}), 400
+        description = data.get('description') or None
+        slug = str(data.get('slug') or '').strip() or None
+        department = db.create_department(code=code, name=name, description=description, slug=slug)
+        return jsonify({"status": "success", "department": department}), 201
+    except Exception as e:
+        if 'departments_code_key' in str(e) or 'departments_slug_key' in str(e):
+            return jsonify({"error": "Department with this code already exists"}), 409
+        logging.error(f"Error in departments endpoint: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/admin/departments/<int:department_id>', methods=['PUT', 'OPTIONS'])
+@require_api_key
+def api_admin_update_department(department_id):
+    try:
+        if request.method == 'OPTIONS':
+            return _build_cors_preflight_response()
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        requester_role = _normalize_user_role(requester[3])
+        if not _is_super_admin_role(requester_role):
+            return jsonify({"error": "Only super admins can update departments"}), 403
+        data = request.get_json() or {}
+        allowed = {'code', 'slug', 'name', 'description', 'is_active'}
+        updates = {k: v for k, v in data.items() if k in allowed}
+        if not updates:
+            return jsonify({"error": "No valid fields to update"}), 400
+        department = db.update_department(department_id, **updates)
+        if not department:
+            return jsonify({"error": "Department not found"}), 404
+        return jsonify({"status": "success", "department": department}), 200
+    except Exception as e:
+        if 'departments_code_key' in str(e) or 'departments_slug_key' in str(e):
+            return jsonify({"error": "Department with this code already exists"}), 409
+        logging.error(f"Error updating department: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/user/history', methods=['GET'])
 @require_api_key
 def get_user_history():
