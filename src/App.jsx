@@ -24928,7 +24928,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [previewData, setPreviewData] = useState(null); // Данные предпросмотра (sheet_name, operators)
             const [selectedDirection, setSelectedDirection] = useState(''); // Выбранное направление
             const [showPreview, setShowPreview] = useState(false); // Показывать ли предпросмотр
-            const [searchQuery, setSearchQuery] = useState('');
+            const [manageUsersSearchQuery, setManageUsersSearchQuery] = useState('');
+            const [manageOperatorsSearchQuery, setManageOperatorsSearchQuery] = useState('');
+            const [trainerSearchQuery, setTrainerSearchQuery] = useState('');
+            const [adminSearchQuery, setAdminSearchQuery] = useState('');
             const [showHistoryModal, setShowHistoryModal] = useState(false);
             const [userHistory, setUserHistory] = useState([]);
             const [selectedUserForHistory, setSelectedUserForHistory] = useState(null);
@@ -31203,20 +31206,23 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 });
             };
 
-            const filteredUsers = users.filter(u => 
-                (u.name || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
-                (u.direction || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
-                (u.supervisor_name || '').toLowerCase().includes(searchQuery.toLowerCase())
-            );
+            const matchesEmployeeSearchQuery = (employee, query, directionLabel = null) => {
+                const q = String(query || '').trim().toLowerCase();
+                if (!q) return true;
+                const directionText = directionLabel ?? employee?.direction ?? employee?.direction_name ?? '';
+                return (
+                    String(employee?.name || '').toLowerCase().includes(q) ||
+                    String(directionText || '').toLowerCase().includes(q) ||
+                    String(employee?.supervisor_name || '').toLowerCase().includes(q)
+                );
+            };
 
-            const filteredTrainerUsers = trainerUsers.filter(u =>
-                (u.name || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
-                (u.direction || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
-                (u.supervisor_name || '').toLowerCase().includes(searchQuery.toLowerCase())
-            );
+            const filteredUsers = users.filter((u) => matchesEmployeeSearchQuery(u, manageUsersSearchQuery));
 
-            const filteredAdminUsers = systemAdmins.filter(u =>
-                (u.name || '').toLowerCase().includes(searchQuery.toLowerCase())
+            const filteredTrainerUsers = trainerUsers.filter((u) => matchesEmployeeSearchQuery(u, trainerSearchQuery));
+
+            const filteredAdminUsers = systemAdmins.filter((u) =>
+                String(u?.name || '').toLowerCase().includes(adminSearchQuery.trim().toLowerCase())
             );
 
             const toggleManageUsersSelection = useCallback((userId) => {
@@ -32388,7 +32394,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 aria-expanded={showSidebarEmployeesDropdown}
                                                 aria-haspopup="menu"
                                             >
-                                                <FaIcon className="fas fa-user-cog"></FaIcon> <span className="sidebar-text">Сотрудники</span>
+                                                <FaIcon className="fas fa-user-cog"></FaIcon> <span className="sidebar-text">Учет сотрудников</span>
                                                 <FaIcon className="fas fa-chevron-right ml-auto opacity-0 transform translate-x-2 transition-all duration-300 group-hover:opacity-100 group-hover:translate-x-0 sidebar-text"></FaIcon>
                                             </button>
 
@@ -32412,7 +32418,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         onClick={(e) => handleSidebarViewNavigation(e, isSuperAdmin ? 'employees' : 'manage_users', { onNavigate: () => handleToggleEmployeesDropdown(true) })}
                                                         className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${(view === 'manage_users' || view === 'employees') ? 'bg-gray-100 font-medium' : ''}`}
                                                     >
-                                                        <FaIcon className="fas fa-user-cog mr-2"></FaIcon> {isSuperAdmin ? 'Сотрудники' : 'Операторы'}
+                                                        <FaIcon className="fas fa-user-cog mr-2"></FaIcon> Операторы
                                                     </button>
 
                                                     <div className="border-t border-gray-200" />
@@ -32553,7 +32559,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         {canAccessLmsSection && renderSidebarDivider()}
                                         <li>
                                             <button onClick={(e) => handleSidebarViewNavigation(e, 'manage_operators')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_operators' ? 'bg-blue-700' : ''}`}>
-                                                <FaIcon className="fas fa-user-edit"></FaIcon> <span className="sidebar-text">Сотрудники</span>
+                                                <FaIcon className="fas fa-user-edit"></FaIcon> <span className="sidebar-text">Учет сотрудников</span>
                                             </button>
                                         </li>
                                         <li>
@@ -32645,7 +32651,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <>
                                         <li>
                                             <button onClick={(e) => handleSidebarViewNavigation(e, 'manage_operators')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_operators' ? 'bg-blue-700' : ''}`}>
-                                                <FaIcon className="fas fa-user-edit"></FaIcon> <span className="sidebar-text">Сотрудники</span>
+                                                <FaIcon className="fas fa-user-edit"></FaIcon> <span className="sidebar-text">Учет сотрудников</span>
                                             </button>
                                         </li>
                                         <li>
@@ -33567,7 +33573,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {(view === 'manage_users' || view === 'employees') && (
                                 <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                     <div className="flex items-center justify-between mb-6">
-                                    <h2 className="text-2xl font-semibold text-gray-800">{isSuperAdmin ? 'Сотрудники' : 'Операторы'}</h2>
+                                    <h2 className="text-2xl font-semibold text-gray-800">Операторы</h2>
 
                                     <div className="flex items-center gap-3">
                                         <button
@@ -33602,7 +33608,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </div>
                                     </div>
 
-                                    {renderUpcomingBirthdaysCard(upcomingManageUsersBirthdays, 'Сотрудники')}
+                                    {renderUpcomingBirthdaysCard(upcomingManageUsersBirthdays, 'Операторы')}
 
                                     {/* Tabs */}
                                     <div className="flex flex-wrap gap-3 mb-6">
@@ -33638,19 +33644,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         return <p className="text-center text-gray-600">Операторы не найдены.</p>;
                                         }
 
-                                        // применяем локальный поиск (как у вас раньше)
-                                        const searched = filteredUsers
-                                        .filter((u) => filteredByStatus.includes(u))
-                                        .filter((u) => {
-                                            if (!searchQuery) return true;
-                                            const q = searchQuery.toLowerCase();
-                                            const dir = (u.direction || "-").toString().toLowerCase();
-                                            return (
-                                            (u.name || "").toString().toLowerCase().includes(q) ||
-                                            dir.includes(q) ||
-                                            (u.supervisor_name || "").toString().toLowerCase().includes(q)
-                                            );
-                                        });
+                                        // применяем локальный поиск только для этого подраздела
+                                        const searched = filteredUsers.filter((u) => filteredByStatus.includes(u));
 
                                         const sortedUsersFlat = [...searched].sort((a, b) => compareUsersByField(a, b, usersSortField));
                                         const grouped = { __all__: sortedUsersFlat };
@@ -33671,8 +33666,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <input
                                                 type="text"
                                                 placeholder="Поиск по имени, направлению или супервайзеру..."
-                                                value={searchQuery}
-                                                onChange={(e) => setSearchQuery(e.target.value)}
+                                                value={manageUsersSearchQuery}
+                                                onChange={(e) => setManageUsersSearchQuery(e.target.value)}
                                                 className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                             />
                                             </div>
@@ -33971,8 +33966,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         <input
                                                             type="text"
                                                             placeholder="Поиск по имени админа..."
-                                                            value={searchQuery}
-                                                            onChange={(e) => setSearchQuery(e.target.value)}
+                                                            value={adminSearchQuery}
+                                                            onChange={(e) => setAdminSearchQuery(e.target.value)}
                                                             className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                                         />
                                                     </div>
@@ -34147,8 +34142,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <input
                                                 type="text"
                                                 placeholder="Поиск по имени, направлению или супервайзеру..."
-                                                value={searchQuery}
-                                                onChange={(e) => setSearchQuery(e.target.value)}
+                                                value={trainerSearchQuery}
+                                                onChange={(e) => setTrainerSearchQuery(e.target.value)}
                                                 className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                             />
                                             </div>
@@ -34589,7 +34584,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {view === 'manage_operators' && (
                                     <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                         <div className="flex justify-between items-center mb-6">
-                                        <h2 className="text-2xl font-semibold text-gray-800">Сотрудники</h2>
+                                        <h2 className="text-2xl font-semibold text-gray-800">Операторы</h2>
 
                                         {!isManageOperatorsReadOnly && (
                                         <button
@@ -34654,16 +34649,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             return <p className="text-center text-gray-600">Операторы не найдены.</p>;
                                             }
 
-                                            // Применяем локальный поиск (если нужно)
+                                            // Применяем локальный поиск только для этого подраздела
                                             const matched = filteredByStatus.filter((op) => {
-                                            if (!searchQuery) return true;
-                                            const q = searchQuery.toLowerCase();
-                                            const dirName = directions.find(d => d.id === op.direction_id)?.name || "Без направления";
-                                            return (
-                                                (op.name || "").toLowerCase().includes(q) ||
-                                                dirName.toLowerCase().includes(q) ||
-                                                (op.supervisor_name || "").toLowerCase().includes(q)
-                                            );
+                                            const dirName = getOperatorDirectionLabel(op);
+                                            return matchesEmployeeSearchQuery(op, manageOperatorsSearchQuery, dirName);
                                             });
 
                                             const requesterSupervisorId = Number(user?.id);
@@ -34692,7 +34681,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             const grouped = matched.reduce((acc, op) => {
                                             const opId = Number(op?.id);
                                             if (Number.isFinite(opId) && myOperatorIds.has(opId)) return acc;
-                                            const dirName = directions.find(d => d.id === op.direction_id)?.name || "Без направления";
+                                            const dirName = getOperatorDirectionLabel(op);
                                             if (!acc[dirName]) acc[dirName] = [];
                                             acc[dirName].push(op);
                                             return acc;
@@ -34727,8 +34716,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <input
                                                     type="text"
                                                     placeholder="Поиск по имени, направлению или супервайзеру..."
-                                                    value={searchQuery}
-                                                    onChange={(e) => setSearchQuery(e.target.value)}
+                                                    value={manageOperatorsSearchQuery}
+                                                    onChange={(e) => setManageOperatorsSearchQuery(e.target.value)}
                                                     className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                                 />
                                                 </div>
