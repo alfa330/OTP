@@ -24930,6 +24930,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [showPreview, setShowPreview] = useState(false); // Показывать ли предпросмотр
             const [manageUsersSearchQuery, setManageUsersSearchQuery] = useState('');
             const [manageOperatorsSearchQuery, setManageOperatorsSearchQuery] = useState('');
+            const [supervisorSearchQuery, setSupervisorSearchQuery] = useState('');
             const [trainerSearchQuery, setTrainerSearchQuery] = useState('');
             const [adminSearchQuery, setAdminSearchQuery] = useState('');
             const [showHistoryModal, setShowHistoryModal] = useState(false);
@@ -25826,7 +25827,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 </div>
             );
 
-            const employeeSectionColumns = (() => {
+            const buildEmployeeSectionColumns = (variant = 'operator') => {
+                const isOperatorVariant = variant === 'operator';
                 const nameColumn = {
                     key: 'name',
                     label: 'Имя',
@@ -25835,7 +25837,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 };
 
                 if (employeeTableSection === 'data') {
-                    return [
+                    const dataColumns = [
                         nameColumn,
                         {
                             key: 'gender',
@@ -25863,7 +25865,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             key: 'card_number',
                             label: 'Номер карты',
                             render: (employee) => employee?.card_number || '-'
-                        },
+                        }
+                    ];
+                    if (isOperatorVariant) {
+                        dataColumns.push(
                         {
                             key: 'has_driver_license',
                             label: 'Вод. права',
@@ -25871,7 +25876,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             cellClassName: 'text-center',
                             render: (employee) => renderEmployeeBoolIcon(employee?.has_driver_license, 'Есть', 'Нет')
                         }
-                    ];
+                        );
+                    }
+                    return dataColumns;
                 }
 
                 if (employeeTableSection === 'contacts') {
@@ -25960,8 +25967,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     ];
                 }
 
-                return [
+                const generalColumns = [
                     nameColumn,
+                    ...(isOperatorVariant ? [
                     {
                         key: 'supervisor_name',
                         label: 'Супервайзер',
@@ -25974,6 +25982,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         sortField: 'direction',
                         render: (employee) => employee?.direction || '-'
                     },
+                    ] : []),
                     {
                         key: 'status',
                         label: 'Статус',
@@ -25986,6 +25995,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         sortField: 'hire_date',
                         render: (employee) => formatEmployeeTableDate(employee?.hire_date)
                     },
+                    ...(isOperatorVariant ? [
                     {
                         key: 'rate',
                         label: 'Ставка',
@@ -26015,8 +26025,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         label: 'SIP',
                         render: (employee) => employee?.sip_number || '-'
                     }
+                    ] : [])
                 ];
-            })();
+                return generalColumns;
+            };
+
+            const employeeSectionColumns = buildEmployeeSectionColumns('operator');
 
             const activeEmployeeTableSection = EMPLOYEE_TABLE_SECTIONS.find((tab) => tab.key === employeeTableSection) || EMPLOYEE_TABLE_SECTIONS[0];
 
@@ -29477,7 +29491,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             if (avatarWarning) {
                                 showToast(`Сотрудник создан, но аватар не сохранён: ${avatarWarning}`, 'error');
                             }
-                            await fetchUsers(); // обновим список операторов на клиенте
+                            const refreshAfterCreate = [fetchUsers()];
+                            if (createdRole === 'sv' || createdRole === 'supervisor') {
+                                refreshAfterCreate.push(fetchSvList());
+                            }
+                            await Promise.allSettled(refreshAfterCreate);
                             return data;
                         } else {
                             throw new Error(data?.error || 'Не удалось создать сотрудника');
@@ -29919,7 +29937,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     showToast('User updated successfully', 'success');
                     const updatedRole = editedUser?.role || userToEdit?.role;
                     const refreshRequests = [fetchUsers()];
-                    if (updatedRole === 'sv') {
+                    if (updatedRole === 'sv' || updatedRole === 'supervisor') {
                         refreshRequests.push(fetchSvList());
                     }
                     await Promise.allSettled(refreshRequests);
@@ -31559,6 +31577,264 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             };
 
+            const createEmployeeDraftForRole = (role) => ({
+                name: "",
+                rate: 1.0,
+                direction_id: "",
+                hire_date: "",
+                supervisor_id: "",
+                status: "working",
+                role,
+            });
+
+            const openCreateEmployeeModalForRole = (role) => {
+                setUserToEdit(createEmployeeDraftForRole(role));
+                setShowUserEditModal(true);
+            };
+
+            const renderEmployeeDirectorySection = ({
+                title,
+                addLabel,
+                addIcon = 'fas fa-user-plus',
+                role,
+                items,
+                activeStatusTab,
+                setActiveStatusTab,
+                searchQuery,
+                setSearchQuery,
+                searchPlaceholder = 'Поиск по имени...',
+                emptyText,
+                emptySearchText,
+                countLabel,
+                canAdd = true,
+                canRemoveSupervisor = false,
+                canDismissAdmin = false,
+            }) => {
+                const rows = Array.isArray(items) ? items : [];
+                const columns = buildEmployeeSectionColumns(role === 'operator' ? 'operator' : 'staff');
+
+                const renderRowActionMenu = (employee) => {
+                    const menuId = `${role}-${employee?.id}`;
+                    const normalizedStatus = String(employee?.status || '').trim().toLowerCase();
+                    const isDismissed = normalizedStatus === 'fired' || normalizedStatus === 'dismissal';
+                    return (
+                        <td
+                            onClick={(e) => e.stopPropagation()}
+                            className={`px-2 py-4 text-right transition-opacity duration-200 ${openMenuId === menuId ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
+                        >
+                            <div className="relative inline-block text-left">
+                                <button
+                                    type="button"
+                                    onClick={(event) => openRowActionMenu(event, menuId, { width: 208, height: canDismissAdmin || canRemoveSupervisor ? 176 : 132 })}
+                                    className="p-2 rounded-full hover:bg-gray-100"
+                                >
+                                    <FaIcon className="fas fa-ellipsis-v"></FaIcon>
+                                </button>
+
+                                {openMenuId === menuId && (
+                                    <div
+                                        className="fixed bg-white border rounded-lg shadow-lg"
+                                        style={{
+                                            top: `${rowActionMenuPos.top}px`,
+                                            left: `${rowActionMenuPos.left}px`,
+                                            width: `${rowActionMenuPos.width}px`,
+                                            zIndex: 10000
+                                        }}
+                                    >
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setUserToEdit(employee);
+                                                setShowUserEditModal(true);
+                                                setOpenMenuId(null);
+                                            }}
+                                            className="block w-full text-left px-4 py-2 hover:bg-gray-100"
+                                        >
+                                            <FaIcon className="fas fa-edit mr-2"></FaIcon>Править
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setSelectedUserForHistory(employee);
+                                                fetchUserHistory(employee.id);
+                                                setOpenMenuId(null);
+                                            }}
+                                            disabled={loadingHistoryId === employee.id}
+                                            className="block w-full text-left px-4 py-2 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
+                                        >
+                                            {loadingHistoryId === employee.id ? (
+                                                <>
+                                                    <FaIcon className="fas fa-spinner fa-spin mr-2"></FaIcon>
+                                                    Загрузка...
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <FaIcon className="fas fa-history mr-2"></FaIcon>
+                                                    История
+                                                </>
+                                            )}
+                                        </button>
+
+                                        {(canRemoveSupervisor || canDismissAdmin) && <div className="border-t border-gray-200" />}
+
+                                        {canRemoveSupervisor && (
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    setOpenMenuId(null);
+                                                    removeSv(employee.id);
+                                                }}
+                                                className="block w-full text-left px-4 py-2 text-red-600 hover:bg-red-50"
+                                            >
+                                                <FaIcon className="fas fa-trash mr-2"></FaIcon>Удалить
+                                            </button>
+                                        )}
+
+                                        {canDismissAdmin && (
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    setOpenMenuId(null);
+                                                    dismissAdminUser(employee);
+                                                }}
+                                                disabled={isDismissed || dismissingAdminId === Number(employee.id)}
+                                                className="block w-full text-left px-4 py-2 text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:text-gray-400 disabled:hover:bg-white"
+                                            >
+                                                {dismissingAdminId === Number(employee.id) ? (
+                                                    <>
+                                                        <FaIcon className="fas fa-spinner fa-spin mr-2"></FaIcon>Увольняю...
+                                                    </>
+                                                ) : (
+                                                    <>
+                                                        <FaIcon className="fas fa-user-slash mr-2"></FaIcon>{isDismissed ? 'Уволен' : 'Уволить'}
+                                                    </>
+                                                )}
+                                            </button>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        </td>
+                    );
+                };
+
+                const filteredByStatus = rows.filter((employee) => isEmployeeVisibleByStatusTab(employee?.status, activeStatusTab));
+                const searchedRows = filteredByStatus.filter((employee) => matchesEmployeeSearchQuery(employee, searchQuery));
+                const sortedRows = [...searchedRows].sort((a, b) => compareUsersByField(a, b, usersSortField));
+
+                return (
+                    <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
+                        <div className="flex items-center justify-between mb-6">
+                            <h2 className="text-2xl font-semibold text-gray-800">{title}</h2>
+
+                            {canAdd && (
+                                <button
+                                    type="button"
+                                    onClick={() => openCreateEmployeeModalForRole(role)}
+                                    className="inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition"
+                                >
+                                    <FaIcon className={addIcon}></FaIcon> {addLabel}
+                                </button>
+                            )}
+                        </div>
+
+                        <div className="flex flex-wrap gap-3 mb-6">
+                            {USER_STATUS_FILTER_TABS.map((tab) => {
+                                const count = rows.filter((employee) => isEmployeeVisibleByStatusTab(employee?.status, tab.key)).length;
+                                const isActive = activeStatusTab === tab.key;
+                                return (
+                                    <button
+                                        key={tab.key}
+                                        type="button"
+                                        onClick={() => setActiveStatusTab(tab.key)}
+                                        className={`px-4 py-2 rounded-lg font-medium text-sm transition ${isActive ? tab.activeClass : tab.idleClass}`}
+                                    >
+                                        {tab.label}
+                                        <span className={`ml-2 inline-flex items-center justify-center px-2 py-0.5 text-xs rounded font-medium ${isActive ? 'bg-white/90 text-gray-800' : 'bg-white text-gray-700'}`}>
+                                            {count}
+                                        </span>
+                                    </button>
+                                );
+                            })}
+                        </div>
+
+                        {isAdminDataLoading ? (
+                            <p className="text-center text-gray-600">Загрузка...</p>
+                        ) : rows.length === 0 ? (
+                            <p className="text-center text-gray-600">{emptyText}</p>
+                        ) : (
+                            <div className="overflow-x-auto rounded-lg border border-gray-200">
+                                <div className="mb-4">
+                                    <input
+                                        type="text"
+                                        placeholder={searchPlaceholder}
+                                        value={searchQuery}
+                                        onChange={(event) => setSearchQuery(event.target.value)}
+                                        className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                    />
+                                </div>
+
+                                {sortedRows.length === 0 ? (
+                                    <p className="px-6 py-6 text-center text-gray-600">{emptySearchText}</p>
+                                ) : (
+                                    <table className="min-w-full border rounded-lg w-full">
+                                        <thead className="bg-gray-50">
+                                            <tr>
+                                                {columns.map((column) => {
+                                                    const isSortable = !!column.sortField;
+                                                    return (
+                                                        <th
+                                                            key={column.key}
+                                                            onClick={isSortable ? () => handleUsersSort(column.sortField) : undefined}
+                                                            className={`px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase ${
+                                                                isSortable ? 'cursor-pointer select-none' : ''
+                                                            } ${column.headerClassName || ''}`}
+                                                        >
+                                                            {column.label}
+                                                            {isSortable ? getUsersSortIcon(column.sortField) : null}
+                                                        </th>
+                                                    );
+                                                })}
+                                                <th className="px-6 py-3"></th>
+                                            </tr>
+                                        </thead>
+
+                                        <tbody className="bg-white divide-y divide-gray-200">
+                                            {sortedRows.map((employee) => (
+                                                <tr key={employee.id} className="transition-colors duration-200 group hover:bg-gray-50">
+                                                    {columns.map((column) => (
+                                                        <td
+                                                            key={column.key}
+                                                            className={`px-6 py-4 text-sm text-gray-900 align-top break-words ${column.cellClassName || ''}`}
+                                                        >
+                                                            {column.render(employee)}
+                                                        </td>
+                                                    ))}
+                                                    {renderRowActionMenu(employee)}
+                                                </tr>
+                                            ))}
+                                        </tbody>
+
+                                        <tfoot className="bg-gray-50">
+                                            <tr>
+                                                <td className="px-6 py-3 font-medium text-gray-700">
+                                                    {sortedRows.length} {countLabel}
+                                                </td>
+                                                <td colSpan={columns.length} className="px-6 py-3 text-sm text-gray-600">
+                                                    Показан раздел: {activeEmployeeTableSection.label}
+                                                </td>
+                                            </tr>
+                                        </tfoot>
+                                    </table>
+                                )}
+                            </div>
+                        )}
+
+                        {renderEmployeeTableSectionSwitcher()}
+                    </div>
+                );
+            };
+
             const changeSvTable = async (svId, url) => {
                 if (!validateUrl(url)) {
                     showToast('Invalid Google Sheets URL', 'error');
@@ -33093,7 +33369,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 </>
                             )}
 
-                            {view === 'sv_list' && (
+                            {view === 'sv_list' && renderEmployeeDirectorySection({
+                                title: 'Супервайзеры',
+                                addLabel: 'Добавить супервайзера',
+                                addIcon: 'fas fa-users',
+                                role: 'sv',
+                                items: svList,
+                                activeStatusTab: activeSvTab,
+                                setActiveStatusTab: setActiveSvTab,
+                                searchQuery: supervisorSearchQuery,
+                                setSearchQuery: setSupervisorSearchQuery,
+                                searchPlaceholder: 'Поиск по имени супервайзера...',
+                                emptyText: 'Супервайзеры не найдены.',
+                                emptySearchText: 'Супервайзеры по запросу не найдены.',
+                                countLabel: 'супервайзеров',
+                                canRemoveSupervisor: true,
+                            })}
+
+                            {false && view === 'sv_list' && (
                             <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                 <div className="flex justify-between items-center mb-6">
                                 <h2 className="text-2xl font-semibold text-gray-800">Супервайзеры</h2>
@@ -33278,7 +33571,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             )}
 
                                 {/* Модалка Add Supervisor */}
-                                {showAddSvModal && (
+                                {false && showAddSvModal && (
                                 <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-50 z-50">
                                     <div className="bg-white w-full max-w-md p-6 rounded-xl shadow-lg relative">
                                     <h2 className="text-2xl font-semibold mb-6 text-gray-800">Добавить супервайзера</h2>
@@ -33899,7 +34192,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     {renderEmployeeTableSectionSwitcher()}
                                 </div>
                                 )}
-                                {view === 'manage_admins' && isSuperAdmin && (
+                                {view === 'manage_admins' && isSuperAdmin && renderEmployeeDirectorySection({
+                                    title: 'Админы',
+                                    addLabel: 'Добавить админа',
+                                    addIcon: 'fas fa-user-shield',
+                                    role: 'admin',
+                                    items: systemAdmins,
+                                    activeStatusTab: activeAdminTab,
+                                    setActiveStatusTab: setActiveAdminTab,
+                                    searchQuery: adminSearchQuery,
+                                    setSearchQuery: setAdminSearchQuery,
+                                    searchPlaceholder: 'Поиск по имени админа...',
+                                    emptyText: 'Админы не найдены.',
+                                    emptySearchText: 'Админы по запросу не найдены.',
+                                    countLabel: 'админов',
+                                    canDismissAdmin: true,
+                                })}
+
+                                {false && view === 'manage_admins' && isSuperAdmin && (
                                 <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                     <div className="flex items-center justify-between mb-6">
                                         <h2 className="text-2xl font-semibold text-gray-800">Админы</h2>
@@ -34075,7 +34385,23 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     )}
                                 </div>
                                 )}
-                                {view === 'manage_trainers' && (
+                                {view === 'manage_trainers' && renderEmployeeDirectorySection({
+                                    title: 'Тренеры',
+                                    addLabel: 'Добавить тренера',
+                                    addIcon: 'fas fa-user-plus',
+                                    role: 'trainer',
+                                    items: trainerUsers,
+                                    activeStatusTab: activeTrainerTab,
+                                    setActiveStatusTab: setActiveTrainerTab,
+                                    searchQuery: trainerSearchQuery,
+                                    setSearchQuery: setTrainerSearchQuery,
+                                    searchPlaceholder: 'Поиск по имени тренера...',
+                                    emptyText: 'Тренеры не найдены.',
+                                    emptySearchText: 'Тренеры по запросу не найдены.',
+                                    countLabel: 'тренеров',
+                                })}
+
+                                {false && view === 'manage_trainers' && (
                                 <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                     <div className="flex items-center justify-between mb-6">
                                     <h2 className="text-2xl font-semibold text-gray-800">Тренеры</h2>
