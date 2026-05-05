@@ -9932,10 +9932,23 @@ def handle_monthly_report():
             worksheet = workbook.add_worksheet(safe_sheet_name)
 
             special_table_header_row = len(report_rows) + 2
+            score_column_count = max(
+                1,
+                max(
+                    (
+                        max(len(row.get('scores') or []), len(row.get('special_scores') or []))
+                        for row in report_rows
+                    ),
+                    default=0
+                )
+            )
+            avg_score_col = score_column_count + 1
+            evaluated_calls_col = avg_score_col + 1
+            planned_calls_col = evaluated_calls_col + 1
 
             # Headers
             headers = ['ФИО']
-            for i in range(1, 21):
+            for i in range(1, score_column_count + 1):
                 headers.append(f'{i}')
             headers.append('Средний балл')
             headers.append('Кол-во оцененных звонков')
@@ -9968,7 +9981,7 @@ def handle_monthly_report():
                 worksheet.write(special_row_idx, 0, op_name, fio_format)
 
                 # Оценки с цветом
-                for col in range(1, 21):
+                for col in range(1, score_column_count + 1):
                     if col-1 < count:
                         score = scores[col-1]
                         if score < 80:
@@ -9994,20 +10007,20 @@ def handle_monthly_report():
                         worksheet.write(special_row_idx, col, '', float_format)
 
                 # Итоговые колонки
-                worksheet.write(row_idx, 21, avg_score, total_format)
-                worksheet.write(row_idx, 22, count, total_int_format)
-                worksheet.write(row_idx, 23, planned_calls, total_int_format)
+                worksheet.write(row_idx, avg_score_col, avg_score, total_format)
+                worksheet.write(row_idx, evaluated_calls_col, count, total_int_format)
+                worksheet.write(row_idx, planned_calls_col, planned_calls, total_int_format)
 
-                worksheet.write(special_row_idx, 21, special_avg_score, total_format)
-                worksheet.write(special_row_idx, 22, special_count, total_int_format)
-                worksheet.write(special_row_idx, 23, planned_calls, total_int_format)
+                worksheet.write(special_row_idx, avg_score_col, special_avg_score, total_format)
+                worksheet.write(special_row_idx, evaluated_calls_col, special_count, total_int_format)
+                worksheet.write(special_row_idx, planned_calls_col, planned_calls, total_int_format)
 
             worksheet.set_column('A:A', 30)
-            for i in range(1, 21):
+            for i in range(1, score_column_count + 1):
                 worksheet.set_column(i, i, 12)
-            worksheet.set_column(21, 21, 15)
-            worksheet.set_column(22, 22, 20)
-            worksheet.set_column(23, 23, 12)
+            worksheet.set_column(avg_score_col, avg_score_col, 15)
+            worksheet.set_column(evaluated_calls_col, evaluated_calls_col, 20)
+            worksheet.set_column(planned_calls_col, planned_calls_col, 12)
 
         workbook.close()
         output.seek(0)
@@ -12369,6 +12382,55 @@ def list_offline_activities():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error listing offline activities: {e}", exc_info=True)
+        return jsonify({"error": f"Internal server error"}), 500
+
+
+@app.route('/api/offline_activities/<int:activity_id>', methods=['PUT', 'PATCH'])
+@require_api_key
+def update_offline_activity(activity_id):
+    try:
+        requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+        requester_id = int(requester_id)
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "User not found"}), 404
+
+        requester_role = _normalize_management_role(requester[3])
+        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role)):
+            return jsonify({"error": "Forbidden"}), 403
+
+        payload = request.get_json(silent=True) or {}
+        if not payload:
+            return jsonify({"error": "No data provided"}), 400
+
+        result = db.update_operator_offline_activity(
+            requester_id=requester_id,
+            requester_role=requester_role,
+            activity_id=activity_id,
+            activity_date=payload.get('date') or payload.get('activity_date'),
+            start_time=payload.get('start_time') or payload.get('start'),
+            end_time=payload.get('end_time') or payload.get('end'),
+            comment=payload.get('comment') if 'comment' in payload else None,
+            operator_id=payload.get('operator_id')
+        )
+
+        return jsonify({
+            "status": "success",
+            "message": "Offline activity updated",
+            "result": result
+        }), 200
+    except PermissionError:
+        return jsonify({"error": "Forbidden"}), 403
+    except ValueError as e:
+        error_text = str(e)
+        if error_text == "Offline activity not found":
+            return jsonify({"error": error_text}), 404
+        return jsonify({"error": error_text}), 400
+    except Exception as e:
+        logging.error(f"Error updating offline activity {activity_id}: {e}", exc_info=True)
         return jsonify({"error": f"Internal server error"}), 500
 
 
