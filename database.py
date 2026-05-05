@@ -8581,6 +8581,7 @@ class Database:
         date_from=None,
         date_to=None,
         operator_id=None,
+        supervisor_id=None,
         limit=500,
         offset=0
     ):
@@ -8594,9 +8595,21 @@ class Database:
 
         where_parts = []
         params = []
-        if role_norm == 'sv':
+        supervisor_id_int = None
+        if supervisor_id is not None and str(supervisor_id).strip() != '':
+            try:
+                supervisor_id_int = int(supervisor_id)
+            except (TypeError, ValueError):
+                raise ValueError("Invalid supervisor_id")
+            if supervisor_id_int <= 0:
+                raise ValueError("Invalid supervisor_id")
+
+        if role_norm == 'sv' and supervisor_id_int is None:
+            supervisor_id_int = requester_id_int
+
+        if supervisor_id_int is not None:
             where_parts.append("op.supervisor_id = %s")
-            params.append(requester_id_int)
+            params.append(supervisor_id_int)
 
         if activity_date:
             activity_date_obj = self._parse_technical_issue_date(activity_date, field_name='date')

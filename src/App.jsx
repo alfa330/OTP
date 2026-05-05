@@ -1259,6 +1259,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             offlineParams.append('date_from', `${month}-01`);
             offlineParams.append('date_to', `${month}-${String(daysInMonth).padStart(2, '0')}`);
             offlineParams.append('limit', '5000');
+            if (selectedSvId) {
+                offlineParams.append('supervisor_id', selectedSvId);
+            }
             const offlineActivitiesUrl = `${API_BASE_URL}/api/offline_activities?${offlineParams.toString()}`;
             const scheduleParams = new URLSearchParams();
             scheduleParams.append('start_date', `${month}-01`);

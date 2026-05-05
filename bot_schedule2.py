@@ -11116,6 +11116,7 @@ def get_monthly_report_hours():
                 requester_role=role,
                 date_from=date_from,
                 date_to=date_to,
+                supervisor_id=supervisor_id if not generate_all else None,
                 limit=5000,
                 offset=0
             )
@@ -12359,6 +12360,7 @@ def list_offline_activities():
         date_from = (request.args.get('date_from') or '').strip() or None
         date_to = (request.args.get('date_to') or '').strip() or None
         operator_id = (request.args.get('operator_id') or '').strip() or None
+        supervisor_id = (request.args.get('supervisor_id') or request.args.get('sv_id') or '').strip() or None
         limit = request.args.get('limit', 500)
         offset = request.args.get('offset', 0)
 
@@ -12369,6 +12371,7 @@ def list_offline_activities():
             date_from=date_from,
             date_to=date_to,
             operator_id=operator_id,
+            supervisor_id=supervisor_id,
             limit=limit,
             offset=offset
         )
