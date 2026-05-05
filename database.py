@@ -502,7 +502,34 @@ class Database:
 
     def _init_db(self):
         with self._get_cursor() as cursor:
-            # Users table (без direction_id на этом этапе)
+            # Departments table (created first so users/directions can reference it)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS departments (
+                    id SERIAL PRIMARY KEY,
+                    code VARCHAR(50) NOT NULL UNIQUE,
+                    slug VARCHAR(100) NOT NULL UNIQUE,
+                    name VARCHAR(255) NOT NULL,
+                    description TEXT,
+                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+            """)
+            # Directions table (created before users so direction_id FK can reference it)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS directions (
+                    id SERIAL PRIMARY KEY,
+                    name VARCHAR(255) NOT NULL,
+                    department_id INTEGER REFERENCES departments(id) ON DELETE SET NULL,
+                    has_file_upload BOOLEAN NOT NULL DEFAULT TRUE,
+                    criteria JSONB NOT NULL DEFAULT '[]',
+                    calculation_model_code VARCHAR(32) NOT NULL DEFAULT 'operator',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                    version INTEGER NOT NULL DEFAULT 1,
+                    previous_version_id INTEGER REFERENCES directions(id)
+                );
+            """)
+            # Users table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     id SERIAL PRIMARY KEY,
@@ -513,145 +540,49 @@ class Database:
                     login VARCHAR(255) UNIQUE,
                     password_hash VARCHAR(255),
                     supervisor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    direction_id INTEGER REFERENCES directions(id) ON DELETE SET NULL,
+                    department_id INTEGER REFERENCES departments(id) ON DELETE SET NULL,
                     hours_table_url TEXT,
                     scores_table_url TEXT,
                     is_active BOOLEAN NOT NULL DEFAULT FALSE,
                     status VARCHAR(20) NOT NULL DEFAULT 'working' CHECK(status IN ('working', 'fired', 'unpaid_leave', 'bs', 'sick_leave', 'annual_leave', 'dismissal')),
                     rate DECIMAL(3,2) NOT NULL DEFAULT 1.00 CHECK(rate IN (1.00, 0.75, 0.50)),
+                    gender VARCHAR(20) CHECK (gender IN ('male', 'female')),
+                    birth_date DATE,
+                    avatar_bucket VARCHAR(255),
+                    avatar_blob_path TEXT,
+                    avatar_original_blob_path TEXT,
+                    avatar_content_type VARCHAR(128),
+                    avatar_file_size INTEGER,
+                    avatar_updated_at TIMESTAMP,
+                    phone VARCHAR(50),
+                    email VARCHAR(255),
+                    instagram VARCHAR(255),
+                    telegram_nick VARCHAR(255),
+                    company_name VARCHAR(255),
+                    employment_type VARCHAR(10) CHECK (employment_type IN ('gph', 'of') OR employment_type IS NULL),
+                    has_proxy BOOLEAN NOT NULL DEFAULT FALSE,
+                    proxy_card_number VARCHAR(64),
+                    has_driver_license BOOLEAN NOT NULL DEFAULT FALSE,
+                    sip_number VARCHAR(64),
+                    study_place VARCHAR(255),
+                    study_course VARCHAR(100),
+                    study_completed BOOLEAN NOT NULL DEFAULT FALSE,
+                    study_completion_year INTEGER,
+                    close_contact_1_relation VARCHAR(100),
+                    close_contact_1_full_name VARCHAR(255),
+                    close_contact_1_phone VARCHAR(50),
+                    close_contact_2_relation VARCHAR(100),
+                    close_contact_2_full_name VARCHAR(255),
+                    close_contact_2_phone VARCHAR(50),
+                    card_number VARCHAR(64),
+                    internship_in_company BOOLEAN NOT NULL DEFAULT FALSE,
+                    front_office_training BOOLEAN NOT NULL DEFAULT FALSE,
+                    front_office_training_date DATE,
+                    taxipro_id VARCHAR(128),
+                    feedback_telegram_report_enabled BOOLEAN NOT NULL DEFAULT FALSE,
                     CONSTRAINT unique_name_role UNIQUE (name, role)
                 );
-            """)
-            cursor.execute("""
-                DO $$
-                DECLARE role_constraint RECORD;
-                BEGIN
-                    FOR role_constraint IN
-                        SELECT conname
-                        FROM pg_constraint
-                        WHERE conrelid = 'users'::regclass
-                          AND contype = 'c'
-                          AND pg_get_constraintdef(oid) ILIKE '%role%'
-                    LOOP
-                        EXECUTE format('ALTER TABLE users DROP CONSTRAINT IF EXISTS %I', role_constraint.conname);
-                    END LOOP;
-
-                    BEGIN
-                        ALTER TABLE users
-                            ADD CONSTRAINT users_role_check
-                            CHECK (role IN ('super_admin', 'admin', 'sv', 'supervisor', 'trainer', 'operator', 'trainee'));
-                    EXCEPTION
-                        WHEN duplicate_object THEN
-                            NULL;
-                    END;
-                END $$;
-            """)
-            # Directions table
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS directions (
-                    id SERIAL PRIMARY KEY,
-                    name VARCHAR(255) NOT NULL,
-                    has_file_upload BOOLEAN NOT NULL DEFAULT TRUE,
-                    criteria JSONB NOT NULL DEFAULT '[]',
-                    calculation_model_code VARCHAR(32) NOT NULL DEFAULT 'operator',
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
-                    version INTEGER NOT NULL DEFAULT 1,
-                    previous_version_id INTEGER REFERENCES directions(id)
-                );
-            """)
-            cursor.execute("""
-                DO $$
-                DECLARE column_missing BOOLEAN;
-                BEGIN
-                    SELECT NOT EXISTS (
-                        SELECT 1
-                        FROM information_schema.columns
-                        WHERE table_name = 'directions'
-                          AND column_name = 'calculation_model_code'
-                    ) INTO column_missing;
-
-                    IF column_missing THEN
-                        ALTER TABLE directions
-                            ADD COLUMN calculation_model_code VARCHAR(32) NOT NULL DEFAULT 'operator';
-                    END IF;
-                END $$;
-            """)
-            cursor.execute("""
-                UPDATE directions
-                SET calculation_model_code = 'operator'
-                WHERE calculation_model_code IS NULL
-                   OR calculation_model_code NOT IN ('operator', 'chat_manager');
-            """)
-
-            # Добавляем direction_id в users после создания directions
-            cursor.execute("""
-                DO $$
-                BEGIN
-                    IF NOT EXISTS (
-                        SELECT 1 FROM information_schema.columns 
-                        WHERE table_name = 'users' AND column_name = 'direction_id'
-                    ) THEN
-                        ALTER TABLE users ADD COLUMN direction_id INTEGER REFERENCES directions(id) ON DELETE SET NULL;
-                    END IF;
-                END $$;
-            """)
-            cursor.execute("""
-                ALTER TABLE users
-                    ADD COLUMN IF NOT EXISTS gender VARCHAR(20) CHECK (gender IN ('male', 'female')),
-                    ADD COLUMN IF NOT EXISTS birth_date DATE;
-            """)
-            cursor.execute("""
-                ALTER TABLE users
-                    ADD COLUMN IF NOT EXISTS avatar_bucket VARCHAR(255),
-                    ADD COLUMN IF NOT EXISTS avatar_blob_path TEXT,
-                    ADD COLUMN IF NOT EXISTS avatar_original_blob_path TEXT,
-                    ADD COLUMN IF NOT EXISTS avatar_content_type VARCHAR(128),
-                    ADD COLUMN IF NOT EXISTS avatar_file_size INTEGER,
-                    ADD COLUMN IF NOT EXISTS avatar_updated_at TIMESTAMP;
-            """)
-            cursor.execute("""
-                ALTER TABLE users
-                    ADD COLUMN IF NOT EXISTS phone VARCHAR(50),
-                    ADD COLUMN IF NOT EXISTS email VARCHAR(255),
-                    ADD COLUMN IF NOT EXISTS instagram VARCHAR(255),
-                    ADD COLUMN IF NOT EXISTS telegram_nick VARCHAR(255),
-                    ADD COLUMN IF NOT EXISTS company_name VARCHAR(255),
-                    ADD COLUMN IF NOT EXISTS employment_type VARCHAR(10),
-                    ADD COLUMN IF NOT EXISTS has_proxy BOOLEAN NOT NULL DEFAULT FALSE,
-                    ADD COLUMN IF NOT EXISTS proxy_card_number VARCHAR(64),
-                    ADD COLUMN IF NOT EXISTS has_driver_license BOOLEAN NOT NULL DEFAULT FALSE,
-                    ADD COLUMN IF NOT EXISTS sip_number VARCHAR(64),
-                    ADD COLUMN IF NOT EXISTS study_place VARCHAR(255),
-                    ADD COLUMN IF NOT EXISTS study_course VARCHAR(100),
-                    ADD COLUMN IF NOT EXISTS study_completed BOOLEAN NOT NULL DEFAULT FALSE,
-                    ADD COLUMN IF NOT EXISTS study_completion_year INTEGER,
-                    ADD COLUMN IF NOT EXISTS close_contact_1_relation VARCHAR(100),
-                    ADD COLUMN IF NOT EXISTS close_contact_1_full_name VARCHAR(255),
-                    ADD COLUMN IF NOT EXISTS close_contact_1_phone VARCHAR(50),
-                    ADD COLUMN IF NOT EXISTS close_contact_2_relation VARCHAR(100),
-                    ADD COLUMN IF NOT EXISTS close_contact_2_full_name VARCHAR(255),
-                    ADD COLUMN IF NOT EXISTS close_contact_2_phone VARCHAR(50),
-                    ADD COLUMN IF NOT EXISTS card_number VARCHAR(64),
-                    ADD COLUMN IF NOT EXISTS internship_in_company BOOLEAN NOT NULL DEFAULT FALSE,
-                    ADD COLUMN IF NOT EXISTS front_office_training BOOLEAN NOT NULL DEFAULT FALSE,
-                    ADD COLUMN IF NOT EXISTS front_office_training_date DATE,
-                    ADD COLUMN IF NOT EXISTS taxipro_id VARCHAR(128),
-                    ADD COLUMN IF NOT EXISTS feedback_telegram_report_enabled BOOLEAN NOT NULL DEFAULT FALSE;
-            """)
-            cursor.execute("""
-                DO $$
-                BEGIN
-                    IF NOT EXISTS (
-                        SELECT 1
-                        FROM pg_constraint
-                        WHERE conname = 'users_employment_type_check'
-                          AND conrelid = 'users'::regclass
-                    ) THEN
-                        ALTER TABLE users
-                            ADD CONSTRAINT users_employment_type_check
-                            CHECK (employment_type IN ('gph', 'of') OR employment_type IS NULL);
-                    END IF;
-                END $$;
             """)
             # Calls table
             cursor.execute("""
@@ -680,58 +611,44 @@ class Database:
                     scores JSONB,
                     criterion_comments JSONB,
                     direction_id INTEGER REFERENCES directions(id) ON DELETE SET NULL,
+                    comment_visible_to_operator BOOLEAN NOT NULL DEFAULT TRUE,
+                    question_resolved BOOLEAN NOT NULL DEFAULT FALSE,
+                    resolved_first_contact BOOLEAN,
+                    sv_request BOOLEAN NOT NULL DEFAULT FALSE,
+                    sv_request_comment TEXT,
+                    sv_request_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    sv_request_by_role VARCHAR(20),
+                    sv_request_at TIMESTAMP,
+                    sv_request_approved BOOLEAN NOT NULL DEFAULT FALSE,
+                    sv_request_approved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    sv_request_approved_at TIMESTAMP,
+                    sv_request_rejected BOOLEAN NOT NULL DEFAULT FALSE,
+                    sv_request_rejected_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    sv_request_rejected_at TIMESTAMP,
+                    sv_request_reject_comment TEXT,
                     UNIQUE(evaluator_id, operator_id, month, phone_number, score, comment, is_draft)
                 );
-                ALTER TABLE calls
-                    ADD COLUMN IF NOT EXISTS comment_visible_to_operator BOOLEAN NOT NULL DEFAULT TRUE,
-                    ADD COLUMN IF NOT EXISTS question_resolved BOOLEAN NOT NULL DEFAULT FALSE,
-                    ADD COLUMN IF NOT EXISTS resolved_first_contact BOOLEAN,
-                    ADD COLUMN IF NOT EXISTS sv_request BOOLEAN NOT NULL DEFAULT FALSE,
-                    ADD COLUMN IF NOT EXISTS sv_request_comment TEXT,
-                    ADD COLUMN IF NOT EXISTS sv_request_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
-                    ADD COLUMN IF NOT EXISTS sv_request_by_role VARCHAR(20),
-                    ADD COLUMN IF NOT EXISTS sv_request_at TIMESTAMP,
-                    ADD COLUMN IF NOT EXISTS sv_request_approved BOOLEAN NOT NULL DEFAULT FALSE,
-                    ADD COLUMN IF NOT EXISTS sv_request_approved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
-                    ADD COLUMN IF NOT EXISTS sv_request_approved_at TIMESTAMP,
-                    ADD COLUMN IF NOT EXISTS sv_request_rejected BOOLEAN NOT NULL DEFAULT FALSE,
-                    ADD COLUMN IF NOT EXISTS sv_request_rejected_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
-                    ADD COLUMN IF NOT EXISTS sv_request_rejected_at TIMESTAMP,
-                    ADD COLUMN IF NOT EXISTS sv_request_reject_comment TEXT;
-            """)
-            cursor.execute("""
-                UPDATE calls c
-                SET sv_request_by_role = LOWER(TRIM(u.role))
-                FROM users u
-                WHERE c.sv_request_by = u.id
-                  AND (c.sv_request_by_role IS NULL OR TRIM(c.sv_request_by_role) = '');
             """)
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS imported_calls (
                     id SERIAL PRIMARY KEY,
-                    external_id TEXT,                      -- id из JSON (можно UUID или любой string)
-                    operator_name TEXT NOT NULL,           -- ФИО из JSON
-                    operator_id INTEGER,                   -- resolved users.id (NULL допустим)
-                    month VARCHAR(7) NOT NULL,             -- format 'YYYY-MM'
-                    datetime_raw TIMESTAMP WITH TIME ZONE, -- parsed datetime (store with timezone)
+                    external_id TEXT,
+                    operator_name TEXT NOT NULL,
+                    operator_id INTEGER,
+                    month VARCHAR(7) NOT NULL,
+                    datetime_raw TIMESTAMP WITH TIME ZONE,
                     phone_number TEXT,
                     phone_normalized TEXT,
                     duration_sec DOUBLE PRECISION,
                     desired INTEGER,
                     available INTEGER,
-                    status VARCHAR(20) NOT NULL DEFAULT 'not_evaluated', -- not_evaluated / evaluated / skipped
+                    status VARCHAR(20) NOT NULL DEFAULT 'not_evaluated',
                     imported_at TIMESTAMP WITH TIME ZONE DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
                     evaluated_at TIMESTAMP WITH TIME ZONE,
                     evaluated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
                     notes TEXT
                 );
-
-                ALTER TABLE imported_calls ADD COLUMN id_int SERIAL;
-                ALTER TABLE imported_calls DROP CONSTRAINT imported_calls_pkey;
-                ALTER TABLE imported_calls DROP COLUMN id;
-                ALTER TABLE imported_calls RENAME COLUMN id_int TO id;
-                ALTER TABLE imported_calls ADD PRIMARY KEY (id);
                 CREATE UNIQUE INDEX IF NOT EXISTS uq_imported_calls_external_id_month ON imported_calls (external_id, month);
                 CREATE INDEX IF NOT EXISTS idx_imported_calls_month ON imported_calls(month);
                 CREATE INDEX IF NOT EXISTS idx_imported_calls_operator_id ON imported_calls(operator_id);
@@ -743,9 +660,9 @@ class Database:
                 CREATE TABLE IF NOT EXISTS calibration_rooms (
                     id SERIAL PRIMARY KEY,
                     created_by_admin_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                    operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    operator_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
                     month VARCHAR(7) NOT NULL,
-                    phone_number VARCHAR(255) NOT NULL,
+                    phone_number VARCHAR(255),
                     appeal_date TIMESTAMP,
                     direction_id INTEGER REFERENCES directions(id) ON DELETE SET NULL,
                     score FLOAT NOT NULL DEFAULT 0,
@@ -753,21 +670,10 @@ class Database:
                     audio_path TEXT,
                     scores JSONB NOT NULL DEFAULT '[]',
                     criterion_comments JSONB NOT NULL DEFAULT '[]',
+                    room_title TEXT,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
-            """)
-            cursor.execute("""
-                ALTER TABLE calibration_rooms
-                ADD COLUMN IF NOT EXISTS room_title TEXT;
-            """) 
-            cursor.execute("""
-                ALTER TABLE calibration_rooms
-                ALTER COLUMN operator_id DROP NOT NULL;
-            """)
-            cursor.execute("""
-                ALTER TABLE calibration_rooms
-                ALTER COLUMN phone_number DROP NOT NULL;
             """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS calibration_room_members (
@@ -797,19 +703,12 @@ class Database:
                     etalon_criterion_comments JSONB NOT NULL DEFAULT '[]',
                     etalon_updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
                     etalon_updated_at TIMESTAMP,
+                    general_comment TEXT,
+                    general_comment_updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    general_comment_updated_at TIMESTAMP,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
-            """)
-            cursor.execute("""
-                ALTER TABLE calibration_room_calls
-                    ADD COLUMN IF NOT EXISTS etalon_scores JSONB NOT NULL DEFAULT '[]',
-                    ADD COLUMN IF NOT EXISTS etalon_criterion_comments JSONB NOT NULL DEFAULT '[]',
-                    ADD COLUMN IF NOT EXISTS etalon_updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
-                    ADD COLUMN IF NOT EXISTS etalon_updated_at TIMESTAMP,
-                    ADD COLUMN IF NOT EXISTS general_comment TEXT,
-                    ADD COLUMN IF NOT EXISTS general_comment_updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
-                    ADD COLUMN IF NOT EXISTS general_comment_updated_at TIMESTAMP;
             """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS calibration_room_call_evaluations (
@@ -907,101 +806,38 @@ class Database:
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                     day DATE NOT NULL,
-                    work_time FLOAT NOT NULL DEFAULT 0,   -- часы работы
+                    work_time FLOAT NOT NULL DEFAULT 0,
                     break_time FLOAT NOT NULL DEFAULT 0,
                     talk_time FLOAT NOT NULL DEFAULT 0,
                     calls INTEGER NOT NULL DEFAULT 0,
-                    efficiency FLOAT NOT NULL DEFAULT 0,  -- часы
+                    efficiency FLOAT NOT NULL DEFAULT 0,
                     fine_amount FLOAT NOT NULL DEFAULT 0,
                     fine_reason VARCHAR(64),
                     fine_comment TEXT,
+                    training_time FLOAT NOT NULL DEFAULT 0,
+                    late_minutes INTEGER NOT NULL DEFAULT 0,
+                    late_seconds INTEGER NOT NULL DEFAULT 0,
+                    early_leave_minutes INTEGER NOT NULL DEFAULT 0,
+                    early_leave_seconds INTEGER NOT NULL DEFAULT 0,
+                    overtime_minutes INTEGER NOT NULL DEFAULT 0,
+                    overtime_seconds INTEGER NOT NULL DEFAULT 0,
+                    training_minutes INTEGER NOT NULL DEFAULT 0,
+                    training_seconds INTEGER NOT NULL DEFAULT 0,
+                    technical_reason_minutes INTEGER NOT NULL DEFAULT 0,
+                    technical_reason_seconds INTEGER NOT NULL DEFAULT 0,
+                    late_status VARCHAR(16),
+                    early_leave_status VARCHAR(16),
+                    training_status VARCHAR(16),
+                    technical_reason_status VARCHAR(16),
+                    late_fine_id INTEGER,
+                    early_leave_fine_id INTEGER,
+                    training_fine_id INTEGER,
+                    technical_reason_fine_id INTEGER,
+                    auto_aggregated BOOLEAN NOT NULL DEFAULT FALSE,
+                    auto_aggregated_at TIMESTAMP,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(operator_id, day)
                 );
-            """)
-            cursor.execute("""
-                ALTER TABLE daily_hours
-                ADD COLUMN IF NOT EXISTS training_time FLOAT NOT NULL DEFAULT 0;
-            """)
-            cursor.execute("""
-                ALTER TABLE daily_hours
-                ADD COLUMN IF NOT EXISTS late_minutes INTEGER NOT NULL DEFAULT 0;
-            """)
-            cursor.execute("""
-                ALTER TABLE daily_hours
-                ADD COLUMN IF NOT EXISTS late_seconds INTEGER NOT NULL DEFAULT 0;
-            """)
-            cursor.execute("""
-                ALTER TABLE daily_hours
-                ADD COLUMN IF NOT EXISTS early_leave_minutes INTEGER NOT NULL DEFAULT 0;
-            """)
-            cursor.execute("""
-                ALTER TABLE daily_hours
-                ADD COLUMN IF NOT EXISTS early_leave_seconds INTEGER NOT NULL DEFAULT 0;
-            """)
-            cursor.execute("""
-                ALTER TABLE daily_hours
-                ADD COLUMN IF NOT EXISTS overtime_minutes INTEGER NOT NULL DEFAULT 0;
-            """)
-            cursor.execute("""
-                ALTER TABLE daily_hours
-                ADD COLUMN IF NOT EXISTS overtime_seconds INTEGER NOT NULL DEFAULT 0;
-            """)
-            cursor.execute("""
-                ALTER TABLE daily_hours
-                ADD COLUMN IF NOT EXISTS training_minutes INTEGER NOT NULL DEFAULT 0;
-            """)
-            cursor.execute("""
-                ALTER TABLE daily_hours
-                ADD COLUMN IF NOT EXISTS training_seconds INTEGER NOT NULL DEFAULT 0;
-            """)
-            cursor.execute("""
-                ALTER TABLE daily_hours
-                ADD COLUMN IF NOT EXISTS technical_reason_minutes INTEGER NOT NULL DEFAULT 0;
-            """)
-            cursor.execute("""
-                ALTER TABLE daily_hours
-                ADD COLUMN IF NOT EXISTS technical_reason_seconds INTEGER NOT NULL DEFAULT 0;
-            """)
-            cursor.execute("""
-                ALTER TABLE daily_hours
-                ADD COLUMN IF NOT EXISTS late_status VARCHAR(16);
-            """)
-            cursor.execute("""
-                ALTER TABLE daily_hours
-                ADD COLUMN IF NOT EXISTS early_leave_status VARCHAR(16);
-            """)
-            cursor.execute("""
-                ALTER TABLE daily_hours
-                ADD COLUMN IF NOT EXISTS training_status VARCHAR(16);
-            """)
-            cursor.execute("""
-                ALTER TABLE daily_hours
-                ADD COLUMN IF NOT EXISTS technical_reason_status VARCHAR(16);
-            """)
-            cursor.execute("""
-                ALTER TABLE daily_hours
-                ADD COLUMN IF NOT EXISTS late_fine_id INTEGER;
-            """)
-            cursor.execute("""
-                ALTER TABLE daily_hours
-                ADD COLUMN IF NOT EXISTS early_leave_fine_id INTEGER;
-            """)
-            cursor.execute("""
-                ALTER TABLE daily_hours
-                ADD COLUMN IF NOT EXISTS training_fine_id INTEGER;
-            """)
-            cursor.execute("""
-                ALTER TABLE daily_hours
-                ADD COLUMN IF NOT EXISTS technical_reason_fine_id INTEGER;
-            """)
-            cursor.execute("""
-                ALTER TABLE daily_hours
-                ADD COLUMN IF NOT EXISTS auto_aggregated BOOLEAN NOT NULL DEFAULT FALSE;
-            """)
-            cursor.execute("""
-                ALTER TABLE daily_hours
-                ADD COLUMN IF NOT EXISTS auto_aggregated_at TIMESTAMP;
             """)
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_daily_hours_operator_day
@@ -1036,10 +872,6 @@ class Database:
                     comment TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
-            """)
-            cursor.execute("""
-                ALTER TABLE daily_bonuses
-                ADD COLUMN IF NOT EXISTS training_hours FLOAT;
             """)
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_daily_bonuses_operator_day
@@ -1087,18 +919,6 @@ class Database:
                 );
             """)
             cursor.execute("""
-                ALTER TABLE operator_technical_issues
-                ADD COLUMN IF NOT EXISTS start_time TIME NOT NULL DEFAULT TIME '00:00:00';
-            """)
-            cursor.execute("""
-                ALTER TABLE operator_technical_issues
-                ADD COLUMN IF NOT EXISTS end_time TIME NOT NULL DEFAULT TIME '23:59:59';
-            """)
-            cursor.execute("""
-                ALTER TABLE operator_technical_issues
-                ADD COLUMN IF NOT EXISTS workplace_number INTEGER;
-            """)
-            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS operator_offline_activities (
                     id SERIAL PRIMARY KEY,
                     batch_id UUID NOT NULL,
@@ -1110,14 +930,6 @@ class Database:
                     created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
-            """)
-            cursor.execute("""
-                ALTER TABLE operator_offline_activities
-                ADD COLUMN IF NOT EXISTS start_time TIME NOT NULL DEFAULT TIME '00:00:00';
-            """)
-            cursor.execute("""
-                ALTER TABLE operator_offline_activities
-                ADD COLUMN IF NOT EXISTS end_time TIME NOT NULL DEFAULT TIME '23:59:59';
             """)
 
             cursor.execute("""
@@ -1148,22 +960,6 @@ class Database:
                     sensitive_data_unlocked BOOLEAN NOT NULL DEFAULT FALSE,
                     sensitive_data_unlocked_at TIMESTAMP
                 );
-            """)
-            cursor.execute("""
-                ALTER TABLE user_sessions
-                ADD COLUMN IF NOT EXISTS sensitive_data_unlocked BOOLEAN NOT NULL DEFAULT FALSE;
-            """)
-            cursor.execute("""
-                ALTER TABLE user_sessions
-                ADD COLUMN IF NOT EXISTS sensitive_data_unlocked_at TIMESTAMP;
-            """)
-            cursor.execute("""
-                ALTER TABLE user_sessions
-                ADD COLUMN IF NOT EXISTS previous_refresh_token_hash TEXT;
-            """)
-            cursor.execute("""
-                ALTER TABLE user_sessions
-                ADD COLUMN IF NOT EXISTS previous_refresh_valid_until TIMESTAMP;
             """)
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id
@@ -1208,37 +1004,11 @@ class Database:
                     shift_date DATE NOT NULL,
                     start_time TIME NOT NULL,
                     end_time TIME NOT NULL,
-                    shift_type VARCHAR(32) NOT NULL DEFAULT 'regular',
+                    shift_type VARCHAR(32) NOT NULL DEFAULT 'regular' CHECK (shift_type IN ('regular', 'office_practice')),
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(operator_id, shift_date, start_time, end_time)
                 );
-            """)
-            cursor.execute("""
-                ALTER TABLE work_shifts
-                ADD COLUMN IF NOT EXISTS shift_type VARCHAR(32);
-            """)
-            cursor.execute("""
-                UPDATE work_shifts
-                SET shift_type = 'regular'
-                WHERE shift_type IS NULL;
-            """)
-            cursor.execute("""
-                ALTER TABLE work_shifts
-                ALTER COLUMN shift_type SET DEFAULT 'regular';
-            """)
-            cursor.execute("""
-                ALTER TABLE work_shifts
-                ALTER COLUMN shift_type SET NOT NULL;
-            """)
-            cursor.execute("""
-                ALTER TABLE work_shifts
-                DROP CONSTRAINT IF EXISTS work_shifts_shift_type_check;
-            """)
-            cursor.execute("""
-                ALTER TABLE work_shifts
-                ADD CONSTRAINT work_shifts_shift_type_check
-                CHECK (shift_type IN ('regular', 'office_practice'));
             """)
 
             # Break periods within shifts
@@ -1298,47 +1068,6 @@ class Database:
                     CONSTRAINT work_shift_swap_requests_participants_check CHECK (requester_operator_id <> target_operator_id)
                 );
             """)
-            cursor.execute("""
-                ALTER TABLE work_shift_swap_requests
-                ADD COLUMN IF NOT EXISTS direction_id INTEGER NULL REFERENCES directions(id) ON DELETE SET NULL;
-            """)
-            cursor.execute("""
-                ALTER TABLE work_shift_swap_requests
-                ADD COLUMN IF NOT EXISTS request_comment TEXT;
-            """)
-            cursor.execute("""
-                ALTER TABLE work_shift_swap_requests
-                ADD COLUMN IF NOT EXISTS response_comment TEXT;
-            """)
-            cursor.execute("""
-                ALTER TABLE work_shift_swap_requests
-                ADD COLUMN IF NOT EXISTS requested_shifts_json JSONB NOT NULL DEFAULT '{}'::jsonb;
-            """)
-            cursor.execute("""
-                ALTER TABLE work_shift_swap_requests
-                ADD COLUMN IF NOT EXISTS responded_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL;
-            """)
-            cursor.execute("""
-                ALTER TABLE work_shift_swap_requests
-                ADD COLUMN IF NOT EXISTS responded_at TIMESTAMP;
-            """)
-            cursor.execute("""
-                ALTER TABLE work_shift_swap_requests
-                ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMP;
-            """)
-            cursor.execute("""
-                ALTER TABLE work_shift_swap_requests
-                ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
-            """)
-            cursor.execute("""
-                ALTER TABLE users
-                DROP CONSTRAINT IF EXISTS users_status_check;
-            """)
-            cursor.execute("""
-                ALTER TABLE users
-                ADD CONSTRAINT users_status_check
-                CHECK (status IN ('working', 'fired', 'unpaid_leave', 'bs', 'sick_leave', 'annual_leave', 'dismissal'));
-            """)
             # Special statuses by period (vacation/sick leave/unpaid leave/dismissal)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS operator_schedule_status_periods (
@@ -1354,23 +1083,6 @@ class Database:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
-            """)
-            cursor.execute("""
-                ALTER TABLE operator_schedule_status_periods
-                ADD COLUMN IF NOT EXISTS is_blacklist BOOLEAN;
-            """)
-            cursor.execute("""
-                UPDATE operator_schedule_status_periods
-                SET is_blacklist = FALSE
-                WHERE is_blacklist IS NULL;
-            """)
-            cursor.execute("""
-                ALTER TABLE operator_schedule_status_periods
-                ALTER COLUMN is_blacklist SET DEFAULT FALSE;
-            """)
-            cursor.execute("""
-                ALTER TABLE operator_schedule_status_periods
-                ALTER COLUMN is_blacklist SET NOT NULL;
             """)
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_shift_breaks_shift_id
@@ -1421,35 +1133,9 @@ class Database:
                     event_date DATE NOT NULL,
                     status_key VARCHAR(128) NOT NULL,
                     state_note VARCHAR(255) NULL,
-                    event_kind VARCHAR(16) NOT NULL DEFAULT 'status',
+                    event_kind VARCHAR(16) NOT NULL DEFAULT 'status' CHECK (event_kind IN ('status', 'action')),
                     imported_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL
                 );
-            """)
-            cursor.execute("""
-                ALTER TABLE operator_status_events
-                ADD COLUMN IF NOT EXISTS event_kind VARCHAR(16);
-            """)
-            cursor.execute("""
-                UPDATE operator_status_events
-                SET event_kind = 'status'
-                WHERE event_kind IS NULL;
-            """)
-            cursor.execute("""
-                ALTER TABLE operator_status_events
-                ALTER COLUMN event_kind SET DEFAULT 'status';
-            """)
-            cursor.execute("""
-                ALTER TABLE operator_status_events
-                ALTER COLUMN event_kind SET NOT NULL;
-            """)
-            cursor.execute("""
-                ALTER TABLE operator_status_events
-                DROP CONSTRAINT IF EXISTS operator_status_events_event_kind_check;
-            """)
-            cursor.execute("""
-                ALTER TABLE operator_status_events
-                ADD CONSTRAINT operator_status_events_event_kind_check
-                CHECK (event_kind IN ('status', 'action'));
             """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS operator_status_segments (
@@ -1554,31 +1240,9 @@ class Database:
                     education TEXT,
                     published_at TEXT,
                     detail_url TEXT,
-                    scraped_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                    scraped_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    UNIQUE (run_uuid, detail_url)
                 );
-            """)
-            cursor.execute("""
-                DELETE FROM recruiting_resumes newer
-                USING recruiting_resumes older
-                WHERE newer.id > older.id
-                  AND newer.run_uuid = older.run_uuid
-                  AND newer.detail_url IS NOT NULL
-                  AND newer.detail_url = older.detail_url;
-            """)
-            cursor.execute("""
-                DO $$
-                BEGIN
-                    IF NOT EXISTS (
-                        SELECT 1
-                        FROM pg_constraint
-                        WHERE conname = 'uq_recruiting_resumes_run_detail_url'
-                          AND conrelid = 'recruiting_resumes'::regclass
-                    ) THEN
-                        ALTER TABLE recruiting_resumes
-                            ADD CONSTRAINT uq_recruiting_resumes_run_detail_url
-                            UNIQUE (run_uuid, detail_url);
-                    END IF;
-                END $$;
             """)
 
             # Surveys tables
@@ -1604,36 +1268,6 @@ class Database:
                 );
             """)
             cursor.execute("""
-                ALTER TABLE surveys
-                ADD COLUMN IF NOT EXISTS repeat_root_id INTEGER REFERENCES surveys(id) ON DELETE SET NULL;
-            """)
-            cursor.execute("""
-                ALTER TABLE surveys
-                ADD COLUMN IF NOT EXISTS repeat_iteration INTEGER;
-            """)
-            cursor.execute("""
-                UPDATE surveys
-                SET repeat_iteration = 1
-                WHERE repeat_iteration IS NULL OR repeat_iteration < 1;
-            """)
-            cursor.execute("""
-                ALTER TABLE surveys
-                ALTER COLUMN repeat_iteration SET DEFAULT 1;
-            """)
-            cursor.execute("""
-                ALTER TABLE surveys
-                ALTER COLUMN repeat_iteration SET NOT NULL;
-            """)
-            cursor.execute("""
-                UPDATE surveys
-                SET repeat_root_id = id
-                WHERE repeat_root_id IS NULL;
-            """)
-            cursor.execute("""
-                ALTER TABLE surveys
-                ADD COLUMN IF NOT EXISTS is_test BOOLEAN NOT NULL DEFAULT FALSE;
-            """)
-            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS survey_questions (
                     id SERIAL PRIMARY KEY,
                     survey_id INTEGER NOT NULL REFERENCES surveys(id) ON DELETE CASCADE,
@@ -1647,23 +1281,6 @@ class Database:
                     created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
                     UNIQUE (survey_id, position)
                 );
-            """)
-            cursor.execute("""
-                ALTER TABLE survey_questions
-                ADD COLUMN IF NOT EXISTS correct_options_json JSONB;
-            """)
-            cursor.execute("""
-                UPDATE survey_questions
-                SET correct_options_json = '[]'::jsonb
-                WHERE correct_options_json IS NULL;
-            """)
-            cursor.execute("""
-                ALTER TABLE survey_questions
-                ALTER COLUMN correct_options_json SET DEFAULT '[]'::jsonb;
-            """)
-            cursor.execute("""
-                ALTER TABLE survey_questions
-                ALTER COLUMN correct_options_json SET NOT NULL;
             """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS survey_assignments (
@@ -1717,18 +1334,6 @@ class Database:
                     updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                 );
             """)
-            cursor.execute("""
-                ALTER TABLE tasks
-                ADD COLUMN IF NOT EXISTS completion_summary TEXT;
-            """)
-            cursor.execute("""
-                ALTER TABLE tasks
-                ADD COLUMN IF NOT EXISTS completed_by INTEGER REFERENCES users(id) ON DELETE SET NULL;
-            """)
-            cursor.execute("""
-                ALTER TABLE tasks
-                ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP;
-            """)
 
             # Tasks status history
             cursor.execute("""
@@ -1758,48 +1363,6 @@ class Database:
                     uploaded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
                     created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                 );
-            """)
-            cursor.execute("""
-                ALTER TABLE task_attachments
-                ADD COLUMN IF NOT EXISTS storage_type VARCHAR(16) NOT NULL DEFAULT 'gcs';
-            """)
-            cursor.execute("""
-                ALTER TABLE task_attachments
-                ALTER COLUMN storage_type SET DEFAULT 'gcs';
-            """)
-            cursor.execute("""
-                ALTER TABLE task_attachments
-                ADD COLUMN IF NOT EXISTS gcs_bucket VARCHAR(255);
-            """)
-            cursor.execute("""
-                ALTER TABLE task_attachments
-                ADD COLUMN IF NOT EXISTS gcs_blob_path TEXT;
-            """)
-            cursor.execute("""
-                ALTER TABLE task_attachments
-                ADD COLUMN IF NOT EXISTS attachment_kind VARCHAR(16) NOT NULL DEFAULT 'initial';
-            """)
-            cursor.execute("""
-                ALTER TABLE task_attachments
-                DROP CONSTRAINT IF EXISTS task_attachments_storage_type_check;
-            """)
-            cursor.execute("""
-                ALTER TABLE task_attachments
-                ADD CONSTRAINT task_attachments_storage_type_check
-                CHECK (storage_type IN ('db', 'gcs'));
-            """)
-            cursor.execute("""
-                ALTER TABLE task_attachments
-                DROP CONSTRAINT IF EXISTS task_attachments_attachment_kind_check;
-            """)
-            cursor.execute("""
-                ALTER TABLE task_attachments
-                ADD CONSTRAINT task_attachments_attachment_kind_check
-                CHECK (attachment_kind IN ('initial', 'result'));
-            """)
-            cursor.execute("""
-                ALTER TABLE task_attachments
-                ALTER COLUMN file_data DROP NOT NULL;
             """)
 
             cursor.execute("""
@@ -1887,10 +1450,6 @@ class Database:
                 INSERT INTO resource_settings (id)
                 VALUES (1)
                 ON CONFLICT (id) DO NOTHING;
-            """)
-            cursor.execute("""
-                ALTER TABLE resource_settings
-                ADD COLUMN IF NOT EXISTS selected_direction_ids JSONB NOT NULL DEFAULT '[]'::jsonb;
             """)
 
             # Optimized Indexes (added more based on query patterns)
@@ -2041,21 +1600,6 @@ class Database:
                     published_at TIMESTAMP,
                     UNIQUE(course_id, version_number)
                 );
-
-                ALTER TABLE lms_courses
-                ADD COLUMN IF NOT EXISTS current_version_id INTEGER;
-
-                DO $$
-                BEGIN
-                    ALTER TABLE lms_courses
-                    ADD CONSTRAINT lms_courses_current_version_fk
-                    FOREIGN KEY (current_version_id)
-                    REFERENCES lms_course_versions(id)
-                    ON DELETE SET NULL;
-                EXCEPTION
-                    WHEN duplicate_object THEN
-                        NULL;
-                END $$;
 
                 CREATE TABLE IF NOT EXISTS lms_modules (
                     id SERIAL PRIMARY KEY,
@@ -2277,69 +1821,6 @@ class Database:
                     created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                 );
 
-                -- LMS compatibility migrations for older databases
-                ALTER TABLE lms_tests
-                    ADD COLUMN IF NOT EXISTS question_count INTEGER;
-                ALTER TABLE lms_tests
-                    ADD COLUMN IF NOT EXISTS random_order BOOLEAN NOT NULL DEFAULT TRUE;
-                ALTER TABLE lms_tests
-                    ADD COLUMN IF NOT EXISTS position INTEGER;
-                ALTER TABLE lms_tests
-                    ADD COLUMN IF NOT EXISTS source_lesson_id INTEGER;
-                ALTER TABLE lms_test_attempts
-                    ADD COLUMN IF NOT EXISTS question_ids JSONB NOT NULL DEFAULT '[]'::jsonb;
-                ALTER TABLE lms_lessons
-                    ADD COLUMN IF NOT EXISTS lesson_type VARCHAR(20) NOT NULL DEFAULT 'video';
-                ALTER TABLE lms_lesson_progress
-                    ADD COLUMN IF NOT EXISTS content_completed_at TIMESTAMP;
-                DO $$
-                BEGIN
-                    ALTER TABLE lms_lessons
-                    ADD CONSTRAINT lms_lessons_lesson_type_check
-                    CHECK (lesson_type IN ('video', 'text', 'combined'));
-                EXCEPTION
-                    WHEN duplicate_object THEN
-                        NULL;
-                END $$;
-                -- Backfill legacy lesson types after introducing `lesson_type`
-                UPDATE lms_lessons l
-                SET lesson_type = 'text'
-                WHERE COALESCE(NULLIF(TRIM(LOWER(l.lesson_type)), ''), 'video') = 'video'
-                  AND EXISTS (
-                      SELECT 1
-                      FROM lms_lesson_materials lm
-                      WHERE lm.lesson_id = l.id
-                        AND lm.material_type = 'text'
-                  )
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM lms_lesson_materials lm
-                      WHERE lm.lesson_id = l.id
-                        AND lm.material_type = 'video'
-                  );
-                UPDATE lms_lessons l
-                SET lesson_type = 'combined'
-                WHERE COALESCE(NULLIF(TRIM(LOWER(l.lesson_type)), ''), 'video') IN ('video', 'text')
-                  AND EXISTS (
-                      SELECT 1
-                      FROM lms_lesson_materials lm
-                      WHERE lm.lesson_id = l.id
-                        AND lm.material_type = 'video'
-                  )
-                  AND EXISTS (
-                      SELECT 1
-                      FROM lms_lesson_materials lm
-                      WHERE lm.lesson_id = l.id
-                        AND lm.material_type = 'text'
-                  )
-                  AND EXISTS (
-                      SELECT 1
-                      FROM lms_lesson_materials lm
-                      WHERE lm.lesson_id = l.id
-                        AND lm.material_type IN ('text', 'video')
-                        AND COALESCE(LOWER(lm.metadata->>'combined_block'), '') IN ('1', 'true', 't', 'yes', 'y')
-                  );
-
                 -- LMS indexes
                 CREATE INDEX IF NOT EXISTS idx_lms_courses_status ON lms_courses(status);
                 CREATE INDEX IF NOT EXISTS idx_lms_course_versions_course_status ON lms_course_versions(course_id, status);
@@ -2378,25 +1859,6 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_lms_certificates_token ON lms_certificates(verify_token);
                 CREATE INDEX IF NOT EXISTS idx_lms_notifications_user_read ON lms_notifications(user_id, is_read, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_lms_admin_audit_actor_created ON lms_admin_audit_log(actor_id, created_at DESC);
-
-                -- Departments
-                CREATE TABLE IF NOT EXISTS departments (
-                    id SERIAL PRIMARY KEY,
-                    code VARCHAR(50) NOT NULL UNIQUE,
-                    slug VARCHAR(100) NOT NULL UNIQUE,
-                    name VARCHAR(255) NOT NULL,
-                    description TEXT,
-                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
-                    created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
-                );
-
-                -- Add department_id FK to users
-                ALTER TABLE users
-                    ADD COLUMN IF NOT EXISTS department_id INTEGER REFERENCES departments(id) ON DELETE SET NULL;
-
-                -- Add department_id FK to directions (directions belong to a department)
-                ALTER TABLE directions
-                    ADD COLUMN IF NOT EXISTS department_id INTEGER REFERENCES departments(id) ON DELETE SET NULL;
 
                 -- Operator profiles
                 CREATE TABLE IF NOT EXISTS operator_profiles (
@@ -2463,57 +1925,6 @@ class Database:
                 INSERT INTO departments (code, slug, name, description)
                 VALUES ('szov', 'szov', 'СЗоВ — Служба заботы о водителях', 'Техническая поддержка водителей. Контроль качества звонков, оценка операторов, графики, обучение.')
                 ON CONFLICT (code) DO NOTHING;
-
-                -- Migrate existing data into new profile tables
-                -- Assign all existing users to default department if not yet assigned
-                UPDATE users
-                SET department_id = (SELECT id FROM departments WHERE code = 'szov' LIMIT 1)
-                WHERE department_id IS NULL;
-
-                -- Assign all existing directions to default department if not yet assigned
-                UPDATE directions
-                SET department_id = (SELECT id FROM departments WHERE code = 'szov' LIMIT 1)
-                WHERE department_id IS NULL;
-
-                -- Populate operator_profiles from users for operators/trainees
-                INSERT INTO operator_profiles (
-                    user_id, direction_id, supervisor_id, is_active, rate,
-                    sip_number, has_proxy, proxy_card_number, has_driver_license,
-                    internship_in_company, front_office_training, front_office_training_date, taxipro_id
-                )
-                SELECT
-                    u.id, u.direction_id, u.supervisor_id, COALESCE(u.is_active, FALSE), COALESCE(u.rate, 1.00),
-                    u.sip_number, COALESCE(u.has_proxy, FALSE), u.proxy_card_number, COALESCE(u.has_driver_license, FALSE),
-                    COALESCE(u.internship_in_company, FALSE), COALESCE(u.front_office_training, FALSE), u.front_office_training_date, u.taxipro_id
-                FROM users u
-                WHERE LOWER(COALESCE(u.role, '')) IN ('operator', 'trainee')
-                ON CONFLICT (user_id) DO NOTHING;
-
-                -- Populate user_hr_profiles from users for ALL users
-                INSERT INTO user_hr_profiles (
-                    user_id, phone, email, instagram, telegram_nick,
-                    company_name, employment_type,
-                    study_place, study_course, study_completed, study_completion_year,
-                    close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
-                    close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
-                    card_number
-                )
-                SELECT
-                    u.id, u.phone, u.email, u.instagram, u.telegram_nick,
-                    u.company_name, u.employment_type,
-                    u.study_place, u.study_course, COALESCE(u.study_completed, FALSE), u.study_completion_year,
-                    u.close_contact_1_relation, u.close_contact_1_full_name, u.close_contact_1_phone,
-                    u.close_contact_2_relation, u.close_contact_2_full_name, u.close_contact_2_phone,
-                    u.card_number
-                FROM users u
-                ON CONFLICT (user_id) DO NOTHING;
-
-                -- Populate admin_profiles from users for admin/super_admin
-                INSERT INTO admin_profiles (user_id, feedback_telegram_report_enabled)
-                SELECT u.id, COALESCE(u.feedback_telegram_report_enabled, FALSE)
-                FROM users u
-                WHERE LOWER(COALESCE(u.role, '')) IN ('admin', 'super_admin')
-                ON CONFLICT (user_id) DO NOTHING;
             """)
 
     def create_user(
