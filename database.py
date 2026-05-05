@@ -2378,6 +2378,142 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_lms_certificates_token ON lms_certificates(verify_token);
                 CREATE INDEX IF NOT EXISTS idx_lms_notifications_user_read ON lms_notifications(user_id, is_read, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_lms_admin_audit_actor_created ON lms_admin_audit_log(actor_id, created_at DESC);
+
+                -- Departments
+                CREATE TABLE IF NOT EXISTS departments (
+                    id SERIAL PRIMARY KEY,
+                    code VARCHAR(50) NOT NULL UNIQUE,
+                    slug VARCHAR(100) NOT NULL UNIQUE,
+                    name VARCHAR(255) NOT NULL,
+                    description TEXT,
+                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+
+                -- Add department_id FK to users
+                ALTER TABLE users
+                    ADD COLUMN IF NOT EXISTS department_id INTEGER REFERENCES departments(id) ON DELETE SET NULL;
+
+                -- Add department_id FK to directions (directions belong to a department)
+                ALTER TABLE directions
+                    ADD COLUMN IF NOT EXISTS department_id INTEGER REFERENCES departments(id) ON DELETE SET NULL;
+
+                -- Operator profiles
+                CREATE TABLE IF NOT EXISTS operator_profiles (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+                    direction_id INTEGER REFERENCES directions(id) ON DELETE SET NULL,
+                    supervisor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    is_active BOOLEAN NOT NULL DEFAULT FALSE,
+                    rate DECIMAL(3,2) NOT NULL DEFAULT 1.00 CHECK(rate IN (1.00, 0.75, 0.50)),
+                    sip_number VARCHAR(64),
+                    has_proxy BOOLEAN NOT NULL DEFAULT FALSE,
+                    proxy_card_number VARCHAR(64),
+                    has_driver_license BOOLEAN NOT NULL DEFAULT FALSE,
+                    internship_in_company BOOLEAN NOT NULL DEFAULT FALSE,
+                    front_office_training BOOLEAN NOT NULL DEFAULT FALSE,
+                    front_office_training_date DATE,
+                    taxipro_id VARCHAR(128)
+                );
+
+                -- User HR profiles (кадровые данные)
+                CREATE TABLE IF NOT EXISTS user_hr_profiles (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+                    phone VARCHAR(50),
+                    email VARCHAR(255),
+                    instagram VARCHAR(255),
+                    telegram_nick VARCHAR(255),
+                    company_name VARCHAR(255),
+                    employment_type VARCHAR(10) CHECK (employment_type IN ('gph', 'of') OR employment_type IS NULL),
+                    study_place VARCHAR(255),
+                    study_course VARCHAR(100),
+                    study_completed BOOLEAN NOT NULL DEFAULT FALSE,
+                    study_completion_year INTEGER,
+                    close_contact_1_relation VARCHAR(100),
+                    close_contact_1_full_name VARCHAR(255),
+                    close_contact_1_phone VARCHAR(50),
+                    close_contact_2_relation VARCHAR(100),
+                    close_contact_2_full_name VARCHAR(255),
+                    close_contact_2_phone VARCHAR(50),
+                    card_number VARCHAR(64)
+                );
+
+                -- Admin profiles
+                CREATE TABLE IF NOT EXISTS admin_profiles (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+                    feedback_telegram_report_enabled BOOLEAN NOT NULL DEFAULT FALSE
+                );
+
+                -- Indexes for new tables
+                CREATE INDEX IF NOT EXISTS idx_departments_code ON departments(code);
+                CREATE INDEX IF NOT EXISTS idx_departments_slug ON departments(slug);
+                CREATE INDEX IF NOT EXISTS idx_departments_is_active ON departments(is_active);
+                CREATE INDEX IF NOT EXISTS idx_users_department_id ON users(department_id);
+                CREATE INDEX IF NOT EXISTS idx_directions_department_id ON directions(department_id);
+                CREATE INDEX IF NOT EXISTS idx_operator_profiles_user_id ON operator_profiles(user_id);
+                CREATE INDEX IF NOT EXISTS idx_operator_profiles_direction_id ON operator_profiles(direction_id);
+                CREATE INDEX IF NOT EXISTS idx_operator_profiles_supervisor_id ON operator_profiles(supervisor_id);
+                CREATE INDEX IF NOT EXISTS idx_operator_profiles_is_active ON operator_profiles(is_active);
+                CREATE INDEX IF NOT EXISTS idx_user_hr_profiles_user_id ON user_hr_profiles(user_id);
+                CREATE INDEX IF NOT EXISTS idx_admin_profiles_user_id ON admin_profiles(user_id);
+
+                -- Seed default department (СЗоВ)
+                INSERT INTO departments (code, slug, name, description)
+                VALUES ('szov', 'szov', 'СЗоВ — Служба заботы о водителях', 'Техническая поддержка водителей. Контроль качества звонков, оценка операторов, графики, обучение.')
+                ON CONFLICT (code) DO NOTHING;
+
+                -- Migrate existing data into new profile tables
+                -- Assign all existing users to default department if not yet assigned
+                UPDATE users
+                SET department_id = (SELECT id FROM departments WHERE code = 'szov' LIMIT 1)
+                WHERE department_id IS NULL;
+
+                -- Assign all existing directions to default department if not yet assigned
+                UPDATE directions
+                SET department_id = (SELECT id FROM departments WHERE code = 'szov' LIMIT 1)
+                WHERE department_id IS NULL;
+
+                -- Populate operator_profiles from users for operators/trainees
+                INSERT INTO operator_profiles (
+                    user_id, direction_id, supervisor_id, is_active, rate,
+                    sip_number, has_proxy, proxy_card_number, has_driver_license,
+                    internship_in_company, front_office_training, front_office_training_date, taxipro_id
+                )
+                SELECT
+                    u.id, u.direction_id, u.supervisor_id, COALESCE(u.is_active, FALSE), COALESCE(u.rate, 1.00),
+                    u.sip_number, COALESCE(u.has_proxy, FALSE), u.proxy_card_number, COALESCE(u.has_driver_license, FALSE),
+                    COALESCE(u.internship_in_company, FALSE), COALESCE(u.front_office_training, FALSE), u.front_office_training_date, u.taxipro_id
+                FROM users u
+                WHERE LOWER(COALESCE(u.role, '')) IN ('operator', 'trainee')
+                ON CONFLICT (user_id) DO NOTHING;
+
+                -- Populate user_hr_profiles from users for ALL users
+                INSERT INTO user_hr_profiles (
+                    user_id, phone, email, instagram, telegram_nick,
+                    company_name, employment_type,
+                    study_place, study_course, study_completed, study_completion_year,
+                    close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
+                    close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
+                    card_number
+                )
+                SELECT
+                    u.id, u.phone, u.email, u.instagram, u.telegram_nick,
+                    u.company_name, u.employment_type,
+                    u.study_place, u.study_course, COALESCE(u.study_completed, FALSE), u.study_completion_year,
+                    u.close_contact_1_relation, u.close_contact_1_full_name, u.close_contact_1_phone,
+                    u.close_contact_2_relation, u.close_contact_2_full_name, u.close_contact_2_phone,
+                    u.card_number
+                FROM users u
+                ON CONFLICT (user_id) DO NOTHING;
+
+                -- Populate admin_profiles from users for admin/super_admin
+                INSERT INTO admin_profiles (user_id, feedback_telegram_report_enabled)
+                SELECT u.id, COALESCE(u.feedback_telegram_report_enabled, FALSE)
+                FROM users u
+                WHERE LOWER(COALESCE(u.role, '')) IN ('admin', 'super_admin')
+                ON CONFLICT (user_id) DO NOTHING;
             """)
 
     def create_user(
@@ -2418,7 +2554,8 @@ class Database:
         internship_in_company=None,
         front_office_training=None,
         front_office_training_date=None,
-        taxipro_id=None
+        taxipro_id=None,
+        department_id=None
     ):
         if login is None:
             base_login = f"user_{str(uuid.uuid4())[:8]}"
@@ -2507,6 +2644,94 @@ class Database:
                         (target_user_id,)
                     )
 
+            def _sync_profiles(uid):
+                # Assign department (default to szov if not specified)
+                if department_id:
+                    cursor.execute("UPDATE users SET department_id = %s WHERE id = %s AND department_id IS NULL", (department_id, uid))
+                else:
+                    cursor.execute("""
+                        UPDATE users SET department_id = (SELECT id FROM departments WHERE code = 'szov' LIMIT 1)
+                        WHERE id = %s AND department_id IS NULL
+                    """, (uid,))
+
+                # HR profile (all users)
+                cursor.execute("""
+                    INSERT INTO user_hr_profiles (
+                        user_id, phone, email, instagram, telegram_nick,
+                        company_name, employment_type,
+                        study_place, study_course, study_completed, study_completion_year,
+                        close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
+                        close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
+                        card_number
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (user_id) DO UPDATE SET
+                        phone = COALESCE(EXCLUDED.phone, user_hr_profiles.phone),
+                        email = COALESCE(EXCLUDED.email, user_hr_profiles.email),
+                        instagram = COALESCE(EXCLUDED.instagram, user_hr_profiles.instagram),
+                        telegram_nick = COALESCE(EXCLUDED.telegram_nick, user_hr_profiles.telegram_nick),
+                        company_name = COALESCE(EXCLUDED.company_name, user_hr_profiles.company_name),
+                        employment_type = COALESCE(EXCLUDED.employment_type, user_hr_profiles.employment_type),
+                        study_place = COALESCE(EXCLUDED.study_place, user_hr_profiles.study_place),
+                        study_course = COALESCE(EXCLUDED.study_course, user_hr_profiles.study_course),
+                        study_completed = EXCLUDED.study_completed,
+                        study_completion_year = COALESCE(EXCLUDED.study_completion_year, user_hr_profiles.study_completion_year),
+                        close_contact_1_relation = COALESCE(EXCLUDED.close_contact_1_relation, user_hr_profiles.close_contact_1_relation),
+                        close_contact_1_full_name = COALESCE(EXCLUDED.close_contact_1_full_name, user_hr_profiles.close_contact_1_full_name),
+                        close_contact_1_phone = COALESCE(EXCLUDED.close_contact_1_phone, user_hr_profiles.close_contact_1_phone),
+                        close_contact_2_relation = COALESCE(EXCLUDED.close_contact_2_relation, user_hr_profiles.close_contact_2_relation),
+                        close_contact_2_full_name = COALESCE(EXCLUDED.close_contact_2_full_name, user_hr_profiles.close_contact_2_full_name),
+                        close_contact_2_phone = COALESCE(EXCLUDED.close_contact_2_phone, user_hr_profiles.close_contact_2_phone),
+                        card_number = COALESCE(EXCLUDED.card_number, user_hr_profiles.card_number)
+                """, (
+                    uid, phone, email, instagram, telegram_nick,
+                    company_name, employment_type,
+                    study_place, study_course,
+                    (study_completed_value if study_completed_value is not None else False),
+                    study_completion_year,
+                    close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
+                    close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
+                    card_number
+                ))
+
+                # Operator profile (only for operator/trainee)
+                if role_norm in ('operator', 'trainee'):
+                    cursor.execute("""
+                        INSERT INTO operator_profiles (
+                            user_id, direction_id, supervisor_id, is_active, rate,
+                            sip_number, has_proxy, proxy_card_number, has_driver_license,
+                            internship_in_company, front_office_training, front_office_training_date, taxipro_id
+                        ) VALUES (%s, %s, %s, FALSE, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (user_id) DO UPDATE SET
+                            direction_id = COALESCE(EXCLUDED.direction_id, operator_profiles.direction_id),
+                            supervisor_id = COALESCE(EXCLUDED.supervisor_id, operator_profiles.supervisor_id),
+                            rate = COALESCE(EXCLUDED.rate, operator_profiles.rate),
+                            sip_number = COALESCE(EXCLUDED.sip_number, operator_profiles.sip_number),
+                            has_proxy = EXCLUDED.has_proxy,
+                            proxy_card_number = COALESCE(EXCLUDED.proxy_card_number, operator_profiles.proxy_card_number),
+                            has_driver_license = EXCLUDED.has_driver_license,
+                            internship_in_company = EXCLUDED.internship_in_company,
+                            front_office_training = EXCLUDED.front_office_training,
+                            front_office_training_date = COALESCE(EXCLUDED.front_office_training_date, operator_profiles.front_office_training_date),
+                            taxipro_id = COALESCE(EXCLUDED.taxipro_id, operator_profiles.taxipro_id)
+                    """, (
+                        uid, direction_id, supervisor_id, rate,
+                        sip_number,
+                        (has_proxy_value if has_proxy_value is not None else False),
+                        proxy_card_number,
+                        (has_driver_license_value if has_driver_license_value is not None else False),
+                        (internship_in_company_value if internship_in_company_value is not None else False),
+                        (front_office_training_value if front_office_training_value is not None else False),
+                        front_office_training_date, taxipro_id
+                    ))
+
+                # Admin profile (only for admin/super_admin)
+                if role_norm in ('admin', 'super_admin'):
+                    cursor.execute("""
+                        INSERT INTO admin_profiles (user_id, feedback_telegram_report_enabled)
+                        VALUES (%s, FALSE)
+                        ON CONFLICT (user_id) DO NOTHING
+                    """, (uid,))
+
             cursor.execute("SAVEPOINT before_insert")
             try:
                 cursor.execute("""
@@ -2542,6 +2767,7 @@ class Database:
                 ))
                 created_user_id = cursor.fetchone()[0]
                 _clear_trainer_links(created_user_id)
+                _sync_profiles(created_user_id)
                 return created_user_id
             except psycopg2.IntegrityError as e:
                 cursor.execute("ROLLBACK TO SAVEPOINT before_insert")
@@ -2593,6 +2819,7 @@ class Database:
                     if result:
                         updated_user_id = result[0]
                         _clear_trainer_links(updated_user_id)
+                        _sync_profiles(updated_user_id)
                         return updated_user_id
                     else:
                         raise ValueError("User with this name and role not found")
@@ -2648,6 +2875,7 @@ class Database:
                     ))
                     updated_user_id = cursor.fetchone()[0]
                     _clear_trainer_links(updated_user_id)
+                    _sync_profiles(updated_user_id)
                     return updated_user_id
                 else:
                     raise
@@ -2673,10 +2901,12 @@ class Database:
 
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT COALESCE(feedback_telegram_report_enabled, FALSE)
-                FROM users
-                WHERE id = %s
-                  AND LOWER(COALESCE(role, '')) IN ('admin', 'super_admin')
+                SELECT COALESCE(ap.feedback_telegram_report_enabled,
+                               u.feedback_telegram_report_enabled, FALSE)
+                FROM users u
+                LEFT JOIN admin_profiles ap ON ap.user_id = u.id
+                WHERE u.id = %s
+                  AND LOWER(COALESCE(u.role, '')) IN ('admin', 'super_admin')
                 LIMIT 1
             """, (user_id_int,))
             row = cursor.fetchone()
@@ -2701,17 +2931,25 @@ class Database:
             row = cursor.fetchone()
             if not row:
                 return None
+            # Sync to admin_profiles
+            cursor.execute("""
+                INSERT INTO admin_profiles (user_id, feedback_telegram_report_enabled)
+                VALUES (%s, %s)
+                ON CONFLICT (user_id) DO UPDATE SET feedback_telegram_report_enabled = EXCLUDED.feedback_telegram_report_enabled
+            """, (user_id_int, bool(enabled)))
             return bool(row[0])
 
     def get_admins_with_feedback_telegram_reports_enabled(self) -> List[Dict[str, Any]]:
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT id, name, telegram_id
-                FROM users
-                WHERE LOWER(COALESCE(role, '')) IN ('admin', 'super_admin')
-                  AND telegram_id IS NOT NULL
-                  AND COALESCE(feedback_telegram_report_enabled, FALSE) = TRUE
-                ORDER BY name
+                SELECT u.id, u.name, u.telegram_id
+                FROM users u
+                LEFT JOIN admin_profiles ap ON ap.user_id = u.id
+                WHERE LOWER(COALESCE(u.role, '')) IN ('admin', 'super_admin')
+                  AND u.telegram_id IS NOT NULL
+                  AND COALESCE(ap.feedback_telegram_report_enabled,
+                               u.feedback_telegram_report_enabled, FALSE) = TRUE
+                ORDER BY u.name
             """)
             rows = cursor.fetchall()
 
@@ -2744,6 +2982,67 @@ class Database:
                     "calculation_model_code": normalize_calculation_model_code(row[5], row[1])
                 } for row in cursor.fetchall()
             ]
+
+    # ── Department CRUD ──────────────────────────────────────────────
+
+    def get_departments(self):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id, code, slug, name, description, is_active
+                FROM departments
+                ORDER BY name
+            """)
+            return [
+                {"id": r[0], "code": r[1], "slug": r[2], "name": r[3], "description": r[4], "is_active": r[5]}
+                for r in cursor.fetchall()
+            ]
+
+    def get_department_by_id(self, department_id):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id, code, slug, name, description, is_active
+                FROM departments WHERE id = %s
+            """, (department_id,))
+            r = cursor.fetchone()
+            if not r:
+                return None
+            return {"id": r[0], "code": r[1], "slug": r[2], "name": r[3], "description": r[4], "is_active": r[5]}
+
+    def create_department(self, code, name, description=None, slug=None):
+        if not slug:
+            slug = code
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO departments (code, slug, name, description)
+                VALUES (%s, %s, %s, %s)
+                RETURNING id, code, slug, name, description, is_active
+            """, (code, slug, name, description))
+            r = cursor.fetchone()
+            return {"id": r[0], "code": r[1], "slug": r[2], "name": r[3], "description": r[4], "is_active": r[5]}
+
+    def update_department(self, department_id, **kwargs):
+        allowed = {'code', 'slug', 'name', 'description', 'is_active'}
+        updates = {k: v for k, v in kwargs.items() if k in allowed}
+        if not updates:
+            return self.get_department_by_id(department_id)
+        from psycopg2 import sql as _sql
+        set_clause = _sql.SQL(', ').join(
+            _sql.SQL("{} = %s").format(_sql.Identifier(k)) for k in updates
+        )
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                _sql.SQL("UPDATE departments SET {} WHERE id = %s RETURNING id, code, slug, name, description, is_active").format(set_clause),
+                list(updates.values()) + [department_id]
+            )
+            r = cursor.fetchone()
+            if not r:
+                return None
+            return {"id": r[0], "code": r[1], "slug": r[2], "name": r[3], "description": r[4], "is_active": r[5]}
+
+    def assign_user_department(self, user_id, department_id):
+        with self._get_cursor() as cursor:
+            cursor.execute("UPDATE users SET department_id = %s WHERE id = %s RETURNING id", (department_id, user_id))
+            return cursor.fetchone() is not None
 
     def insert_or_update_daily_hours(self, operator_id, day, work_time=0.0, break_time=0.0,
                                     talk_time=0.0, calls=0, efficiency=0.0,
@@ -7048,6 +7347,20 @@ class Database:
                 })
             return result
 
+    _OPERATOR_PROFILE_FIELDS = frozenset([
+        'direction_id', 'supervisor_id', 'rate', 'sip_number',
+        'has_proxy', 'proxy_card_number', 'has_driver_license',
+        'internship_in_company', 'front_office_training', 'front_office_training_date', 'taxipro_id'
+    ])
+    _HR_PROFILE_FIELDS = frozenset([
+        'phone', 'email', 'instagram', 'telegram_nick',
+        'company_name', 'employment_type',
+        'study_place', 'study_course', 'study_completed', 'study_completion_year',
+        'close_contact_1_relation', 'close_contact_1_full_name', 'close_contact_1_phone',
+        'close_contact_2_relation', 'close_contact_2_full_name', 'close_contact_2_phone',
+        'card_number'
+    ])
+
     def update_user(self, user_id, field, value, changed_by=None):
         allowed_fields = [
             'direction_id',
@@ -7111,10 +7424,29 @@ class Database:
                         work_date=datetime.now().date()
                     )
             
-            # Update
+            # Update users table (kept for backward compatibility)
             cursor.execute(f"UPDATE users SET {field} = %s WHERE id = %s RETURNING id", (value, user_id))
             updated = cursor.fetchone() is not None
             
+            # Sync to profile tables
+            if updated:
+                if field in self._OPERATOR_PROFILE_FIELDS and current_role in ('operator', 'trainee'):
+                    from psycopg2 import sql as _sql
+                    cursor.execute(
+                        _sql.SQL("UPDATE operator_profiles SET {} = %s WHERE user_id = %s").format(
+                            _sql.Identifier(field)
+                        ),
+                        (value, user_id)
+                    )
+                elif field in self._HR_PROFILE_FIELDS:
+                    from psycopg2 import sql as _sql
+                    cursor.execute(
+                        _sql.SQL("UPDATE user_hr_profiles SET {} = %s WHERE user_id = %s").format(
+                            _sql.Identifier(field)
+                        ),
+                        (value, user_id)
+                    )
+
             # Log history if updated
             if updated:
                 cursor.execute("""
@@ -7165,6 +7497,12 @@ class Database:
                     INSERT INTO user_history (user_id, changed_by, field_changed, old_value, new_value)
                     VALUES (%s, %s, %s, %s, %s)
                 """, (target_id, changed_by, 'supervisor_id', str(current_supervisor_id), None))
+
+            # Deactivate operator profile on promotion
+            cursor.execute(
+                "UPDATE operator_profiles SET is_active = FALSE, supervisor_id = NULL WHERE user_id = %s",
+                (target_id,)
+            )
 
             return {
                 "id": int(updated[0]),
@@ -7368,7 +7706,14 @@ class Database:
                 WHERE id = %s AND role = 'operator'
                 RETURNING id
             """, (is_active, user_id))
-            return cursor.fetchone() is not None
+            result = cursor.fetchone()
+            if result:
+                cursor.execute(
+                    "UPDATE operator_profiles SET is_active = %s WHERE user_id = %s",
+                    (is_active, user_id)
+                )
+                return True
+            return False
     
     def get_active_operators(self, direction_name=None):
         with self._get_cursor() as cursor:

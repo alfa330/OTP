@@ -1,6 +1,7 @@
 ﻿node_modules/
 dist/
 .vite/
+.env
 src/_extracted_script.jsx
 tools_find_tdz.js
 tools_find_tdz.cjs

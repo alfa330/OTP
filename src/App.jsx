@@ -56,6 +56,7 @@ const UserEditModal = lazyWithRetry(() => import('./components/modals/UserEditMo
 const AccountAvatarModal = lazyWithRetry(() => import('./components/modals/AccountAvatarModal'));
 const SalaryCalculatorChat = lazyWithRetry(() => import('./components/salary/SalaryCalculatorChat'));
 const ResourceFteView = lazyWithRetry(() => import('./components/resources/ResourceFteView'));
+const DepartmentsView = lazyWithRetry(() => import('./components/departments/DepartmentsView'));
 
 
 if (typeof window !== 'undefined') {
@@ -32828,6 +32829,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <FaIcon className="fas fa-award"></FaIcon> <span className="sidebar-text">Конкурсы</span>
                                             </button>
                                         </li>
+                                        {isSuperAdmin && (
+                                            <>
+                                                {renderSidebarDivider()}
+                                                <li>
+                                                    <button onClick={(e) => handleSidebarViewNavigation(e, 'departments')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'departments' ? 'bg-blue-700' : ''}`}>
+                                                        <FaIcon className="fas fa-layer-group"></FaIcon> <span className="sidebar-text">Отделы</span>
+                                                    </button>
+                                                </li>
+                                            </>
+                                        )}
                                     </>
                                 )}
                                 {currentUserRole === 'sv' && (
@@ -34686,6 +34697,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 ))}
                                 {( view === "call_division" && (<AdminCallsUploadView user={user}/>))}
                                 {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
+                                {( view === "departments" && isSuperAdmin && (
+                                    <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
+                                        <DepartmentsView
+                                            user={user}
+                                            showToast={showToast}
+                                            apiBaseUrl={API_BASE_URL}
+                                            withAccessTokenHeader={withAccessTokenHeader}
+                                        />
+                                    </Suspense>
+                                ))}
                             </>
                         )}
                         {(user.role === 'sv' || user.role === 'supervisor' || user.role === 'trainer') && (
