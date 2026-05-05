@@ -8758,6 +8758,155 @@ class Database:
                 'end_time': row[6].strftime('%H:%M') if row[6] else None,
                 'comment': row[7]
             }
+
+    def update_operator_offline_activity(
+        self,
+        requester_id,
+        requester_role,
+        activity_id,
+        activity_date=None,
+        start_time=None,
+        end_time=None,
+        comment=None,
+        operator_id=None
+    ):
+        role_norm = self._normalize_technical_issue_role(requester_role)
+        if not (role_has_min(role_norm, 'admin') or role_norm == 'sv'):
+            raise ValueError("Only admin and sv can update offline activities")
+
+        requester_id_int = int(requester_id)
+        try:
+            activity_id_int = int(activity_id)
+        except (TypeError, ValueError):
+            raise ValueError("Invalid offline activity id")
+        if activity_id_int <= 0:
+            raise ValueError("Invalid offline activity id")
+
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    oa.id,
+                    oa.batch_id::text,
+                    oa.operator_id,
+                    op.supervisor_id,
+                    oa.activity_date,
+                    oa.start_time,
+                    oa.end_time,
+                    oa.comment,
+                    oa.created_by,
+                    cb.name
+                FROM operator_offline_activities oa
+                JOIN users op ON op.id = oa.operator_id
+                LEFT JOIN users cb ON cb.id = oa.created_by
+                WHERE oa.id = %s
+                """,
+                (activity_id_int,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError("Offline activity not found")
+
+            current_operator_id = int(row[2])
+            current_supervisor_id = int(row[3]) if row[3] is not None else None
+            if role_norm == 'sv' and current_supervisor_id != requester_id_int:
+                raise PermissionError("Forbidden")
+
+            target_operator_id = current_operator_id
+            if operator_id is not None and str(operator_id).strip() != '':
+                operator_ids_norm = self._coerce_int_list([operator_id])
+                if not operator_ids_norm:
+                    raise ValueError("Invalid operator_id")
+                target_operator_ids, _ = self._resolve_technical_issue_operator_ids_tx(
+                    cursor=cursor,
+                    requester_id=requester_id_int,
+                    requester_role=role_norm,
+                    operator_ids=operator_ids_norm,
+                    direction_ids=None
+                )
+                target_operator_id = int(target_operator_ids[0])
+
+            next_date_obj = (
+                self._parse_technical_issue_date(activity_date, field_name='date')
+                if activity_date is not None and str(activity_date).strip() != ''
+                else row[4]
+            )
+            next_start_time_obj = (
+                self._parse_technical_issue_time(start_time, field_name='start_time')
+                if start_time is not None and str(start_time).strip() != ''
+                else row[5]
+            )
+            next_end_time_obj = (
+                self._parse_technical_issue_time(end_time, field_name='end_time')
+                if end_time is not None and str(end_time).strip() != ''
+                else row[6]
+            )
+            if next_start_time_obj == next_end_time_obj:
+                raise ValueError("start_time and end_time cannot be equal")
+
+            overlaps_by_operator = self._find_shift_overlap_intervals_for_technical_issue_tx(
+                cursor=cursor,
+                operator_ids=[target_operator_id],
+                issue_date_obj=next_date_obj,
+                start_time_obj=next_start_time_obj,
+                end_time_obj=next_end_time_obj
+            )
+            if int(target_operator_id) not in overlaps_by_operator:
+                raise ValueError("Selected operator has no shifts in the specified time range")
+
+            comment_text = str(comment).strip() if comment is not None else row[7]
+            if comment_text == '':
+                comment_text = None
+
+            cursor.execute(
+                """
+                UPDATE operator_offline_activities
+                SET
+                    operator_id = %s,
+                    activity_date = %s,
+                    start_time = %s,
+                    end_time = %s,
+                    comment = %s
+                WHERE id = %s
+                RETURNING id, batch_id::text, operator_id, activity_date, start_time, end_time, comment
+                """,
+                (
+                    target_operator_id,
+                    next_date_obj,
+                    next_start_time_obj,
+                    next_end_time_obj,
+                    comment_text,
+                    activity_id_int
+                )
+            )
+            updated = cursor.fetchone()
+            if not updated:
+                raise ValueError("Offline activity not found")
+
+            start_time_text = updated[4].strftime('%H:%M') if updated[4] else None
+            end_time_text = updated[5].strftime('%H:%M') if updated[5] else None
+            duration_minutes = 0
+            try:
+                if updated[4] and updated[5]:
+                    start_min, end_min = self._schedule_interval_minutes(updated[4], updated[5])
+                    duration_minutes = max(0, int(end_min - start_min))
+            except Exception:
+                duration_minutes = 0
+
+            return {
+                'id': int(updated[0]),
+                'batch_id': updated[1],
+                'operator_id': int(updated[2]),
+                'date': updated[3].strftime('%Y-%m-%d') if updated[3] else None,
+                'start_time': start_time_text,
+                'end_time': end_time_text,
+                'time_range': f"{start_time_text} - {end_time_text}" if start_time_text and end_time_text else None,
+                'comment': updated[6],
+                'created_by_id': int(row[8]) if row[8] is not None else None,
+                'created_by_name': row[9],
+                'duration_minutes': int(duration_minutes),
+                'duration_hours': round(float(duration_minutes) / 60.0, 2)
+            }
     
     def get_user_history(self, user_id):
         with self._get_cursor() as cursor:

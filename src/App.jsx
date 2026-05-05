@@ -1151,6 +1151,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const [isTrainingActionLoading, setIsTrainingActionLoading] = useState(false);
         const [isTechnicalIssueActionLoading, setIsTechnicalIssueActionLoading] = useState(false);
         const [isOfflineActivityActionLoading, setIsOfflineActivityActionLoading] = useState(false);
+        const [offlineActivityModalState, setOfflineActivityModalState] = useState({ open: false, operatorId: null, date: '', activity: null, start_time: '09:00', end_time: '10:00', comment: '' });
+        const [offlineActivityModalError, setOfflineActivityModalError] = useState('');
         const [selectedSvId, setSelectedSvId] = useState(user?.role === 'sv' ? user.id : '');
         const [reportScope, setReportScope] = useState('by_sv'); // 'by_sv' or 'all' (admin only)
         const [isLoading, setIsLoading] = useState(false);
@@ -1628,6 +1630,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         function closeCellModal() {
             setSelectedCell(null);
             setCellModel(null);
+            closeOfflineActivityModal();
         }
 
         function updateCellField(field, value) {
@@ -2835,6 +2838,91 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
         }
 
+        function openOfflineActivityModalForDay(opId, day, activity = null) {
+            if (!opId || !day) return;
+            const baseDate = activity?.date || dayToDateStr(day);
+            setOfflineActivityModalError('');
+            setOfflineActivityModalState({
+            open: true,
+            operatorId: Number(opId),
+            date: baseDate,
+            activity: activity ? { ...activity } : null,
+            start_time: activity?.start_time || '09:00',
+            end_time: activity?.end_time || '10:00',
+            comment: activity?.comment || ''
+            });
+        }
+
+        function closeOfflineActivityModal() {
+            setOfflineActivityModalError('');
+            setOfflineActivityModalState({ open: false, operatorId: null, date: '', activity: null, start_time: '09:00', end_time: '10:00', comment: '' });
+        }
+
+        function updateOfflineActivityModalField(field, value) {
+            setOfflineActivityModalState(prev => ({
+            ...(prev || {}),
+            [field]: value
+            }));
+        }
+
+        async function handleOfflineActivitySaveFromModal() {
+            if (!user || !offlineActivityModalState?.operatorId) return;
+            const date = String(offlineActivityModalState?.date || '').trim();
+            const startTime = String(offlineActivityModalState?.start_time || '').trim();
+            const endTime = String(offlineActivityModalState?.end_time || '').trim();
+            const comment = String(offlineActivityModalState?.comment || '').trim();
+            if (!date) {
+            setOfflineActivityModalError('Укажите дату.');
+            return;
+            }
+            if (!startTime || !endTime) {
+            setOfflineActivityModalError('Укажите время начала и окончания.');
+            return;
+            }
+            const startMinutes = parseTimeToMinutes(startTime);
+            const endMinutes = parseTimeToMinutes(endTime);
+            if (!Number.isFinite(startMinutes) || !Number.isFinite(endMinutes) || endMinutes <= startMinutes) {
+            setOfflineActivityModalError('Время окончания должно быть позже времени начала.');
+            return;
+            }
+
+            setIsOfflineActivityActionLoading(true);
+            setOfflineActivityModalError('');
+            try {
+            const payload = {
+                operator_id: offlineActivityModalState.operatorId,
+                date,
+                start_time: startTime,
+                end_time: endTime,
+                comment
+            };
+            if (offlineActivityModalState?.activity?.id) {
+                await axios.put(`${API_BASE_URL}/api/offline_activities/${offlineActivityModalState.activity.id}`, payload, {
+                headers: {
+                    'X-User-Id': user.id
+                }
+                });
+                fallbackToast('Офлайн-активность обновлена', 'success');
+            } else {
+                await axios.post(`${API_BASE_URL}/api/offline_activities`, payload, {
+                headers: {
+                    'X-User-Id': user.id
+                }
+                });
+                fallbackToast('Офлайн-активность добавлена', 'success');
+            }
+            await fetchDailyHoursAndTrainings();
+            closeOfflineActivityModal();
+            } catch (err) {
+            console.error('handleOfflineActivitySaveFromModal error', err);
+            const message = err?.response?.data?.error || 'Не удалось сохранить офлайн-активность';
+            setOfflineActivityModalError(message);
+            fallbackToast(message, 'error');
+            } finally {
+            setIsOfflineActivityActionLoading(false);
+            }
+        }
+
         async function downloadMonthlyReport() {
             if (!user) {
             fallbackToast('Пользователь не авторизован', 'error');
@@ -3683,6 +3771,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         <h4 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
                         <FaIcon className="fas fa-user-clock" aria-hidden="true" /> Офлайн активность
                         </h4>
+                        <div className="flex items-center gap-2">
+                        {isOfflineActivityActionLoading && (
+                            <span className="text-xs text-emerald-700 inline-flex items-center gap-1">
+                            <FaIcon className="fas fa-spinner fa-spin" aria-hidden="true" /> Сохранение...
+                            </span>
+                        )}
+                        <button
+                            type="button"
+                            onClick={() => openOfflineActivityModalForDay(selectedCell.operator.operator_id, selectedCell.day)}
+                            disabled={isOfflineActivityActionLoading}
+                            className="inline-flex items-center gap-2 px-3 py-1.5 rounded-md border bg-white text-sm font-medium shadow-sm hover:shadow focus:outline-none focus:ring-2 focus:ring-offset-1 disabled:opacity-60 disabled:cursor-not-allowed"
+                            aria-label="Добавить офлайн-активность"
+                        >
+                            <FaIcon className="fas fa-plus" aria-hidden="true" /> Добавить
+                        </button>
+                        </div>
                     </div>
 
                     {getOfflineActivitiesFor(selectedCell.operator.operator_id, selectedCell.day).length === 0 ? (
@@ -3691,6 +3795,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         <div className="space-y-2">
                         {getOfflineActivitiesFor(selectedCell.operator.operator_id, selectedCell.day).map((item, idx) => {
                             const dur = computeOfflineActivityDurationHours(item);
+                            const isReadOnlyOfflineActivity = !!(item?.read_only || item?.is_practice_shift);
                             return (
                             <div key={`${item.id || 'offline'}-${idx}`} className="p-3 rounded-lg border border-emerald-200 bg-emerald-50/60 flex flex-col gap-2">
                                 <div className="flex items-center justify-between gap-2">
@@ -3703,17 +3808,34 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <div className="text-xs text-gray-500">by {item.created_by_name || '—'}</div>
                                     <button
                                         type="button"
+                                        onClick={() => openOfflineActivityModalForDay(selectedCell.operator.operator_id, selectedCell.day, item)}
+                                        disabled={isOfflineActivityActionLoading || isReadOnlyOfflineActivity}
+                                        className="px-2 py-1 text-xs rounded-md border bg-white hover:bg-gray-50 disabled:opacity-60 disabled:cursor-not-allowed"
+                                        aria-label="Редактировать офлайн-активность"
+                                        title={isReadOnlyOfflineActivity ? 'Запись формируется из графика смен' : 'Редактировать офлайн-активность'}
+                                    >
+                                        <FaIcon className="fas fa-pen" aria-hidden="true" />
+                                    </button>
+                                    <button
+                                        type="button"
                                         onClick={() => handleOfflineActivityDeleteFromModal(item.id)}
-                                        disabled={isOfflineActivityActionLoading}
+                                        disabled={isOfflineActivityActionLoading || isReadOnlyOfflineActivity}
                                         className="px-2 py-1 text-xs rounded-md border border-red-200 text-red-600 bg-white hover:bg-red-50 disabled:opacity-60 disabled:cursor-not-allowed"
                                         aria-label="Удалить офлайн-активность"
-                                        title="Удалить офлайн-активность"
+                                        title={isReadOnlyOfflineActivity ? 'Запись формируется из графика смен' : 'Удалить офлайн-активность'}
                                     >
                                         <FaIcon className={`fas ${isOfflineActivityActionLoading ? 'fa-spinner fa-spin' : 'fa-trash'}`} aria-hidden="true" />
                                     </button>
                                 </div>
                                 </div>
                                 {item.comment && <div className="text-sm text-gray-700">{item.comment}</div>}
+                                {isReadOnlyOfflineActivity && (
+                                <div className="flex items-center gap-2 text-xs">
+                                    <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-white border border-emerald-200 text-emerald-700">
+                                    <FaIcon className="fas fa-briefcase" /> Из графика смен
+                                    </span>
+                                </div>
+                                )}
                             </div>
                             );
                         })}
@@ -4050,6 +4172,110 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             <FaIcon className="fas fa-save" aria-hidden="true" /> Сохранить
                         </>
                         )}
+                    </button>
+                    </div>
+                </div>
+                </div>
+            )}
+            {offlineActivityModalState?.open && (
+                <div
+                className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4"
+                onClick={closeOfflineActivityModal}
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="offline-activity-modal-title"
+                >
+                <div
+                    className="bg-white w-full max-w-lg rounded-xl shadow-2xl border border-gray-100 overflow-hidden"
+                    onClick={e => e.stopPropagation()}
+                >
+                    <div className="flex items-start justify-between gap-4 p-5 border-b">
+                    <div>
+                        <h3 id="offline-activity-modal-title" className="text-lg font-semibold text-gray-800 flex items-center gap-2">
+                        <FaIcon className="fas fa-user-clock text-emerald-600" aria-hidden="true" />
+                        {offlineActivityModalState?.activity?.id ? 'Редактировать офлайн-активность' : 'Добавить офлайн-активность'}
+                        </h3>
+                        <div className="text-xs text-gray-500 mt-1">
+                        {selectedCell?.operator?.name || cellModel?.name || 'Оператор'}
+                        </div>
+                    </div>
+                    <button
+                        type="button"
+                        onClick={closeOfflineActivityModal}
+                        disabled={isOfflineActivityActionLoading}
+                        className="inline-flex items-center gap-2 px-3 py-1.5 rounded-md border text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-60"
+                        aria-label="Закрыть"
+                    >
+                        <FaIcon className="fas fa-times" aria-hidden="true" /> Закрыть
+                    </button>
+                    </div>
+
+                    <div className="p-5 space-y-4">
+                    <label className="block text-xs text-gray-700">
+                        <span className="mb-1 block font-medium">Дата</span>
+                        <input
+                        type="date"
+                        className="w-full p-2 rounded-md border focus:ring-2 focus:ring-emerald-200"
+                        value={offlineActivityModalState.date || ''}
+                        onChange={e => updateOfflineActivityModalField('date', e.target.value)}
+                        />
+                    </label>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <label className="block text-xs text-gray-700">
+                        <span className="mb-1 block font-medium">Начало</span>
+                        <input
+                            type="time"
+                            className="w-full p-2 rounded-md border focus:ring-2 focus:ring-emerald-200"
+                            value={offlineActivityModalState.start_time || ''}
+                            onChange={e => updateOfflineActivityModalField('start_time', e.target.value)}
+                        />
+                        </label>
+                        <label className="block text-xs text-gray-700">
+                        <span className="mb-1 block font-medium">Окончание</span>
+                        <input
+                            type="time"
+                            className="w-full p-2 rounded-md border focus:ring-2 focus:ring-emerald-200"
+                            value={offlineActivityModalState.end_time || ''}
+                            onChange={e => updateOfflineActivityModalField('end_time', e.target.value)}
+                        />
+                        </label>
+                    </div>
+
+                    <label className="block text-xs text-gray-700">
+                        <span className="mb-1 block font-medium">Комментарий</span>
+                        <textarea
+                        className="w-full min-h-[88px] p-2 rounded-md border focus:ring-2 focus:ring-emerald-200"
+                        value={offlineActivityModalState.comment || ''}
+                        onChange={e => updateOfflineActivityModalField('comment', e.target.value)}
+                        placeholder="Например: обзвон, сверка, ручная обработка"
+                        />
+                    </label>
+
+                    {offlineActivityModalError && (
+                        <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                        {offlineActivityModalError}
+                        </div>
+                    )}
+                    </div>
+
+                    <div className="flex items-center justify-end gap-3 p-4 border-t bg-gray-50">
+                    <button
+                        type="button"
+                        onClick={closeOfflineActivityModal}
+                        disabled={isOfflineActivityActionLoading}
+                        className="px-4 py-2 rounded-md border text-sm text-gray-600 bg-white hover:bg-gray-50 disabled:opacity-60"
+                    >
+                        Отмена
+                    </button>
+                    <button
+                        type="button"
+                        onClick={handleOfflineActivitySaveFromModal}
+                        disabled={isOfflineActivityActionLoading}
+                        className={`inline-flex items-center gap-2 px-5 py-2 rounded-md text-sm text-white ${isOfflineActivityActionLoading ? 'bg-emerald-400 cursor-wait' : 'bg-emerald-600 hover:bg-emerald-700'}`}
+                    >
+                        <FaIcon className={`fas ${isOfflineActivityActionLoading ? 'fa-spinner fa-spin' : 'fa-save'}`} aria-hidden="true" />
+                        {isOfflineActivityActionLoading ? 'Сохраняем...' : 'Сохранить'}
                     </button>
                     </div>
                 </div>
