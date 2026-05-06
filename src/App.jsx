@@ -15596,7 +15596,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     </div>
                                                     <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2.5">
                                                         <div className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-emerald-700 mb-1 leading-tight">
-                                                            <FaIcon className="fas fa-business-time text-emerald-500"></FaIcon>
+                                                            <FaIcon className="fas fa-user-clock text-emerald-500"></FaIcon>
                                                             Чистое время работы план
                                                         </div>
                                                         <div className="text-xl font-bold text-emerald-900 tabular-nums leading-none">{formatHoursMinutes(myScheduleSummary.totalNetWorkPlanMin)}</div>
