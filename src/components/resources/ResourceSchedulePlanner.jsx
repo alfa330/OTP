@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
+  ArrowDownUp,
   GripVertical,
   Plus,
   Redo2,
@@ -457,6 +458,8 @@ const PlannerDayRow = ({
         <div className="min-w-[980px]">
           <div
             ref={timelineRef}
+            data-resource-planner-timeline="true"
+            onContextMenu={(event) => event.preventDefault()}
             className="relative rounded-lg border border-slate-200 bg-slate-50"
             style={{ height: rowHeight }}
           >
@@ -629,6 +632,7 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
   const timelineRefs = useRef(new Map());
   const plannerDaysRef = useRef(plannerDays);
   const dragStartSnapshotRef = useRef(null);
+  const suppressContextMenuUntilRef = useRef(0);
 
   const emit = useCallback(
     (message, type = 'success') => {
@@ -773,9 +777,12 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
       const target = event.target;
       const targetTag = String(target?.tagName || '').toLowerCase();
       if (target?.isContentEditable || ['input', 'textarea', 'select'].includes(targetTag)) return;
+      const code = String(event.code || '');
       const key = String(event.key || '').toLowerCase();
-      const isUndo = (event.ctrlKey || event.metaKey) && key === 'z' && !event.shiftKey;
-      const isRedo = (event.ctrlKey || event.metaKey) && (key === 'y' || (key === 'z' && event.shiftKey));
+      const isZ = code === 'KeyZ' || key === 'z';
+      const isY = code === 'KeyY' || key === 'y';
+      const isUndo = (event.ctrlKey || event.metaKey) && isZ && !event.shiftKey;
+      const isRedo = (event.ctrlKey || event.metaKey) && (isY || (isZ && event.shiftKey));
       if (!isUndo && !isRedo) return;
       event.preventDefault();
       if (isUndo) undoPlannerChange();
@@ -784,6 +791,18 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [redoPlannerChange, undoPlannerChange]);
+
+  useEffect(() => {
+    const onContextMenu = (event) => {
+      const target = event.target;
+      const isPlannerTimeline = Boolean(target?.closest?.('[data-resource-planner-timeline]'));
+      if (splitPreview || Date.now() < suppressContextMenuUntilRef.current || isPlannerTimeline) {
+        event.preventDefault();
+      }
+    };
+    document.addEventListener('contextmenu', onContextMenu, true);
+    return () => document.removeEventListener('contextmenu', onContextMenu, true);
+  }, [splitPreview]);
 
   const updateShift = useCallback((dayIndex, shiftId, updater) => {
     setPlannerDays((current) =>
@@ -844,6 +863,7 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
       const originalDuration = originalEnd - originalStart;
 
       if (event.button === 2 && action === 'move') {
+        suppressContextMenuUntilRef.current = Date.now() + 1200;
         if (originalDuration < MIN_SHIFT_MINUTES * 2) return;
         const splitAtClientX = (clientX) => {
           const rawMinute = ((clientX - rect.left) / width) * 1440;
@@ -865,11 +885,14 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
         updatePreview(event.clientX, event.clientY);
 
         const onSplitMove = (moveEvent) => {
+          moveEvent.preventDefault();
           updatePreview(moveEvent.clientX, moveEvent.clientY);
         };
         const onSplitUp = (upEvent) => {
+          upEvent.preventDefault();
           window.removeEventListener('pointermove', onSplitMove);
           window.removeEventListener('pointerup', onSplitUp);
+          suppressContextMenuUntilRef.current = Date.now() + 1200;
           const splitMinute = splitAtClientX(upEvent.clientX);
           setSplitPreview(null);
           pushHistorySnapshot();
@@ -1003,12 +1026,34 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
     );
   }, [pushHistorySnapshot, selectedTemplate, templates]);
 
+  const activeDayIndex = computedDays.length ? clamp(Number(selectedDayIndex || 0), 0, computedDays.length - 1) : 0;
+
+  const sortSelectedDayShifts = useCallback(() => {
+    const sourceShifts = plannerDaysRef.current[activeDayIndex]?.shifts || [];
+    if (sourceShifts.length < 2) return;
+    const sortedShifts = [...sourceShifts].sort((a, b) => (
+      Number(a.startMinute || 0) - Number(b.startMinute || 0) ||
+      Number(a.endMinute || 0) - Number(b.endMinute || 0) ||
+      Number(b.rate || 0) - Number(a.rate || 0) ||
+      String(a.label || '').localeCompare(String(b.label || ''), 'ru')
+    ));
+    const currentOrder = sourceShifts.map((shift) => shift.id).join('|');
+    const sortedOrder = sortedShifts.map((shift) => shift.id).join('|');
+    if (currentOrder === sortedOrder) return;
+    pushHistorySnapshot();
+    setPlannerDays((current) =>
+      current.map((day, index) => (
+        index === activeDayIndex
+          ? { ...day, shifts: sortedShifts.map((shift) => ({ ...shift, breaks: (shift.breaks || []).map((item) => ({ ...item })) })) }
+          : day
+      )),
+    );
+  }, [activeDayIndex, pushHistorySnapshot]);
+
   const resetTemplates = useCallback(() => {
     if (typeof window !== 'undefined') window.localStorage.removeItem(TEMPLATE_STORAGE_KEY);
     loadDefaultTemplates();
   }, [loadDefaultTemplates]);
-
-  const activeDayIndex = computedDays.length ? clamp(Number(selectedDayIndex || 0), 0, computedDays.length - 1) : 0;
 
   return (
     <div className="space-y-4">
@@ -1027,24 +1072,6 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
               }}
               className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
             />
-            <button
-              type="button"
-              onClick={undoPlannerChange}
-              disabled={!historyPast.length}
-              className="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
-              title="Ctrl+Z"
-            >
-              <Undo2 size={16} />
-            </button>
-            <button
-              type="button"
-              onClick={redoPlannerChange}
-              disabled={!historyFuture.length}
-              className="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
-              title="Ctrl+Y"
-            >
-              <Redo2 size={16} />
-            </button>
             <button
               type="button"
               onClick={loadDefaultTemplates}
@@ -1114,6 +1141,45 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
               selectedDayIndex={activeDayIndex}
               onSelect={setSelectedDayIndex}
             />
+            <div className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white p-3 shadow-sm md:flex-row md:items-center md:justify-between">
+              <div>
+                <div className="text-sm font-semibold text-slate-950">
+                  {computedDays[activeDayIndex]?.short || computedDays[activeDayIndex]?.label || 'День'} · {computedDays[activeDayIndex]?.date || ''}
+                </div>
+                <div className="text-xs text-slate-500">Действия применяются к выбранному полотну</div>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={undoPlannerChange}
+                  disabled={!historyPast.length}
+                  className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+                  title="Ctrl+Z"
+                >
+                  <Undo2 size={16} />
+                  Отменить
+                </button>
+                <button
+                  type="button"
+                  onClick={redoPlannerChange}
+                  disabled={!historyFuture.length}
+                  className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+                  title="Ctrl+Y"
+                >
+                  <Redo2 size={16} />
+                  Вернуть
+                </button>
+                <button
+                  type="button"
+                  onClick={sortSelectedDayShifts}
+                  disabled={(computedDays[activeDayIndex]?.shifts || []).length < 2}
+                  className="inline-flex h-10 items-center gap-2 rounded-lg bg-slate-900 px-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
+                >
+                  <ArrowDownUp size={16} />
+                  Сортировать
+                </button>
+              </div>
+            </div>
             <PlannerDayRow
               key={computedDays[activeDayIndex]?.date || activeDayIndex}
               day={computedDays[activeDayIndex]}
