@@ -33,9 +33,11 @@ import html
 from concurrent.futures import ThreadPoolExecutor
 from database import db, TECHNICAL_ISSUE_REASONS, normalize_role_value, get_calculation_model_catalog
 from resource_fte_service import (
+    build_resource_schedule_preview,
     get_resource_day,
     get_resource_overview,
     get_resource_settings,
+    get_resource_shift_templates,
     import_resource_csv,
     recalculate_resource_forecast,
     update_resource_settings,
@@ -2440,6 +2442,38 @@ def api_resource_fte_day(report_date):
         return guard_response, guard_status
     try:
         return jsonify({"status": "success", "day": get_resource_day(db, report_date)}), 200
+    except Exception as error:
+        return _resource_fte_error_response(error)
+
+
+@app.route('/api/resource_fte/shift_templates', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_shift_templates():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    try:
+        return jsonify({"status": "success", **get_resource_shift_templates()}), 200
+    except Exception as error:
+        return _resource_fte_error_response(error)
+
+
+@app.route('/api/resource_fte/schedule_preview', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_schedule_preview():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    try:
+        payload = request.get_json(silent=True) or {}
+        preview = build_resource_schedule_preview(db, payload)
+        return jsonify({"status": "success", "preview": preview}), 200
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
     except Exception as error:
         return _resource_fte_error_response(error)
 

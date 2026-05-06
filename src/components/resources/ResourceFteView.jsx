@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
+import ResourceSchedulePlanner from './ResourceSchedulePlanner';
 import {
   AlertTriangle,
   BarChart3,
@@ -228,6 +229,7 @@ const DISPLAY_PREFERENCES_STORAGE_KEY = 'otp_resource_fte_display_v1';
 const VIEW_TABS = [
   { key: 'overview', label: 'Обзор', icon: LayoutDashboard },
   { key: 'next_week', label: 'Прогнозы', icon: TrendingUp },
+  { key: 'schedule_planner', label: 'Графики', icon: CalendarDays },
   { key: 'losses', label: 'Звонки', icon: PhoneCall },
   { key: 'settings', label: 'Настройки', icon: SlidersHorizontal },
 ];
@@ -1441,7 +1443,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
           </button>
         </div>
 
-        {activeDashboardView !== 'settings' && activeDashboardView !== 'next_week' && visibleMetricCount > 0 && (
+        {activeDashboardView !== 'settings' && activeDashboardView !== 'next_week' && activeDashboardView !== 'schedule_planner' && visibleMetricCount > 0 && (
           <div className={`grid gap-3 md:grid-cols-2 ${visibleMetricCount >= 5 ? 'xl:grid-cols-6' : visibleMetricCount >= 4 ? 'xl:grid-cols-4' : 'xl:grid-cols-3'}`}>
             {displayOptions.metricOperators && (
               <StatCard
@@ -1830,6 +1832,16 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
               </>
             ) : null}
           </section>
+        )}
+
+        {activeDashboardView === 'schedule_planner' && (
+          <ResourceSchedulePlanner
+            apiRoot={apiRoot}
+            buildHeaders={buildHeaders}
+            selectedWeekStart={selectedForecastWeekStart}
+            onWeekStartChange={(value) => setSelectedForecastWeekStart(getWeekStartIso(value))}
+            notify={notify}
+          />
         )}
 
         {(activeDashboardView === 'settings' || activeDashboardView === 'next_week') && (

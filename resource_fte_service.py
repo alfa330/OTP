@@ -35,6 +35,55 @@ DEFAULT_RESOURCE_SETTINGS = {
 
 ROUNDING_MODES = {"none", "ceil", "floor", "round"}
 
+DEFAULT_RESOURCE_SHIFT_TEMPLATE_LABELS = {
+    1.0: [
+        "20*08",
+        "7*16",
+        "8*17",
+        "9*18",
+        "10*19",
+        "11*20",
+        "13*22",
+        "15*00",
+        "17*02",
+    ],
+    0.75: [
+        "7*13/30",
+        "8*14/30",
+        "9*15/30",
+        "10*16/30",
+        "11*17/30",
+        "12*18/30",
+        "13*19/30",
+        "14*20/30",
+        "15*21/30",
+        "15/30*22",
+        "16/30*23",
+        "17/30*00",
+        "19/30*02",
+    ],
+    0.5: [
+        "7*11",
+        "8*12",
+        "9*13",
+        "10*14",
+        "11*15",
+        "12*16",
+        "13*17",
+        "14*18",
+        "15*19",
+        "16*20",
+        "17*21",
+        "18*22",
+        "19*23",
+        "20*00",
+        "22*02",
+    ],
+}
+
+SHIFT_PREVIEW_HOURS = 24 * 7
+SHIFT_PREVIEW_MINUTES = SHIFT_PREVIEW_HOURS * 60
+
 HEADER_ALIASES = {
     "report_date": ["дата", "date", "день"],
     "hour": ["час"],
@@ -159,6 +208,186 @@ def _round_value(value: float, mode: str) -> float:
     if mode == "round":
         return float(round(number))
     return number
+
+
+def _round_half_up(value: float) -> int:
+    return int(math.floor(max(0.0, float(value or 0)) + 0.5))
+
+
+def _parse_shift_template_time(value: Any) -> int:
+    raw = str(value or "").strip()
+    if not raw:
+        raise ValueError("INVALID_SHIFT_TEMPLATE_TIME")
+    if "/" in raw:
+        hour_raw, minute_raw = raw.split("/", 1)
+    elif ":" in raw:
+        hour_raw, minute_raw = raw.split(":", 1)
+    else:
+        hour_raw, minute_raw = raw, "0"
+    try:
+        hour = int(str(hour_raw).strip())
+        minute = int(str(minute_raw).strip() or 0)
+    except Exception as exc:
+        raise ValueError("INVALID_SHIFT_TEMPLATE_TIME") from exc
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        raise ValueError("INVALID_SHIFT_TEMPLATE_TIME")
+    return hour * 60 + minute
+
+
+def _format_minutes_hhmm(minutes: int) -> str:
+    normalized = int(minutes) % (24 * 60)
+    return f"{normalized // 60:02d}:{normalized % 60:02d}"
+
+
+def _shift_template_id(rate: float, label: str, start_minute: int, end_minute: int) -> str:
+    safe_label = re.sub(r"[^a-zA-Z0-9]+", "-", str(label or "").strip()).strip("-").lower()
+    rate_part = str(int(round(float(rate or 0) * 100))).rjust(3, "0")
+    return f"tpl-{rate_part}-{start_minute}-{end_minute}-{safe_label or 'shift'}"
+
+
+def _parse_shift_template_label(label: Any) -> Dict[str, Any]:
+    raw = str(label or "").strip()
+    if "*" not in raw:
+        raise ValueError("INVALID_SHIFT_TEMPLATE")
+    start_raw, end_raw = raw.split("*", 1)
+    start_minute = _parse_shift_template_time(start_raw)
+    end_clock_minute = _parse_shift_template_time(end_raw)
+    end_minute = end_clock_minute
+    if end_minute <= start_minute:
+        end_minute += 24 * 60
+    duration_minutes = end_minute - start_minute
+    if duration_minutes <= 0 or duration_minutes > 18 * 60:
+        raise ValueError("INVALID_SHIFT_TEMPLATE_DURATION")
+    return {
+        "label": raw,
+        "startMinute": start_minute,
+        "endMinute": end_minute,
+        "start": _format_minutes_hhmm(start_minute),
+        "end": _format_minutes_hhmm(end_minute),
+        "durationMinutes": duration_minutes,
+        "overnight": end_minute > 24 * 60,
+    }
+
+
+def _default_break_durations_for_shift(duration_minutes: int) -> List[int]:
+    duration = int(duration_minutes or 0)
+    if duration >= 5 * 60 and duration < 6 * 60:
+        return [15]
+    if duration >= 6 * 60 and duration < 8 * 60:
+        return [15, 15]
+    if duration >= 8 * 60 and duration < 11 * 60:
+        return [15, 30, 15]
+    if duration >= 11 * 60:
+        return [15, 30, 15, 15]
+    return []
+
+
+def _compute_default_shift_breaks(start_minute: int, end_minute: int) -> List[Dict[str, int]]:
+    start_minute = int(start_minute)
+    end_minute = int(end_minute)
+    duration = end_minute - start_minute
+    if duration <= 0:
+        return []
+
+    def snap5(value):
+        return int(round(float(value) / 5.0) * 5)
+
+    breaks = []
+    durations = _default_break_durations_for_shift(duration)
+    count = len(durations)
+    for index, size in enumerate(durations):
+        center = start_minute + (duration * ((index + 1) / (count + 1)))
+        center_snapped = snap5(center)
+        start = snap5(center_snapped - (int(size) / 2))
+        end = start + int(size)
+        start = max(start_minute, min(end_minute, start))
+        end = max(start_minute, min(end_minute, end))
+        if end > start:
+            breaks.append({"start": int(start), "end": int(end)})
+    return breaks
+
+
+def _normalize_shift_template(raw: Any, fallback_rate: Optional[float] = None, index: int = 0) -> Dict[str, Any]:
+    if isinstance(raw, str):
+        rate = fallback_rate if fallback_rate is not None else 1.0
+        parsed = _parse_shift_template_label(raw)
+        enabled = True
+    elif isinstance(raw, dict):
+        rate = _to_float(raw.get("rate"), fallback_rate if fallback_rate is not None else 1.0)
+        enabled = bool(raw.get("enabled", True))
+        label = raw.get("label")
+        if label:
+            parsed = _parse_shift_template_label(label)
+        else:
+            start_raw = raw.get("start") or raw.get("startTime")
+            end_raw = raw.get("end") or raw.get("endTime")
+            start_minute = _parse_shift_template_time(start_raw)
+            end_minute = _parse_shift_template_time(end_raw)
+            if end_minute <= start_minute:
+                end_minute += 24 * 60
+            parsed = {
+                "label": f"{_format_minutes_hhmm(start_minute)}-{_format_minutes_hhmm(end_minute)}",
+                "startMinute": start_minute,
+                "endMinute": end_minute,
+                "start": _format_minutes_hhmm(start_minute),
+                "end": _format_minutes_hhmm(end_minute),
+                "durationMinutes": end_minute - start_minute,
+                "overnight": end_minute > 24 * 60,
+            }
+    else:
+        raise ValueError("INVALID_SHIFT_TEMPLATE")
+
+    rate = 1.0 if rate not in {1.0, 0.75, 0.5} else float(rate)
+    template_id = str((raw or {}).get("id") or "").strip() if isinstance(raw, dict) else ""
+    if not template_id:
+        template_id = _shift_template_id(rate, parsed["label"], parsed["startMinute"], parsed["endMinute"])
+    return {
+        "id": template_id,
+        "rate": rate,
+        "label": parsed["label"],
+        "start": parsed["start"],
+        "end": parsed["end"],
+        "startMinute": parsed["startMinute"],
+        "endMinute": parsed["endMinute"],
+        "durationMinutes": parsed["durationMinutes"],
+        "overnight": parsed["overnight"],
+        "enabled": enabled,
+        "sortOrder": int((raw or {}).get("sortOrder", index)) if isinstance(raw, dict) else index,
+    }
+
+
+def get_resource_shift_templates() -> Dict[str, Any]:
+    templates = []
+    index = 0
+    for rate, labels in DEFAULT_RESOURCE_SHIFT_TEMPLATE_LABELS.items():
+        for label in labels:
+            templates.append(_normalize_shift_template(label, fallback_rate=rate, index=index))
+            index += 1
+    return {
+        "templates": templates,
+        "rates": [
+            {"rate": 1.0, "label": "1"},
+            {"rate": 0.75, "label": "0.75"},
+            {"rate": 0.5, "label": "0.5"},
+        ],
+    }
+
+
+def _normalize_shift_templates(value: Any = None) -> List[Dict[str, Any]]:
+    if value is None:
+        return get_resource_shift_templates()["templates"]
+    if not isinstance(value, list):
+        raise ValueError("INVALID_SHIFT_TEMPLATES")
+    result = []
+    seen = set()
+    for index, item in enumerate(value):
+        template = _normalize_shift_template(item, index=index)
+        key = template["id"]
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(template)
+    return result
 
 
 def _as_settings(row: Optional[Iterable[Any]]) -> Dict[str, Any]:
@@ -989,6 +1218,232 @@ def _weekly_totals(
         "current_operator_fte": round(current_operator_fte, 4),
         "operator_fte_gap": round(operator_fte_gap, 4),
     }
+
+
+def _shift_preview_vector(day_index: int, template: Dict[str, Any]) -> List[float]:
+    vector = [0.0 for _ in range(SHIFT_PREVIEW_HOURS)]
+    day_start = int(day_index) * 24 * 60
+    start_abs = day_start + int(template.get("startMinute") or 0)
+    end_abs = day_start + int(template.get("endMinute") or 0)
+    breaks_abs = [
+        {
+            "start": day_start + int(item.get("start") or 0),
+            "end": day_start + int(item.get("end") or 0),
+        }
+        for item in (template.get("breaks") or [])
+        if int(item.get("end") or 0) > int(item.get("start") or 0)
+    ]
+    for hour_index in range(SHIFT_PREVIEW_HOURS):
+        hour_start = hour_index * 60
+        hour_end = hour_start + 60
+        overlap = max(0, min(end_abs, hour_end) - max(start_abs, hour_start))
+        if overlap <= 0:
+            continue
+        break_overlap = 0
+        for break_item in breaks_abs:
+            break_overlap += max(
+                0,
+                min(int(break_item["end"]), hour_end) - max(int(break_item["start"]), hour_start),
+            )
+        vector[hour_index] = round(max(0, overlap - break_overlap) / 60, 4)
+    return vector
+
+
+def _shift_preview_score(target: List[float], coverage: List[float], vector: List[float]) -> Dict[str, float]:
+    covered_need = 0.0
+    weighted_need = 0.0
+    added_over = 0.0
+    active = 0.0
+    for index, amount in enumerate(vector):
+        amount = float(amount or 0)
+        if amount <= 0:
+            continue
+        need = float(target[index] or 0)
+        current = float(coverage[index] or 0)
+        before_deficit = max(0.0, need - current)
+        after_deficit = max(0.0, need - current - amount)
+        closed = before_deficit - after_deficit
+        current_over = max(0.0, current - need)
+        next_over = max(0.0, current + amount - need)
+        added_over += max(0.0, next_over - current_over)
+        covered_need += closed
+        weighted_need += closed * (1.0 + min(need, 10.0) * 0.04)
+        active += amount
+    score = weighted_need * 10.0 - added_over * 3.2 - active * 0.015
+    return {
+        "score": score,
+        "covered_need": covered_need,
+        "added_over": added_over,
+        "active": active,
+    }
+
+
+def _shift_preview_totals(target: List[float], coverage: List[float]) -> Dict[str, Any]:
+    total_needed = sum(float(item or 0) for item in target)
+    covered_need = sum(min(float(coverage[index] or 0), float(target[index] or 0)) for index in range(len(target)))
+    deficit = sum(max(0.0, float(target[index] or 0) - float(coverage[index] or 0)) for index in range(len(target)))
+    over = sum(max(0.0, float(coverage[index] or 0) - float(target[index] or 0)) for index in range(len(target)))
+    return {
+        "neededFteHours": round(total_needed, 4),
+        "coveredFteHours": round(covered_need, 4),
+        "deficitFteHours": round(deficit, 4),
+        "overFteHours": round(over, 4),
+        "coveragePercent": round((covered_need / total_needed * 100) if total_needed > 0 else 0.0, 2),
+    }
+
+
+def _generate_schedule_preview_from_forecast(forecast_payload: Dict[str, Any], templates: List[Dict[str, Any]]) -> Dict[str, Any]:
+    days = forecast_payload.get("days") or []
+    target = [0.0 for _ in range(SHIFT_PREVIEW_HOURS)]
+    raw_target = [0.0 for _ in range(SHIFT_PREVIEW_HOURS)]
+    for day_index, day in enumerate(days[:7]):
+        for row in day.get("hourly_forecast") or []:
+            hour = _to_int(row.get("hour"), -1)
+            if hour < 0 or hour > 23:
+                continue
+            absolute_hour = day_index * 24 + hour
+            raw_value = max(0.0, _to_float(row.get("forecast_fte")))
+            raw_target[absolute_hour] = round(raw_value, 4)
+            target[absolute_hour] = float(_round_half_up(raw_value))
+
+    enabled_templates = [item for item in templates if item.get("enabled", True)]
+
+    candidates = []
+    for day_index in range(min(7, len(days))):
+        for template in enabled_templates:
+            template_with_breaks = {
+                **template,
+                "breaks": _compute_default_shift_breaks(
+                    int(template.get("startMinute") or 0),
+                    int(template.get("endMinute") or 0),
+                ),
+            }
+            vector = _shift_preview_vector(day_index, template_with_breaks)
+            if sum(vector) <= 0:
+                continue
+            candidates.append({
+                "dayIndex": day_index,
+                "template": template_with_breaks,
+                "vector": vector,
+            })
+
+    coverage = [0.0 for _ in range(SHIFT_PREVIEW_HOURS)]
+    selected = []
+    max_shifts = max(0, min(800, int(sum(target) / 3) + 80))
+    for _ in range(max_shifts):
+        best = None
+        best_score = None
+        for candidate in candidates:
+            stats = _shift_preview_score(target, coverage, candidate["vector"])
+            if stats["covered_need"] <= 0.05 or stats["score"] <= 0:
+                continue
+            if best_score is None or stats["score"] > best_score["score"]:
+                best = candidate
+                best_score = stats
+        if best is None:
+            break
+        for index, amount in enumerate(best["vector"]):
+            coverage[index] = round(float(coverage[index] or 0) + float(amount or 0), 4)
+        selected.append({
+            "dayIndex": best["dayIndex"],
+            "template": best["template"],
+            "vector": list(best["vector"]),
+            "score": best_score,
+        })
+        if sum(max(0.0, target[index] - coverage[index]) for index in range(SHIFT_PREVIEW_HOURS)) <= 0.01:
+            break
+
+    for selected_item in list(selected):
+        vector = selected_item["vector"]
+        coverage_without = [
+            round(float(coverage[index] or 0) - float(vector[index] or 0), 4)
+            for index in range(SHIFT_PREVIEW_HOURS)
+        ]
+        current_totals = _shift_preview_totals(target, coverage)
+        next_totals = _shift_preview_totals(target, coverage_without)
+        if (
+            next_totals["deficitFteHours"] <= current_totals["deficitFteHours"] + 0.001
+            and next_totals["overFteHours"] + 0.001 < current_totals["overFteHours"]
+        ):
+            selected.remove(selected_item)
+            coverage = coverage_without
+
+    shifts_by_day = defaultdict(list)
+    for index, selected_item in enumerate(selected, start=1):
+        template = selected_item["template"]
+        day_index = int(selected_item["dayIndex"])
+        shift = {
+            "id": f"gen-{day_index}-{index}",
+            "templateId": template["id"],
+            "rate": template["rate"],
+            "label": template["label"],
+            "start": template["start"],
+            "end": template["end"],
+            "startMinute": int(template["startMinute"]),
+            "endMinute": int(template["endMinute"]),
+            "durationMinutes": int(template["durationMinutes"]),
+            "overnight": bool(template.get("overnight")),
+            "breaks": template.get("breaks") or [],
+        }
+        shifts_by_day[day_index].append(shift)
+
+    preview_days = []
+    for day_index, day in enumerate(days[:7]):
+        coverage_rows = []
+        for hour in range(24):
+            absolute_hour = day_index * 24 + hour
+            needed = float(target[absolute_hour] or 0)
+            covered = float(coverage[absolute_hour] or 0)
+            coverage_rows.append({
+                "hour": hour,
+                "needed": round(needed, 4),
+                "rawNeeded": round(float(raw_target[absolute_hour] or 0), 4),
+                "covered": round(covered, 4),
+                "deficit": round(max(0.0, needed - covered), 4),
+                "over": round(max(0.0, covered - needed), 4),
+            })
+        day_target = target[day_index * 24:(day_index + 1) * 24]
+        day_coverage = coverage[day_index * 24:(day_index + 1) * 24]
+        preview_days.append({
+            "date": day.get("forecast_date"),
+            "weekday": day.get("weekday"),
+            "short": day.get("short"),
+            "label": day.get("label"),
+            "coverage": coverage_rows,
+            "shifts": shifts_by_day.get(day_index, []),
+            "stats": _shift_preview_totals(day_target, day_coverage),
+        })
+
+    return {
+        "week_start": forecast_payload.get("week_start"),
+        "week_end": forecast_payload.get("week_end"),
+        "rounding": "math",
+        "templates": templates,
+        "days": preview_days,
+        "summary": _shift_preview_totals(target, coverage),
+    }
+
+
+def build_resource_schedule_preview(db, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    payload = payload or {}
+    week_start_value = payload.get("week_start") or payload.get("weekStart")
+    if week_start_value:
+        target_week_start = _week_start_date(_parse_report_date(week_start_value))
+    else:
+        target_week_start = _next_week_start_date(datetime.now().date())
+    templates = _normalize_shift_templates(payload.get("templates") if "templates" in payload else None)
+
+    with db._get_cursor() as cursor:
+        settings = _get_settings_tx(cursor)
+        profiles = _compute_week_forecast_profiles_tx(cursor, target_week_start, settings)
+        current_fte = _current_operator_fte_tx(cursor, settings).get("current_operator_fte", 0.0)
+        forecast_payload = _build_week_forecast_payload(
+            target_week_start,
+            profiles,
+            settings,
+            current_operator_fte=current_fte,
+        )
+    return _generate_schedule_preview_from_forecast(forecast_payload, templates)
 
 
 def import_resource_csv(db, content: bytes, filename: str, user_id: Optional[int]) -> Dict[str, Any]:
