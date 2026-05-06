@@ -12593,7 +12593,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     daysWithShifts,
                     daysOffCount,
                     totalWorkMin,
-                    totalBreakMin
+                    totalBreakMin,
+                    totalNetWorkPlanMin: Math.max(0, totalWorkMin - totalBreakMin)
                 };
             }, [myScheduleDayCards, myNowTick]);
             const myCurrentDayCard = useMemo(
@@ -15571,7 +15572,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         </span>
                                                     </div>
                                                 </div>
-                                                <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+                                                <div className="grid grid-cols-2 lg:grid-cols-5 gap-2">
                                                     <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5">
                                                         <div className="flex items-center gap-1 text-[11px] uppercase tracking-wide text-slate-500 mb-1">
                                                             <FaIcon className="fas fa-calendar-check text-slate-400"></FaIcon>
@@ -15592,6 +15593,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             Часов
                                                         </div>
                                                         <div className="text-xl font-bold text-blue-900 tabular-nums leading-none">{(myScheduleSummary.totalWorkMin / 60).toFixed(1)}</div>
+                                                    </div>
+                                                    <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2.5">
+                                                        <div className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-emerald-700 mb-1 leading-tight">
+                                                            <FaIcon className="fas fa-business-time text-emerald-500"></FaIcon>
+                                                            Чистое время работы план
+                                                        </div>
+                                                        <div className="text-xl font-bold text-emerald-900 tabular-nums leading-none">{formatHoursMinutes(myScheduleSummary.totalNetWorkPlanMin)}</div>
+                                                        <div className="mt-1 text-[11px] text-emerald-700/80">без перерыва</div>
                                                     </div>
                                                     <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5">
                                                         <div className="flex items-center gap-1 text-[11px] uppercase tracking-wide text-amber-700 mb-1">
