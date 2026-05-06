@@ -828,6 +828,7 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
   const [selectedTemplateId, setSelectedTemplateId] = useState('');
   const [plannerDays, setPlannerDays] = useState([]);
   const [serverSummary, setServerSummary] = useState(null);
+  const [capacityInfo, setCapacityInfo] = useState(null);
   const [isTemplatesLoading, setIsTemplatesLoading] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [errorText, setErrorText] = useState('');
@@ -953,6 +954,7 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
       setHistoryPast([]);
       setHistoryFuture([]);
       setServerSummary(preview.summary || null);
+      setCapacityInfo(preview.capacity || null);
       emit('График рассчитан', 'success');
     } catch (error) {
       const message = error?.response?.data?.error || 'Не удалось сгенерировать график';
@@ -1393,6 +1395,11 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
         {serverSummary ? (
           <div className="mt-3 text-xs text-slate-500">
             Исходный расчет: {formatNumber(serverSummary.coveragePercent, 1)}% · нужно округл. {formatFte(serverSummary.roundedNeededFteHours ?? serverSummary.neededFteHours)} / сумма без округления {formatNumber(serverSummary.realNeededFteHours ?? serverSummary.neededFteHours, 2)} FTE-ч · покрыто округл. {formatFte(serverSummary.roundedCoveredFteHours ?? serverSummary.coveredFteHours)} / сумма без округления {formatNumber(serverSummary.realCoveredFteHours ?? serverSummary.coveredFteHours, 2)} FTE-ч · перепокрытие {formatNumber(serverSummary.overFteHours, 1)} FTE-ч
+          </div>
+        ) : null}
+        {capacityInfo?.rates?.length ? (
+          <div className="mt-2 text-xs text-slate-500">
+            Ресурс ставок: {(capacityInfo.rates || []).map((item) => `${formatFte(item.rate)}: ${Number(item.weeklyShiftsUsed || 0)}/${Number(item.weeklyShiftCapacity || 0)} смен (${Number(item.count || 0)} чел.)`).join(' · ')} · 5 рабочих дней и 2 выходных на сотрудника
           </div>
         ) : null}
       </section>

@@ -84,6 +84,8 @@ DEFAULT_RESOURCE_SHIFT_TEMPLATE_LABELS = {
 SHIFT_PREVIEW_HOURS = 24 * 7
 SHIFT_PREVIEW_MINUTES = SHIFT_PREVIEW_HOURS * 60
 FTE_ROUNDING_STEP = 0.5
+RESOURCE_RATE_VALUES = (1.0, 0.75, 0.5)
+WORK_DAYS_PER_OPERATOR_WEEK = 5
 
 HEADER_ALIASES = {
     "report_date": ["дата", "date", "день"],
@@ -216,6 +218,24 @@ def _round_fte_to_half(value: float) -> float:
     return round(math.floor((number / FTE_ROUNDING_STEP) + 0.5) * FTE_ROUNDING_STEP, 4)
 
 
+def _resource_rate_key(value: Any) -> str:
+    rate = _to_float(value, 1.0)
+    if abs(rate - 0.75) < 0.001:
+        return "0.75"
+    if abs(rate - 0.5) < 0.001:
+        return "0.5"
+    return "1"
+
+
+def _resource_rate_value(value: Any) -> float:
+    key = _resource_rate_key(value)
+    if key == "0.75":
+        return 0.75
+    if key == "0.5":
+        return 0.5
+    return 1.0
+
+
 def _parse_shift_template_time(value: Any) -> int:
     raw = str(value or "").strip()
     if not raw:
@@ -339,7 +359,7 @@ def _normalize_shift_template(raw: Any, fallback_rate: Optional[float] = None, i
     else:
         raise ValueError("INVALID_SHIFT_TEMPLATE")
 
-    rate = 1.0 if rate not in {1.0, 0.75, 0.5} else float(rate)
+    rate = _resource_rate_value(rate)
     template_id = str((raw or {}).get("id") or "").strip() if isinstance(raw, dict) else ""
     if not template_id:
         template_id = _shift_template_id(rate, parsed["label"], parsed["startMinute"], parsed["endMinute"])
@@ -732,18 +752,41 @@ def _current_operator_fte_tx(cursor, settings: Optional[Dict[str, Any]] = None) 
     params = [selected_direction_ids] if selected_direction_ids else []
     cursor.execute(
         f"""
-        SELECT COUNT(*), COALESCE(SUM(COALESCE(u.rate, 1.0)), 0)
+        SELECT COALESCE(u.rate, 1.0), COUNT(*)
         FROM users u
         WHERE u.role = 'operator'
           AND COALESCE(u.status, 'working') = 'working'
           {direction_filter}
+        GROUP BY COALESCE(u.rate, 1.0)
         """,
         params,
     )
-    row = cursor.fetchone() or (0, 0)
+    by_rate = {
+        _resource_rate_key(rate): {
+            "rate": float(rate),
+            "count": 0,
+            "daily_shift_capacity": 0,
+            "weekly_shift_capacity": 0,
+        }
+        for rate in RESOURCE_RATE_VALUES
+    }
+    active_operator_count = 0
+    current_operator_fte = 0.0
+    for rate_raw, count_raw in cursor.fetchall():
+        rate = _resource_rate_value(rate_raw)
+        rate_key = _resource_rate_key(rate)
+        count = _to_int(count_raw)
+        by_rate[rate_key]["count"] += count
+        by_rate[rate_key]["daily_shift_capacity"] += count
+        by_rate[rate_key]["weekly_shift_capacity"] += count * WORK_DAYS_PER_OPERATOR_WEEK
+        active_operator_count += count
+        current_operator_fte += count * rate
+    rate_capacity = [by_rate[_resource_rate_key(rate)] for rate in RESOURCE_RATE_VALUES]
     return {
-        "active_operator_count": _to_int(row[0]),
-        "current_operator_fte": _to_float(row[1]),
+        "active_operator_count": active_operator_count,
+        "current_operator_fte": round(current_operator_fte, 4),
+        "rate_capacity": rate_capacity,
+        "rate_counts": {item["rate"]: item["count"] for item in rate_capacity},
         "selected_direction_ids": selected_direction_ids,
     }
 
@@ -1222,6 +1265,63 @@ def _weekly_totals(
     }
 
 
+def _normalize_schedule_rate_capacity(operator_capacity: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    by_rate = {
+        _resource_rate_key(rate): {
+            "rate": float(rate),
+            "count": 0,
+            "daily_shift_capacity": 0,
+            "weekly_shift_capacity": 0,
+        }
+        for rate in RESOURCE_RATE_VALUES
+    }
+    for item in (operator_capacity or {}).get("rate_capacity") or []:
+        rate_key = _resource_rate_key(item.get("rate"))
+        count = max(0, _to_int(item.get("count")))
+        weekly_capacity = max(0, _to_int(item.get("weekly_shift_capacity"), count * WORK_DAYS_PER_OPERATOR_WEEK))
+        daily_capacity = max(0, _to_int(item.get("daily_shift_capacity"), count))
+        by_rate[rate_key] = {
+            "rate": _resource_rate_value(item.get("rate")),
+            "count": count,
+            "daily_shift_capacity": daily_capacity,
+            "weekly_shift_capacity": weekly_capacity,
+        }
+    return by_rate
+
+
+def _shift_preview_usage_by_rate(selected: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    usage = {
+        _resource_rate_key(rate): {
+            "rate": float(rate),
+            "weekly_shifts": 0,
+            "daily_shifts": [0 for _ in range(7)],
+        }
+        for rate in RESOURCE_RATE_VALUES
+    }
+    for item in selected:
+        rate_key = _resource_rate_key((item.get("template") or {}).get("rate"))
+        day_index = int(item.get("dayIndex") or 0)
+        if rate_key not in usage or day_index < 0 or day_index >= 7:
+            continue
+        usage[rate_key]["weekly_shifts"] += 1
+        usage[rate_key]["daily_shifts"][day_index] += 1
+    return usage
+
+
+def _shift_preview_presence_vector(day_index: int, template: Dict[str, Any]) -> List[float]:
+    vector = [0.0 for _ in range(SHIFT_PREVIEW_HOURS)]
+    day_start = int(day_index) * 24 * 60
+    start_abs = day_start + int(template.get("startMinute") or 0)
+    end_abs = day_start + int(template.get("endMinute") or 0)
+    for hour_index in range(SHIFT_PREVIEW_HOURS):
+        hour_start = hour_index * 60
+        hour_end = hour_start + 60
+        overlap = max(0, min(end_abs, hour_end) - max(start_abs, hour_start))
+        if overlap > 0:
+            vector[hour_index] = round(overlap / 60, 4)
+    return vector
+
+
 def _shift_preview_vector(day_index: int, template: Dict[str, Any]) -> List[float]:
     vector = [0.0 for _ in range(SHIFT_PREVIEW_HOURS)]
     day_start = int(day_index) * 24 * 60
@@ -1266,6 +1366,12 @@ def _shift_preview_score(target: List[float], coverage: List[float], vector: Lis
     }
 
 
+def _shift_preview_day_deficit(target: List[float], coverage: List[float], day_index: int) -> float:
+    start = max(0, int(day_index) * 24)
+    end = min(len(target), start + 24)
+    return sum(max(0.0, float(target[index] or 0) - float(coverage[index] or 0)) for index in range(start, end))
+
+
 def _shift_preview_totals(
     target: List[float],
     coverage: List[float],
@@ -1302,7 +1408,11 @@ def _shift_preview_totals(
     }
 
 
-def _generate_schedule_preview_from_forecast(forecast_payload: Dict[str, Any], templates: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _generate_schedule_preview_from_forecast(
+    forecast_payload: Dict[str, Any],
+    templates: List[Dict[str, Any]],
+    operator_capacity: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     days = forecast_payload.get("days") or []
     target = [0.0 for _ in range(SHIFT_PREVIEW_HOURS)]
     raw_target = [0.0 for _ in range(SHIFT_PREVIEW_HOURS)]
@@ -1317,10 +1427,14 @@ def _generate_schedule_preview_from_forecast(forecast_payload: Dict[str, Any], t
             target[absolute_hour] = float(_round_fte_to_half(raw_value))
 
     enabled_templates = [item for item in templates if item.get("enabled", True)]
+    rate_capacity = _normalize_schedule_rate_capacity(operator_capacity)
 
     candidates = []
     for day_index in range(min(7, len(days))):
         for template in enabled_templates:
+            rate_key = _resource_rate_key(template.get("rate"))
+            if rate_capacity.get(rate_key, {}).get("weekly_shift_capacity", 0) <= 0:
+                continue
             template_with_breaks = {
                 **template,
                 "breaks": _compute_default_shift_breaks(
@@ -1334,19 +1448,50 @@ def _generate_schedule_preview_from_forecast(forecast_payload: Dict[str, Any], t
             candidates.append({
                 "dayIndex": day_index,
                 "template": template_with_breaks,
+                "rateKey": rate_key,
                 "vector": vector,
+                "presenceVector": _shift_preview_presence_vector(day_index, template_with_breaks),
             })
 
     coverage = [0.0 for _ in range(SHIFT_PREVIEW_HOURS)]
     selected = []
-    max_shifts = max(0, min(800, int(sum(target) / 3) + 80))
+    weekly_usage = defaultdict(int)
+    daily_usage = defaultdict(lambda: defaultdict(int))
+    hourly_usage = {
+        _resource_rate_key(rate): [0.0 for _ in range(SHIFT_PREVIEW_HOURS)]
+        for rate in RESOURCE_RATE_VALUES
+    }
+    total_weekly_capacity = sum(int(item.get("weekly_shift_capacity") or 0) for item in rate_capacity.values())
+    target_based_limit = max(0, min(800, int(sum(target) / 3) + 80))
+    max_shifts = min(target_based_limit, total_weekly_capacity)
     for _ in range(max_shifts):
         best = None
         best_score = None
         for candidate in candidates:
+            rate_key = candidate["rateKey"]
+            day_index = int(candidate["dayIndex"])
+            capacity = rate_capacity.get(rate_key) or {}
+            if weekly_usage[rate_key] >= int(capacity.get("weekly_shift_capacity") or 0):
+                continue
+            if daily_usage[day_index][rate_key] >= int(capacity.get("daily_shift_capacity") or 0):
+                continue
+            active_capacity = int(capacity.get("daily_shift_capacity") or 0)
+            if active_capacity <= 0:
+                continue
+            if any(
+                float(hourly_usage[rate_key][index] or 0) + float(amount or 0) > active_capacity + 0.001
+                for index, amount in enumerate(candidate.get("presenceVector") or [])
+            ):
+                continue
             stats = _shift_preview_score(target, coverage, candidate["vector"])
             if stats["covered_need"] <= 0.05 or stats["score"] <= 0:
                 continue
+            day_deficit = _shift_preview_day_deficit(target, coverage, day_index)
+            stats = {
+                **stats,
+                "day_deficit": round(day_deficit, 4),
+                "score": stats["score"] + min(day_deficit, 120.0) * 0.12,
+            }
             if best_score is None or stats["score"] > best_score["score"]:
                 best = candidate
                 best_score = stats
@@ -1360,6 +1505,14 @@ def _generate_schedule_preview_from_forecast(forecast_payload: Dict[str, Any], t
             "vector": list(best["vector"]),
             "score": best_score,
         })
+        best_rate_key = best["rateKey"]
+        weekly_usage[best_rate_key] += 1
+        daily_usage[int(best["dayIndex"])][best_rate_key] += 1
+        for index, amount in enumerate(best.get("presenceVector") or []):
+            hourly_usage[best_rate_key][index] = round(
+                float(hourly_usage[best_rate_key][index] or 0) + float(amount or 0),
+                4,
+            )
         if sum(max(0.0, target[index] - coverage[index]) for index in range(SHIFT_PREVIEW_HOURS)) <= 0.01:
             break
 
@@ -1377,6 +1530,24 @@ def _generate_schedule_preview_from_forecast(forecast_payload: Dict[str, Any], t
         ):
             selected.remove(selected_item)
             coverage = coverage_without
+
+    final_usage = _shift_preview_usage_by_rate(selected)
+    capacity_summary = []
+    for rate in RESOURCE_RATE_VALUES:
+        rate_key = _resource_rate_key(rate)
+        capacity = rate_capacity[rate_key]
+        usage = final_usage[rate_key]
+        weekly_capacity = int(capacity.get("weekly_shift_capacity") or 0)
+        daily_capacity = int(capacity.get("daily_shift_capacity") or 0)
+        capacity_summary.append({
+            "rate": float(rate),
+            "count": int(capacity.get("count") or 0),
+            "dailyShiftCapacity": daily_capacity,
+            "weeklyShiftCapacity": weekly_capacity,
+            "weeklyShiftsUsed": int(usage.get("weekly_shifts") or 0),
+            "weeklyShiftsRemaining": max(0, weekly_capacity - int(usage.get("weekly_shifts") or 0)),
+            "dailyShiftsUsed": usage.get("daily_shifts") or [0 for _ in range(7)],
+        })
 
     shifts_by_day = defaultdict(list)
     for index, selected_item in enumerate(selected, start=1):
@@ -1434,6 +1605,13 @@ def _generate_schedule_preview_from_forecast(forecast_payload: Dict[str, Any], t
         "rounding": "math_half",
         "rounding_step": FTE_ROUNDING_STEP,
         "templates": templates,
+        "capacity": {
+            "workDaysPerOperatorWeek": WORK_DAYS_PER_OPERATOR_WEEK,
+            "rates": capacity_summary,
+            "activeOperatorCount": _to_int((operator_capacity or {}).get("active_operator_count")),
+            "currentOperatorFte": _to_float((operator_capacity or {}).get("current_operator_fte")),
+            "selectedDirectionIds": (operator_capacity or {}).get("selected_direction_ids") or [],
+        },
         "days": preview_days,
         "summary": _shift_preview_totals(target, coverage, raw_target),
     }
@@ -1451,14 +1629,15 @@ def build_resource_schedule_preview(db, payload: Optional[Dict[str, Any]] = None
     with db._get_cursor() as cursor:
         settings = _get_settings_tx(cursor)
         profiles = _compute_week_forecast_profiles_tx(cursor, target_week_start, settings)
-        current_fte = _current_operator_fte_tx(cursor, settings).get("current_operator_fte", 0.0)
+        operator_capacity = _current_operator_fte_tx(cursor, settings)
+        current_fte = operator_capacity.get("current_operator_fte", 0.0)
         forecast_payload = _build_week_forecast_payload(
             target_week_start,
             profiles,
             settings,
             current_operator_fte=current_fte,
         )
-    return _generate_schedule_preview_from_forecast(forecast_payload, templates)
+    return _generate_schedule_preview_from_forecast(forecast_payload, templates, operator_capacity)
 
 
 def import_resource_csv(db, content: bytes, filename: str, user_id: Optional[int]) -> Dict[str, Any]:
