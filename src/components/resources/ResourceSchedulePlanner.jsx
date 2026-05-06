@@ -39,6 +39,13 @@ const formatTime = (minutes) => {
   return `${String(Math.floor(normalized / 60)).padStart(2, '0')}:${String(normalized % 60).padStart(2, '0')}`;
 };
 
+const formatDurationHours = (minutes) => {
+  const total = Math.max(0, Math.round(Number(minutes || 0)));
+  const hours = Math.floor(total / 60);
+  const rest = total % 60;
+  return rest > 0 ? `${hours}ч ${String(rest).padStart(2, '0')}м` : `${hours}ч`;
+};
+
 const parseTemplateTime = (value) => {
   const raw = String(value || '').trim();
   if (!raw) return null;
@@ -626,10 +633,42 @@ const PlannerDayRow = ({
               );
             })}
             {splitPreview && Number(splitPreview.dayIndex) === Number(dayIndex) ? (
-              <div
-                className="pointer-events-none absolute bottom-0 top-0 z-30 border-l-2 border-slate-950"
-                style={{ left: `${clamp((Number(splitPreview.minute || 0) / 1440) * 100, 0, 100)}%` }}
-              />
+              <>
+                <div
+                  className="pointer-events-none absolute bottom-0 top-0 z-30 border-l-2 border-slate-950"
+                  style={{ left: `${clamp((Number(splitPreview.minute || 0) / 1440) * 100, 0, 100)}%` }}
+                />
+                {(() => {
+                  const shift = shifts.find((item) => item.id === splitPreview.shiftId);
+                  if (!shift) return null;
+                  const start = Number(shift.startMinute || 0);
+                  const end = Number(shift.endMinute || start + MIN_SHIFT_MINUTES);
+                  const split = Number(splitPreview.minute || start);
+                  const rowIndex = shifts.findIndex((item) => item.id === splitPreview.shiftId);
+                  const top = 32 + Math.max(0, rowIndex) * 34 - 24;
+                  const leftStart = clamp((start / 1440) * 100, 0, 100);
+                  const splitLeft = clamp((split / 1440) * 100, 0, 100);
+                  const rightEnd = clamp((Math.min(end, 1440) / 1440) * 100, 0, 100);
+                  const leftCenter = leftStart + Math.max(0, splitLeft - leftStart) / 2;
+                  const rightCenter = splitLeft + Math.max(0, rightEnd - splitLeft) / 2;
+                  return (
+                    <>
+                      <div
+                        className="pointer-events-none absolute z-40 -translate-x-1/2 rounded-md bg-slate-950 px-2 py-1 text-[11px] font-semibold text-white shadow-lg"
+                        style={{ top, left: `${leftCenter}%` }}
+                      >
+                        {formatDurationHours(split - start)}
+                      </div>
+                      <div
+                        className="pointer-events-none absolute z-40 -translate-x-1/2 rounded-md bg-slate-950 px-2 py-1 text-[11px] font-semibold text-white shadow-lg"
+                        style={{ top, left: `${rightCenter}%` }}
+                      >
+                        {formatDurationHours(end - split)}
+                      </div>
+                    </>
+                  );
+                })()}
+              </>
             ) : null}
           </div>
 
