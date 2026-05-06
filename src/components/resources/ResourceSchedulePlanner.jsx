@@ -3,10 +3,12 @@ import axios from 'axios';
 import {
   GripVertical,
   Plus,
+  Redo2,
   RefreshCw,
   RotateCcw,
   SlidersHorizontal,
   Trash2,
+  Undo2,
   Wand2,
 } from 'lucide-react';
 
@@ -14,11 +16,6 @@ const TEMPLATE_STORAGE_KEY = 'otp_resource_schedule_templates_v1';
 const SNAP_MINUTES = 30;
 const MIN_SHIFT_MINUTES = 60;
 const MAX_SHIFT_END_MINUTES = 32 * 60;
-
-const numberFormatter = new Intl.NumberFormat('ru-RU', {
-  maximumFractionDigits: 1,
-  minimumFractionDigits: 1,
-});
 
 const intFormatter = new Intl.NumberFormat('ru-RU', {
   maximumFractionDigits: 0,
@@ -33,6 +30,8 @@ const formatNumber = (value, digits = 1) =>
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 
 const snapMinutes = (value) => Math.round(Number(value || 0) / SNAP_MINUTES) * SNAP_MINUTES;
+
+const roundMathFte = (value) => Math.round(Math.max(0, Number(value || 0)));
 
 const formatTime = (minutes) => {
   const normalized = ((Math.round(Number(minutes || 0)) % 1440) + 1440) % 1440;
@@ -128,6 +127,32 @@ const storeTemplates = (templates) => {
   window.localStorage.setItem(TEMPLATE_STORAGE_KEY, JSON.stringify(templates || []));
 };
 
+const clonePlannerDays = (days) =>
+  (days || []).map((day) => ({
+    ...day,
+    coverage: (day.coverage || []).map((row) => ({ ...row })),
+    shifts: (day.shifts || []).map((shift) => ({
+      ...shift,
+      breaks: (shift.breaks || []).map((breakItem) => ({ ...breakItem })),
+    })),
+    stats: day.stats ? { ...day.stats } : day.stats,
+  }));
+
+const plannerDaysSignature = (days) => JSON.stringify(
+  (days || []).map((day) => ({
+    date: day.date,
+    shifts: (day.shifts || []).map((shift) => ({
+      id: shift.id,
+      templateId: shift.templateId,
+      rate: shift.rate,
+      label: shift.label,
+      startMinute: shift.startMinute,
+      endMinute: shift.endMinute,
+      breaks: shift.breaks || [],
+    })),
+  })),
+);
+
 const coverageTone = (row) => {
   const deficit = Number(row?.deficit || 0);
   const over = Number(row?.over || 0);
@@ -142,7 +167,9 @@ const buildCoverageFromDays = (days) => {
   const target = Array.from({ length: dayCount * 24 }, (_, index) => {
     const dayIndex = Math.floor(index / 24);
     const hour = index % 24;
-    return Number(days[dayIndex]?.coverage?.[hour]?.needed || 0);
+    const row = days[dayIndex]?.coverage?.[hour] || {};
+    const rawNeeded = row.rawNeeded ?? row.needed ?? 0;
+    return roundMathFte(rawNeeded);
   });
   const rawTarget = Array.from({ length: dayCount * 24 }, (_, index) => {
     const dayIndex = Math.floor(index / 24);
@@ -182,6 +209,7 @@ const buildCoverageFromDays = (days) => {
         needed,
         rawNeeded: rawTarget[index],
         covered: currentCovered,
+        coveredRounded: roundMathFte(currentCovered),
         deficit: Math.max(0, needed - currentCovered),
         over: Math.max(0, currentCovered - needed),
       };
@@ -377,17 +405,27 @@ const ShiftTemplateEditor = ({
 
 const PlannerDayRow = ({
   day,
+  previousDay,
   dayIndex,
   templates,
   selectedTemplateId,
   activeDragId,
+  splitPreview,
   timelineRef,
   onShiftPointerDown,
   onDeleteShift,
   onAddShift,
 }) => {
   const shifts = day.shifts || [];
-  const rowHeight = Math.max(90, shifts.length * 34 + 42);
+  const carryoverShifts = (previousDay?.shifts || [])
+    .filter((shift) => Number(shift.endMinute || 0) > 1440)
+    .map((shift) => ({
+      ...shift,
+      carryoverStartMinute: 0,
+      carryoverEndMinute: Math.min(1440, Number(shift.endMinute || 0) - 1440),
+    }))
+    .filter((shift) => Number(shift.carryoverEndMinute || 0) > 0);
+  const rowHeight = Math.max(90, (shifts.length + carryoverShifts.length) * 34 + 42);
 
   return (
     <section
@@ -401,7 +439,7 @@ const PlannerDayRow = ({
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <div className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-600">
-            <b className="text-slate-900">{formatNumber(day.stats?.coveredFteHours, 1)}</b> / {formatNumber(day.stats?.neededFteHours, 1)} FTE-ч
+            <b className="text-slate-900">{formatNumber(day.stats?.coveredFteHours, 1)}</b> / {intFormatter.format(roundMathFte(day.stats?.neededFteHours || 0))} FTE-ч
           </div>
           <button
             type="button"
@@ -449,6 +487,7 @@ const PlannerDayRow = ({
                     width: `${width}%`,
                   }}
                   onPointerDown={(event) => onShiftPointerDown(event, dayIndex, shift.id, 'move')}
+                  onContextMenu={(event) => event.preventDefault()}
                   title={`${formatTime(start)}-${formatTime(end)} · ${shift.rate} · ${shift.label}`}
                 >
                   <button
@@ -483,12 +522,39 @@ const PlannerDayRow = ({
                 </div>
               );
             })}
+            {carryoverShifts.map((shift, index) => {
+              const start = Number(shift.carryoverStartMinute || 0);
+              const end = Number(shift.carryoverEndMinute || 0);
+              const width = clamp(((end - start) / 1440) * 100, 1.8, 100);
+              return (
+                <div
+                  key={`carryover-${previousDay?.date || 'prev'}-${shift.id}`}
+                  className="pointer-events-none absolute z-10 flex h-7 items-center rounded-md border border-amber-300 bg-amber-100 px-2 text-xs font-semibold text-amber-800 shadow-sm"
+                  style={{
+                    top: 32 + (shifts.length + index) * 34,
+                    left: '0%',
+                    width: `${width}%`,
+                  }}
+                  title={`Переход с прошлого дня: ${formatTime(shift.startMinute)}-${formatTime(shift.endMinute)} · ${shift.rate} · ${shift.label}`}
+                >
+                  <span className="min-w-0 flex-1 truncate">
+                    {formatTime(start)}-{formatTime(end)} · с прошлого дня · {shift.rate}
+                  </span>
+                </div>
+              );
+            })}
+            {splitPreview && Number(splitPreview.dayIndex) === Number(dayIndex) ? (
+              <div
+                className="pointer-events-none absolute bottom-0 top-0 z-30 border-l-2 border-slate-950"
+                style={{ left: `${clamp((Number(splitPreview.minute || 0) / 1440) * 100, 0, 100)}%` }}
+              />
+            ) : null}
           </div>
 
           <div className="mt-3 grid gap-1" style={{ gridTemplateColumns: 'repeat(24, minmax(40px, 1fr))' }}>
             {(day.coverage || []).map((row) => (
               <div key={row.hour} className={`rounded-md border px-1 py-1 text-center text-[10px] ${coverageTone(row)}`}>
-                <div className="font-semibold">{numberFormatter.format(row.covered || 0)}</div>
+                <div className="font-semibold">{intFormatter.format(row.coveredRounded ?? roundMathFte(row.covered || 0))}</div>
                 <div>{intFormatter.format(row.needed || 0)}</div>
               </div>
             ))}
@@ -499,6 +565,54 @@ const PlannerDayRow = ({
   );
 };
 
+const PlannerDayCards = ({ days, selectedDayIndex, onSelect }) => (
+  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-7">
+    {days.map((day, dayIndex) => {
+      const active = Number(selectedDayIndex) === Number(dayIndex);
+      const deficit = Number(day.stats?.deficitFteHours || 0);
+      const coveragePercent = Number(day.stats?.coveragePercent || 0);
+      return (
+        <button
+          key={day.date || dayIndex}
+          type="button"
+          onClick={() => onSelect(dayIndex)}
+          className={`rounded-xl border p-3 text-left shadow-sm transition ${
+            active
+              ? 'border-slate-900 bg-slate-900 text-white'
+              : 'border-slate-200 bg-white text-slate-900 hover:border-slate-300 hover:bg-slate-50'
+          }`}
+        >
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <div className={`text-sm font-semibold ${active ? 'text-white' : 'text-slate-950'}`}>{day.short || day.label}</div>
+              <div className={`text-xs ${active ? 'text-slate-300' : 'text-slate-500'}`}>{day.date}</div>
+            </div>
+            <div className={`rounded-md px-2 py-1 text-xs font-semibold ${active ? 'bg-white/15 text-white' : 'bg-slate-100 text-slate-700'}`}>
+              {(day.shifts || []).length}
+            </div>
+          </div>
+          <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+            <div>
+              <div className={active ? 'text-slate-300' : 'text-slate-500'}>Нужно</div>
+              <b>{intFormatter.format(roundMathFte(day.stats?.neededFteHours || 0))}</b>
+            </div>
+            <div>
+              <div className={active ? 'text-slate-300' : 'text-slate-500'}>Дефицит</div>
+              <b className={deficit > 0.05 && !active ? 'text-rose-700' : ''}>{formatNumber(deficit, 1)}</b>
+            </div>
+          </div>
+          <div className={`mt-3 h-2 overflow-hidden rounded-full ${active ? 'bg-white/20' : 'bg-slate-200'}`}>
+            <div
+              className={`h-full rounded-full ${deficit > 0.05 ? 'bg-rose-500' : 'bg-emerald-500'}`}
+              style={{ width: `${clamp(coveragePercent, 0, 100)}%` }}
+            />
+          </div>
+        </button>
+      );
+    })}
+  </div>
+);
+
 const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onWeekStartChange, notify }) => {
   const [templates, setTemplates] = useState(() => loadStoredTemplates());
   const [selectedTemplateId, setSelectedTemplateId] = useState('');
@@ -508,7 +622,13 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
   const [isGenerating, setIsGenerating] = useState(false);
   const [errorText, setErrorText] = useState('');
   const [activeDragId, setActiveDragId] = useState('');
+  const [splitPreview, setSplitPreview] = useState(null);
+  const [selectedDayIndex, setSelectedDayIndex] = useState(0);
+  const [historyPast, setHistoryPast] = useState([]);
+  const [historyFuture, setHistoryFuture] = useState([]);
   const timelineRefs = useRef(new Map());
+  const plannerDaysRef = useRef(plannerDays);
+  const dragStartSnapshotRef = useRef(null);
 
   const emit = useCallback(
     (message, type = 'success') => {
@@ -520,6 +640,40 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
   const setTimelineRef = useCallback((dayIndex, node) => {
     if (node) timelineRefs.current.set(dayIndex, node);
     else timelineRefs.current.delete(dayIndex);
+  }, []);
+
+  useEffect(() => {
+    plannerDaysRef.current = plannerDays;
+  }, [plannerDays]);
+
+  const pushHistorySnapshot = useCallback((snapshot) => {
+    const source = clonePlannerDays(snapshot || plannerDaysRef.current);
+    setHistoryPast((current) => {
+      const last = current[current.length - 1];
+      if (last && plannerDaysSignature(last) === plannerDaysSignature(source)) return current;
+      return [...current, source].slice(-60);
+    });
+    setHistoryFuture([]);
+  }, []);
+
+  const undoPlannerChange = useCallback(() => {
+    setHistoryPast((current) => {
+      if (!current.length) return current;
+      const previous = current[current.length - 1];
+      setHistoryFuture((future) => [clonePlannerDays(plannerDaysRef.current), ...future].slice(0, 60));
+      setPlannerDays(clonePlannerDays(previous));
+      return current.slice(0, -1);
+    });
+  }, []);
+
+  const redoPlannerChange = useCallback(() => {
+    setHistoryFuture((current) => {
+      if (!current.length) return current;
+      const next = current[0];
+      setHistoryPast((past) => [...past, clonePlannerDays(plannerDaysRef.current)].slice(-60));
+      setPlannerDays(clonePlannerDays(next));
+      return current.slice(1);
+    });
   }, []);
 
   const applyTemplates = useCallback((nextTemplates) => {
@@ -578,10 +732,14 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
         },
       );
       const preview = response.data?.preview || {};
-      setPlannerDays((preview.days || []).map((day) => ({
+      const nextDays = (preview.days || []).map((day) => ({
         ...day,
         shifts: (day.shifts || []).map((shift) => ({ ...shift, breaks: shift.breaks || [] })),
-      })));
+      }));
+      setPlannerDays(nextDays);
+      setSelectedDayIndex(0);
+      setHistoryPast([]);
+      setHistoryFuture([]);
       setServerSummary(preview.summary || null);
       emit('График рассчитан', 'success');
     } catch (error) {
@@ -597,10 +755,35 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
   const computedDays = computed.days;
   const summary = computed.summary;
 
+  useEffect(() => {
+    if (!computedDays.length) {
+      setSelectedDayIndex(0);
+      return;
+    }
+    setSelectedDayIndex((current) => clamp(Number(current || 0), 0, computedDays.length - 1));
+  }, [computedDays.length]);
+
   const selectedTemplate = useMemo(
     () => templates.find((template) => template.id === selectedTemplateId) || templates.find((template) => template.enabled !== false) || null,
     [selectedTemplateId, templates],
   );
+
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      const target = event.target;
+      const targetTag = String(target?.tagName || '').toLowerCase();
+      if (target?.isContentEditable || ['input', 'textarea', 'select'].includes(targetTag)) return;
+      const key = String(event.key || '').toLowerCase();
+      const isUndo = (event.ctrlKey || event.metaKey) && key === 'z' && !event.shiftKey;
+      const isRedo = (event.ctrlKey || event.metaKey) && (key === 'y' || (key === 'z' && event.shiftKey));
+      if (!isUndo && !isRedo) return;
+      event.preventDefault();
+      if (isUndo) undoPlannerChange();
+      else redoPlannerChange();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [redoPlannerChange, undoPlannerChange]);
 
   const updateShift = useCallback((dayIndex, shiftId, updater) => {
     setPlannerDays((current) =>
@@ -659,6 +842,81 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
       const originalStart = Number(sourceShift.startMinute || 0);
       const originalEnd = Number(sourceShift.endMinute || originalStart + 60);
       const originalDuration = originalEnd - originalStart;
+
+      if (event.button === 2 && action === 'move') {
+        if (originalDuration < MIN_SHIFT_MINUTES * 2) return;
+        const splitAtClientX = (clientX) => {
+          const rawMinute = ((clientX - rect.left) / width) * 1440;
+          return clamp(
+            snapMinutes(rawMinute),
+            originalStart + MIN_SHIFT_MINUTES,
+            originalEnd - MIN_SHIFT_MINUTES,
+          );
+        };
+        const updatePreview = (clientX, clientY) => {
+          setSplitPreview({
+            dayIndex,
+            shiftId,
+            minute: splitAtClientX(clientX),
+            x: clientX,
+            y: clientY,
+          });
+        };
+        updatePreview(event.clientX, event.clientY);
+
+        const onSplitMove = (moveEvent) => {
+          updatePreview(moveEvent.clientX, moveEvent.clientY);
+        };
+        const onSplitUp = (upEvent) => {
+          window.removeEventListener('pointermove', onSplitMove);
+          window.removeEventListener('pointerup', onSplitUp);
+          const splitMinute = splitAtClientX(upEvent.clientX);
+          setSplitPreview(null);
+          pushHistorySnapshot();
+          setPlannerDays((current) =>
+            current.map((day, index) => {
+              if (index !== dayIndex) return day;
+              const nextShifts = [];
+              (day.shifts || []).forEach((shift) => {
+                if (shift.id !== shiftId) {
+                  nextShifts.push(shift);
+                  return;
+                }
+                const leftStart = Number(shift.startMinute || 0);
+                const rightEnd = Number(shift.endMinute || leftStart + MIN_SHIFT_MINUTES);
+                nextShifts.push({
+                  ...shift,
+                  id: `${shift.id}-a-${Date.now()}`,
+                  endMinute: splitMinute,
+                  end: formatTime(splitMinute),
+                  durationMinutes: splitMinute - leftStart,
+                  overnight: splitMinute > 1440,
+                  breaks: computeDefaultBreaks(leftStart, splitMinute),
+                });
+                nextShifts.push({
+                  ...shift,
+                  id: `${shift.id}-b-${Date.now()}`,
+                  startMinute: splitMinute,
+                  start: formatTime(splitMinute),
+                  endMinute: rightEnd,
+                  end: formatTime(rightEnd),
+                  durationMinutes: rightEnd - splitMinute,
+                  overnight: rightEnd > 1440,
+                  breaks: computeDefaultBreaks(splitMinute, rightEnd),
+                });
+              });
+              return { ...day, shifts: nextShifts };
+            }),
+          );
+        };
+        window.addEventListener('pointermove', onSplitMove);
+        window.addEventListener('pointerup', onSplitUp);
+        return;
+      }
+
+      if (event.button !== 0) return;
+      const startSnapshot = clonePlannerDays(plannerDaysRef.current);
+      dragStartSnapshotRef.current = startSnapshot;
       setActiveDragId(shiftId);
 
       const onMove = (moveEvent) => {
@@ -693,16 +951,22 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
         if (Number.isFinite(targetDayIndex)) {
           moveShiftToDay(dayIndex, targetDayIndex, shiftId);
         }
+        const changed =
+          plannerDaysSignature(startSnapshot) !== plannerDaysSignature(plannerDaysRef.current) ||
+          (Number.isFinite(targetDayIndex) && Number(targetDayIndex) !== Number(dayIndex));
+        if (changed) pushHistorySnapshot(startSnapshot);
+        dragStartSnapshotRef.current = null;
         setActiveDragId('');
       };
 
       window.addEventListener('pointermove', onMove);
       window.addEventListener('pointerup', onUp);
     },
-    [moveShiftToDay, plannerDays, updateShift],
+    [moveShiftToDay, plannerDays, pushHistorySnapshot, updateShift],
   );
 
   const deleteShift = useCallback((dayIndex, shiftId) => {
+    pushHistorySnapshot();
     setPlannerDays((current) =>
       current.map((day, index) => (
         index === dayIndex
@@ -710,12 +974,13 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
           : day
       )),
     );
-  }, []);
+  }, [pushHistorySnapshot]);
 
   const addShift = useCallback((dayIndex, templateId) => {
     const template = templates.find((item) => item.id === templateId) || selectedTemplate;
     const localTemplate = normalizeTemplateForLocalUse(template);
     if (!localTemplate) return;
+    pushHistorySnapshot();
     const startMinute = localTemplate.startMinute;
     const endMinute = localTemplate.endMinute;
     const shift = {
@@ -736,12 +1001,14 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
         index === dayIndex ? { ...day, shifts: [...(day.shifts || []), shift] } : day
       )),
     );
-  }, [selectedTemplate, templates]);
+  }, [pushHistorySnapshot, selectedTemplate, templates]);
 
   const resetTemplates = useCallback(() => {
     if (typeof window !== 'undefined') window.localStorage.removeItem(TEMPLATE_STORAGE_KEY);
     loadDefaultTemplates();
   }, [loadDefaultTemplates]);
+
+  const activeDayIndex = computedDays.length ? clamp(Number(selectedDayIndex || 0), 0, computedDays.length - 1) : 0;
 
   return (
     <div className="space-y-4">
@@ -760,6 +1027,24 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
               }}
               className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
             />
+            <button
+              type="button"
+              onClick={undoPlannerChange}
+              disabled={!historyPast.length}
+              className="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+              title="Ctrl+Z"
+            >
+              <Undo2 size={16} />
+            </button>
+            <button
+              type="button"
+              onClick={redoPlannerChange}
+              disabled={!historyFuture.length}
+              className="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+              title="Ctrl+Y"
+            >
+              <Redo2 size={16} />
+            </button>
             <button
               type="button"
               onClick={loadDefaultTemplates}
@@ -794,7 +1079,7 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
           </div>
           <div className="rounded-lg bg-slate-50 px-3 py-2">
             <div className="text-xs text-slate-500">Нужно</div>
-            <b className="text-slate-950">{formatNumber(summary.neededFteHours, 1)} FTE-ч</b>
+            <b className="text-slate-950">{intFormatter.format(roundMathFte(summary.neededFteHours || 0))} FTE-ч</b>
           </div>
           <div className="rounded-lg bg-slate-50 px-3 py-2">
             <div className="text-xs text-slate-500">Дефицит</div>
@@ -823,26 +1108,44 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
 
       <div className="space-y-4">
         {computedDays.length ? (
-          computedDays.map((day, dayIndex) => (
+          <>
+            <PlannerDayCards
+              days={computedDays}
+              selectedDayIndex={activeDayIndex}
+              onSelect={setSelectedDayIndex}
+            />
             <PlannerDayRow
-              key={day.date || dayIndex}
-              day={day}
-              dayIndex={dayIndex}
+              key={computedDays[activeDayIndex]?.date || activeDayIndex}
+              day={computedDays[activeDayIndex]}
+              previousDay={activeDayIndex > 0 ? computedDays[activeDayIndex - 1] : null}
+              dayIndex={activeDayIndex}
               templates={templates.filter((template) => template.enabled !== false)}
               selectedTemplateId={selectedTemplateId}
               activeDragId={activeDragId}
-              timelineRef={(node) => setTimelineRef(dayIndex, node)}
+              splitPreview={splitPreview}
+              timelineRef={(node) => setTimelineRef(activeDayIndex, node)}
               onShiftPointerDown={handleShiftPointerDown}
               onDeleteShift={deleteShift}
               onAddShift={addShift}
             />
-          ))
+          </>
         ) : (
           <div className="rounded-xl border border-dashed border-slate-300 bg-white px-6 py-12 text-center text-sm text-slate-500">
             Нажмите «Сгенерировать», чтобы построить виртуальные линии смен по прогнозу выбранной недели.
           </div>
         )}
       </div>
+      {splitPreview ? (
+        <div
+          className="pointer-events-none fixed z-50 rounded-md bg-slate-950 px-2 py-1 text-xs font-semibold text-white shadow-lg"
+          style={{
+            left: Number(splitPreview.x || 0) + 12,
+            top: Number(splitPreview.y || 0) + 12,
+          }}
+        >
+          {formatTime(splitPreview.minute)}
+        </div>
+      ) : null}
     </div>
   );
 };
