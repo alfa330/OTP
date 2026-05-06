@@ -209,19 +209,12 @@ const buildCoverageFromDays = (days) => {
     (day.shifts || []).forEach((shift) => {
       const startAbs = dayIndex * 1440 + Number(shift.startMinute || 0);
       const endAbs = dayIndex * 1440 + Number(shift.endMinute || 0);
-      const breaks = Array.isArray(shift.breaks) ? shift.breaks : [];
       for (let hourIndex = 0; hourIndex < covered.length; hourIndex += 1) {
         const hourStart = hourIndex * 60;
         const hourEnd = hourStart + 60;
         const overlap = Math.max(0, Math.min(endAbs, hourEnd) - Math.max(startAbs, hourStart));
         if (overlap <= 0) continue;
-        let breakOverlap = 0;
-        breaks.forEach((breakItem) => {
-          const breakStart = dayIndex * 1440 + Number(breakItem.start || 0);
-          const breakEnd = dayIndex * 1440 + Number(breakItem.end || 0);
-          breakOverlap += Math.max(0, Math.min(breakEnd, hourEnd) - Math.max(breakStart, hourStart));
-        });
-        covered[hourIndex] += Math.max(0, overlap - breakOverlap) / 60;
+        covered[hourIndex] += overlap / 60;
       }
     });
   });
@@ -500,6 +493,7 @@ const PlannerDayRow = ({
   coverageView,
   timelineRef,
   onShiftPointerDown,
+  onCarryoverPointerDown,
   onDeleteShift,
   onAddShift,
 }) => {
@@ -559,6 +553,7 @@ const PlannerDayRow = ({
             {shifts.map((shift, index) => {
               const start = Number(shift.startMinute || 0);
               const end = Number(shift.endMinute || start + 60);
+              const duration = Math.max(0, end - start);
               const left = clamp((start / 1440) * 100, 0, 100);
               const width = clamp(((Math.min(end, 1440) - start) / 1440) * 100, 1.8, 100 - left);
               const isActive = activeDragId === shift.id;
@@ -577,7 +572,7 @@ const PlannerDayRow = ({
                   }}
                   onPointerDown={(event) => onShiftPointerDown(event, dayIndex, shift.id, 'move')}
                   onContextMenu={(event) => event.preventDefault()}
-                  title={`${formatTime(start)}-${formatTime(end)} · ${shift.rate} · ${shift.label}`}
+                  title={`${formatTime(start)}-${formatTime(end)} · ${formatDurationHours(duration)} · ${shift.label}`}
                 >
                   <button
                     type="button"
@@ -614,21 +609,51 @@ const PlannerDayRow = ({
             {carryoverShifts.map((shift, index) => {
               const start = Number(shift.carryoverStartMinute || 0);
               const end = Number(shift.carryoverEndMinute || 0);
+              const sourceDayIndex = dayIndex - 1;
+              const originalStart = Number(shift.startMinute || 0);
+              const originalEnd = Number(shift.endMinute || originalStart + MIN_SHIFT_MINUTES);
+              const originalDuration = Math.max(0, originalEnd - originalStart);
               const width = clamp(((end - start) / 1440) * 100, 1.8, 100);
+              const isActive = activeDragId === shift.id;
               return (
                 <div
                   key={`carryover-${previousDay?.date || 'prev'}-${shift.id}`}
-                  className="pointer-events-none absolute z-10 flex h-7 items-center rounded-md border border-amber-300 bg-amber-100 px-2 text-xs font-semibold text-amber-800 shadow-sm"
+                  className={`absolute flex h-7 cursor-grab items-center rounded-md border px-1.5 text-xs font-semibold shadow-sm transition ${
+                    isActive
+                      ? 'z-20 border-amber-500 bg-amber-400 text-slate-950'
+                      : 'z-10 border-amber-300 bg-amber-100 text-amber-800 hover:bg-amber-200'
+                  }`}
                   style={{
                     top: 32 + (shifts.length + index) * 34,
                     left: '0%',
                     width: `${width}%`,
                   }}
-                  title={`Переход с прошлого дня: ${formatTime(shift.startMinute)}-${formatTime(shift.endMinute)} · ${shift.rate} · ${shift.label}`}
+                  onPointerDown={(event) => onCarryoverPointerDown(event, dayIndex, shift.id, 'move')}
+                  onContextMenu={(event) => event.preventDefault()}
+                  title={`Переход с прошлого дня: ${formatTime(originalStart)}-${formatTime(originalEnd)} · ${formatDurationHours(originalDuration)} · ${shift.label}`}
                 >
+                  <GripVertical size={13} className="mr-1 shrink-0" />
                   <span className="min-w-0 flex-1 truncate">
-                    {formatTime(start)}-{formatTime(end)} · с прошлого дня · {shift.rate}
+                    {formatTime(originalStart)}-{formatTime(originalEnd)} · с прошлого дня
                   </span>
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onDeleteShift(sourceDayIndex, shift.id);
+                    }}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    className="ml-1 flex h-5 w-5 shrink-0 items-center justify-center rounded text-current hover:bg-white/60"
+                    aria-label="delete-carryover-shift"
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                  <button
+                    type="button"
+                    onPointerDown={(event) => onCarryoverPointerDown(event, dayIndex, shift.id, 'resize-right')}
+                    className="ml-1 h-5 w-2 cursor-ew-resize rounded bg-white/70"
+                    aria-label="resize-carryover-right"
+                  />
                 </div>
               );
             })}
@@ -1111,6 +1136,60 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
     [moveShiftToDay, plannerDays, pushHistorySnapshot, updateShift],
   );
 
+  const handleCarryoverPointerDown = useCallback(
+    (event, dayIndex, shiftId, action) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.button !== 0) return;
+
+      const sourceDayIndex = dayIndex - 1;
+      const timelineNode = timelineRefs.current.get(dayIndex);
+      const sourceShift = plannerDays[sourceDayIndex]?.shifts?.find((shift) => shift.id === shiftId);
+      if (sourceDayIndex < 0 || !timelineNode || !sourceShift) return;
+
+      const rect = timelineNode.getBoundingClientRect();
+      const width = Math.max(1, rect.width);
+      const originalStart = Number(sourceShift.startMinute || 0);
+      const originalEnd = Number(sourceShift.endMinute || originalStart + MIN_SHIFT_MINUTES);
+      const originalDuration = Math.max(MIN_SHIFT_MINUTES, originalEnd - originalStart);
+      const startSnapshot = clonePlannerDays(plannerDaysRef.current);
+
+      dragStartSnapshotRef.current = startSnapshot;
+      setActiveDragId(shiftId);
+
+      const onMove = (moveEvent) => {
+        const deltaMinutes = snapMinutes(((moveEvent.clientX - event.clientX) / width) * 1440);
+        if (action === 'resize-right') {
+          updateShift(sourceDayIndex, shiftId, () => ({
+            startMinute: originalStart,
+            endMinute: clamp(originalEnd + deltaMinutes, originalStart + MIN_SHIFT_MINUTES, MAX_SHIFT_END_MINUTES),
+          }));
+          return;
+        }
+
+        const maxStart = Math.min(1439, MAX_SHIFT_END_MINUTES - originalDuration);
+        const nextStart = clamp(originalStart + deltaMinutes, 0, maxStart);
+        updateShift(sourceDayIndex, shiftId, () => ({
+          startMinute: nextStart,
+          endMinute: nextStart + originalDuration,
+        }));
+      };
+
+      const onUp = () => {
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        const changed = plannerDaysSignature(startSnapshot) !== plannerDaysSignature(plannerDaysRef.current);
+        if (changed) pushHistorySnapshot(startSnapshot);
+        dragStartSnapshotRef.current = null;
+        setActiveDragId('');
+      };
+
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+    },
+    [plannerDays, pushHistorySnapshot, updateShift],
+  );
+
   const deleteShift = useCallback((dayIndex, shiftId) => {
     pushHistorySnapshot();
     setPlannerDays((current) =>
@@ -1334,6 +1413,7 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
               coverageView={coverageView}
               timelineRef={(node) => setTimelineRef(activeDayIndex, node)}
               onShiftPointerDown={handleShiftPointerDown}
+              onCarryoverPointerDown={handleCarryoverPointerDown}
               onDeleteShift={deleteShift}
               onAddShift={addShift}
             />
