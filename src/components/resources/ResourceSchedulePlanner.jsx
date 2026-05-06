@@ -18,9 +18,11 @@ const SNAP_MINUTES = 30;
 const MIN_SHIFT_MINUTES = 60;
 const MAX_SHIFT_END_MINUTES = 32 * 60;
 
-const intFormatter = new Intl.NumberFormat('ru-RU', {
-  maximumFractionDigits: 0,
+const fteFormatter = new Intl.NumberFormat('ru-RU', {
+  maximumFractionDigits: 1,
 });
+
+const FTE_EPSILON = 0.001;
 
 const formatNumber = (value, digits = 1) =>
   new Intl.NumberFormat('ru-RU', {
@@ -28,11 +30,13 @@ const formatNumber = (value, digits = 1) =>
     minimumFractionDigits: digits,
   }).format(Number(value || 0));
 
+const formatFte = (value) => fteFormatter.format(Number(value || 0));
+
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 
 const snapMinutes = (value) => Math.round(Number(value || 0) / SNAP_MINUTES) * SNAP_MINUTES;
 
-const roundMathFte = (value) => Math.round(Math.max(0, Number(value || 0)));
+const roundMathFte = (value) => Math.round((Math.max(0, Number(value || 0)) + Number.EPSILON) * 2) / 2;
 
 const formatTime = (minutes) => {
   const normalized = ((Math.round(Number(minutes || 0)) % 1440) + 1440) % 1440;
@@ -138,8 +142,8 @@ const storeTemplates = (templates) => {
 const getCoverageVisualState = (row) => {
   const needed = roundMathFte(row?.needed || 0);
   const covered = Number(row?.coveredRounded ?? roundMathFte(row?.covered || 0));
-  if (covered < needed) return 'deficit';
-  if (covered > needed) return 'over';
+  if (covered + FTE_EPSILON < needed) return 'deficit';
+  if (covered > needed + FTE_EPSILON) return 'over';
   if (needed > 0) return 'covered';
   return 'empty';
 };
@@ -224,43 +228,87 @@ const buildCoverageFromDays = (days) => {
       const index = dayIndex * 24 + hour;
       const needed = target[index];
       const currentCovered = Number(covered[index] || 0);
+      const coveredRounded = roundMathFte(currentCovered);
       return {
         hour,
         needed,
         rawNeeded: rawTarget[index],
         covered: currentCovered,
-        coveredRounded: roundMathFte(currentCovered),
-        deficit: Math.max(0, needed - currentCovered),
-        over: Math.max(0, currentCovered - needed),
+        coveredRounded,
+        deficit: Math.max(0, needed - coveredRounded),
+        over: Math.max(0, coveredRounded - needed),
       };
     });
     const stats = coverage.reduce(
       (acc, row) => {
+        acc.realNeededFteHours += Number(row.rawNeeded || 0);
         acc.neededFteHours += row.needed;
-        acc.coveredFteHours += Math.min(row.covered, row.needed);
+        acc.roundedNeededFteHours += row.needed;
+        acc.realCoveredFteHours += row.covered;
+        acc.roundedCoveredFteHours += row.coveredRounded;
+        acc.realCoveredNeedFteHours += Math.min(row.covered, Number(row.rawNeeded || 0));
+        acc.coveredFteHours += Math.min(row.coveredRounded, row.needed);
         acc.deficitFteHours += row.deficit;
         acc.overFteHours += row.over;
         return acc;
       },
-      { neededFteHours: 0, coveredFteHours: 0, deficitFteHours: 0, overFteHours: 0 },
+      {
+        realNeededFteHours: 0,
+        neededFteHours: 0,
+        roundedNeededFteHours: 0,
+        realCoveredFteHours: 0,
+        roundedCoveredFteHours: 0,
+        realCoveredNeedFteHours: 0,
+        coveredFteHours: 0,
+        deficitFteHours: 0,
+        overFteHours: 0,
+      },
     );
     stats.coveragePercent = stats.neededFteHours > 0 ? (stats.coveredFteHours / stats.neededFteHours) * 100 : 0;
+    stats.realCoveragePercent = stats.realNeededFteHours > 0
+      ? (stats.realCoveredNeedFteHours / stats.realNeededFteHours) * 100
+      : 0;
     return { ...day, coverage, stats };
   });
 
   const summary = nextDays.reduce(
     (acc, day) => {
+      acc.realNeededFteHours += Number(day.stats?.realNeededFteHours || 0);
       acc.neededFteHours += Number(day.stats?.neededFteHours || 0);
+      acc.roundedNeededFteHours += Number(day.stats?.roundedNeededFteHours || day.stats?.neededFteHours || 0);
+      acc.realCoveredFteHours += Number(day.stats?.realCoveredFteHours || 0);
+      acc.roundedCoveredFteHours += Number(day.stats?.roundedCoveredFteHours || 0);
+      acc.realCoveredNeedFteHours += Number(day.stats?.realCoveredNeedFteHours || 0);
       acc.coveredFteHours += Number(day.stats?.coveredFteHours || 0);
       acc.deficitFteHours += Number(day.stats?.deficitFteHours || 0);
       acc.overFteHours += Number(day.stats?.overFteHours || 0);
       return acc;
     },
-    { neededFteHours: 0, coveredFteHours: 0, deficitFteHours: 0, overFteHours: 0 },
+    {
+      realNeededFteHours: 0,
+      neededFteHours: 0,
+      roundedNeededFteHours: 0,
+      realCoveredFteHours: 0,
+      roundedCoveredFteHours: 0,
+      realCoveredNeedFteHours: 0,
+      coveredFteHours: 0,
+      deficitFteHours: 0,
+      overFteHours: 0,
+    },
   );
   summary.coveragePercent = summary.neededFteHours > 0 ? (summary.coveredFteHours / summary.neededFteHours) * 100 : 0;
+  summary.realCoveragePercent = summary.realNeededFteHours > 0
+    ? (summary.realCoveredNeedFteHours / summary.realNeededFteHours) * 100
+    : 0;
   return { days: nextDays, summary };
 };
+
+const FteSumValue = ({ rounded, real, suffix = 'FTE-ч', className = 'text-slate-950' }) => (
+  <div>
+    <b className={className}>Округл. {formatFte(rounded)} {suffix}</b>
+    <div className="mt-0.5 text-[11px] text-slate-500">Сумма без округления {formatNumber(real, 2)} {suffix}</div>
+  </div>
+);
 
 const ShiftTemplateEditor = ({
   templates,
@@ -458,7 +506,7 @@ const CoverageBars = ({ coverage = [] }) => {
                   <div
                     key={`${rowMeta.key}-${row.hour}`}
                     className="flex items-end rounded-md bg-slate-100 px-0.5"
-                    title={`${String(row.hour).padStart(2, '0')}:00 · нужно ${intFormatter.format(row.needed || 0)} · покрыто ${intFormatter.format(row.coveredRounded ?? roundMathFte(row.covered || 0))}`}
+                    title={`${String(row.hour).padStart(2, '0')}:00 · нужно ${formatFte(row.needed || 0)} (без округления ${formatNumber(row.rawNeeded, 2)}) · покрыто ${formatFte(row.coveredRounded ?? roundMathFte(row.covered || 0))} (без округления ${formatNumber(row.covered, 2)})`}
                   >
                     <div
                       className={`w-full rounded-sm ${coverageBarTone(row, rowMeta.key)}`}
@@ -520,7 +568,12 @@ const PlannerDayRow = ({
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <div className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-600">
-            <b className="text-slate-900">{formatNumber(day.stats?.coveredFteHours, 1)}</b> / {intFormatter.format(roundMathFte(day.stats?.neededFteHours || 0))} FTE-ч
+            <b className="text-slate-900">
+              Округл. {formatFte(day.stats?.roundedCoveredFteHours ?? day.stats?.coveredFteHours)} / {formatFte(day.stats?.roundedNeededFteHours ?? day.stats?.neededFteHours)} FTE-ч
+            </b>
+            <div className="mt-0.5 text-[11px] text-slate-500">
+              Сумма без округления {formatNumber(day.stats?.realCoveredFteHours, 2)} / {formatNumber(day.stats?.realNeededFteHours, 2)} FTE-ч
+            </div>
           </div>
           <button
             type="button"
@@ -702,9 +755,13 @@ const PlannerDayRow = ({
           ) : (
             <div className="mt-3 grid gap-1" style={{ gridTemplateColumns: 'repeat(24, minmax(40px, 1fr))' }}>
               {(day.coverage || []).map((row) => (
-                <div key={row.hour} className={`rounded-md border px-1 py-1 text-center text-[10px] ${coverageTone(row)}`}>
-                  <div className="font-semibold">{intFormatter.format(row.coveredRounded ?? roundMathFte(row.covered || 0))}</div>
-                  <div>{intFormatter.format(row.needed || 0)}</div>
+                <div
+                  key={row.hour}
+                  className={`rounded-md border px-1 py-1 text-center text-[10px] ${coverageTone(row)}`}
+                  title={`${String(row.hour).padStart(2, '0')}:00 · округл. ${formatFte(row.coveredRounded ?? roundMathFte(row.covered || 0))}/${formatFte(row.needed || 0)} · без округления ${formatNumber(row.covered, 2)}/${formatNumber(row.rawNeeded, 2)}`}
+                >
+                  <div className="font-semibold">{formatFte(row.coveredRounded ?? roundMathFte(row.covered || 0))}</div>
+                  <div>{formatFte(row.needed || 0)}</div>
                 </div>
               ))}
             </div>
@@ -744,7 +801,10 @@ const PlannerDayCards = ({ days, selectedDayIndex, onSelect }) => (
           <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
             <div>
               <div className={active ? 'text-slate-300' : 'text-slate-500'}>Нужно</div>
-              <b>{intFormatter.format(roundMathFte(day.stats?.neededFteHours || 0))}</b>
+              <b>{formatFte(day.stats?.roundedNeededFteHours ?? day.stats?.neededFteHours)}</b>
+              <div className={active ? 'text-slate-300' : 'text-slate-500'}>
+                без округления {formatNumber(day.stats?.realNeededFteHours, 2)}
+              </div>
             </div>
             <div>
               <div className={active ? 'text-slate-300' : 'text-slate-500'}>Дефицит</div>
@@ -763,7 +823,7 @@ const PlannerDayCards = ({ days, selectedDayIndex, onSelect }) => (
   </div>
 );
 
-const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onWeekStartChange, notify }) => {
+const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onWeekStartChange, weekPicker, notify }) => {
   const [templates, setTemplates] = useState(() => loadStoredTemplates());
   const [selectedTemplateId, setSelectedTemplateId] = useState('');
   const [plannerDays, setPlannerDays] = useState([]);
@@ -1260,20 +1320,24 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
   return (
     <div className="space-y-4">
       <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-        <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+        <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_300px_auto] xl:items-start">
           <div>
             <h2 className="text-lg font-semibold text-slate-950">Генератор графиков по FTE</h2>
             <div className="mt-1 text-sm text-slate-500">Неделя: {selectedWeekStart || '-'}</div>
           </div>
-          <div className="flex flex-wrap gap-2">
-            <input
-              type="date"
-              value={selectedWeekStart || ''}
-              onChange={(event) => {
-                if (typeof onWeekStartChange === 'function') onWeekStartChange(event.target.value);
-              }}
-              className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
-            />
+          <div className="min-w-0">
+            {weekPicker || (
+              <input
+                type="date"
+                value={selectedWeekStart || ''}
+                onChange={(event) => {
+                  if (typeof onWeekStartChange === 'function') onWeekStartChange(event.target.value);
+                }}
+                className="h-10 w-full rounded-lg border-2 border-blue-300 bg-white px-3 text-sm text-slate-900 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+              />
+            )}
+          </div>
+          <div className="flex flex-wrap gap-2 xl:justify-end">
             <button
               type="button"
               onClick={loadDefaultTemplates}
@@ -1304,11 +1368,17 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
         <div className="mt-4 grid gap-3 md:grid-cols-4">
           <div className="rounded-lg bg-slate-50 px-3 py-2">
             <div className="text-xs text-slate-500">Покрыто</div>
-            <b className="text-slate-950">{formatNumber(summary.coveredFteHours, 1)} FTE-ч</b>
+            <FteSumValue
+              rounded={summary.roundedCoveredFteHours ?? summary.coveredFteHours}
+              real={summary.realCoveredFteHours ?? summary.coveredFteHours}
+            />
           </div>
           <div className="rounded-lg bg-slate-50 px-3 py-2">
             <div className="text-xs text-slate-500">Нужно</div>
-            <b className="text-slate-950">{intFormatter.format(roundMathFte(summary.neededFteHours || 0))} FTE-ч</b>
+            <FteSumValue
+              rounded={summary.roundedNeededFteHours ?? summary.neededFteHours}
+              real={summary.realNeededFteHours ?? summary.neededFteHours}
+            />
           </div>
           <div className="rounded-lg bg-slate-50 px-3 py-2">
             <div className="text-xs text-slate-500">Дефицит</div>
@@ -1322,7 +1392,7 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
 
         {serverSummary ? (
           <div className="mt-3 text-xs text-slate-500">
-            Исходный расчет: {formatNumber(serverSummary.coveragePercent, 1)}% · перепокрытие {formatNumber(serverSummary.overFteHours, 1)} FTE-ч
+            Исходный расчет: {formatNumber(serverSummary.coveragePercent, 1)}% · нужно округл. {formatFte(serverSummary.roundedNeededFteHours ?? serverSummary.neededFteHours)} / сумма без округления {formatNumber(serverSummary.realNeededFteHours ?? serverSummary.neededFteHours, 2)} FTE-ч · покрыто округл. {formatFte(serverSummary.roundedCoveredFteHours ?? serverSummary.coveredFteHours)} / сумма без округления {formatNumber(serverSummary.realCoveredFteHours ?? serverSummary.coveredFteHours, 2)} FTE-ч · перепокрытие {formatNumber(serverSummary.overFteHours, 1)} FTE-ч
           </div>
         ) : null}
       </section>

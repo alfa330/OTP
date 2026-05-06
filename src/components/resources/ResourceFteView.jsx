@@ -673,9 +673,7 @@ const WeekForecastPicker = ({ value, onChange, loadedDates = [] }) => {
       <button
         type="button"
         onClick={() => setOpen((current) => !current)}
-        className={`flex min-h-16 w-full items-center justify-between gap-3 rounded-xl border-2 bg-white px-4 py-3 text-left text-sm shadow-sm transition hover:bg-slate-50 ${
-          selectedWeekComplete ? 'border-emerald-200 hover:border-emerald-300' : 'border-slate-200 hover:border-slate-300'
-        }`}
+        className="flex min-h-16 w-full items-center justify-between gap-3 rounded-xl border-2 border-blue-300 bg-white px-4 py-3 text-left text-sm shadow-sm transition hover:border-blue-400 hover:bg-slate-50"
       >
         <span className="min-w-0">
           <span className="block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Неделя прогноза</span>
@@ -688,7 +686,7 @@ const WeekForecastPicker = ({ value, onChange, loadedDates = [] }) => {
             {selectedWeekComplete ? 'истории хватает' : 'истории не хватает'}
           </span>
         </span>
-        <CalendarDays size={17} className={selectedWeekComplete ? 'shrink-0 text-emerald-600' : 'shrink-0 text-blue-600'} />
+        <CalendarDays size={17} className="shrink-0 text-blue-600" />
       </button>
 
       <div className="mt-2 rounded-xl border border-slate-200 bg-slate-100 px-3 py-2 text-xs text-slate-600">
@@ -736,9 +734,7 @@ const WeekForecastPicker = ({ value, onChange, loadedDates = [] }) => {
                   onClick={() => selectWeek(iso)}
                   className={`relative flex h-10 items-center justify-center rounded-lg border text-sm font-semibold transition ${
                     isSelectedWeek
-                      ? weekComplete
-                        ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
-                        : 'border-blue-200 bg-blue-50 text-blue-800'
+                      ? 'border-blue-500 bg-white text-blue-800 ring-1 ring-blue-500'
                       : dayComplete
                         ? 'border-emerald-100 bg-emerald-50 text-emerald-700 hover:border-emerald-300'
                         : isOutside
@@ -1840,6 +1836,13 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
             buildHeaders={buildHeaders}
             selectedWeekStart={selectedForecastWeekStart}
             onWeekStartChange={(value) => setSelectedForecastWeekStart(getWeekStartIso(value))}
+            weekPicker={(
+              <WeekForecastPicker
+                value={selectedForecastWeekStart}
+                onChange={(weekStart) => setSelectedForecastWeekStart(weekStart)}
+                loadedDates={loadedReportDates}
+              />
+            )}
             notify={notify}
           />
         )}

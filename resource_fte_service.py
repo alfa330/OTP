@@ -83,6 +83,7 @@ DEFAULT_RESOURCE_SHIFT_TEMPLATE_LABELS = {
 
 SHIFT_PREVIEW_HOURS = 24 * 7
 SHIFT_PREVIEW_MINUTES = SHIFT_PREVIEW_HOURS * 60
+FTE_ROUNDING_STEP = 0.5
 
 HEADER_ALIASES = {
     "report_date": ["дата", "date", "день"],
@@ -210,8 +211,9 @@ def _round_value(value: float, mode: str) -> float:
     return number
 
 
-def _round_half_up(value: float) -> int:
-    return int(math.floor(max(0.0, float(value or 0)) + 0.5))
+def _round_fte_to_half(value: float) -> float:
+    number = max(0.0, float(value or 0))
+    return round(math.floor((number / FTE_ROUNDING_STEP) + 0.5) * FTE_ROUNDING_STEP, 4)
 
 
 def _parse_shift_template_time(value: Any) -> int:
@@ -1225,27 +1227,13 @@ def _shift_preview_vector(day_index: int, template: Dict[str, Any]) -> List[floa
     day_start = int(day_index) * 24 * 60
     start_abs = day_start + int(template.get("startMinute") or 0)
     end_abs = day_start + int(template.get("endMinute") or 0)
-    breaks_abs = [
-        {
-            "start": day_start + int(item.get("start") or 0),
-            "end": day_start + int(item.get("end") or 0),
-        }
-        for item in (template.get("breaks") or [])
-        if int(item.get("end") or 0) > int(item.get("start") or 0)
-    ]
     for hour_index in range(SHIFT_PREVIEW_HOURS):
         hour_start = hour_index * 60
         hour_end = hour_start + 60
         overlap = max(0, min(end_abs, hour_end) - max(start_abs, hour_start))
         if overlap <= 0:
             continue
-        break_overlap = 0
-        for break_item in breaks_abs:
-            break_overlap += max(
-                0,
-                min(int(break_item["end"]), hour_end) - max(int(break_item["start"]), hour_start),
-            )
-        vector[hour_index] = round(max(0, overlap - break_overlap) / 60, 4)
+        vector[hour_index] = round(overlap / 60, 4)
     return vector
 
 
@@ -1278,17 +1266,39 @@ def _shift_preview_score(target: List[float], coverage: List[float], vector: Lis
     }
 
 
-def _shift_preview_totals(target: List[float], coverage: List[float]) -> Dict[str, Any]:
+def _shift_preview_totals(
+    target: List[float],
+    coverage: List[float],
+    raw_target: Optional[List[float]] = None,
+) -> Dict[str, Any]:
+    effective_raw_target = raw_target if raw_target is not None else target
     total_needed = sum(float(item or 0) for item in target)
-    covered_need = sum(min(float(coverage[index] or 0), float(target[index] or 0)) for index in range(len(target)))
-    deficit = sum(max(0.0, float(target[index] or 0) - float(coverage[index] or 0)) for index in range(len(target)))
-    over = sum(max(0.0, float(coverage[index] or 0) - float(target[index] or 0)) for index in range(len(target)))
+    real_needed = sum(float(item or 0) for item in effective_raw_target)
+    real_coverage = sum(float(item or 0) for item in coverage)
+    rounded_coverage = [_round_fte_to_half(float(item or 0)) for item in coverage]
+    rounded_coverage_total = sum(float(item or 0) for item in rounded_coverage)
+    covered_need = sum(min(float(rounded_coverage[index] or 0), float(target[index] or 0)) for index in range(len(target)))
+    real_covered_need = sum(
+        min(
+            float(coverage[index] or 0),
+            float(effective_raw_target[index] or 0),
+        )
+        for index in range(len(target))
+    )
+    deficit = sum(max(0.0, float(target[index] or 0) - float(rounded_coverage[index] or 0)) for index in range(len(target)))
+    over = sum(max(0.0, float(rounded_coverage[index] or 0) - float(target[index] or 0)) for index in range(len(target)))
     return {
         "neededFteHours": round(total_needed, 4),
+        "roundedNeededFteHours": round(total_needed, 4),
+        "realNeededFteHours": round(real_needed, 4),
         "coveredFteHours": round(covered_need, 4),
+        "roundedCoveredFteHours": round(rounded_coverage_total, 4),
+        "realCoveredFteHours": round(real_coverage, 4),
+        "realCoveredNeedFteHours": round(real_covered_need, 4),
         "deficitFteHours": round(deficit, 4),
         "overFteHours": round(over, 4),
         "coveragePercent": round((covered_need / total_needed * 100) if total_needed > 0 else 0.0, 2),
+        "realCoveragePercent": round((real_covered_need / real_needed * 100) if real_needed > 0 else 0.0, 2),
     }
 
 
@@ -1304,7 +1314,7 @@ def _generate_schedule_preview_from_forecast(forecast_payload: Dict[str, Any], t
             absolute_hour = day_index * 24 + hour
             raw_value = max(0.0, _to_float(row.get("forecast_fte")))
             raw_target[absolute_hour] = round(raw_value, 4)
-            target[absolute_hour] = float(_round_half_up(raw_value))
+            target[absolute_hour] = float(_round_fte_to_half(raw_value))
 
     enabled_templates = [item for item in templates if item.get("enabled", True)]
 
@@ -1394,15 +1404,19 @@ def _generate_schedule_preview_from_forecast(forecast_payload: Dict[str, Any], t
             absolute_hour = day_index * 24 + hour
             needed = float(target[absolute_hour] or 0)
             covered = float(coverage[absolute_hour] or 0)
+            covered_rounded = _round_fte_to_half(covered)
             coverage_rows.append({
                 "hour": hour,
                 "needed": round(needed, 4),
                 "rawNeeded": round(float(raw_target[absolute_hour] or 0), 4),
+                "realNeeded": round(float(raw_target[absolute_hour] or 0), 4),
                 "covered": round(covered, 4),
-                "deficit": round(max(0.0, needed - covered), 4),
-                "over": round(max(0.0, covered - needed), 4),
+                "coveredRounded": round(covered_rounded, 4),
+                "deficit": round(max(0.0, needed - covered_rounded), 4),
+                "over": round(max(0.0, covered_rounded - needed), 4),
             })
         day_target = target[day_index * 24:(day_index + 1) * 24]
+        day_raw_target = raw_target[day_index * 24:(day_index + 1) * 24]
         day_coverage = coverage[day_index * 24:(day_index + 1) * 24]
         preview_days.append({
             "date": day.get("forecast_date"),
@@ -1411,16 +1425,17 @@ def _generate_schedule_preview_from_forecast(forecast_payload: Dict[str, Any], t
             "label": day.get("label"),
             "coverage": coverage_rows,
             "shifts": shifts_by_day.get(day_index, []),
-            "stats": _shift_preview_totals(day_target, day_coverage),
+            "stats": _shift_preview_totals(day_target, day_coverage, day_raw_target),
         })
 
     return {
         "week_start": forecast_payload.get("week_start"),
         "week_end": forecast_payload.get("week_end"),
-        "rounding": "math",
+        "rounding": "math_half",
+        "rounding_step": FTE_ROUNDING_STEP,
         "templates": templates,
         "days": preview_days,
-        "summary": _shift_preview_totals(target, coverage),
+        "summary": _shift_preview_totals(target, coverage, raw_target),
     }
 
 
