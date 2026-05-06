@@ -632,7 +632,7 @@ const CalendarPicker = ({
   );
 };
 
-const WeekForecastPicker = ({ value, onChange, loadedDates = [] }) => {
+const WeekForecastPicker = ({ value, onChange, loadedDates = [], compact = false }) => {
   const [open, setOpen] = useState(false);
   const anchorRef = useRef(null);
   const loadedSet = useMemo(() => new Set(loadedDates), [loadedDates]);
@@ -673,23 +673,25 @@ const WeekForecastPicker = ({ value, onChange, loadedDates = [] }) => {
       <button
         type="button"
         onClick={() => setOpen((current) => !current)}
-        className="flex min-h-16 w-full items-center justify-between gap-3 rounded-xl border-2 border-blue-300 bg-white px-4 py-3 text-left text-sm shadow-sm transition hover:border-blue-400 hover:bg-slate-50"
+        className={`flex w-full items-center justify-between gap-3 rounded-xl border-2 border-blue-300 bg-white text-left text-sm shadow-sm transition hover:border-blue-400 hover:bg-slate-50 ${
+          compact ? 'h-10 px-3 py-2' : 'min-h-16 px-4 py-3'
+        }`}
       >
         <span className="min-w-0">
-          <span className="block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Неделя прогноза</span>
-          <span className="block truncate font-semibold text-slate-900">
+          {!compact ? <span className="block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Неделя прогноза</span> : null}
+          <span className={`block truncate font-semibold text-slate-900 ${compact ? 'text-sm' : ''}`}>
             {formatDate(selectedWeekStart)} - {formatDate(selectedWeekEnd)}
           </span>
-          <span className={`mt-1 inline-flex rounded-md px-2 py-0.5 text-[11px] font-semibold ${
+          {!compact ? <span className={`mt-1 inline-flex rounded-md px-2 py-0.5 text-[11px] font-semibold ${
             selectedWeekComplete ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'
           }`}>
             {selectedWeekComplete ? 'истории хватает' : 'истории не хватает'}
-          </span>
+          </span> : null}
         </span>
         <CalendarDays size={17} className="shrink-0 text-blue-600" />
       </button>
 
-      <div className="mt-2 rounded-xl border border-slate-200 bg-slate-100 px-3 py-2 text-xs text-slate-600">
+      {!compact ? <div className="mt-2 rounded-xl border border-slate-200 bg-slate-100 px-3 py-2 text-xs text-slate-600">
         <div className="font-semibold text-slate-700">История для расчета</div>
         <div className="mt-1 grid gap-1">
           {historyWeeks.map((week, index) => (
@@ -698,7 +700,7 @@ const WeekForecastPicker = ({ value, onChange, loadedDates = [] }) => {
             </div>
           ))}
         </div>
-      </div>
+      </div> : null}
 
       {open && (
         <div className="absolute left-0 z-40 mt-2 w-[330px] rounded-2xl border-2 border-slate-200 bg-white p-4 shadow-xl">
@@ -730,7 +732,7 @@ const WeekForecastPicker = ({ value, onChange, loadedDates = [] }) => {
                 <button
                   key={iso}
                   type="button"
-                  title={`${formatDate(iso)}: ${dayComplete ? 'истории хватает' : 'истории не хватает'}`}
+                  title={compact ? formatDate(iso) : `${formatDate(iso)}: ${dayComplete ? 'истории хватает' : 'истории не хватает'}`}
                   onClick={() => selectWeek(iso)}
                   className={`relative flex h-10 items-center justify-center rounded-lg border text-sm font-semibold transition ${
                     isSelectedWeek
@@ -751,9 +753,9 @@ const WeekForecastPicker = ({ value, onChange, loadedDates = [] }) => {
             })}
           </div>
 
-          <div className="mt-3 rounded-lg bg-slate-100 px-3 py-2 text-xs text-slate-600">
+          {!compact ? <div className="mt-3 rounded-lg bg-slate-100 px-3 py-2 text-xs text-slate-600">
             Зеленый день означает, что для него загружены оба исторических дня: минус 21 и минус 14 дней.
-          </div>
+          </div> : null}
         </div>
       )}
     </div>
@@ -1841,6 +1843,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
                 value={selectedForecastWeekStart}
                 onChange={(weekStart) => setSelectedForecastWeekStart(weekStart)}
                 loadedDates={loadedReportDates}
+                compact
               />
             )}
             notify={notify}

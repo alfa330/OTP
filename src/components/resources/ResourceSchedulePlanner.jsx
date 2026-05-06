@@ -532,29 +532,101 @@ const CoverageBars = ({ coverage = [] }) => {
 
 const PlannerDayRow = ({
   day,
-  previousDay,
+  days = [],
   dayIndex,
   templates,
   selectedTemplateId,
   activeDragId,
   splitPreview,
   coverageView,
-  timelineRef,
+  onTimelineRef,
   onShiftPointerDown,
-  onCarryoverPointerDown,
   onDeleteShift,
   onAddShift,
 }) => {
-  const shifts = day.shifts || [];
-  const carryoverShifts = (previousDay?.shifts || [])
-    .filter((shift) => Number(shift.endMinute || 0) > 1440)
-    .map((shift) => ({
-      ...shift,
-      carryoverStartMinute: 0,
-      carryoverEndMinute: Math.min(1440, Number(shift.endMinute || 0) - 1440),
-    }))
-    .filter((shift) => Number(shift.carryoverEndMinute || 0) > 0);
-  const rowHeight = Math.max(90, (shifts.length + carryoverShifts.length) * 34 + 42);
+  const viewportRef = useRef(null);
+  const allDays = days.length ? days : [day].filter(Boolean);
+  const totalDays = Math.max(1, allDays.length);
+  const totalMinutes = totalDays * 1440;
+
+  const timeline = useMemo(() => {
+    const lanes = [];
+    const items = [];
+    const sourceItems = allDays.flatMap((itemDay, sourceDayIndex) =>
+      (itemDay.shifts || []).map((shift) => {
+        const start = Number(shift.startMinute || 0);
+        const end = Number(shift.endMinute || start + MIN_SHIFT_MINUTES);
+        return {
+          shift,
+          sourceDayIndex,
+          startAbs: sourceDayIndex * 1440 + start,
+          endAbs: sourceDayIndex * 1440 + end,
+        };
+      }),
+    ).sort((left, right) => left.startAbs - right.startAbs || left.endAbs - right.endAbs);
+
+    sourceItems.forEach((item) => {
+      let lane = lanes.findIndex((laneEnd) => laneEnd <= item.startAbs + 0.001);
+      if (lane < 0) {
+        lane = lanes.length;
+        lanes.push(0);
+      }
+      lanes[lane] = item.endAbs;
+      items.push({ ...item, lane });
+    });
+
+    return { items, laneCount: Math.max(1, lanes.length) };
+  }, [allDays]);
+
+  const coverageRows = useMemo(
+    () => allDays.flatMap((itemDay, sourceDayIndex) =>
+      (itemDay.coverage || []).map((row) => ({ ...row, sourceDayIndex })),
+    ),
+    [allDays],
+  );
+  const rowHeight = Math.max(104, timeline.laneCount * 34 + 54);
+  const hourColumnCount = Math.max(24, totalDays * 24);
+  const maxCoverageValue = Math.max(
+    1,
+    ...coverageRows.flatMap((row) => [
+      Number(row.needed || 0),
+      Number(row.coveredRounded ?? roundMathFte(row.covered || 0)),
+    ]),
+  );
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const nextLeft = clamp(Number(dayIndex || 0), 0, totalDays - 1) * viewport.clientWidth;
+    viewport.scrollTo({ left: nextLeft, behavior: 'smooth' });
+  }, [dayIndex, totalDays]);
+
+  const handleMiddlePanPointerDown = useCallback((event) => {
+    if (event.button !== 1) return;
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const startScrollLeft = viewport.scrollLeft;
+    viewport.classList.add('cursor-grabbing');
+
+    const onMove = (moveEvent) => {
+      moveEvent.preventDefault();
+      viewport.scrollLeft = startScrollLeft - (moveEvent.clientX - startX);
+    };
+    const onUp = () => {
+      viewport.classList.remove('cursor-grabbing');
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }, []);
+
+  const splitTimelineItem = splitPreview
+    ? timeline.items.find((item) => item.sourceDayIndex === Number(splitPreview.dayIndex) && item.shift.id === splitPreview.shiftId)
+    : null;
 
   return (
     <section
@@ -590,182 +662,218 @@ const PlannerDayRow = ({
       <div className="mt-4 overflow-x-auto">
         <div className="min-w-[980px]">
           <div
-            ref={timelineRef}
+            ref={viewportRef}
             data-resource-planner-timeline="true"
             onContextMenu={(event) => event.preventDefault()}
-            className="relative rounded-lg border border-slate-200 bg-slate-50"
-            style={{ height: rowHeight }}
+            onAuxClick={(event) => {
+              if (event.button === 1) event.preventDefault();
+            }}
+            onPointerDown={handleMiddlePanPointerDown}
+            className="overflow-x-auto rounded-lg border border-slate-200 bg-slate-50"
           >
-            <div className="absolute inset-0 grid" style={{ gridTemplateColumns: 'repeat(24, minmax(0, 1fr))' }}>
-              {Array.from({ length: 24 }, (_, hour) => (
-                <div key={hour} className="border-r border-slate-200/80 last:border-r-0">
-                  <div className="px-1 pt-1 text-[10px] font-medium text-slate-400">{String(hour).padStart(2, '0')}</div>
+            <div className="relative" style={{ width: `${totalDays * 100}%` }}>
+              <div className="relative overflow-hidden" style={{ height: rowHeight }}>
+                <div className="absolute inset-0 flex">
+                  {allDays.map((itemDay, index) => (
+                    <div
+                      key={itemDay.date || index}
+                      ref={(node) => {
+                        if (typeof onTimelineRef === 'function') onTimelineRef(index, node);
+                      }}
+                      data-planner-day-index={index}
+                      className={`relative shrink-0 border-r border-slate-300 last:border-r-0 ${
+                        Number(index) === Number(dayIndex) ? 'bg-white' : 'bg-slate-50'
+                      }`}
+                      style={{ width: `${100 / totalDays}%` }}
+                    >
+                      <div className="absolute inset-0 grid" style={{ gridTemplateColumns: 'repeat(24, minmax(0, 1fr))' }}>
+                        {Array.from({ length: 24 }, (_, hour) => (
+                          <div key={hour} className="border-r border-slate-200/80 last:border-r-0">
+                            <div className="px-1 pt-6 text-[10px] font-medium text-slate-400">{String(hour).padStart(2, '0')}</div>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="absolute left-2 top-1 z-[1] rounded bg-white/80 px-1.5 py-0.5 text-[11px] font-semibold text-slate-700 shadow-sm">
+                        {itemDay.short || itemDay.label} · {itemDay.date}
+                      </div>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-            {shifts.map((shift, index) => {
-              const start = Number(shift.startMinute || 0);
-              const end = Number(shift.endMinute || start + 60);
-              const duration = Math.max(0, end - start);
-              const left = clamp((start / 1440) * 100, 0, 100);
-              const width = clamp(((Math.min(end, 1440) - start) / 1440) * 100, 1.8, 100 - left);
-              const isActive = activeDragId === shift.id;
-              return (
-                <div
-                  key={shift.id}
-                  className={`absolute flex h-7 cursor-grab items-center rounded-md border px-1.5 text-xs font-semibold shadow-sm transition ${
-                    isActive
-                      ? 'z-20 border-slate-900 bg-slate-900 text-white'
-                      : 'z-10 border-blue-300 bg-blue-100 text-blue-800 hover:bg-blue-200'
-                  }`}
-                  style={{
-                    top: 32 + index * 34,
-                    left: `${left}%`,
-                    width: `${width}%`,
-                  }}
-                  onPointerDown={(event) => onShiftPointerDown(event, dayIndex, shift.id, 'move')}
-                  onContextMenu={(event) => event.preventDefault()}
-                  title={`${formatTime(start)}-${formatTime(end)} · ${formatDurationHours(duration)} · ${shift.label}`}
-                >
-                  <button
-                    type="button"
-                    onPointerDown={(event) => onShiftPointerDown(event, dayIndex, shift.id, 'resize-left')}
-                    className="mr-1 h-5 w-2 cursor-ew-resize rounded bg-white/70"
-                    aria-label="resize-left"
-                  />
-                  <GripVertical size={13} className="mr-1 shrink-0" />
-                  <span className="min-w-0 flex-1 truncate">
-                    {formatTime(start)}-{formatTime(end)} · {shift.rate}
-                  </span>
-                  {end > 1440 ? <span className="ml-1 shrink-0 rounded bg-white/70 px-1 text-[10px] text-blue-800">+1</span> : null}
-                  <button
-                    type="button"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      onDeleteShift(dayIndex, shift.id);
-                    }}
-                    onPointerDown={(event) => event.stopPropagation()}
-                    className="ml-1 flex h-5 w-5 shrink-0 items-center justify-center rounded text-current hover:bg-white/60"
-                    aria-label="delete-shift"
-                  >
-                    <Trash2 size={12} />
-                  </button>
-                  <button
-                    type="button"
-                    onPointerDown={(event) => onShiftPointerDown(event, dayIndex, shift.id, 'resize-right')}
-                    className="ml-1 h-5 w-2 cursor-ew-resize rounded bg-white/70"
-                    aria-label="resize-right"
-                  />
-                </div>
-              );
-            })}
-            {carryoverShifts.map((shift, index) => {
-              const start = Number(shift.carryoverStartMinute || 0);
-              const end = Number(shift.carryoverEndMinute || 0);
-              const sourceDayIndex = dayIndex - 1;
-              const originalStart = Number(shift.startMinute || 0);
-              const originalEnd = Number(shift.endMinute || originalStart + MIN_SHIFT_MINUTES);
-              const originalDuration = Math.max(0, originalEnd - originalStart);
-              const width = clamp(((end - start) / 1440) * 100, 1.8, 100);
-              const isActive = activeDragId === shift.id;
-              return (
-                <div
-                  key={`carryover-${previousDay?.date || 'prev'}-${shift.id}`}
-                  className={`absolute flex h-7 cursor-grab items-center rounded-md border px-1.5 text-xs font-semibold shadow-sm transition ${
-                    isActive
-                      ? 'z-20 border-amber-500 bg-amber-400 text-slate-950'
-                      : 'z-10 border-amber-300 bg-amber-100 text-amber-800 hover:bg-amber-200'
-                  }`}
-                  style={{
-                    top: 32 + (shifts.length + index) * 34,
-                    left: '0%',
-                    width: `${width}%`,
-                  }}
-                  onPointerDown={(event) => onCarryoverPointerDown(event, dayIndex, shift.id, 'move')}
-                  onContextMenu={(event) => event.preventDefault()}
-                  title={`Переход с прошлого дня: ${formatTime(originalStart)}-${formatTime(originalEnd)} · ${formatDurationHours(originalDuration)} · ${shift.label}`}
-                >
-                  <GripVertical size={13} className="mr-1 shrink-0" />
-                  <span className="min-w-0 flex-1 truncate">
-                    {formatTime(originalStart)}-{formatTime(originalEnd)} · с прошлого дня
-                  </span>
-                  <button
-                    type="button"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      onDeleteShift(sourceDayIndex, shift.id);
-                    }}
-                    onPointerDown={(event) => event.stopPropagation()}
-                    className="ml-1 flex h-5 w-5 shrink-0 items-center justify-center rounded text-current hover:bg-white/60"
-                    aria-label="delete-carryover-shift"
-                  >
-                    <Trash2 size={12} />
-                  </button>
-                  <button
-                    type="button"
-                    onPointerDown={(event) => onCarryoverPointerDown(event, dayIndex, shift.id, 'resize-right')}
-                    className="ml-1 h-5 w-2 cursor-ew-resize rounded bg-white/70"
-                    aria-label="resize-carryover-right"
-                  />
-                </div>
-              );
-            })}
-            {splitPreview && Number(splitPreview.dayIndex) === Number(dayIndex) ? (
-              <>
-                <div
-                  className="pointer-events-none absolute bottom-0 top-0 z-30 border-l-2 border-slate-950"
-                  style={{ left: `${clamp((Number(splitPreview.minute || 0) / 1440) * 100, 0, 100)}%` }}
-                />
-                {(() => {
-                  const shift = shifts.find((item) => item.id === splitPreview.shiftId);
-                  if (!shift) return null;
+                {timeline.items.map((item) => {
+                  const { shift, sourceDayIndex, lane, startAbs, endAbs } = item;
                   const start = Number(shift.startMinute || 0);
                   const end = Number(shift.endMinute || start + MIN_SHIFT_MINUTES);
-                  const split = Number(splitPreview.minute || start);
-                  const rowIndex = shifts.findIndex((item) => item.id === splitPreview.shiftId);
-                  const top = 32 + Math.max(0, rowIndex) * 34 - 24;
-                  const leftStart = clamp((start / 1440) * 100, 0, 100);
-                  const splitLeft = clamp((split / 1440) * 100, 0, 100);
-                  const rightEnd = clamp((Math.min(end, 1440) / 1440) * 100, 0, 100);
-                  const leftCenter = leftStart + Math.max(0, splitLeft - leftStart) / 2;
-                  const rightCenter = splitLeft + Math.max(0, rightEnd - splitLeft) / 2;
+                  const visibleStart = clamp(startAbs, 0, totalMinutes);
+                  const visibleEnd = clamp(endAbs, visibleStart, totalMinutes);
+                  const visibleDuration = Math.max(1, visibleEnd - visibleStart);
+                  const duration = Math.max(0, end - start);
+                  const left = clamp((visibleStart / totalMinutes) * 100, 0, 100);
+                  const width = clamp((visibleDuration / totalMinutes) * 100, 0.25, 100 - left);
+                  const carryoverBoundaryAbs = (sourceDayIndex + 1) * 1440;
+                  const hasCarryover = endAbs > carryoverBoundaryAbs && carryoverBoundaryAbs < visibleEnd;
+                  const carryoverLeft = hasCarryover
+                    ? clamp(((carryoverBoundaryAbs - visibleStart) / visibleDuration) * 100, 0, 100)
+                    : 100;
+                  const isActive = activeDragId === shift.id;
                   return (
-                    <>
-                      <div
-                        className="pointer-events-none absolute z-40 -translate-x-1/2 rounded-md bg-slate-950 px-2 py-1 text-[11px] font-semibold text-white shadow-lg"
-                        style={{ top, left: `${leftCenter}%` }}
+                    <div
+                      key={`${sourceDayIndex}-${shift.id}`}
+                      className={`absolute flex h-7 cursor-grab items-center overflow-hidden rounded-md border px-1.5 text-xs font-semibold shadow-sm transition ${
+                        isActive
+                          ? 'z-30 border-slate-900 bg-slate-900 text-white'
+                          : 'z-20 border-blue-300 bg-blue-100 text-blue-800 hover:bg-blue-200'
+                      }`}
+                      style={{
+                        top: 42 + lane * 34,
+                        left: `${left}%`,
+                        width: `${width}%`,
+                      }}
+                      onPointerDown={(event) => {
+                        if (event.button === 1) return;
+                        onShiftPointerDown(event, sourceDayIndex, shift.id, 'move');
+                      }}
+                      onContextMenu={(event) => event.preventDefault()}
+                      title={`${formatTime(start)}-${formatTime(end)} · ${formatDurationHours(duration)} · ${shift.label}`}
+                    >
+                      {hasCarryover ? (
+                        <div
+                          className="pointer-events-none absolute inset-y-0 right-0 border-l border-amber-300 bg-amber-100/90"
+                          style={{ left: `${carryoverLeft}%` }}
+                        />
+                      ) : null}
+                      <button
+                        type="button"
+                        onPointerDown={(event) => {
+                          if (event.button === 1) return;
+                          onShiftPointerDown(event, sourceDayIndex, shift.id, 'resize-left');
+                        }}
+                        className="relative z-10 mr-1 h-5 w-2 cursor-ew-resize rounded bg-white/70"
+                        aria-label="resize-left"
+                      />
+                      <GripVertical size={13} className="relative z-10 mr-1 shrink-0" />
+                      <span className="relative z-10 min-w-0 flex-1 truncate">
+                        {formatTime(start)}-{formatTime(end)} · {shift.rate}
+                      </span>
+                      {end > 1440 ? <span className="relative z-10 ml-1 shrink-0 rounded bg-white/70 px-1 text-[10px] text-blue-800">+1</span> : null}
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onDeleteShift(sourceDayIndex, shift.id);
+                        }}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        className="relative z-10 ml-1 flex h-5 w-5 shrink-0 items-center justify-center rounded text-current hover:bg-white/60"
+                        aria-label="delete-shift"
                       >
-                        {formatDurationHours(split - start)}
-                      </div>
-                      <div
-                        className="pointer-events-none absolute z-40 -translate-x-1/2 rounded-md bg-slate-950 px-2 py-1 text-[11px] font-semibold text-white shadow-lg"
-                        style={{ top, left: `${rightCenter}%` }}
-                      >
-                        {formatDurationHours(end - split)}
-                      </div>
-                    </>
+                        <Trash2 size={12} />
+                      </button>
+                      <button
+                        type="button"
+                        onPointerDown={(event) => {
+                          if (event.button === 1) return;
+                          onShiftPointerDown(event, sourceDayIndex, shift.id, 'resize-right');
+                        }}
+                        className="relative z-10 ml-1 h-5 w-2 cursor-ew-resize rounded bg-white/70"
+                        aria-label="resize-right"
+                      />
+                    </div>
                   );
-                })()}
-              </>
-            ) : null}
-          </div>
+                })}
+                {splitTimelineItem ? (
+                  <>
+                    <div
+                      className="pointer-events-none absolute bottom-0 top-0 z-40 border-l-2 border-slate-950"
+                      style={{
+                        left: `${clamp(((Number(splitPreview.minute || 0) + Number(splitPreview.dayIndex || 0) * 1440) / totalMinutes) * 100, 0, 100)}%`,
+                      }}
+                    />
+                    {(() => {
+                      const split = Number(splitPreview.minute || 0) + Number(splitPreview.dayIndex || 0) * 1440;
+                      const startAbs = splitTimelineItem.startAbs;
+                      const endAbs = splitTimelineItem.endAbs;
+                      const top = 42 + Math.max(0, splitTimelineItem.lane) * 34 - 24;
+                      const leftCenter = clamp((((startAbs + split) / 2) / totalMinutes) * 100, 0, 100);
+                      const rightCenter = clamp((((split + endAbs) / 2) / totalMinutes) * 100, 0, 100);
+                      return (
+                        <>
+                          <div
+                            className="pointer-events-none absolute z-50 -translate-x-1/2 rounded-md bg-slate-950 px-2 py-1 text-[11px] font-semibold text-white shadow-lg"
+                            style={{ top, left: `${leftCenter}%` }}
+                          >
+                            {formatDurationHours(split - startAbs)}
+                          </div>
+                          <div
+                            className="pointer-events-none absolute z-50 -translate-x-1/2 rounded-md bg-slate-950 px-2 py-1 text-[11px] font-semibold text-white shadow-lg"
+                            style={{ top, left: `${rightCenter}%` }}
+                          >
+                            {formatDurationHours(endAbs - split)}
+                          </div>
+                        </>
+                      );
+                    })()}
+                  </>
+                ) : null}
+              </div>
 
-          {coverageView === 'bars' ? (
-            <CoverageBars coverage={day.coverage || []} />
-          ) : (
-            <div className="mt-3 grid gap-1" style={{ gridTemplateColumns: 'repeat(24, minmax(40px, 1fr))' }}>
-              {(day.coverage || []).map((row) => (
-                <div
-                  key={row.hour}
-                  className={`rounded-md border px-1 py-1 text-center text-[10px] ${coverageTone(row)}`}
-                  title={`${String(row.hour).padStart(2, '0')}:00 · округл. ${formatFte(row.coveredRounded ?? roundMathFte(row.covered || 0))}/${formatFte(row.needed || 0)} · без округления ${formatNumber(row.covered, 2)}/${formatNumber(row.rawNeeded, 2)}`}
-                >
-                  <div className="font-semibold">{formatFte(row.coveredRounded ?? roundMathFte(row.covered || 0))}</div>
-                  <div>{formatFte(row.needed || 0)}</div>
+              {coverageView === 'bars' ? (
+                <div className="mt-3 rounded-lg border border-slate-200 bg-white p-3">
+                  <div className="mb-3 flex flex-wrap gap-3 text-xs text-slate-600">
+                    <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-blue-500" />Нужно</span>
+                    <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-emerald-500" />Покрыто</span>
+                    <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-rose-500" />Дефицит</span>
+                    <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-amber-400" />Избыток</span>
+                  </div>
+                  <div className="space-y-2">
+                    {[
+                      ['needed', 'Нужно'],
+                      ['covered', 'Покрыто'],
+                    ].map(([key, label]) => (
+                      <div key={key} className="grid grid-cols-[72px_minmax(0,1fr)] items-center gap-2">
+                        <div className="text-xs font-semibold text-slate-600">{label}</div>
+                        <div className="grid h-8 gap-1" style={{ gridTemplateColumns: `repeat(${hourColumnCount}, minmax(24px, 1fr))` }}>
+                          {coverageRows.map((row) => {
+                            const value = key === 'needed'
+                              ? Number(row.needed || 0)
+                              : Number(row.coveredRounded ?? roundMathFte(row.covered || 0));
+                            const heightPercent = clamp((value / maxCoverageValue) * 100, value > 0 ? 28 : 12, 100);
+                            return (
+                              <div
+                                key={`${key}-${row.sourceDayIndex}-${row.hour}`}
+                                className={`flex items-end rounded-md bg-slate-100 px-0.5 ${
+                                  Number(row.hour) === 0 ? 'border-l-2 border-slate-300' : ''
+                                }`}
+                                title={`${allDays[row.sourceDayIndex]?.short || ''} ${String(row.hour).padStart(2, '0')}:00 · нужно ${formatFte(row.needed || 0)} · покрыто ${formatFte(row.coveredRounded ?? roundMathFte(row.covered || 0))}`}
+                              >
+                                <div
+                                  className={`w-full rounded-sm ${coverageBarTone(row, key)}`}
+                                  style={{ height: `${heightPercent}%` }}
+                                />
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
-              ))}
+              ) : (
+                <div className="mt-3 grid gap-1" style={{ gridTemplateColumns: `repeat(${hourColumnCount}, minmax(40px, 1fr))` }}>
+                  {coverageRows.map((row) => (
+                    <div
+                      key={`${row.sourceDayIndex}-${row.hour}`}
+                      className={`rounded-md border px-1 py-1 text-center text-[10px] ${coverageTone(row)} ${
+                        Number(row.hour) === 0 ? 'border-l-2 border-l-slate-300' : ''
+                      }`}
+                      title={`${allDays[row.sourceDayIndex]?.short || ''} ${String(row.hour).padStart(2, '0')}:00 · округл. ${formatFte(row.coveredRounded ?? roundMathFte(row.covered || 0))}/${formatFte(row.needed || 0)} · без округления ${formatNumber(row.covered, 2)}/${formatNumber(row.rawNeeded, 2)}`}
+                    >
+                      <div className="font-semibold">{formatFte(row.coveredRounded ?? roundMathFte(row.covered || 0))}</div>
+                      <div>{formatFte(row.needed || 0)}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
-          )}
+          </div>
         </div>
       </div>
     </section>
@@ -1325,7 +1433,6 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
         <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_300px_auto] xl:items-start">
           <div>
             <h2 className="text-lg font-semibold text-slate-950">Генератор графиков по FTE</h2>
-            <div className="mt-1 text-sm text-slate-500">Неделя: {selectedWeekStart || '-'}</div>
           </div>
           <div className="min-w-0">
             {weekPicker || (
@@ -1479,18 +1586,17 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
               </div>
             </div>
             <PlannerDayRow
-              key={computedDays[activeDayIndex]?.date || activeDayIndex}
+              key={(computedDays || []).map((item) => item.date).join('-')}
               day={computedDays[activeDayIndex]}
-              previousDay={activeDayIndex > 0 ? computedDays[activeDayIndex - 1] : null}
+              days={computedDays}
               dayIndex={activeDayIndex}
               templates={templates.filter((template) => template.enabled !== false)}
               selectedTemplateId={selectedTemplateId}
               activeDragId={activeDragId}
               splitPreview={splitPreview}
               coverageView={coverageView}
-              timelineRef={(node) => setTimelineRef(activeDayIndex, node)}
+              onTimelineRef={setTimelineRef}
               onShiftPointerDown={handleShiftPointerDown}
-              onCarryoverPointerDown={handleCarryoverPointerDown}
               onDeleteShift={deleteShift}
               onAddShift={addShift}
             />
