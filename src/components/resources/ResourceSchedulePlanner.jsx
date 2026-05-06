@@ -303,6 +303,72 @@ const buildCoverageFromDays = (days) => {
   return { days: nextDays, summary };
 };
 
+const compareTimelineItems = (left, right) => (
+  left.visibleStartAbs - right.visibleStartAbs ||
+  left.startAbs - right.startAbs ||
+  left.endAbs - right.endAbs ||
+  Number(right.shift?.rate || 0) - Number(left.shift?.rate || 0) ||
+  String(left.shift?.label || '').localeCompare(String(right.shift?.label || ''), 'ru') ||
+  String(left.shift?.id || '').localeCompare(String(right.shift?.id || ''))
+);
+
+const getVisibleDayIndices = (visibleStartAbs, visibleEndAbs, totalDays) => {
+  if (!totalDays || visibleEndAbs <= visibleStartAbs) return [];
+  const startDay = clamp(Math.floor(visibleStartAbs / 1440), 0, totalDays - 1);
+  const endDay = clamp(Math.floor((visibleEndAbs - 0.001) / 1440), 0, totalDays - 1);
+  return Array.from({ length: endDay - startDay + 1 }, (_, index) => startDay + index);
+};
+
+const buildPlannerTimeline = (days, activeDayIndex) => {
+  const allDays = days || [];
+  const totalDays = Math.max(1, allDays.length);
+  const totalMinutes = totalDays * 1440;
+  const sourceItems = allDays.flatMap((itemDay, sourceDayIndex) =>
+    (itemDay.shifts || []).map((shift) => {
+      const start = Number(shift.startMinute || 0);
+      const end = Number(shift.endMinute || start + MIN_SHIFT_MINUTES);
+      const startAbs = sourceDayIndex * 1440 + start;
+      const endAbs = sourceDayIndex * 1440 + end;
+      const visibleStartAbs = clamp(startAbs, 0, totalMinutes);
+      const visibleEndAbs = clamp(endAbs, visibleStartAbs, totalMinutes);
+      return {
+        shift,
+        sourceDayIndex,
+        startAbs,
+        endAbs,
+        visibleStartAbs,
+        visibleEndAbs,
+        visibleDayIndices: getVisibleDayIndices(visibleStartAbs, visibleEndAbs, totalDays),
+      };
+    }),
+  );
+  const selectedDayIndex = clamp(Number(activeDayIndex || 0), 0, totalDays - 1);
+  const selectedItems = sourceItems
+    .filter((item) => item.visibleDayIndices.includes(selectedDayIndex))
+    .sort(compareTimelineItems);
+  const selectedKeys = new Set(selectedItems.map((item) => `${item.sourceDayIndex}-${item.shift.id}`));
+  const remainingItems = sourceItems
+    .filter((item) => !selectedKeys.has(`${item.sourceDayIndex}-${item.shift.id}`))
+    .sort(compareTimelineItems);
+  const lanes = [];
+  const items = [];
+
+  [...selectedItems, ...remainingItems].forEach((item) => {
+    let lane = lanes.findIndex((usedDays) => item.visibleDayIndices.every((index) => !usedDays.has(index)));
+    if (lane < 0) {
+      lane = lanes.length;
+      lanes.push(new Set());
+    }
+    item.visibleDayIndices.forEach((index) => lanes[lane].add(index));
+    items.push({ ...item, lane });
+  });
+
+  return {
+    items: items.sort((left, right) => left.sourceDayIndex - right.sourceDayIndex || left.lane - right.lane || compareTimelineItems(left, right)),
+    laneCount: Math.max(1, lanes.length),
+  };
+};
+
 const FteSumValue = ({ rounded, real, suffix = 'FTE-ч', className = 'text-slate-950' }) => (
   <div>
     <b className={className}>Округл. {formatFte(rounded)} {suffix}</b>
@@ -549,34 +615,7 @@ const PlannerDayRow = ({
   const totalDays = Math.max(1, allDays.length);
   const totalMinutes = totalDays * 1440;
 
-  const timeline = useMemo(() => {
-    const lanes = [];
-    const items = [];
-    const sourceItems = allDays.flatMap((itemDay, sourceDayIndex) =>
-      (itemDay.shifts || []).map((shift) => {
-        const start = Number(shift.startMinute || 0);
-        const end = Number(shift.endMinute || start + MIN_SHIFT_MINUTES);
-        return {
-          shift,
-          sourceDayIndex,
-          startAbs: sourceDayIndex * 1440 + start,
-          endAbs: sourceDayIndex * 1440 + end,
-        };
-      }),
-    ).sort((left, right) => left.startAbs - right.startAbs || left.endAbs - right.endAbs);
-
-    sourceItems.forEach((item) => {
-      let lane = lanes.findIndex((laneEnd) => laneEnd <= item.startAbs + 0.001);
-      if (lane < 0) {
-        lane = lanes.length;
-        lanes.push(0);
-      }
-      lanes[lane] = item.endAbs;
-      items.push({ ...item, lane });
-    });
-
-    return { items, laneCount: Math.max(1, lanes.length) };
-  }, [allDays]);
+  const timeline = useMemo(() => buildPlannerTimeline(allDays, dayIndex), [allDays, dayIndex]);
 
   const coverageRows = useMemo(
     () => allDays.flatMap((itemDay, sourceDayIndex) =>
