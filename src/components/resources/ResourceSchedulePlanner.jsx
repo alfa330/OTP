@@ -128,6 +128,15 @@ const storeTemplates = (templates) => {
   window.localStorage.setItem(TEMPLATE_STORAGE_KEY, JSON.stringify(templates || []));
 };
 
+const getCoverageVisualState = (row) => {
+  const needed = roundMathFte(row?.needed || 0);
+  const covered = Number(row?.coveredRounded ?? roundMathFte(row?.covered || 0));
+  if (covered < needed) return 'deficit';
+  if (covered > needed) return 'over';
+  if (needed > 0) return 'covered';
+  return 'empty';
+};
+
 const clonePlannerDays = (days) =>
   (days || []).map((day) => ({
     ...day,
@@ -155,11 +164,10 @@ const plannerDaysSignature = (days) => JSON.stringify(
 );
 
 const coverageTone = (row) => {
-  const deficit = Number(row?.deficit || 0);
-  const over = Number(row?.over || 0);
-  if (deficit > 0.05) return 'border-rose-200 bg-rose-50 text-rose-700';
-  if (over > 0.25) return 'border-amber-200 bg-amber-50 text-amber-700';
-  if (Number(row?.needed || 0) > 0) return 'border-emerald-200 bg-emerald-50 text-emerald-700';
+  const state = getCoverageVisualState(row);
+  if (state === 'deficit') return 'border-rose-200 bg-rose-50 text-rose-700';
+  if (state === 'over') return 'border-amber-200 bg-amber-50 text-amber-700';
+  if (state === 'covered') return 'border-emerald-200 bg-emerald-50 text-emerald-700';
   return 'border-slate-200 bg-slate-50 text-slate-500';
 };
 
@@ -167,12 +175,10 @@ const coverageBarTone = (row, kind) => {
   if (kind === 'needed') {
     return Number(row?.needed || 0) > 0 ? 'bg-blue-500' : 'bg-slate-200';
   }
-  const deficit = Number(row?.deficit || 0);
-  const over = Number(row?.over || 0);
-  const covered = Number(row?.covered || 0);
-  if (deficit > 0.05) return 'bg-rose-500';
-  if (over > 0.25) return 'bg-amber-400';
-  if (covered > 0.05) return 'bg-emerald-500';
+  const state = getCoverageVisualState(row);
+  if (state === 'deficit') return 'bg-rose-500';
+  if (state === 'over') return 'bg-amber-400';
+  if (state === 'covered') return 'bg-emerald-500';
   return 'bg-slate-200';
 };
 
