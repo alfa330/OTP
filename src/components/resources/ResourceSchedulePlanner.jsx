@@ -163,6 +163,19 @@ const coverageTone = (row) => {
   return 'border-slate-200 bg-slate-50 text-slate-500';
 };
 
+const coverageBarTone = (row, kind) => {
+  if (kind === 'needed') {
+    return Number(row?.needed || 0) > 0 ? 'bg-blue-500' : 'bg-slate-200';
+  }
+  const deficit = Number(row?.deficit || 0);
+  const over = Number(row?.over || 0);
+  const covered = Number(row?.covered || 0);
+  if (deficit > 0.05) return 'bg-rose-500';
+  if (over > 0.25) return 'bg-amber-400';
+  if (covered > 0.05) return 'bg-emerald-500';
+  return 'bg-slate-200';
+};
+
 const buildCoverageFromDays = (days) => {
   const dayCount = days.length;
   const target = Array.from({ length: dayCount * 24 }, (_, index) => {
@@ -404,6 +417,65 @@ const ShiftTemplateEditor = ({
   );
 };
 
+const CoverageBars = ({ coverage = [] }) => {
+  const maxValue = Math.max(
+    1,
+    ...coverage.flatMap((row) => [
+      Number(row.needed || 0),
+      Number(row.coveredRounded ?? roundMathFte(row.covered || 0)),
+    ]),
+  );
+  const rows = [
+    { key: 'needed', label: 'Нужно' },
+    { key: 'covered', label: 'Покрыто' },
+  ];
+
+  return (
+    <div className="mt-3 rounded-lg border border-slate-200 bg-white p-3">
+      <div className="mb-3 flex flex-wrap gap-3 text-xs text-slate-600">
+        <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-blue-500" />Нужно</span>
+        <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-emerald-500" />Покрыто</span>
+        <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-rose-500" />Дефицит</span>
+        <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-amber-400" />Избыток</span>
+      </div>
+      <div className="space-y-2">
+        {rows.map((rowMeta) => (
+          <div key={rowMeta.key} className="grid grid-cols-[72px_minmax(0,1fr)] items-center gap-2">
+            <div className="text-xs font-semibold text-slate-600">{rowMeta.label}</div>
+            <div className="grid h-8 gap-1" style={{ gridTemplateColumns: 'repeat(24, minmax(24px, 1fr))' }}>
+              {coverage.map((row) => {
+                const value = rowMeta.key === 'needed'
+                  ? Number(row.needed || 0)
+                  : Number(row.coveredRounded ?? roundMathFte(row.covered || 0));
+                const heightPercent = clamp((value / maxValue) * 100, value > 0 ? 28 : 12, 100);
+                return (
+                  <div
+                    key={`${rowMeta.key}-${row.hour}`}
+                    className="flex items-end rounded-md bg-slate-100 px-0.5"
+                    title={`${String(row.hour).padStart(2, '0')}:00 · нужно ${intFormatter.format(row.needed || 0)} · покрыто ${intFormatter.format(row.coveredRounded ?? roundMathFte(row.covered || 0))}`}
+                  >
+                    <div
+                      className={`w-full rounded-sm ${coverageBarTone(row, rowMeta.key)}`}
+                      style={{ height: `${heightPercent}%` }}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="mt-2 grid gap-1 pl-[80px]" style={{ gridTemplateColumns: 'repeat(24, minmax(24px, 1fr))' }}>
+        {coverage.map((row) => (
+          <div key={`label-${row.hour}`} className="text-center text-[10px] font-medium text-slate-400">
+            {Number(row.hour) % 2 === 0 ? String(row.hour).padStart(2, '0') : ''}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
 const PlannerDayRow = ({
   day,
   previousDay,
@@ -412,6 +484,7 @@ const PlannerDayRow = ({
   selectedTemplateId,
   activeDragId,
   splitPreview,
+  coverageView,
   timelineRef,
   onShiftPointerDown,
   onDeleteShift,
@@ -554,14 +627,18 @@ const PlannerDayRow = ({
             ) : null}
           </div>
 
-          <div className="mt-3 grid gap-1" style={{ gridTemplateColumns: 'repeat(24, minmax(40px, 1fr))' }}>
-            {(day.coverage || []).map((row) => (
-              <div key={row.hour} className={`rounded-md border px-1 py-1 text-center text-[10px] ${coverageTone(row)}`}>
-                <div className="font-semibold">{intFormatter.format(row.coveredRounded ?? roundMathFte(row.covered || 0))}</div>
-                <div>{intFormatter.format(row.needed || 0)}</div>
-              </div>
-            ))}
-          </div>
+          {coverageView === 'bars' ? (
+            <CoverageBars coverage={day.coverage || []} />
+          ) : (
+            <div className="mt-3 grid gap-1" style={{ gridTemplateColumns: 'repeat(24, minmax(40px, 1fr))' }}>
+              {(day.coverage || []).map((row) => (
+                <div key={row.hour} className={`rounded-md border px-1 py-1 text-center text-[10px] ${coverageTone(row)}`}>
+                  <div className="font-semibold">{intFormatter.format(row.coveredRounded ?? roundMathFte(row.covered || 0))}</div>
+                  <div>{intFormatter.format(row.needed || 0)}</div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </section>
@@ -627,6 +704,7 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
   const [activeDragId, setActiveDragId] = useState('');
   const [splitPreview, setSplitPreview] = useState(null);
   const [selectedDayIndex, setSelectedDayIndex] = useState(0);
+  const [coverageView, setCoverageView] = useState('cards');
   const [historyPast, setHistoryPast] = useState([]);
   const [historyFuture, setHistoryFuture] = useState([]);
   const timelineRefs = useRef(new Map());
@@ -1149,6 +1227,25 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
                 <div className="text-xs text-slate-500">Действия применяются к выбранному полотну</div>
               </div>
               <div className="flex flex-wrap gap-2">
+                <div className="inline-flex h-10 overflow-hidden rounded-lg border border-slate-200 bg-white p-1">
+                  {[
+                    ['cards', 'Карточки'],
+                    ['bars', 'Полосы'],
+                  ].map(([key, label]) => (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() => setCoverageView(key)}
+                      className={`rounded-md px-3 text-sm font-semibold transition ${
+                        coverageView === key
+                          ? 'bg-slate-900 text-white'
+                          : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
                 <button
                   type="button"
                   onClick={undoPlannerChange}
@@ -1189,6 +1286,7 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
               selectedTemplateId={selectedTemplateId}
               activeDragId={activeDragId}
               splitPreview={splitPreview}
+              coverageView={coverageView}
               timelineRef={(node) => setTimelineRef(activeDayIndex, node)}
               onShiftPointerDown={handleShiftPointerDown}
               onDeleteShift={deleteShift}
