@@ -112,6 +112,23 @@ const computeDefaultBreaks = (startMinute, endMinute) => {
     .filter(Boolean);
 };
 
+const normalizeShiftTiming = (shift) => {
+  const rawStart = Number(shift?.startMinute || 0);
+  const rawEnd = Number(shift?.endMinute || rawStart + MIN_SHIFT_MINUTES);
+  const startMinute = clamp(snapMinutes(rawStart), 0, 1439);
+  const endMinute = clamp(snapMinutes(rawEnd), startMinute + MIN_SHIFT_MINUTES, MAX_SHIFT_END_MINUTES);
+  return {
+    ...shift,
+    startMinute,
+    endMinute,
+    start: formatTime(startMinute),
+    end: formatTime(endMinute),
+    durationMinutes: endMinute - startMinute,
+    overnight: endMinute > 1440,
+    breaks: computeDefaultBreaks(startMinute, endMinute),
+  };
+};
+
 const normalizeTemplateForLocalUse = (template) => {
   const parsed = parseTemplateLabel(template?.label);
   if (!parsed) return null;
@@ -303,15 +320,6 @@ const buildCoverageFromDays = (days) => {
   return { days: nextDays, summary };
 };
 
-const compareTimelineItems = (left, right) => (
-  left.visibleStartAbs - right.visibleStartAbs ||
-  left.startAbs - right.startAbs ||
-  left.endAbs - right.endAbs ||
-  Number(right.shift?.rate || 0) - Number(left.shift?.rate || 0) ||
-  String(left.shift?.label || '').localeCompare(String(right.shift?.label || ''), 'ru') ||
-  String(left.shift?.id || '').localeCompare(String(right.shift?.id || ''))
-);
-
 const getVisibleDayIndices = (visibleStartAbs, visibleEndAbs, totalDays) => {
   if (!totalDays || visibleEndAbs <= visibleStartAbs) return [];
   const startDay = clamp(Math.floor(visibleStartAbs / 1440), 0, totalDays - 1);
@@ -324,7 +332,7 @@ const buildPlannerTimeline = (days, activeDayIndex) => {
   const totalDays = Math.max(1, allDays.length);
   const totalMinutes = totalDays * 1440;
   const sourceItems = allDays.flatMap((itemDay, sourceDayIndex) =>
-    (itemDay.shifts || []).map((shift) => {
+    (itemDay.shifts || []).map((shift, sourceShiftIndex) => {
       const start = Number(shift.startMinute || 0);
       const end = Number(shift.endMinute || start + MIN_SHIFT_MINUTES);
       const startAbs = sourceDayIndex * 1440 + start;
@@ -339,17 +347,16 @@ const buildPlannerTimeline = (days, activeDayIndex) => {
         visibleStartAbs,
         visibleEndAbs,
         visibleDayIndices: getVisibleDayIndices(visibleStartAbs, visibleEndAbs, totalDays),
+        sourceShiftIndex,
       };
     }),
   );
   const selectedDayIndex = clamp(Number(activeDayIndex || 0), 0, totalDays - 1);
   const selectedItems = sourceItems
-    .filter((item) => item.visibleDayIndices.includes(selectedDayIndex))
-    .sort(compareTimelineItems);
+    .filter((item) => item.visibleDayIndices.includes(selectedDayIndex));
   const selectedKeys = new Set(selectedItems.map((item) => `${item.sourceDayIndex}-${item.shift.id}`));
   const remainingItems = sourceItems
-    .filter((item) => !selectedKeys.has(`${item.sourceDayIndex}-${item.shift.id}`))
-    .sort(compareTimelineItems);
+    .filter((item) => !selectedKeys.has(`${item.sourceDayIndex}-${item.shift.id}`));
   const lanes = [];
   const items = [];
 
@@ -364,9 +371,35 @@ const buildPlannerTimeline = (days, activeDayIndex) => {
   });
 
   return {
-    items: items.sort((left, right) => left.sourceDayIndex - right.sourceDayIndex || left.lane - right.lane || compareTimelineItems(left, right)),
+    items: items.sort((left, right) => (
+      left.sourceDayIndex - right.sourceDayIndex ||
+      left.lane - right.lane ||
+      left.sourceShiftIndex - right.sourceShiftIndex
+    )),
     laneCount: Math.max(1, lanes.length),
   };
+};
+
+const getMostVisibleTimelineDayIndex = (viewport, totalDays) => {
+  if (!viewport || !totalDays) return 0;
+  const dayWidth = viewport.scrollWidth / totalDays;
+  if (!Number.isFinite(dayWidth) || dayWidth <= 0) return 0;
+  const visibleLeft = viewport.scrollLeft;
+  const visibleRight = visibleLeft + viewport.clientWidth;
+  let bestIndex = 0;
+  let bestWidth = -1;
+
+  for (let index = 0; index < totalDays; index += 1) {
+    const dayLeft = index * dayWidth;
+    const dayRight = dayLeft + dayWidth;
+    const visibleWidth = Math.max(0, Math.min(dayRight, visibleRight) - Math.max(dayLeft, visibleLeft));
+    if (visibleWidth > bestWidth) {
+      bestWidth = visibleWidth;
+      bestIndex = index;
+    }
+  }
+
+  return bestIndex;
 };
 
 const FteSumValue = ({ rounded, real, suffix = 'FTE-ч', className = 'text-slate-950' }) => (
@@ -606,11 +639,14 @@ const PlannerDayRow = ({
   splitPreview,
   coverageView,
   onTimelineRef,
+  onFocusedDayChange,
   onShiftPointerDown,
   onDeleteShift,
   onAddShift,
 }) => {
   const viewportRef = useRef(null);
+  const focusFrameRef = useRef(0);
+  const scrollSyncRef = useRef({ active: false, targetLeft: 0, startedAt: 0 });
   const allDays = days.length ? days : [day].filter(Boolean);
   const totalDays = Math.max(1, allDays.length);
   const totalMinutes = totalDays * 1440;
@@ -636,9 +672,41 @@ const PlannerDayRow = ({
   useEffect(() => {
     const viewport = viewportRef.current;
     if (!viewport) return;
-    const nextLeft = clamp(Number(dayIndex || 0), 0, totalDays - 1) * viewport.clientWidth;
+    const targetIndex = clamp(Number(dayIndex || 0), 0, totalDays - 1);
+    if (getMostVisibleTimelineDayIndex(viewport, totalDays) === targetIndex) return;
+    const dayWidth = viewport.scrollWidth / totalDays;
+    const nextLeft = targetIndex * dayWidth;
+    scrollSyncRef.current = { active: true, targetLeft: nextLeft, startedAt: Date.now() };
     viewport.scrollTo({ left: nextLeft, behavior: 'smooth' });
   }, [dayIndex, totalDays]);
+
+  const reportFocusedDay = useCallback(() => {
+    if (typeof onFocusedDayChange !== 'function') return;
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    onFocusedDayChange(getMostVisibleTimelineDayIndex(viewport, totalDays));
+  }, [onFocusedDayChange, totalDays]);
+
+  const handleTimelineScroll = useCallback(() => {
+    if (typeof onFocusedDayChange !== 'function') return;
+    const viewport = viewportRef.current;
+    const sync = scrollSyncRef.current;
+    if (viewport && sync.active) {
+      const arrived = Math.abs(viewport.scrollLeft - sync.targetLeft) <= 2;
+      const expired = Date.now() - sync.startedAt > 700;
+      if (!arrived && !expired) return;
+      scrollSyncRef.current = { active: false, targetLeft: 0, startedAt: 0 };
+    }
+    if (focusFrameRef.current) window.cancelAnimationFrame(focusFrameRef.current);
+    focusFrameRef.current = window.requestAnimationFrame(() => {
+      focusFrameRef.current = 0;
+      reportFocusedDay();
+    });
+  }, [onFocusedDayChange, reportFocusedDay]);
+
+  useEffect(() => () => {
+    if (focusFrameRef.current) window.cancelAnimationFrame(focusFrameRef.current);
+  }, []);
 
   const handleMiddlePanPointerDown = useCallback((event) => {
     if (event.button !== 1) return;
@@ -669,7 +737,6 @@ const PlannerDayRow = ({
 
   return (
     <section
-      data-planner-day-index={dayIndex}
       className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"
     >
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -708,6 +775,7 @@ const PlannerDayRow = ({
               if (event.button === 1) event.preventDefault();
             }}
             onPointerDown={handleMiddlePanPointerDown}
+            onScroll={handleTimelineScroll}
             className="overflow-x-auto rounded-lg border border-slate-200 bg-slate-50"
           >
             <div className="relative" style={{ width: `${totalDays * 100}%` }}>
@@ -1006,6 +1074,12 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
     plannerDaysRef.current = plannerDays;
   }, [plannerDays]);
 
+  const applyPlannerDaysUpdate = useCallback((updater) => {
+    const nextDays = updater(plannerDaysRef.current);
+    plannerDaysRef.current = nextDays;
+    setPlannerDays(nextDays);
+  }, []);
+
   const pushHistorySnapshot = useCallback((snapshot) => {
     const source = clonePlannerDays(snapshot || plannerDaysRef.current);
     setHistoryPast((current) => {
@@ -1021,7 +1095,9 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
       if (!current.length) return current;
       const previous = current[current.length - 1];
       setHistoryFuture((future) => [clonePlannerDays(plannerDaysRef.current), ...future].slice(0, 60));
-      setPlannerDays(clonePlannerDays(previous));
+      const previousDays = clonePlannerDays(previous);
+      plannerDaysRef.current = previousDays;
+      setPlannerDays(previousDays);
       return current.slice(0, -1);
     });
   }, []);
@@ -1031,7 +1107,9 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
       if (!current.length) return current;
       const next = current[0];
       setHistoryPast((past) => [...past, clonePlannerDays(plannerDaysRef.current)].slice(-60));
-      setPlannerDays(clonePlannerDays(next));
+      const nextDays = clonePlannerDays(next);
+      plannerDaysRef.current = nextDays;
+      setPlannerDays(nextDays);
       return current.slice(1);
     });
   }, []);
@@ -1096,6 +1174,7 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
         ...day,
         shifts: (day.shifts || []).map((shift) => ({ ...shift, breaks: shift.breaks || [] })),
       }));
+      plannerDaysRef.current = nextDays;
       setPlannerDays(nextDays);
       setSelectedDayIndex(0);
       setHistoryPast([]);
@@ -1162,7 +1241,7 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
   }, [splitPreview]);
 
   const updateShift = useCallback((dayIndex, shiftId, updater) => {
-    setPlannerDays((current) =>
+    applyPlannerDaysUpdate((current) =>
       current.map((day, index) => {
         if (index !== dayIndex) return day;
         return {
@@ -1170,41 +1249,52 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
           shifts: (day.shifts || []).map((shift) => {
             if (shift.id !== shiftId) return shift;
             const next = updater(shift);
-            const startMinute = clamp(snapMinutes(next.startMinute), 0, 1439);
-            const endMinute = clamp(snapMinutes(next.endMinute), startMinute + MIN_SHIFT_MINUTES, MAX_SHIFT_END_MINUTES);
-            return {
-              ...shift,
-              ...next,
-              startMinute,
-              endMinute,
-              start: formatTime(startMinute),
-              end: formatTime(endMinute),
-              durationMinutes: endMinute - startMinute,
-              overnight: endMinute > 1440,
-              breaks: computeDefaultBreaks(startMinute, endMinute),
-            };
+            return normalizeShiftTiming({ ...shift, ...next });
           }),
         };
       }),
     );
-  }, []);
+  }, [applyPlannerDaysUpdate]);
 
-  const moveShiftToDay = useCallback((fromDayIndex, toDayIndex, shiftId) => {
-    if (fromDayIndex === toDayIndex || toDayIndex < 0 || toDayIndex >= plannerDays.length) return;
-    setPlannerDays((current) => {
-      const movingShift = current[fromDayIndex]?.shifts?.find((shift) => shift.id === shiftId);
+  const moveShiftToTimelinePosition = useCallback((shiftId, startAbs, durationMinutes) => {
+    const totalDays = plannerDaysRef.current.length;
+    if (!totalDays) return;
+    const duration = Math.max(MIN_SHIFT_MINUTES, Number(durationMinutes || MIN_SHIFT_MINUTES));
+    const maxStartAbs = Math.max(0, totalDays * 1440 - 1);
+    const nextStartAbs = clamp(snapMinutes(startAbs), 0, maxStartAbs);
+    const targetDayIndex = clamp(Math.floor(nextStartAbs / 1440), 0, totalDays - 1);
+    const maxLocalStart = Math.min(1439, MAX_SHIFT_END_MINUTES - duration);
+    const startMinute = clamp(nextStartAbs - targetDayIndex * 1440, 0, maxLocalStart);
+    const endMinute = startMinute + duration;
+
+    applyPlannerDaysUpdate((current) => {
+      const currentDayIndex = current.findIndex((day) => (day.shifts || []).some((shift) => shift.id === shiftId));
+      if (currentDayIndex < 0) return current;
+      const movingShift = current[currentDayIndex]?.shifts?.find((shift) => shift.id === shiftId);
       if (!movingShift) return current;
+      const nextShift = normalizeShiftTiming({
+        ...movingShift,
+        startMinute,
+        endMinute,
+      });
+
       return current.map((day, index) => {
-        if (index === fromDayIndex) {
+        if (index === currentDayIndex && index === targetDayIndex) {
+          return {
+            ...day,
+            shifts: (day.shifts || []).map((shift) => (shift.id === shiftId ? nextShift : shift)),
+          };
+        }
+        if (index === currentDayIndex) {
           return { ...day, shifts: (day.shifts || []).filter((shift) => shift.id !== shiftId) };
         }
-        if (index === toDayIndex) {
-          return { ...day, shifts: [...(day.shifts || []), movingShift] };
+        if (index === targetDayIndex) {
+          return { ...day, shifts: [...(day.shifts || []), nextShift] };
         }
         return day;
       });
     });
-  }, [plannerDays.length]);
+  }, [applyPlannerDaysUpdate]);
 
   const handleShiftPointerDown = useCallback(
     (event, dayIndex, shiftId, action) => {
@@ -1218,6 +1308,7 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
       const originalStart = Number(sourceShift.startMinute || 0);
       const originalEnd = Number(sourceShift.endMinute || originalStart + 60);
       const originalDuration = originalEnd - originalStart;
+      const originalStartAbs = dayIndex * 1440 + originalStart;
 
       if (event.button === 2 && action === 'move') {
         suppressContextMenuUntilRef.current = Date.now() + 1200;
@@ -1253,7 +1344,7 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
           const splitMinute = splitAtClientX(upEvent.clientX);
           setSplitPreview(null);
           pushHistorySnapshot();
-          setPlannerDays((current) =>
+          applyPlannerDaysUpdate((current) =>
             current.map((day, index) => {
               if (index !== dayIndex) return day;
               const nextShifts = [];
@@ -1315,25 +1406,14 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
           }));
           return;
         }
-        const nextStart = clamp(originalStart + deltaMinutes, 0, MAX_SHIFT_END_MINUTES - originalDuration);
-        updateShift(dayIndex, shiftId, () => ({
-          startMinute: nextStart,
-          endMinute: nextStart + originalDuration,
-        }));
+        moveShiftToTimelinePosition(shiftId, originalStartAbs + deltaMinutes, originalDuration);
       };
 
       const onUp = (upEvent) => {
         window.removeEventListener('pointermove', onMove);
         window.removeEventListener('pointerup', onUp);
-        const targetElement = document.elementFromPoint(upEvent.clientX, upEvent.clientY);
-        const targetDayNode = targetElement?.closest?.('[data-planner-day-index]');
-        const targetDayIndex = Number(targetDayNode?.getAttribute('data-planner-day-index'));
-        if (Number.isFinite(targetDayIndex)) {
-          moveShiftToDay(dayIndex, targetDayIndex, shiftId);
-        }
-        const changed =
-          plannerDaysSignature(startSnapshot) !== plannerDaysSignature(plannerDaysRef.current) ||
-          (Number.isFinite(targetDayIndex) && Number(targetDayIndex) !== Number(dayIndex));
+        upEvent.preventDefault();
+        const changed = plannerDaysSignature(startSnapshot) !== plannerDaysSignature(plannerDaysRef.current);
         if (changed) pushHistorySnapshot(startSnapshot);
         dragStartSnapshotRef.current = null;
         setActiveDragId('');
@@ -1342,7 +1422,7 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
       window.addEventListener('pointermove', onMove);
       window.addEventListener('pointerup', onUp);
     },
-    [moveShiftToDay, plannerDays, pushHistorySnapshot, updateShift],
+    [applyPlannerDaysUpdate, moveShiftToTimelinePosition, plannerDays, pushHistorySnapshot, updateShift],
   );
 
   const handleCarryoverPointerDown = useCallback(
@@ -1401,14 +1481,14 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
 
   const deleteShift = useCallback((dayIndex, shiftId) => {
     pushHistorySnapshot();
-    setPlannerDays((current) =>
+    applyPlannerDaysUpdate((current) =>
       current.map((day, index) => (
         index === dayIndex
           ? { ...day, shifts: (day.shifts || []).filter((shift) => shift.id !== shiftId) }
           : day
       )),
     );
-  }, [pushHistorySnapshot]);
+  }, [applyPlannerDaysUpdate, pushHistorySnapshot]);
 
   const addShift = useCallback((dayIndex, templateId) => {
     const template = templates.find((item) => item.id === templateId) || selectedTemplate;
@@ -1430,14 +1510,20 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
       overnight: endMinute > 1440,
       breaks: computeDefaultBreaks(startMinute, endMinute),
     };
-    setPlannerDays((current) =>
+    applyPlannerDaysUpdate((current) =>
       current.map((day, index) => (
         index === dayIndex ? { ...day, shifts: [...(day.shifts || []), shift] } : day
       )),
     );
-  }, [pushHistorySnapshot, selectedTemplate, templates]);
+  }, [applyPlannerDaysUpdate, pushHistorySnapshot, selectedTemplate, templates]);
 
   const activeDayIndex = computedDays.length ? clamp(Number(selectedDayIndex || 0), 0, computedDays.length - 1) : 0;
+
+  const handleFocusedDayChange = useCallback((dayIndex) => {
+    if (!computedDays.length) return;
+    const nextDayIndex = clamp(Number(dayIndex || 0), 0, computedDays.length - 1);
+    setSelectedDayIndex((current) => (Number(current) === nextDayIndex ? current : nextDayIndex));
+  }, [computedDays.length]);
 
   const sortSelectedDayShifts = useCallback(() => {
     const sourceShifts = plannerDaysRef.current[activeDayIndex]?.shifts || [];
@@ -1452,14 +1538,14 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
     const sortedOrder = sortedShifts.map((shift) => shift.id).join('|');
     if (currentOrder === sortedOrder) return;
     pushHistorySnapshot();
-    setPlannerDays((current) =>
+    applyPlannerDaysUpdate((current) =>
       current.map((day, index) => (
         index === activeDayIndex
           ? { ...day, shifts: sortedShifts.map((shift) => ({ ...shift, breaks: (shift.breaks || []).map((item) => ({ ...item })) })) }
           : day
       )),
     );
-  }, [activeDayIndex, pushHistorySnapshot]);
+  }, [activeDayIndex, applyPlannerDaysUpdate, pushHistorySnapshot]);
 
   const resetTemplates = useCallback(() => {
     if (typeof window !== 'undefined') window.localStorage.removeItem(TEMPLATE_STORAGE_KEY);
@@ -1635,6 +1721,7 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
               splitPreview={splitPreview}
               coverageView={coverageView}
               onTimelineRef={setTimelineRef}
+              onFocusedDayChange={handleFocusedDayChange}
               onShiftPointerDown={handleShiftPointerDown}
               onDeleteShift={deleteShift}
               onAddShift={addShift}
