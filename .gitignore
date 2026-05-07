@@ -2,6 +2,7 @@
 dist/
 .vite/
 .env
+.env.codex.local
 src/_extracted_script.jsx
 tools_find_tdz.js
 tools_find_tdz.cjs
