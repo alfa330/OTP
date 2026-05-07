@@ -1044,6 +1044,9 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
   const [plannerDays, setPlannerDays] = useState([]);
   const [serverSummary, setServerSummary] = useState(null);
   const [capacityInfo, setCapacityInfo] = useState(null);
+  const [scheduleVariants, setScheduleVariants] = useState([]);
+  const [selectedVariantKey, setSelectedVariantKey] = useState('');
+  const [previewCapacityBase, setPreviewCapacityBase] = useState(null);
   const [isTemplatesLoading, setIsTemplatesLoading] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [errorText, setErrorText] = useState('');
@@ -1154,6 +1157,33 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
     }
   }, [loadDefaultTemplates, selectedTemplateId, templates]);
 
+  const normalizePreviewDays = useCallback((days) =>
+    (days || []).map((day) => ({
+      ...day,
+      shifts: (day.shifts || []).map((shift) => ({ ...shift, breaks: shift.breaks || [] })),
+    })), []);
+
+  const applyGeneratedVariant = useCallback((variant, capacityBase = previewCapacityBase) => {
+    if (!variant) return;
+    const nextDays = normalizePreviewDays(variant.days || []);
+    plannerDaysRef.current = nextDays;
+    setPlannerDays(nextDays);
+    setSelectedVariantKey(variant.key || '');
+    setSelectedDayIndex(0);
+    setHistoryPast([]);
+    setHistoryFuture([]);
+    setServerSummary(variant.summary || null);
+    setCapacityInfo({
+      ...(capacityBase || {}),
+      rates: variant.capacityRates || capacityBase?.rates || [],
+    });
+  }, [normalizePreviewDays, previewCapacityBase]);
+
+  const selectGeneratedVariant = useCallback((variantKey) => {
+    const variant = scheduleVariants.find((item) => item.key === variantKey);
+    applyGeneratedVariant(variant);
+  }, [applyGeneratedVariant, scheduleVariants]);
+
   const generatePreview = useCallback(async () => {
     if (!apiRoot) return;
     setIsGenerating(true);
@@ -1170,17 +1200,22 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
         },
       );
       const preview = response.data?.preview || {};
-      const nextDays = (preview.days || []).map((day) => ({
-        ...day,
-        shifts: (day.shifts || []).map((shift) => ({ ...shift, breaks: shift.breaks || [] })),
+      const capacityBase = preview.capacity || null;
+      const variants = (preview.variants?.length ? preview.variants : [{
+        key: preview.selectedVariant || 'templates',
+        label: 'По шаблонам',
+        days: preview.days || [],
+        summary: preview.summary || null,
+        capacityRates: preview.capacity?.rates || [],
+      }]).map((variant) => ({
+        ...variant,
+        days: normalizePreviewDays(variant.days || []),
       }));
-      plannerDaysRef.current = nextDays;
-      setPlannerDays(nextDays);
-      setSelectedDayIndex(0);
-      setHistoryPast([]);
-      setHistoryFuture([]);
-      setServerSummary(preview.summary || null);
-      setCapacityInfo(preview.capacity || null);
+      const selectedKey = preview.selectedVariant || variants[0]?.key || '';
+      const selectedVariant = variants.find((variant) => variant.key === selectedKey) || variants[0];
+      setScheduleVariants(variants);
+      setPreviewCapacityBase(capacityBase);
+      applyGeneratedVariant(selectedVariant, capacityBase);
       emit('График рассчитан', 'success');
     } catch (error) {
       const message = error?.response?.data?.error || 'Не удалось сгенерировать график';
@@ -1189,7 +1224,7 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
     } finally {
       setIsGenerating(false);
     }
-  }, [apiRoot, buildHeaders, emit, selectedWeekStart, templates]);
+  }, [apiRoot, applyGeneratedVariant, buildHeaders, emit, normalizePreviewDays, selectedWeekStart, templates]);
 
   const computed = useMemo(() => buildCoverageFromDays(plannerDays), [plannerDays]);
   const computedDays = computed.days;
@@ -1596,6 +1631,28 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
         {errorText ? (
           <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
             {errorText}
+          </div>
+        ) : null}
+
+        {scheduleVariants.length > 1 ? (
+          <div className="mt-3 inline-flex flex-wrap rounded-lg border border-slate-200 bg-slate-50 p-1">
+            {scheduleVariants.map((variant) => {
+              const active = variant.key === selectedVariantKey;
+              return (
+                <button
+                  key={variant.key}
+                  type="button"
+                  onClick={() => selectGeneratedVariant(variant.key)}
+                  className={`h-8 rounded-md px-3 text-xs font-semibold transition ${
+                    active
+                      ? 'bg-white text-slate-950 shadow-sm'
+                      : 'text-slate-600 hover:bg-white/70 hover:text-slate-900'
+                  }`}
+                >
+                  {variant.label || variant.key}
+                </button>
+              );
+            })}
           </div>
         ) : null}
 
