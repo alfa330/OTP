@@ -104,6 +104,11 @@ FREEFORM_RATE_TARGET_DURATIONS = {
 FREEFORM_NIGHT_SHIFT_START_MINUTE = 20 * 60
 FREEFORM_NIGHT_SHIFT_END_MINUTE = 32 * 60
 FREEFORM_NIGHT_SHIFT_LABEL = "20*08"
+FREEFORM_DEEP_NIGHT_START_MINUTE = 3 * 60
+FREEFORM_DEEP_NIGHT_END_MINUTE = 7 * 60
+FREEFORM_REGULAR_OVERNIGHT_MAX_END_MINUTE = 26 * 60
+FREEFORM_REGULAR_OVERNIGHT_END_CLOCK_HOURS = {0, 1, 2}
+SHIFT_PREVIEW_DEEP_NIGHT_NEED_WEIGHT = 3.5
 SHIFT_PREVIEW_GREEDY_STRATEGIES = (
     {
         "name": "balanced",
@@ -1415,6 +1420,13 @@ def _shift_preview_active_items(vector: List[float]) -> List[tuple]:
     ]
 
 
+def _shift_preview_need_weight(hour_index: int) -> float:
+    hour = int(hour_index) % 24
+    if FREEFORM_DEEP_NIGHT_START_MINUTE // 60 <= hour < FREEFORM_DEEP_NIGHT_END_MINUTE // 60:
+        return SHIFT_PREVIEW_DEEP_NIGHT_NEED_WEIGHT
+    return 1.0
+
+
 def _shift_preview_score(
     target: List[float],
     coverage: List[float],
@@ -1441,7 +1453,7 @@ def _shift_preview_score(
         next_over = max(0.0, current + amount - need)
         added_over += max(0.0, next_over - current_over)
         covered_need += closed
-        weighted_need += closed * (1.0 + min(need, 10.0) * 0.04)
+        weighted_need += closed * (1.0 + min(need, 10.0) * 0.04) * _shift_preview_need_weight(index)
         active += amount
     score = (
         weighted_need * float(strategy.get("need_weight", 10.0))
@@ -1497,6 +1509,24 @@ def _freeform_shift_template(rate: float, start_minute: int, end_minute: int, la
     }
 
 
+def _is_freeform_regular_shift_allowed(start_minute: int, end_minute: int) -> bool:
+    start_minute = int(start_minute)
+    end_minute = int(end_minute)
+    for night_start in (FREEFORM_DEEP_NIGHT_START_MINUTE, FREEFORM_DEEP_NIGHT_START_MINUTE + 24 * 60):
+        night_end = night_start + (FREEFORM_DEEP_NIGHT_END_MINUTE - FREEFORM_DEEP_NIGHT_START_MINUTE)
+        if max(start_minute, night_start) < min(end_minute, night_end):
+            return False
+    if end_minute <= 24 * 60:
+        return True
+    if end_minute > FREEFORM_REGULAR_OVERNIGHT_MAX_END_MINUTE:
+        return False
+    end_clock_minute = end_minute % (24 * 60)
+    end_clock_hour = end_clock_minute // 60
+    if end_clock_minute % 60 != 0:
+        return False
+    return end_clock_hour in FREEFORM_REGULAR_OVERNIGHT_END_CLOCK_HOURS
+
+
 def _build_freeform_shift_templates(rate_capacity: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
     result = []
     for rate in RESOURCE_RATE_VALUES:
@@ -1507,7 +1537,7 @@ def _build_freeform_shift_templates(rate_capacity: Dict[str, Dict[str, Any]]) ->
         for start_minute in range(0, 24 * 60, FREEFORM_SHIFT_START_STEP_MINUTES):
             for duration_minutes in durations:
                 end_minute = start_minute + duration_minutes
-                if end_minute > 24 * 60:
+                if not _is_freeform_regular_shift_allowed(start_minute, end_minute):
                     continue
                 result.append(_freeform_shift_template(rate, start_minute, end_minute))
         if rate_key == "1":
