@@ -86,6 +86,58 @@ SHIFT_PREVIEW_MINUTES = SHIFT_PREVIEW_HOURS * 60
 FTE_ROUNDING_STEP = 0.5
 RESOURCE_RATE_VALUES = (1.0, 0.75, 0.5)
 WORK_DAYS_PER_OPERATOR_WEEK = 5
+SHIFT_PREVIEW_GREEDY_STRATEGIES = (
+    {
+        "name": "balanced",
+        "need_weight": 10.0,
+        "over_weight": 3.2,
+        "active_weight": 0.015,
+        "day_deficit_weight": 0.12,
+        "min_score": 0.0,
+        "min_covered_need": 0.05,
+        "prune_mode": "strict",
+    },
+    {
+        "name": "coverage_first",
+        "need_weight": 12.0,
+        "over_weight": 1.8,
+        "active_weight": 0.01,
+        "day_deficit_weight": 0.18,
+        "min_score": -0.2,
+        "min_covered_need": 0.05,
+        "prune_mode": "strict",
+    },
+    {
+        "name": "low_over",
+        "need_weight": 9.5,
+        "over_weight": 5.4,
+        "active_weight": 0.02,
+        "day_deficit_weight": 0.08,
+        "min_score": 0.0,
+        "min_covered_need": 0.05,
+        "prune_mode": "strict",
+    },
+    {
+        "name": "day_focus",
+        "need_weight": 10.5,
+        "over_weight": 2.6,
+        "active_weight": 0.015,
+        "day_deficit_weight": 0.35,
+        "min_score": -0.1,
+        "min_covered_need": 0.05,
+        "prune_mode": "strict",
+    },
+    {
+        "name": "compact",
+        "need_weight": 10.0,
+        "over_weight": 3.2,
+        "active_weight": 0.04,
+        "day_deficit_weight": 0.12,
+        "min_score": 0.0,
+        "min_covered_need": 0.05,
+        "prune_mode": "objective",
+    },
+)
 
 HEADER_ALIASES = {
     "report_date": ["дата", "date", "день"],
@@ -1337,7 +1389,13 @@ def _shift_preview_vector(day_index: int, template: Dict[str, Any]) -> List[floa
     return vector
 
 
-def _shift_preview_score(target: List[float], coverage: List[float], vector: List[float]) -> Dict[str, float]:
+def _shift_preview_score(
+    target: List[float],
+    coverage: List[float],
+    vector: List[float],
+    strategy: Optional[Dict[str, Any]] = None,
+) -> Dict[str, float]:
+    strategy = strategy or SHIFT_PREVIEW_GREEDY_STRATEGIES[0]
     covered_need = 0.0
     weighted_need = 0.0
     added_over = 0.0
@@ -1357,7 +1415,11 @@ def _shift_preview_score(target: List[float], coverage: List[float], vector: Lis
         covered_need += closed
         weighted_need += closed * (1.0 + min(need, 10.0) * 0.04)
         active += amount
-    score = weighted_need * 10.0 - added_over * 3.2 - active * 0.015
+    score = (
+        weighted_need * float(strategy.get("need_weight", 10.0))
+        - added_over * float(strategy.get("over_weight", 3.2))
+        - active * float(strategy.get("active_weight", 0.015))
+    )
     return {
         "score": score,
         "covered_need": covered_need,
@@ -1408,6 +1470,156 @@ def _shift_preview_totals(
     }
 
 
+def _shift_preview_quality_score(totals: Dict[str, Any], selected_count: int = 0) -> float:
+    deficit = float(totals.get("deficitFteHours") or 0)
+    over = float(totals.get("overFteHours") or 0)
+    real_coverage = float(totals.get("realCoveragePercent") or 0)
+    return deficit * 100.0 + over * 3.0 + max(0, int(selected_count or 0)) * 0.025 - real_coverage * 0.02
+
+
+def _shift_preview_prune_selected(
+    target: List[float],
+    coverage: List[float],
+    selected: List[Dict[str, Any]],
+    prune_mode: str = "strict",
+) -> Dict[str, Any]:
+    selected = list(selected)
+    coverage = list(coverage)
+    while True:
+        current_totals = _shift_preview_totals(target, coverage)
+        current_quality = _shift_preview_quality_score(current_totals, len(selected))
+        removed = False
+        for item_index, selected_item in enumerate(list(selected)):
+            vector = selected_item["vector"]
+            coverage_without = [
+                round(float(coverage[index] or 0) - float(vector[index] or 0), 4)
+                for index in range(SHIFT_PREVIEW_HOURS)
+            ]
+            next_totals = _shift_preview_totals(target, coverage_without)
+            if prune_mode == "objective":
+                next_quality = _shift_preview_quality_score(next_totals, len(selected) - 1)
+                should_remove = next_quality + 0.001 < current_quality
+            else:
+                should_remove = (
+                    next_totals["deficitFteHours"] <= current_totals["deficitFteHours"] + 0.001
+                    and next_totals["overFteHours"] + 0.001 < current_totals["overFteHours"]
+                )
+            if not should_remove:
+                continue
+            selected.pop(item_index)
+            coverage = coverage_without
+            removed = True
+            break
+        if not removed:
+            break
+    return {
+        "selected": selected,
+        "coverage": coverage,
+        "totals": _shift_preview_totals(target, coverage),
+    }
+
+
+def _run_shift_preview_greedy_strategy(
+    target: List[float],
+    candidates: List[Dict[str, Any]],
+    rate_capacity: Dict[str, Dict[str, Any]],
+    strategy: Dict[str, Any],
+) -> Dict[str, Any]:
+    coverage = [0.0 for _ in range(SHIFT_PREVIEW_HOURS)]
+    selected = []
+    weekly_usage = defaultdict(int)
+    daily_usage = defaultdict(lambda: defaultdict(int))
+    hourly_usage = {
+        _resource_rate_key(rate): [0.0 for _ in range(SHIFT_PREVIEW_HOURS)]
+        for rate in RESOURCE_RATE_VALUES
+    }
+    total_weekly_capacity = sum(int(item.get("weekly_shift_capacity") or 0) for item in rate_capacity.values())
+    target_based_limit = max(0, min(800, int(sum(target) / 3) + 80))
+    max_shifts = min(target_based_limit, total_weekly_capacity)
+    min_covered_need = float(strategy.get("min_covered_need", 0.05))
+    min_score = float(strategy.get("min_score", 0.0))
+    day_deficit_weight = float(strategy.get("day_deficit_weight", 0.12))
+
+    for _ in range(max_shifts):
+        best = None
+        best_score = None
+        best_rank = None
+        for candidate in candidates:
+            rate_key = candidate["rateKey"]
+            day_index = int(candidate["dayIndex"])
+            capacity = rate_capacity.get(rate_key) or {}
+            if weekly_usage[rate_key] >= int(capacity.get("weekly_shift_capacity") or 0):
+                continue
+            if daily_usage[day_index][rate_key] >= int(capacity.get("daily_shift_capacity") or 0):
+                continue
+            active_capacity = int(capacity.get("daily_shift_capacity") or 0)
+            if active_capacity <= 0:
+                continue
+            if any(
+                float(hourly_usage[rate_key][index] or 0) + float(amount or 0) > active_capacity + 0.001
+                for index, amount in enumerate(candidate.get("presenceVector") or [])
+            ):
+                continue
+
+            stats = _shift_preview_score(target, coverage, candidate["vector"], strategy)
+            if stats["covered_need"] <= min_covered_need:
+                continue
+            day_deficit = _shift_preview_day_deficit(target, coverage, day_index)
+            stats = {
+                **stats,
+                "day_deficit": round(day_deficit, 4),
+                "score": stats["score"] + min(day_deficit, 120.0) * day_deficit_weight,
+            }
+            if stats["score"] <= min_score:
+                continue
+            rank = (
+                round(float(stats["score"] or 0), 6),
+                round(float(stats["covered_need"] or 0), 6),
+                -round(float(stats["added_over"] or 0), 6),
+                -round(float(stats["active"] or 0), 6),
+            )
+            if best_rank is None or rank > best_rank:
+                best = candidate
+                best_score = stats
+                best_rank = rank
+        if best is None:
+            break
+        for index, amount in enumerate(best["vector"]):
+            coverage[index] = round(float(coverage[index] or 0) + float(amount or 0), 4)
+        selected.append({
+            "dayIndex": best["dayIndex"],
+            "template": best["template"],
+            "vector": list(best["vector"]),
+            "score": best_score,
+        })
+        best_rate_key = best["rateKey"]
+        weekly_usage[best_rate_key] += 1
+        daily_usage[int(best["dayIndex"])][best_rate_key] += 1
+        for index, amount in enumerate(best.get("presenceVector") or []):
+            hourly_usage[best_rate_key][index] = round(
+                float(hourly_usage[best_rate_key][index] or 0) + float(amount or 0),
+                4,
+            )
+        if sum(max(0.0, target[index] - coverage[index]) for index in range(SHIFT_PREVIEW_HOURS)) <= 0.01:
+            break
+
+    pruned = _shift_preview_prune_selected(
+        target,
+        coverage,
+        selected,
+        prune_mode=str(strategy.get("prune_mode") or "strict"),
+    )
+    totals = pruned["totals"]
+    selected = pruned["selected"]
+    return {
+        "method": str(strategy.get("name") or "greedy"),
+        "selected": selected,
+        "coverage": pruned["coverage"],
+        "totals": totals,
+        "quality": _shift_preview_quality_score(totals, len(selected)),
+    }
+
+
 def _generate_schedule_preview_from_forecast(
     forecast_payload: Dict[str, Any],
     templates: List[Dict[str, Any]],
@@ -1453,83 +1665,21 @@ def _generate_schedule_preview_from_forecast(
                 "presenceVector": _shift_preview_presence_vector(day_index, template_with_breaks),
             })
 
-    coverage = [0.0 for _ in range(SHIFT_PREVIEW_HOURS)]
-    selected = []
-    weekly_usage = defaultdict(int)
-    daily_usage = defaultdict(lambda: defaultdict(int))
-    hourly_usage = {
-        _resource_rate_key(rate): [0.0 for _ in range(SHIFT_PREVIEW_HOURS)]
-        for rate in RESOURCE_RATE_VALUES
-    }
-    total_weekly_capacity = sum(int(item.get("weekly_shift_capacity") or 0) for item in rate_capacity.values())
-    target_based_limit = max(0, min(800, int(sum(target) / 3) + 80))
-    max_shifts = min(target_based_limit, total_weekly_capacity)
-    for _ in range(max_shifts):
-        best = None
-        best_score = None
-        for candidate in candidates:
-            rate_key = candidate["rateKey"]
-            day_index = int(candidate["dayIndex"])
-            capacity = rate_capacity.get(rate_key) or {}
-            if weekly_usage[rate_key] >= int(capacity.get("weekly_shift_capacity") or 0):
-                continue
-            if daily_usage[day_index][rate_key] >= int(capacity.get("daily_shift_capacity") or 0):
-                continue
-            active_capacity = int(capacity.get("daily_shift_capacity") or 0)
-            if active_capacity <= 0:
-                continue
-            if any(
-                float(hourly_usage[rate_key][index] or 0) + float(amount or 0) > active_capacity + 0.001
-                for index, amount in enumerate(candidate.get("presenceVector") or [])
-            ):
-                continue
-            stats = _shift_preview_score(target, coverage, candidate["vector"])
-            if stats["covered_need"] <= 0.05 or stats["score"] <= 0:
-                continue
-            day_deficit = _shift_preview_day_deficit(target, coverage, day_index)
-            stats = {
-                **stats,
-                "day_deficit": round(day_deficit, 4),
-                "score": stats["score"] + min(day_deficit, 120.0) * 0.12,
-            }
-            if best_score is None or stats["score"] > best_score["score"]:
-                best = candidate
-                best_score = stats
-        if best is None:
-            break
-        for index, amount in enumerate(best["vector"]):
-            coverage[index] = round(float(coverage[index] or 0) + float(amount or 0), 4)
-        selected.append({
-            "dayIndex": best["dayIndex"],
-            "template": best["template"],
-            "vector": list(best["vector"]),
-            "score": best_score,
-        })
-        best_rate_key = best["rateKey"]
-        weekly_usage[best_rate_key] += 1
-        daily_usage[int(best["dayIndex"])][best_rate_key] += 1
-        for index, amount in enumerate(best.get("presenceVector") or []):
-            hourly_usage[best_rate_key][index] = round(
-                float(hourly_usage[best_rate_key][index] or 0) + float(amount or 0),
-                4,
-            )
-        if sum(max(0.0, target[index] - coverage[index]) for index in range(SHIFT_PREVIEW_HOURS)) <= 0.01:
-            break
-
-    for selected_item in list(selected):
-        vector = selected_item["vector"]
-        coverage_without = [
-            round(float(coverage[index] or 0) - float(vector[index] or 0), 4)
-            for index in range(SHIFT_PREVIEW_HOURS)
-        ]
-        current_totals = _shift_preview_totals(target, coverage)
-        next_totals = _shift_preview_totals(target, coverage_without)
-        if (
-            next_totals["deficitFteHours"] <= current_totals["deficitFteHours"] + 0.001
-            and next_totals["overFteHours"] + 0.001 < current_totals["overFteHours"]
-        ):
-            selected.remove(selected_item)
-            coverage = coverage_without
+    strategy_results = [
+        _run_shift_preview_greedy_strategy(target, candidates, rate_capacity, strategy)
+        for strategy in SHIFT_PREVIEW_GREEDY_STRATEGIES
+    ]
+    best_result = min(
+        strategy_results,
+        key=lambda item: (
+            round(float(item.get("quality") or 0), 6),
+            round(float((item.get("totals") or {}).get("deficitFteHours") or 0), 4),
+            round(float((item.get("totals") or {}).get("overFteHours") or 0), 4),
+            len(item.get("selected") or []),
+        ),
+    )
+    coverage = best_result["coverage"]
+    selected = best_result["selected"]
 
     final_usage = _shift_preview_usage_by_rate(selected)
     capacity_summary = []
@@ -1614,6 +1764,21 @@ def _generate_schedule_preview_from_forecast(
         },
         "days": preview_days,
         "summary": _shift_preview_totals(target, coverage, raw_target),
+        "generation": {
+            "method": best_result.get("method"),
+            "strategiesTried": len(strategy_results),
+            "qualityScore": round(float(best_result.get("quality") or 0), 4),
+            "strategySummaries": [
+                {
+                    "method": item.get("method"),
+                    "shifts": len(item.get("selected") or []),
+                    "deficitFteHours": (item.get("totals") or {}).get("deficitFteHours"),
+                    "overFteHours": (item.get("totals") or {}).get("overFteHours"),
+                    "qualityScore": round(float(item.get("quality") or 0), 4),
+                }
+                for item in strategy_results
+            ],
+        },
     }
 
 
