@@ -5,6 +5,11 @@ from typing import Any, Dict, List, Optional
 
 from .common import _resource_rate_key, _resource_rate_value, _round_fte_to_half, _to_float, _to_int
 
+try:
+    from ortools.sat.python import cp_model
+except Exception:
+    cp_model = None
+
 
 DEFAULT_RESOURCE_SHIFT_TEMPLATE_LABELS = {
     1.0: [
@@ -80,6 +85,12 @@ FREEFORM_DEEP_NIGHT_END_MINUTE = 7 * 60
 FREEFORM_REGULAR_OVERNIGHT_MAX_END_MINUTE = 26 * 60
 FREEFORM_REGULAR_OVERNIGHT_END_CLOCK_HOURS = {0, 1, 2}
 SHIFT_PREVIEW_DEEP_NIGHT_NEED_WEIGHT = 3.5
+SHIFT_PREVIEW_CP_SAT_TIME_LIMIT_SECONDS = 2.0
+SHIFT_PREVIEW_CP_SAT_SEARCH_WORKERS = 8
+SHIFT_PREVIEW_CP_SAT_DEFICIT_WEIGHT = 100
+SHIFT_PREVIEW_CP_SAT_OVER_WEIGHT = 5
+SHIFT_PREVIEW_CP_SAT_SHIFT_WEIGHT = 2
+SHIFT_PREVIEW_CP_SAT_PREFERENCE_WEIGHT = 10
 SHIFT_PREVIEW_GREEDY_STRATEGIES = (
     {
         "name": "balanced",
@@ -765,15 +776,157 @@ def _run_shift_preview_greedy_strategy(
     }
 
 
+def _shift_preview_status_name(status: int) -> str:
+    if cp_model is None:
+        return "unavailable"
+    status_names = {
+        cp_model.OPTIMAL: "optimal",
+        cp_model.FEASIBLE: "feasible",
+        cp_model.INFEASIBLE: "infeasible",
+        cp_model.MODEL_INVALID: "model_invalid",
+        cp_model.UNKNOWN: "unknown",
+    }
+    return status_names.get(status, str(status))
+
+
+def _run_shift_preview_cp_sat_strategy(
+    target: List[float],
+    candidates: List[Dict[str, Any]],
+    rate_capacity: Dict[str, Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    if cp_model is None or not candidates:
+        return None
+
+    total_hours = len(target)
+    model = cp_model.CpModel()
+    selected_vars = [
+        model.NewBoolVar(f"shift_{index}")
+        for index in range(len(candidates))
+    ]
+    objective_terms = []
+
+    by_rate = defaultdict(list)
+    by_day_rate = defaultdict(list)
+    by_hour_rate = defaultdict(list)
+    vector_minutes_by_candidate = []
+
+    for index, candidate in enumerate(candidates):
+        rate_key = candidate["rateKey"]
+        day_index = int(candidate.get("dayIndex") or 0)
+        by_rate[rate_key].append(index)
+        by_day_rate[(day_index, rate_key)].append(index)
+        vector_minutes = [
+            int(round(float(amount or 0) * 60))
+            for amount in (candidate.get("vector") or [])
+        ]
+        presence_minutes = [
+            int(round(float(amount or 0) * 60))
+            for amount in (candidate.get("presenceVector") or [])
+        ]
+        vector_minutes_by_candidate.append(vector_minutes)
+        for hour_index, amount in enumerate(presence_minutes):
+            if amount > 0:
+                by_hour_rate[(hour_index, rate_key)].append((index, amount))
+        preference_bonus = int(
+            round(float(candidate.get("preferenceScore") or 0) * SHIFT_PREVIEW_CP_SAT_PREFERENCE_WEIGHT)
+        )
+        shift_weight = SHIFT_PREVIEW_CP_SAT_SHIFT_WEIGHT - preference_bonus
+        objective_terms.append(selected_vars[index] * shift_weight)
+
+    for rate_key, indexes in by_rate.items():
+        capacity = int((rate_capacity.get(rate_key) or {}).get("weekly_shift_capacity") or 0)
+        model.Add(sum(selected_vars[index] for index in indexes) <= capacity)
+
+    for (_day_index, rate_key), indexes in by_day_rate.items():
+        capacity = int((rate_capacity.get(rate_key) or {}).get("daily_shift_capacity") or 0)
+        model.Add(sum(selected_vars[index] for index in indexes) <= capacity)
+
+    for (_hour_index, rate_key), items in by_hour_rate.items():
+        capacity = int((rate_capacity.get(rate_key) or {}).get("daily_shift_capacity") or 0)
+        active_minutes = sum(selected_vars[index] * amount for index, amount in items)
+        model.Add(active_minutes <= capacity * 60)
+
+    for hour_index in range(total_hours):
+        target_minutes = int(round(float(target[hour_index] or 0) * 60))
+        coverage_terms = [
+            selected_vars[index] * vector_minutes_by_candidate[index][hour_index]
+            for index in range(len(candidates))
+            if hour_index < len(vector_minutes_by_candidate[index])
+            and vector_minutes_by_candidate[index][hour_index] > 0
+        ]
+        max_coverage_minutes = sum(
+            vector_minutes_by_candidate[index][hour_index]
+            for index in range(len(candidates))
+            if hour_index < len(vector_minutes_by_candidate[index])
+        )
+        deficit = model.NewIntVar(0, max(target_minutes, 0), f"deficit_{hour_index}")
+        over = model.NewIntVar(
+            0,
+            max(max_coverage_minutes, target_minutes, 0),
+            f"over_{hour_index}",
+        )
+        model.Add(sum(coverage_terms) + deficit - over == target_minutes)
+
+        deficit_weight = SHIFT_PREVIEW_CP_SAT_DEFICIT_WEIGHT
+        if _shift_preview_need_weight(hour_index) > 1.0:
+            deficit_weight = int(round(deficit_weight * _shift_preview_need_weight(hour_index)))
+        objective_terms.append(deficit * deficit_weight)
+        objective_terms.append(over * SHIFT_PREVIEW_CP_SAT_OVER_WEIGHT)
+
+    model.Minimize(sum(objective_terms))
+
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = SHIFT_PREVIEW_CP_SAT_TIME_LIMIT_SECONDS
+    solver.parameters.num_search_workers = SHIFT_PREVIEW_CP_SAT_SEARCH_WORKERS
+    status = solver.Solve(model)
+    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        return None
+
+    coverage = [0.0 for _ in range(total_hours)]
+    selected = []
+    status_name = _shift_preview_status_name(status)
+    for index, candidate in enumerate(candidates):
+        if not solver.BooleanValue(selected_vars[index]):
+            continue
+        for hour_index, amount in enumerate(candidate["vector"]):
+            coverage[hour_index] = round(float(coverage[hour_index] or 0) + float(amount or 0), 4)
+        selected.append({
+            "dayIndex": candidate["dayIndex"],
+            "template": candidate["template"],
+            "vector": list(candidate["vector"]),
+            "score": {
+                "method": "cp_sat",
+                "status": status_name,
+                "objective": round(float(solver.ObjectiveValue()), 4),
+                "preference_score": round(float(candidate.get("preferenceScore") or 0), 4),
+            },
+        })
+
+    pruned = _shift_preview_prune_selected(target, coverage, selected, prune_mode="objective")
+    totals = pruned["totals"]
+    selected = pruned["selected"]
+    return {
+        "method": f"cp_sat_{status_name}",
+        "selected": selected,
+        "coverage": pruned["coverage"],
+        "totals": totals,
+        "quality": _shift_preview_quality_score(totals, len(selected)),
+    }
+
+
 def _select_shift_preview_strategy(
     target: List[float],
     candidates: List[Dict[str, Any]],
     rate_capacity: Dict[str, Dict[str, Any]],
 ) -> Dict[str, Any]:
-    strategy_results = [
+    cp_sat_result = _run_shift_preview_cp_sat_strategy(target, candidates, rate_capacity)
+    strategy_results = []
+    if cp_sat_result is not None:
+        strategy_results.append(cp_sat_result)
+    strategy_results.extend([
         _run_shift_preview_greedy_strategy(target, candidates, rate_capacity, strategy)
         for strategy in SHIFT_PREVIEW_GREEDY_STRATEGIES
-    ]
+    ])
     best_result = min(
         strategy_results,
         key=lambda item: (
@@ -915,6 +1068,22 @@ def _build_schedule_preview_variant(
     }
 
 
+def _schedule_preview_variant_rank(variant: Dict[str, Any]) -> tuple:
+    summary = variant.get("summary") or {}
+    generation = variant.get("generation") or {}
+    quality = _to_float(
+        generation.get("qualityScore"),
+        _shift_preview_quality_score(summary),
+    )
+    variant_bias = 0 if str(variant.get("key") or "") == "templates" else 1
+    return (
+        round(quality, 6),
+        round(_to_float(summary.get("deficitFteHours")), 4),
+        round(_to_float(summary.get("overFteHours")), 4),
+        variant_bias,
+    )
+
+
 def _work_days_per_operator_for_period(day_count: int) -> int:
     day_count = max(1, int(day_count or 1))
     return min(day_count, max(1, int(math.ceil(WORK_DAYS_PER_OPERATOR_WEEK * day_count / 7))))
@@ -989,7 +1158,7 @@ def _generate_schedule_preview_from_forecast(
         rate_capacity,
     )
     variants = [template_variant, freeform_variant]
-    default_variant = template_variant
+    default_variant = min(variants, key=_schedule_preview_variant_rank)
 
     return {
         "week_start": forecast_payload.get("week_start"),
