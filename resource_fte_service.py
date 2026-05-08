@@ -22,6 +22,7 @@ from resource_fte.calculations import (
 )
 from resource_fte.common import (
     RESOURCE_RATE_VALUES,
+    WORK_DAYS_PER_OPERATOR_WEEK,
     WEEKDAYS_RU,
     _json_safe,
     _parse_report_date,
