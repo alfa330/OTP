@@ -2401,7 +2401,9 @@ def api_resource_fte_overview():
             date_from=request.args.get('date_from'),
             date_to=request.args.get('date_to'),
             as_of_date_value=request.args.get('as_of'),
-            forecast_week_start_value=request.args.get('forecast_week_start')
+            forecast_week_start_value=request.args.get('forecast_week_start'),
+            forecast_date_from_value=request.args.get('forecast_date_from') or request.args.get('forecast_period_start'),
+            forecast_date_to_value=request.args.get('forecast_date_to') or request.args.get('forecast_period_end')
         )
         return jsonify({"status": "success", **payload}), 200
     except Exception as error:

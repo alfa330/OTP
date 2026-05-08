@@ -1,0 +1,1 @@
+"""Resource FTE domain helpers."""
