@@ -11,6 +11,7 @@ psycopg2-binary==2.9.9
 passlib==1.7.4
 google-cloud-storage==2.18.2
 pandas==2.2.2
+ortools==9.15.6755
 packaging>=23.0
 loguru==0.7.3
 httpx==0.28.1
