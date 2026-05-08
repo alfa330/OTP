@@ -11744,6 +11744,85 @@ def technical_issue_reasons():
         return jsonify({"error": f"Internal server error"}), 500
 
 
+@app.route('/api/technical_issues/workplace_settings', methods=['GET', 'OPTIONS'])
+@require_api_key
+def technical_issue_workplace_settings():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    try:
+        requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+        requester_id = int(requester_id)
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "User not found"}), 404
+
+        requester_role = _normalize_management_role(requester[3])
+        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role)):
+            return jsonify({"error": "Forbidden"}), 403
+
+        result = db.get_technical_issue_workplace_settings(
+            requester_id=requester_id,
+            requester_role=requester_role
+        )
+
+        return jsonify({
+            "status": "success",
+            "items": result.get('items') or []
+        }), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error fetching technical issue workplace settings: {e}", exc_info=True)
+        return jsonify({"error": f"Internal server error"}), 500
+
+
+@app.route('/api/technical_issues/workplace_settings/<int:workplace_number>', methods=['PUT', 'PATCH', 'OPTIONS'])
+@require_api_key
+def update_technical_issue_workplace_setting(workplace_number):
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    try:
+        requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+        requester_id = int(requester_id)
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "User not found"}), 404
+
+        requester_role = _normalize_management_role(requester[3])
+        if not _is_admin_role(requester_role):
+            return jsonify({"error": "Only admin can update technical issue workplace settings"}), 403
+
+        payload = request.get_json(silent=True) or {}
+        for_supervisor = payload.get('for_supervisor')
+        if for_supervisor is None:
+            for_supervisor = payload.get('is_for_supervisor')
+        if for_supervisor is None:
+            for_supervisor = payload.get('forSupervisor')
+
+        item = db.update_technical_issue_workplace_setting(
+            requester_id=requester_id,
+            requester_role=requester_role,
+            workplace_number=workplace_number,
+            for_supervisor=for_supervisor
+        )
+
+        return jsonify({
+            "status": "success",
+            "item": item
+        }), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error updating technical issue workplace setting {workplace_number}: {e}", exc_info=True)
+        return jsonify({"error": f"Internal server error"}), 500
+
+
 @app.route('/api/technical_issues', methods=['POST'])
 @require_api_key
 def create_technical_issue():
@@ -12559,6 +12638,7 @@ def export_technical_issues_excel():
             'Время окончания',
             'Оператор',
             'Рабочее место',
+            'Для супервайзера',
             'Направление оператора',
             'Техническая причина',
             'Комментарий',
@@ -12577,12 +12657,13 @@ def export_technical_issues_excel():
             ws.cell(row=row_idx, column=3, value=item.get('end_time') or '')
             ws.cell(row=row_idx, column=4, value=item.get('operator_name') or '')
             ws.cell(row=row_idx, column=5, value=item.get('workplace_number') or '')
-            ws.cell(row=row_idx, column=6, value=item.get('direction_name') or '')
-            ws.cell(row=row_idx, column=7, value=item.get('reason') or '')
-            ws.cell(row=row_idx, column=8, value=item.get('comment') or '')
-            ws.cell(row=row_idx, column=9, value=selected_directions)
-            ws.cell(row=row_idx, column=10, value=item.get('created_by_name') or '')
-            ws.cell(row=row_idx, column=11, value=item.get('created_at') or '')
+            ws.cell(row=row_idx, column=6, value='Да' if item.get('for_supervisor') else 'Нет')
+            ws.cell(row=row_idx, column=7, value=item.get('direction_name') or '')
+            ws.cell(row=row_idx, column=8, value=item.get('reason') or '')
+            ws.cell(row=row_idx, column=9, value=item.get('comment') or '')
+            ws.cell(row=row_idx, column=10, value=selected_directions)
+            ws.cell(row=row_idx, column=11, value=item.get('created_by_name') or '')
+            ws.cell(row=row_idx, column=12, value=item.get('created_at') or '')
 
         for column_cells in ws.columns:
             max_len = 0

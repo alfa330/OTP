@@ -128,6 +128,29 @@ const normalizeWorkplaceNumber = (value) => {
     return intN;
 };
 
+const isTruthyFlag = (value) => {
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'number') return value === 1;
+    const normalized = String(value ?? '').trim().toLowerCase();
+    return ['1', 'true', 't', 'yes', 'y', 'on', 'да'].includes(normalized);
+};
+
+const normalizeWorkplaceSettingsMap = (settings) => {
+    const map = new Map();
+    if (!Array.isArray(settings)) return map;
+    for (const item of settings) {
+        const workplaceNumber = normalizeWorkplaceNumber(item?.workplace_number ?? item?.workplaceNumber);
+        if (workplaceNumber === null) continue;
+        map.set(workplaceNumber, {
+            workplaceNumber,
+            forSupervisor: isTruthyFlag(item?.for_supervisor ?? item?.is_for_supervisor ?? item?.forSupervisor),
+            updatedByName: item?.updated_by_name || item?.updatedByName || '',
+            updatedAt: item?.updated_at || item?.updatedAt || '',
+        });
+    }
+    return map;
+};
+
 const formatDateDisplay = (iso) => {
     if (!iso) return '';
     const parts = iso.split('-');
@@ -597,6 +620,7 @@ const AddIssueModal = memo(function AddIssueModal({
     createStartTime, setCreateStartTime,
     createEndTime, setCreateEndTime,
     createWorkplaceNumber, setCreateWorkplaceNumber,
+    createWorkplaceForSupervisor,
     createReason, setCreateReason,
     createComment, setCreateComment,
     createOperatorIds, setCreateOperatorIds,
@@ -696,6 +720,12 @@ const AddIssueModal = memo(function AddIssueModal({
                                 </select>
                             </label>
                         </div>
+
+                        {createWorkplaceForSupervisor && (
+                            <div className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-medium text-indigo-800">
+                                Выбранное РМ помечено для супервайзера. Новые записи получат эту отметку автоматически.
+                            </div>
+                        )}
 
                         {/* Reason dropdown */}
                         <div>
@@ -840,6 +870,7 @@ const WorkplaceSeat = memo(function WorkplaceSeat({
 }) {
     const item = itemsByNumber?.get(seatNumber);
     const incidents = item?.incidents || 0;
+    const forSupervisor = Boolean(item?.forSupervisor);
     const isSelected = seatNumber === selectedWorkplace;
     const style = getWorkplaceTileStyle(incidents, maxIncidents);
 
@@ -847,12 +878,17 @@ const WorkplaceSeat = memo(function WorkplaceSeat({
         <button
             type="button"
             onClick={() => onSelectWorkplace(seatNumber)}
-            className={`flex flex-col items-center justify-center border rounded-sm transition-all hover:-translate-y-0.5 ${
-                isSelected ? 'ring-2 ring-rose-400 shadow-md' : 'shadow-sm'
+            className={`relative flex flex-col items-center justify-center border rounded-sm transition-all hover:-translate-y-0.5 ${
+                isSelected ? 'ring-2 ring-rose-400 shadow-md' : forSupervisor ? 'ring-2 ring-indigo-300 shadow-sm' : 'shadow-sm'
             }`}
             style={{ width: CELL_W, height: CELL_H, flexShrink: 0, ...style }}
-            title={`Место ${seatNumber}: ${incidents} инцидент(ов)`}
+            title={`Место ${seatNumber}: ${incidents} инцидент(ов)${forSupervisor ? ' • для супервайзера' : ''}`}
         >
+            {forSupervisor && (
+                <span className="absolute right-0.5 top-0.5 rounded-sm bg-indigo-700 px-1 py-0.5 text-[9px] font-bold leading-none text-white">
+                    СВ
+                </span>
+            )}
             <span className="text-[15px] font-medium leading-none">{seatNumber}</span>
             {incidents > 0 && (
                 <span className="text-[11px] font-medium mt-1 leading-none opacity-90">{incidents}</span>
@@ -916,7 +952,13 @@ const WorkplaceVisualizationBlock = memo(function WorkplaceVisualizationBlock({
     );
 });
 
-const WorkplaceAnalyticsPanel = memo(function WorkplaceAnalyticsPanel({ rows }) {
+const WorkplaceAnalyticsPanel = memo(function WorkplaceAnalyticsPanel({
+    rows,
+    workplaceSettingsMap,
+    canManageSupervisorFlags,
+    updatingWorkplaceNumber,
+    onToggleSupervisorFlag,
+}) {
     const [selectedWorkplace, setSelectedWorkplace] = useState(null);
     const [detailsWorkplace, setDetailsWorkplace] = useState(null);
 
@@ -944,15 +986,23 @@ const WorkplaceAnalyticsPanel = memo(function WorkplaceAnalyticsPanel({ rows }) 
 
         const items = WORKPLACE_NUMBERS.map((num) => {
             const entry = buckets.get(num);
-            return entry || {
+            const setting = workplaceSettingsMap?.get(num);
+            const base = entry || {
                 workplaceNumber: num,
                 incidents: 0,
                 totalMinutes: 0,
                 rows: [],
             };
+            return {
+                ...base,
+                forSupervisor: Boolean(setting?.forSupervisor),
+                supervisorFlagUpdatedByName: setting?.updatedByName || '',
+                supervisorFlagUpdatedAt: setting?.updatedAt || '',
+            };
         });
 
         const activeItems = items.filter((item) => item.incidents > 0);
+        const supervisorItems = items.filter((item) => item.forSupervisor);
         const maxIncidents = Math.max(...items.map((item) => item.incidents), 0);
         const totalIncidents = items.reduce((sum, item) => sum + item.incidents, 0);
 
@@ -971,11 +1021,12 @@ const WorkplaceAnalyticsPanel = memo(function WorkplaceAnalyticsPanel({ rows }) 
             itemsByNumber,
             activeItems,
             activeCount: activeItems.length,
+            supervisorCount: supervisorItems.length,
             maxIncidents,
             totalIncidents,
             topItems,
         };
-    }, [rows]);
+    }, [rows, workplaceSettingsMap]);
 
     const selectedEntry = useMemo(() => {
         if (selectedWorkplace === null) return null;
@@ -995,8 +1046,6 @@ const WorkplaceAnalyticsPanel = memo(function WorkplaceAnalyticsPanel({ rows }) 
         document.addEventListener('keydown', onKeyDown);
         return () => document.removeEventListener('keydown', onKeyDown);
     }, [detailsWorkplace]);
-
-    if (rows.length === 0) return null;
 
     const openWorkplaceDetails = (workplaceNumber) => {
         setSelectedWorkplace(workplaceNumber);
@@ -1019,6 +1068,10 @@ const WorkplaceAnalyticsPanel = memo(function WorkplaceAnalyticsPanel({ rows }) 
                         <span className="inline-flex items-center gap-1 rounded-full bg-red-100 border border-red-200 px-3 py-0.5 text-xs font-semibold text-red-800">
                             <FaIcon className="fas fa-desktop" style={{ width: '0.8em', height: '0.8em' }} />
                             Активных РМ: {workplaceStats.activeCount}
+                        </span>
+                        <span className="inline-flex items-center gap-1 rounded-full bg-indigo-100 border border-indigo-200 px-3 py-0.5 text-xs font-semibold text-indigo-800">
+                            <FaIcon className="fas fa-user-tie" style={{ width: '0.8em', height: '0.8em' }} />
+                            Для СВ: {workplaceStats.supervisorCount}
                         </span>
                         <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 border border-slate-200 px-3 py-0.5 text-xs font-semibold text-slate-700">
                             Нажмите на РМ, чтобы открыть детали.
@@ -1056,7 +1109,14 @@ const WorkplaceAnalyticsPanel = memo(function WorkplaceAnalyticsPanel({ rows }) 
                                             }`}
                                         >
                                             <div className="flex items-center justify-between gap-2 text-xs">
-                                                <span className="font-semibold text-slate-800">#{idx + 1} • РМ {item.workplaceNumber}</span>
+                                                <span className="flex flex-wrap items-center gap-1 font-semibold text-slate-800">
+                                                    <span>#{idx + 1} • РМ {item.workplaceNumber}</span>
+                                                    {item.forSupervisor && (
+                                                        <span className="rounded-full bg-indigo-100 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-indigo-700">
+                                                            Для СВ
+                                                        </span>
+                                                    )}
+                                                </span>
                                                 <span className="font-semibold text-rose-700">{item.incidents} сл.</span>
                                             </div>
                                             <div className="mt-1.5 h-1.5 w-full rounded-full bg-rose-100 overflow-hidden">
@@ -1090,8 +1150,13 @@ const WorkplaceAnalyticsPanel = memo(function WorkplaceAnalyticsPanel({ rows }) 
                 >
                     <div className="w-full max-w-2xl rounded-xl border border-rose-200 bg-white shadow-2xl">
                         <div className="flex items-center justify-between gap-2 border-b border-rose-100 px-4 py-3 bg-gradient-to-r from-rose-50 to-red-50">
-                            <div className="text-sm font-bold text-rose-900">
-                                РМ {detailsEntry.workplaceNumber}: {detailsEntry.incidents} инцидент(ов)
+                            <div className="flex flex-wrap items-center gap-2 text-sm font-bold text-rose-900">
+                                <span>РМ {detailsEntry.workplaceNumber}: {detailsEntry.incidents} инцидент(ов)</span>
+                                {detailsEntry.forSupervisor && (
+                                    <span className="rounded-full bg-indigo-100 border border-indigo-200 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-indigo-700">
+                                        Для СВ
+                                    </span>
+                                )}
                             </div>
                             <button
                                 type="button"
@@ -1102,8 +1167,45 @@ const WorkplaceAnalyticsPanel = memo(function WorkplaceAnalyticsPanel({ rows }) 
                             </button>
                         </div>
 
-                        <div className="px-4 py-3 border-b border-rose-100 text-xs text-slate-600">
-                            Суммарная длительность: <span className="font-semibold text-slate-800">{formatDuration(detailsEntry.totalMinutes)}</span>
+                        <div className="space-y-3 px-4 py-3 border-b border-rose-100 text-xs text-slate-600">
+                            <div>
+                                Суммарная длительность: <span className="font-semibold text-slate-800">{formatDuration(detailsEntry.totalMinutes)}</span>
+                            </div>
+                            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-indigo-100 bg-indigo-50/70 px-3 py-2">
+                                <div>
+                                    <div className="font-semibold text-indigo-900">Для супервайзера</div>
+                                    <div className="mt-0.5 text-indigo-700">
+                                        Новые техпричины на это РМ будут получать эту отметку.
+                                    </div>
+                                    {(detailsEntry.supervisorFlagUpdatedByName || detailsEntry.supervisorFlagUpdatedAt) && (
+                                        <div className="mt-1 text-[11px] text-indigo-500">
+                                            Обновлено: {detailsEntry.supervisorFlagUpdatedByName || '—'} {detailsEntry.supervisorFlagUpdatedAt || ''}
+                                        </div>
+                                    )}
+                                </div>
+                                {canManageSupervisorFlags ? (
+                                    <button
+                                        type="button"
+                                        role="switch"
+                                        aria-checked={detailsEntry.forSupervisor}
+                                        disabled={updatingWorkplaceNumber === detailsEntry.workplaceNumber}
+                                        onClick={() => onToggleSupervisorFlag(detailsEntry.workplaceNumber, !detailsEntry.forSupervisor)}
+                                        className={`relative inline-flex h-[26px] w-11 shrink-0 rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 ${
+                                            detailsEntry.forSupervisor ? 'bg-indigo-600' : 'bg-slate-300'
+                                        } ${updatingWorkplaceNumber === detailsEntry.workplaceNumber ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'}`}
+                                    >
+                                        <span
+                                            className={`pointer-events-none inline-block h-[22px] w-[22px] transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
+                                                detailsEntry.forSupervisor ? 'translate-x-5' : 'translate-x-0'
+                                            }`}
+                                        />
+                                    </button>
+                                ) : (
+                                    <span className={`rounded-full px-2 py-1 text-[11px] font-semibold ${detailsEntry.forSupervisor ? 'bg-indigo-100 text-indigo-700' : 'bg-slate-100 text-slate-500'}`}>
+                                        {detailsEntry.forSupervisor ? 'Включено' : 'Выключено'}
+                                    </span>
+                                )}
+                            </div>
                         </div>
 
                         <div className="p-4">
@@ -1243,6 +1345,7 @@ const TechnicalIssueRow = memo(function TechnicalIssueRow({ item, canDelete, isD
         ? item.selected_direction_names.filter((n) => String(n || '').trim() !== '')
         : [];
     const massive = isMassiveReason(item?.reason);
+    const forSupervisor = isTruthyFlag(item?.for_supervisor ?? item?.is_for_supervisor ?? item?.forSupervisor);
     const rowBg = isEven ? 'bg-white' : 'bg-slate-50/70';
 
     return (
@@ -1261,9 +1364,16 @@ const TechnicalIssueRow = memo(function TechnicalIssueRow({ item, canDelete, isD
             </td>
             <td className="px-3 py-2.5 text-xs text-gray-700 whitespace-nowrap">
                 {normalizeWorkplaceNumber(item?.workplace_number) !== null ? (
-                    <span className="inline-flex items-center rounded-full border border-rose-200 bg-rose-50 px-2 py-0.5 font-semibold text-rose-700">
-                        РМ {normalizeWorkplaceNumber(item?.workplace_number)}
-                    </span>
+                    <div className="flex flex-wrap items-center gap-1">
+                        <span className="inline-flex items-center rounded-full border border-rose-200 bg-rose-50 px-2 py-0.5 font-semibold text-rose-700">
+                            РМ {normalizeWorkplaceNumber(item?.workplace_number)}
+                        </span>
+                        {forSupervisor && (
+                            <span className="inline-flex items-center rounded-full border border-indigo-200 bg-indigo-50 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-indigo-700">
+                                Для СВ
+                            </span>
+                        )}
+                    </div>
                 ) : (
                     <span className="text-gray-300">—</span>
                 )}
@@ -1325,6 +1435,7 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
     const canView   = isAdminLikeRole(role) || isSupervisorRole(role);
     const canExport = isAdminLikeRole(role) || isSupervisorRole(role); // admins + super_admins + supervisors
     const canDelete = isAdminLikeRole(role) || isSupervisorRole(role);
+    const canManageWorkplaceSupervisorFlags = isAdminLikeRole(role);
 
     const showToastRef = useRef(showToast);
     useEffect(() => { showToastRef.current = showToast; }, [showToast]);
@@ -1379,6 +1490,8 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
     const [exporting, setExporting]       = useState(false);
     const [deletingId, setDeletingId]     = useState(null);
     const [isModalOpen, setIsModalOpen]   = useState(false);
+    const [workplaceSettings, setWorkplaceSettings] = useState([]);
+    const [updatingWorkplaceNumber, setUpdatingWorkplaceNumber] = useState(null);
 
     // form state
     const [createDate, setCreateDate]             = useState(() => toIsoDate(new Date()));
@@ -1397,6 +1510,12 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
     const [activeTab, setActiveTab]           = useState('journal');
 
     const hasPending = useMemo(() => !areFiltersEqual(filterDraft, appliedFilters), [filterDraft, appliedFilters]);
+    const workplaceSettingsMap = useMemo(() => normalizeWorkplaceSettingsMap(workplaceSettings), [workplaceSettings]);
+    const createWorkplaceForSupervisor = useMemo(() => {
+        const workplaceNumber = normalizeWorkplaceNumber(createWorkplaceNumber);
+        if (workplaceNumber === null) return false;
+        return Boolean(workplaceSettingsMap.get(workplaceNumber)?.forSupervisor);
+    }, [createWorkplaceNumber, workplaceSettingsMap]);
 
     const latestReqId    = useRef(0);
     const lastQueryRef   = useRef('');
@@ -1441,8 +1560,20 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
         }
     }, [apiBaseUrl, buildHeaders, canView, notify]);
 
+    const fetchWorkplaceSettings = useCallback(async () => {
+        if (!canView) return;
+        try {
+            const res = await axios.get(`${apiBaseUrl}/api/technical_issues/workplace_settings`, { headers: buildHeaders() });
+            const items = Array.isArray(res?.data?.items) ? res.data.items : [];
+            setWorkplaceSettings(items);
+        } catch (err) {
+            notify(err?.response?.data?.error || 'Не удалось загрузить настройки РМ', 'error');
+        }
+    }, [apiBaseUrl, buildHeaders, canView, notify]);
+
     useEffect(() => { if (canView) fetchReasons(); }, [canView, fetchReasons]);
     useEffect(() => { if (canView) fetchRows(appliedFilters); }, [appliedFilters, canView, fetchRows]);
+    useEffect(() => { if (canView) fetchWorkplaceSettings(); }, [canView, fetchWorkplaceSettings]);
 
     // ── filter handlers ──
     const updateDraft = useCallback((field, value) => {
@@ -1460,6 +1591,44 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
         if (areFiltersEqual(reset, appliedFilters)) { await fetchRows(reset, { force: true }); return; }
         setAppliedFilters(reset);
     }, [appliedFilters, fetchRows]);
+
+    const handleToggleWorkplaceSupervisorFlag = useCallback(async (workplaceNumber, nextValue) => {
+        if (!canManageWorkplaceSupervisorFlags) return;
+        const normalizedWorkplaceNumber = normalizeWorkplaceNumber(workplaceNumber);
+        if (normalizedWorkplaceNumber === null) return;
+
+        setUpdatingWorkplaceNumber(normalizedWorkplaceNumber);
+        try {
+            const res = await axios.put(
+                `${apiBaseUrl}/api/technical_issues/workplace_settings/${normalizedWorkplaceNumber}`,
+                { for_supervisor: Boolean(nextValue) },
+                { headers: buildHeaders() }
+            );
+            const item = res?.data?.item || {
+                workplace_number: normalizedWorkplaceNumber,
+                for_supervisor: Boolean(nextValue),
+            };
+            setWorkplaceSettings((prev) => {
+                const next = (Array.isArray(prev) ? prev : [])
+                    .filter((entry) => normalizeWorkplaceNumber(entry?.workplace_number ?? entry?.workplaceNumber) !== normalizedWorkplaceNumber);
+                next.push(item);
+                return next.sort((a, b) => (
+                    (normalizeWorkplaceNumber(a?.workplace_number ?? a?.workplaceNumber) || 0)
+                    - (normalizeWorkplaceNumber(b?.workplace_number ?? b?.workplaceNumber) || 0)
+                ));
+            });
+            notify(
+                Boolean(nextValue)
+                    ? `РМ ${normalizedWorkplaceNumber} помечено для супервайзера`
+                    : `С РМ ${normalizedWorkplaceNumber} снята отметка для супервайзера`,
+                'success'
+            );
+        } catch (err) {
+            notify(err?.response?.data?.error || 'Не удалось обновить настройку РМ', 'error');
+        } finally {
+            setUpdatingWorkplaceNumber(null);
+        }
+    }, [apiBaseUrl, buildHeaders, canManageWorkplaceSupervisorFlags, notify]);
 
     // ── modal reset helper ──
     const resetForm = useCallback(() => {
@@ -1595,6 +1764,7 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
                 createStartTime={createStartTime} setCreateStartTime={setCreateStartTime}
                 createEndTime={createEndTime}     setCreateEndTime={setCreateEndTime}
                 createWorkplaceNumber={createWorkplaceNumber} setCreateWorkplaceNumber={setCreateWorkplaceNumber}
+                createWorkplaceForSupervisor={createWorkplaceForSupervisor}
                 createReason={createReason}       setCreateReason={setCreateReason}
                 createComment={createComment}     setCreateComment={setCreateComment}
                 createOperatorIds={createOperatorIds} setCreateOperatorIds={setCreateOperatorIds}
@@ -1833,12 +2003,14 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
                                 <FaIcon className="fas fa-spinner fa-spin text-blue-500" style={{ width: '1em', height: '1em' }} />
                                 Загрузка...
                             </div>
-                        ) : rows.length > 0 ? (
-                            <WorkplaceAnalyticsPanel rows={rows} />
                         ) : (
-                            <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-8 text-center text-sm text-slate-500">
-                                Для аналитики РМ нет данных.
-                            </div>
+                            <WorkplaceAnalyticsPanel
+                                rows={rows}
+                                workplaceSettingsMap={workplaceSettingsMap}
+                                canManageSupervisorFlags={canManageWorkplaceSupervisorFlags}
+                                updatingWorkplaceNumber={updatingWorkplaceNumber}
+                                onToggleSupervisorFlag={handleToggleWorkplaceSupervisorFlag}
+                            />
                         )}
                     </div>
                 )}

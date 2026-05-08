@@ -913,9 +913,22 @@ class Database:
                     reason VARCHAR(255) NOT NULL,
                     comment TEXT,
                     workplace_number INTEGER,
+                    for_supervisor BOOLEAN NOT NULL DEFAULT FALSE,
                     direction_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
                     created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cursor.execute("""
+                ALTER TABLE operator_technical_issues
+                ADD COLUMN IF NOT EXISTS for_supervisor BOOLEAN NOT NULL DEFAULT FALSE;
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS technical_issue_workplace_settings (
+                    workplace_number INTEGER PRIMARY KEY CHECK (workplace_number BETWEEN 1 AND 30),
+                    for_supervisor BOOLEAN NOT NULL DEFAULT FALSE,
+                    updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
             """)
             cursor.execute("""
@@ -1494,6 +1507,8 @@ class Database:
                 ON operator_technical_issues(reason);
                 CREATE INDEX IF NOT EXISTS idx_operator_technical_issues_workplace_number
                 ON operator_technical_issues(workplace_number);
+                CREATE INDEX IF NOT EXISTS idx_operator_technical_issues_for_supervisor
+                ON operator_technical_issues(for_supervisor);
                 CREATE INDEX IF NOT EXISTS idx_operator_technical_issues_created_by
                 ON operator_technical_issues(created_by);
                 CREATE INDEX IF NOT EXISTS idx_operator_technical_issues_created_at
@@ -2618,6 +2633,7 @@ class Database:
                 ti.reason,
                 ti.comment,
                 ti.workplace_number,
+                ti.for_supervisor,
                 cb.name,
                 ti.created_at
             FROM operator_technical_issues ti
@@ -2629,7 +2645,7 @@ class Database:
             """,
             (op_ids, start_date, end_date),
         )
-        for issue_id, op_id, issue_date, start_time, end_time, reason, comment, workplace_number, created_by_name, created_at in cursor.fetchall() or []:
+        for issue_id, op_id, issue_date, start_time, end_time, reason, comment, workplace_number, for_supervisor, created_by_name, created_at in cursor.fetchall() or []:
             try:
                 op_id_int = int(op_id)
             except Exception:
@@ -2658,6 +2674,7 @@ class Database:
                 "reason": reason,
                 "comment": comment,
                 "workplace_number": int(workplace_number) if workplace_number is not None else None,
+                "for_supervisor": bool(for_supervisor) if for_supervisor is not None else False,
                 "created_by_name": created_by_name,
                 "created_at": created_at.strftime('%Y-%m-%d %H:%M:%S') if created_at else None,
                 "duration_minutes": int(duration_minutes),
@@ -7928,6 +7945,42 @@ class Database:
 
         return number
 
+    def _parse_bool_value(self, value, field_name='value', default=None):
+        if value is None:
+            if default is not None:
+                return bool(default)
+            raise ValueError(f"Field '{field_name}' is required")
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return bool(value)
+
+        text = str(value).strip().lower()
+        if text in ('1', 'true', 't', 'yes', 'y', 'on', 'да'):
+            return True
+        if text in ('0', 'false', 'f', 'no', 'n', 'off', 'нет'):
+            return False
+        raise ValueError(f"Invalid boolean field '{field_name}'")
+
+    def _get_technical_issue_workplace_flag_tx(self, cursor, workplace_number):
+        workplace_number_int = self._parse_technical_issue_workplace_number(
+            workplace_number,
+            field_name='workplace_number',
+            required=False
+        )
+        if workplace_number_int is None:
+            return False
+        cursor.execute(
+            """
+            SELECT COALESCE(for_supervisor, FALSE)
+            FROM technical_issue_workplace_settings
+            WHERE workplace_number = %s
+            """,
+            (workplace_number_int,)
+        )
+        row = cursor.fetchone()
+        return bool(row[0]) if row else False
+
     def _technical_issue_time_to_hhmm(self, time_value):
         if isinstance(time_value, dt_time):
             return time_value.strftime('%H:%M')
@@ -8146,6 +8199,82 @@ class Database:
     def get_technical_issue_reasons(self):
         return list(TECHNICAL_ISSUE_REASONS)
 
+    def get_technical_issue_workplace_settings(self, requester_id, requester_role):
+        role_norm = self._normalize_technical_issue_role(requester_role)
+        if not (role_has_min(role_norm, 'admin') or role_norm == 'sv'):
+            raise ValueError("Only admin and sv can view technical issue workplace settings")
+
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    s.workplace_number,
+                    COALESCE(s.for_supervisor, FALSE),
+                    s.updated_by,
+                    u.name,
+                    s.updated_at
+                FROM technical_issue_workplace_settings s
+                LEFT JOIN users u ON u.id = s.updated_by
+                ORDER BY s.workplace_number
+                """
+            )
+            items = []
+            for workplace_number, for_supervisor, updated_by, updated_by_name, updated_at in cursor.fetchall() or []:
+                items.append({
+                    'workplace_number': int(workplace_number),
+                    'for_supervisor': bool(for_supervisor),
+                    'updated_by_id': int(updated_by) if updated_by is not None else None,
+                    'updated_by_name': updated_by_name,
+                    'updated_at': updated_at.strftime('%Y-%m-%d %H:%M:%S') if updated_at else None
+                })
+            return {'items': items}
+
+    def update_technical_issue_workplace_setting(self, requester_id, requester_role, workplace_number, for_supervisor):
+        role_norm = self._normalize_technical_issue_role(requester_role)
+        if not role_has_min(role_norm, 'admin'):
+            raise ValueError("Only admin can update technical issue workplace settings")
+
+        requester_id_int = int(requester_id)
+        workplace_number_int = self._parse_technical_issue_workplace_number(
+            workplace_number,
+            field_name='workplace_number',
+            required=True
+        )
+        flag_value = self._parse_bool_value(for_supervisor, field_name='for_supervisor', default=False)
+
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO technical_issue_workplace_settings (
+                    workplace_number,
+                    for_supervisor,
+                    updated_by,
+                    updated_at
+                )
+                VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT (workplace_number) DO UPDATE SET
+                    for_supervisor = EXCLUDED.for_supervisor,
+                    updated_by = EXCLUDED.updated_by,
+                    updated_at = CURRENT_TIMESTAMP
+                RETURNING workplace_number, for_supervisor, updated_by, updated_at
+                """,
+                (workplace_number_int, flag_value, requester_id_int)
+            )
+            row = cursor.fetchone()
+            updated_by_name = None
+            if row and row[2] is not None:
+                cursor.execute("SELECT name FROM users WHERE id = %s", (int(row[2]),))
+                user_row = cursor.fetchone()
+                updated_by_name = user_row[0] if user_row else None
+
+            return {
+                'workplace_number': int(row[0]),
+                'for_supervisor': bool(row[1]),
+                'updated_by_id': int(row[2]) if row[2] is not None else None,
+                'updated_by_name': updated_by_name,
+                'updated_at': row[3].strftime('%Y-%m-%d %H:%M:%S') if row[3] else None
+            }
+
     def create_operator_technical_issues(
         self,
         requester_id,
@@ -8202,6 +8331,7 @@ class Database:
                 raise ValueError("No selected operators have shifts in the specified time range")
 
             batch_id = str(uuid.uuid4())
+            for_supervisor = self._get_technical_issue_workplace_flag_tx(cursor, workplace_number_int)
             issue_values = []
 
             for operator_id in eligible_operator_ids:
@@ -8219,6 +8349,7 @@ class Database:
                         reason_text,
                         comment_text,
                         workplace_number_int,
+                        for_supervisor,
                         Json(selected_direction_ids),
                         requester_id_int
                     ))
@@ -8238,6 +8369,7 @@ class Database:
                         reason,
                         comment,
                         workplace_number,
+                        for_supervisor,
                         direction_ids,
                         created_by
                     )
@@ -8263,7 +8395,8 @@ class Database:
                 'start_time': start_time_obj.strftime('%H:%M'),
                 'end_time': end_time_obj.strftime('%H:%M'),
                 'reason': reason_text,
-                'workplace_number': workplace_number_int
+                'workplace_number': workplace_number_int,
+                'for_supervisor': bool(for_supervisor)
             }
 
     def get_operator_technical_issues(
@@ -8357,6 +8490,7 @@ class Database:
                         ti.reason,
                         ti.comment,
                         ti.workplace_number,
+                        ti.for_supervisor,
                         ti.created_by,
                         cb.name,
                         ti.created_at,
@@ -8373,7 +8507,7 @@ class Database:
             all_selected_direction_ids = set()
             prepared_rows = []
             for row in rows:
-                selected_direction_ids = self._normalize_direction_ids_json_payload(row[17])
+                selected_direction_ids = self._normalize_direction_ids_json_payload(row[18])
                 all_selected_direction_ids.update(selected_direction_ids)
                 prepared_rows.append((row, selected_direction_ids))
 
@@ -8398,9 +8532,10 @@ class Database:
                     'reason': row[11],
                     'comment': row[12],
                     'workplace_number': int(row[13]) if row[13] is not None else None,
-                    'created_by_id': int(row[14]) if row[14] is not None else None,
-                    'created_by_name': row[15],
-                    'created_at': row[16].strftime('%Y-%m-%d %H:%M:%S') if row[16] else None,
+                    'for_supervisor': bool(row[14]) if row[14] is not None else False,
+                    'created_by_id': int(row[15]) if row[15] is not None else None,
+                    'created_by_name': row[16],
+                    'created_at': row[17].strftime('%Y-%m-%d %H:%M:%S') if row[17] else None,
                     'selected_direction_ids': selected_direction_ids,
                     'selected_direction_names': [direction_name_map.get(dir_id) for dir_id in selected_direction_ids if direction_name_map.get(dir_id)]
                 })
@@ -13135,7 +13270,8 @@ class Database:
                 start_time,
                 end_time,
                 reason,
-                comment
+                comment,
+                for_supervisor
             FROM operator_technical_issues
             WHERE operator_id = ANY(%s)
         """
@@ -13152,7 +13288,7 @@ class Database:
         rows = cursor.fetchall() or []
 
         for row in rows:
-            issue_id, operator_id, batch_id, issue_date_value, start_time_value, end_time_value, reason, comment = row
+            issue_id, operator_id, batch_id, issue_date_value, start_time_value, end_time_value, reason, comment, for_supervisor = row
             op_id = int(operator_id)
             if op_id not in result or issue_date_value is None:
                 continue
@@ -13186,7 +13322,8 @@ class Database:
                     'startMin': start_min_local,
                     'endMin': end_min_local,
                     'reason': str(reason or ''),
-                    'comment': str(comment or '')
+                    'comment': str(comment or ''),
+                    'forSupervisor': bool(for_supervisor) if for_supervisor is not None else False
                 })
 
         for op_id, days_map in result.items():
