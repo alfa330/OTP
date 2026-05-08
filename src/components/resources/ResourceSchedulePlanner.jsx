@@ -1038,7 +1038,16 @@ const PlannerDayCards = ({ days, selectedDayIndex, onSelect }) => (
   </div>
 );
 
-const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onWeekStartChange, weekPicker, notify }) => {
+const ResourceSchedulePlanner = ({
+  apiRoot,
+  buildHeaders,
+  selectedWeekStart,
+  selectedPeriodEnd,
+  onWeekStartChange,
+  onPeriodChange,
+  weekPicker,
+  notify,
+}) => {
   const [templates, setTemplates] = useState(() => loadStoredTemplates());
   const [selectedTemplateId, setSelectedTemplateId] = useState('');
   const [plannerDays, setPlannerDays] = useState([]);
@@ -1192,7 +1201,8 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
       const response = await axios.post(
         `${apiRoot}/api/resource_fte/schedule_preview`,
         {
-          week_start: selectedWeekStart,
+          date_from: selectedWeekStart,
+          date_to: selectedPeriodEnd || selectedWeekStart,
           templates,
         },
         {
@@ -1224,7 +1234,7 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
     } finally {
       setIsGenerating(false);
     }
-  }, [apiRoot, applyGeneratedVariant, buildHeaders, emit, normalizePreviewDays, selectedWeekStart, templates]);
+  }, [apiRoot, applyGeneratedVariant, buildHeaders, emit, normalizePreviewDays, selectedPeriodEnd, selectedWeekStart, templates]);
 
   const computed = useMemo(() => buildCoverageFromDays(plannerDays), [plannerDays]);
   const computedDays = computed.days;
@@ -1596,14 +1606,25 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
           </div>
           <div className="min-w-0">
             {weekPicker || (
-              <input
-                type="date"
-                value={selectedWeekStart || ''}
-                onChange={(event) => {
-                  if (typeof onWeekStartChange === 'function') onWeekStartChange(event.target.value);
-                }}
-                className="h-10 w-full rounded-lg border-2 border-blue-300 bg-white px-3 text-sm text-slate-900 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
-              />
+              <div className="grid gap-2 sm:grid-cols-2">
+                <input
+                  type="date"
+                  value={selectedWeekStart || ''}
+                  onChange={(event) => {
+                    if (typeof onPeriodChange === 'function') onPeriodChange(event.target.value, selectedPeriodEnd || event.target.value);
+                    else if (typeof onWeekStartChange === 'function') onWeekStartChange(event.target.value);
+                  }}
+                  className="h-10 w-full rounded-lg border-2 border-blue-300 bg-white px-3 text-sm text-slate-900 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+                />
+                <input
+                  type="date"
+                  value={selectedPeriodEnd || selectedWeekStart || ''}
+                  onChange={(event) => {
+                    if (typeof onPeriodChange === 'function') onPeriodChange(selectedWeekStart || event.target.value, event.target.value);
+                  }}
+                  className="h-10 w-full rounded-lg border-2 border-blue-300 bg-white px-3 text-sm text-slate-900 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+                />
+              </div>
             )}
           </div>
           <div className="flex flex-wrap gap-2 xl:justify-end">
@@ -1688,7 +1709,7 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
         ) : null}
         {capacityInfo?.rates?.length ? (
           <div className="mt-2 text-xs text-slate-500">
-            Ресурс ставок: {(capacityInfo.rates || []).map((item) => `${formatFte(item.rate)}: ${Number(item.weeklyShiftsUsed || 0)}/${Number(item.weeklyShiftCapacity || 0)} смен (${Number(item.count || 0)} чел.)`).join(' · ')} · 5 рабочих дней и 2 выходных на сотрудника
+            Ресурс ставок: {(capacityInfo.rates || []).map((item) => `${formatFte(item.rate)}: ${Number(item.weeklyShiftsUsed || 0)}/${Number(item.weeklyShiftCapacity || 0)} смен (${Number(item.count || 0)} чел.)`).join(' · ')} · период {Number(capacityInfo.periodDayCount || computedDays.length || 0)} дн., до {Number(capacityInfo.workDaysPerOperatorPeriod || capacityInfo.workDaysPerOperatorWeek || 0)} смен на сотрудника
           </div>
         ) : null}
       </section>
@@ -1786,7 +1807,7 @@ const ResourceSchedulePlanner = ({ apiRoot, buildHeaders, selectedWeekStart, onW
           </>
         ) : (
           <div className="rounded-xl border border-dashed border-slate-300 bg-white px-6 py-12 text-center text-sm text-slate-500">
-            Нажмите «Сгенерировать», чтобы построить виртуальные линии смен по прогнозу выбранной недели.
+            Нажмите «Сгенерировать», чтобы построить виртуальные линии смен по прогнозу выбранного периода.
           </div>
         )}
       </div>
