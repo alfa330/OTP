@@ -1,4 +1,4 @@
-﻿import React, { Suspense, lazy, useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import React, { Suspense, lazy, useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useLocation } from 'react-router-dom';
 import axios from 'axios';
 import _ from 'lodash';
@@ -32689,7 +32689,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                           onChange={(e) => setPassword(e.target.value)}
                           className="w-full p-3 mb-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                           disabled={isLoading}
-                          autoComplete="current-password"
+                          autoComplete="off"
                         />
                   
                         {/* Контейнер под сообщение всегда занимает место */}
