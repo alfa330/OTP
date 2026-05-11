@@ -25086,6 +25086,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const initialViewFromUrl = readAppViewFromUrl();
                 return initialViewFromUrl || 'hours';
             });
+            const [resourceFteInitialView, setResourceFteInitialView] = useState('');
             const [pendingSurveysBadgeCount, setPendingSurveysBadgeCount] = useState(0);
             const [newSvName, setNewSvName] = useState('');
             const [newTableUrl, setNewTableUrl] = useState('');
@@ -26358,6 +26359,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setMobileMenuOpen(false);
             }, []);
 
+            const openResourceScheduleGeneration = useCallback(() => {
+                setResourceFteInitialView('schedule_planner');
+                navigateToView('resource_fte');
+            }, [navigateToView]);
+
+            const openShiftAuctionSection = useCallback(() => {
+                navigateToView('shift_auction');
+            }, [navigateToView]);
+
             const handleSidebarViewNavigation = useCallback((event, nextView, options = {}) => {
                 if (!nextView) return;
                 const onNavigate = typeof options?.onNavigate === 'function' ? options.onNavigate : null;
@@ -26368,6 +26378,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     onNavigate?.();
                     return;
                 }
+                if (nextView === 'resource_fte') setResourceFteInitialView('');
                 navigateToView(nextView);
                 onNavigate?.();
             }, [navigateToView, openAppViewInNewTab]);
@@ -33440,6 +33451,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     showToast={showToast}
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
+                                    onOpenResourceGeneration={openResourceScheduleGeneration}
                                 />
                             </Suspense>
                         ))}
@@ -34974,6 +34986,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             showToast={showToast}
                                             apiBaseUrl={API_BASE_URL}
                                             withAccessTokenHeader={withAccessTokenHeader}
+                                            initialDashboardView={resourceFteInitialView}
+                                            onOpenShiftAuction={openShiftAuctionSection}
                                         />
                                     </Suspense>
                                 ))}
@@ -34986,6 +35000,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             showToast={showToast}
                                             apiBaseUrl={API_BASE_URL}
                                             withAccessTokenHeader={withAccessTokenHeader}
+                                            initialDashboardView={resourceFteInitialView}
+                                            onOpenShiftAuction={openShiftAuctionSection}
                                         />
                                     </Suspense>
                                 ))}

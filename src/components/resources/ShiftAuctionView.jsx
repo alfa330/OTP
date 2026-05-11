@@ -104,7 +104,7 @@ const explainSteps = [
   }
 ];
 
-const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHeader, showToast }) => {
+const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHeader, showToast, onOpenResourceGeneration }) => {
   const role = normalizeRole(user?.role);
   const canManage = isAdminLikeRole(role);
   const apiRoot = String(apiBaseUrl || '').replace(/\/+$/, '');
@@ -205,6 +205,28 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     }
   }, [apiRoot, applySnapshot, buildHeaders, notify, user?.id]);
 
+  const handleRealtimeEvent = useCallback((event) => {
+    const eventType = String(event?.event_type || '');
+    const payload = event?.payload || {};
+    if (eventType === 'lot_claimed' && payload.lot?.id) {
+      setLots((currentLots) => currentLots.map((lot) => (
+        Number(lot.id) === Number(payload.lot.id)
+          ? { ...lot, ...payload.lot }
+          : lot
+      )));
+      window.setTimeout(() => fetchSnapshot({ silent: true }), 150);
+      return;
+    }
+
+    if ((eventType === 'day_off_selected' || eventType === 'day_off_removed') && Number(payload.operator_id) === Number(user?.id)) {
+      setMyDayOffs(Array.isArray(payload.my_day_offs) ? payload.my_day_offs.filter(Boolean) : []);
+      window.setTimeout(() => fetchSnapshot({ silent: true }), 150);
+      return;
+    }
+
+    fetchSnapshot({ silent: true });
+  }, [fetchSnapshot, user?.id]);
+
   useEffect(() => {
     fetchSnapshot();
   }, [fetchSnapshot]);
@@ -247,7 +269,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
               const eventId = Number(event?.id || 0);
               lastEventIdRef.current = Math.max(lastEventIdRef.current, eventId);
               setLastEventId((current) => Math.max(current, eventId));
-              fetchSnapshot({ silent: true });
+              handleRealtimeEvent(event);
             } catch (parseError) {
               console.warn('Failed to parse shift auction event', parseError);
             }
@@ -268,7 +290,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       cancelled = true;
       abortController.abort();
     };
-  }, [apiRoot, buildHeaders, canOpenStream, fetchSnapshot, user?.id]);
+  }, [apiRoot, buildHeaders, canOpenStream, fetchSnapshot, handleRealtimeEvent, user?.id]);
 
   const operatorOptions = useMemo(
     () => normalizeOperators(operators, settings.selected_operators),
@@ -458,6 +480,16 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            {canManage && typeof onOpenResourceGeneration === 'function' ? (
+              <button
+                type="button"
+                onClick={onOpenResourceGeneration}
+                className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-slate-900 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800"
+              >
+                <CalendarClock size={16} />
+                Генерация графиков
+              </button>
+            ) : null}
             <div className={`inline-flex h-10 items-center gap-2 rounded-lg border px-3 text-sm ${connectionState === 'online' ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-white text-slate-600'}`}>
               <Wifi size={15} />
               {connectionState === 'online' ? 'Realtime online' : connectionState === 'connecting' ? 'Подключение...' : connectionState === 'reconnecting' ? 'Переподключение...' : 'Realtime idle'}

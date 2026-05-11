@@ -11,6 +11,7 @@ import {
   Clock3,
   Eye,
   FileUp,
+  Gavel,
   LayoutDashboard,
   ListChecks,
   RefreshCw,
@@ -813,7 +814,7 @@ const WeekForecastPicker = ({
   );
 };
 
-const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast }) => {
+const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, initialDashboardView, onOpenShiftAuction }) => {
   const apiRoot = String(apiBaseUrl || '').replace(/\/+$/, '');
   const fileInputRef = useRef(null);
   const showToastRef = useRef(showToast);
@@ -829,7 +830,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
   const [isUploading, setIsUploading] = useState(false);
   const [isRecalculating, setIsRecalculating] = useState(false);
   const [settingsDraft, setSettingsDraft] = useState(null);
-  const [activeDashboardView, setActiveDashboardView] = useState('overview');
+  const [activeDashboardView, setActiveDashboardView] = useState(initialDashboardView || 'overview');
   const [displayOptions, setDisplayOptions] = useState(loadDisplayOptions);
   const [selectedForecastWeekStart, setSelectedForecastWeekStart] = useState(() => getNextWeekStartIso());
   const [selectedForecastPeriodEnd, setSelectedForecastPeriodEnd] = useState(() => addDaysIso(getNextWeekStartIso(), 6));
@@ -849,6 +850,10 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
   useEffect(() => {
     authHeaderRef.current = withAccessTokenHeader;
   }, [withAccessTokenHeader]);
+
+  useEffect(() => {
+    if (initialDashboardView) setActiveDashboardView(initialDashboardView);
+  }, [initialDashboardView]);
 
   const notify = useCallback((message, type = 'success') => {
     if (typeof showToastRef.current === 'function') showToastRef.current(message, type);
@@ -1929,6 +1934,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast })
               />
             )}
             notify={notify}
+            onOpenShiftAuction={onOpenShiftAuction}
           />
         )}
 
