@@ -2514,6 +2514,39 @@ def api_resource_fte_recalculate():
     except Exception as error:
         return _resource_fte_error_response(error)
 
+
+@app.route('/api/shift_auction/test_access', methods=['GET', 'PUT', 'OPTIONS'])
+@require_api_key
+def api_shift_auction_test_access():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        requester_role = _normalize_user_role(requester[3])
+        if request.method == 'GET':
+            payload = db.get_shift_auction_test_access(current_user_id=requester_id)
+            return jsonify({"status": "success", "test_access": payload}), 200
+
+        if not _is_admin_role(requester_role):
+            return jsonify({"error": "Only admins can manage shift auction test access"}), 403
+
+        payload = request.get_json(silent=True) or {}
+        updated = db.update_shift_auction_test_access(
+            enabled=bool(payload.get('enabled')),
+            operator_ids=payload.get('operator_ids') or payload.get('selected_operator_ids') or [],
+            launch_note=payload.get('launch_note') or '',
+            updated_by=requester_id
+        )
+        return jsonify({"status": "success", "test_access": updated}), 200
+    except Exception as error:
+        logging.error(f"Shift auction test access API error: {error}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
 @app.route('/api/login', methods=['POST', 'OPTIONS'])
 def login():
     try:
