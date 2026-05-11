@@ -81,6 +81,15 @@ const formatCountdown = (targetValue, nowMs) => {
     : `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
 };
 
+const getAuctionRuntimeStatus = (settings, nowMs) => {
+  if (!settings?.enabled) return 'disabled';
+  const startsAtMs = settings.starts_at ? new Date(settings.starts_at).getTime() : null;
+  const endsAtMs = settings.ends_at ? new Date(settings.ends_at).getTime() : null;
+  if (Number.isFinite(startsAtMs) && nowMs < startsAtMs) return 'scheduled';
+  if (Number.isFinite(endsAtMs) && nowMs >= endsAtMs) return 'closed';
+  return 'open';
+};
+
 const explainSteps = [
   {
     icon: CalendarClock,
@@ -95,7 +104,7 @@ const explainSteps = [
   {
     icon: Wifi,
     title: 'Выбор идет в реальном времени',
-    text: 'Когда оператор заберет смену, она сразу исчезнет у остальных без обновления страницы.'
+    text: 'Когда оператор заберет смену, она сразу станет недоступной у остальных без обновления страницы.'
   },
   {
     icon: ListChecks,
@@ -320,7 +329,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
   const visibleLots = useMemo(() => {
     if (canManage) return lots;
-    return lots.filter((lot) => lot.status === 'available' && !myDayOffs.includes(lot.shift_date));
+    return lots.filter((lot) => !myDayOffs.includes(lot.shift_date));
   }, [canManage, lots, myDayOffs]);
 
   const lotsByDate = useMemo(() => {
@@ -346,16 +355,19 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       const myClaimed = dayLots.filter((lot) => Number(lot.claimed_by) === Number(user?.id));
       const isDayOff = myDayOffs.includes(date);
       const availableCount = visibleLots.filter((lot) => lot.shift_date === date && lot.status === 'available').length;
+      const lockedCount = dayLots.filter((lot) => lot.status === 'claimed' && Number(lot.claimed_by) !== Number(user?.id)).length;
       let state = 'empty';
       if (isDayOff) state = 'off';
       else if (myClaimed.length > 0) state = 'shift';
       else if (availableCount > 0) state = 'available';
+      else if (lockedCount > 0) state = 'locked';
       return {
         date,
         total: dayLots.length,
         claimed: claimedLots.length,
         myClaimed: myClaimed.length,
         available: availableCount,
+        locked: lockedCount,
         isDayOff,
         state
       };
@@ -374,14 +386,18 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     ));
   }, [dayNavigationItems]);
 
-  const countdown = settings.status === 'scheduled'
+  const runtimeStatus = getAuctionRuntimeStatus(settings, nowMs);
+  const countdown = runtimeStatus === 'scheduled'
     ? formatCountdown(settings.starts_at, nowMs)
+    : '';
+  const closeCountdown = runtimeStatus === 'open' && settings.ends_at
+    ? formatCountdown(settings.ends_at, nowMs)
     : '';
 
   const isTester = Boolean(settings.enabled && settings.is_current_user_tester);
   const canUseAuction = isTester || canManage;
-  const canChoose = isTester && (settings.status === 'scheduled' || settings.status === 'open');
-  const canClaim = isTester && settings.status === 'open';
+  const canChoose = isTester && (runtimeStatus === 'scheduled' || runtimeStatus === 'open');
+  const canClaim = isTester && runtimeStatus === 'open';
 
   const setDaySectionRef = useCallback((date, node) => {
     if (!date) return;
@@ -496,8 +512,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
             </h2>
             <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-700">
               {isTester
-                ? 'В тестовом запуске можно проверить обратный отсчет, выбор двух выходных, захват смены и исчезновение занятой смены у остальных участников в реальном времени.'
-                : 'Когда админ утвердит сгенерированные смены и назначит время старта, здесь появится таймер. После открытия аукциона вы будете выбирать доступные смены, а занятые смены будут исчезать у всех участников в реальном времени.'}
+                ? 'В тестовом запуске можно проверить обратный отсчет, выбор двух выходных, захват смены и блокировку занятой смены у остальных участников в реальном времени.'
+                : 'Когда админ утвердит сгенерированные смены и назначит время старта, здесь появится таймер. После открытия аукциона вы будете выбирать доступные смены, а занятые смены будут сразу становиться недоступными у всех участников в реальном времени.'}
             </p>
             {settings.launch_note ? (
               <p className="mt-3 rounded-md border border-white/70 bg-white/70 px-3 py-2 text-sm text-slate-700">
@@ -508,8 +524,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         </div>
         <div className="flex flex-col gap-2 rounded-md border border-white/70 bg-white/75 px-3 py-2 text-sm text-slate-700">
           <span><span className="font-semibold">{settings.selected_operator_ids.length}</span> тестовых операторов</span>
-          <span className="capitalize">Статус: <span className="font-semibold">{settings.status}</span></span>
+          <span className="capitalize">Статус: <span className="font-semibold">{runtimeStatus}</span></span>
           {countdown ? <span>Старт через: <span className="font-semibold tabular-nums">{countdown}</span></span> : null}
+          {closeCountdown ? <span>Завершение через: <span className="font-semibold tabular-nums">{closeCountdown}</span></span> : null}
         </div>
       </div>
     </section>
@@ -632,10 +649,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
               <div className="border-b border-slate-200 px-5 py-4">
                 <h2 className="text-lg font-semibold text-slate-950">Доступные смены</h2>
                 <p className="mt-1 text-sm text-slate-600">
-                  {settings.status === 'scheduled'
+                  {runtimeStatus === 'scheduled'
                     ? `Аукцион откроется через ${countdown || 'несколько секунд'}.`
-                    : settings.status === 'open'
-                      ? 'Нажмите “Забрать”, чтобы закрепить смену. У остальных участников она исчезнет сразу.'
+                    : runtimeStatus === 'open'
+                      ? 'Нажмите “Забрать”, чтобы закрепить смену. У остальных участников она сразу станет недоступной.'
                       : 'Сейчас аукцион закрыт.'}
                 </p>
               </div>
@@ -668,14 +685,26 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                         </div>
                         {dateLots.length ? (
                         <div className="grid gap-2 md:grid-cols-2 2xl:grid-cols-3">
-                          {dateLots.map((lot) => (
-                            <div key={lot.id} className={`rounded-lg border p-3 ${lot.status === 'claimed' ? 'border-slate-200 bg-slate-50' : 'border-slate-200 bg-white'}`}>
+                          {dateLots.map((lot) => {
+                            const isLotClaimed = lot.status === 'claimed';
+                            const lotClaimedByCurrentUser = Number(lot.claimed_by) === Number(user?.id);
+                            const cardTone = isLotClaimed
+                              ? (lotClaimedByCurrentUser ? 'border-emerald-200 bg-emerald-50/70' : 'border-slate-200 bg-slate-50 text-slate-500')
+                              : 'border-slate-200 bg-white';
+                            const statusTone = isLotClaimed
+                              ? (lotClaimedByCurrentUser ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-200 text-slate-600')
+                              : 'bg-slate-100 text-slate-600';
+                            return (
+                            <div key={lot.id} className={`rounded-lg border p-3 transition-colors ${cardTone}`}>
                               <div className="flex items-start justify-between gap-3">
                                 <div>
-                                  <div className="text-base font-semibold text-slate-950">{lot.start_time} - {lot.end_time}</div>
+                                  <div className={`text-base font-semibold ${isLotClaimed && !lotClaimedByCurrentUser ? 'text-slate-500' : 'text-slate-950'}`}>{lot.start_time} - {lot.end_time}</div>
                                   <div className="mt-1 text-xs text-slate-500">Мин. ставка: {Number(lot.rate_min || 0).toFixed(2)}</div>
                                   {canManage && lot.claimed_by_name ? (
                                     <div className="mt-1 text-xs font-medium text-emerald-700">Забрал: {lot.claimed_by_name}</div>
+                                  ) : null}
+                                  {!canManage && isLotClaimed && !lotClaimedByCurrentUser ? (
+                                    <div className="mt-1 text-xs font-medium text-slate-500">Эту смену уже забрали</div>
                                   ) : null}
                                 </div>
                                 {lot.status === 'available' && !canManage ? (
@@ -688,13 +717,14 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                     {claimingLotId === lot.id ? '...' : 'Забрать'}
                                   </button>
                                 ) : (
-                                  <span className={`rounded-full px-2 py-1 text-xs font-semibold ${lot.status === 'claimed' ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>
+                                  <span className={`rounded-full px-2 py-1 text-xs font-semibold ${statusTone}`}>
                                     {lot.status === 'claimed' ? 'Занята' : 'Доступна'}
                                   </span>
                                 )}
                               </div>
                             </div>
-                          ))}
+                            );
+                          })}
                         </div>
                         ) : (
                           <div className="rounded-lg border border-dashed border-slate-300 bg-white px-4 py-6 text-center text-sm text-slate-500">
@@ -890,6 +920,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                     : item.state === 'off'
                       ? 'Вых.'
                       : 'Пусто';
+                const finalStatusText = !canManage && item.state === 'locked' ? 'Занято' : statusText;
                 const hoverTone = active ? 'hover:border-blue-600 hover:bg-blue-100' : 'hover:border-slate-300 hover:bg-slate-50';
                 return (
                   <React.Fragment key={item.date}>
@@ -901,7 +932,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                       title={formatDateLabel(item.date)}
                     >
                       <span className="block truncate text-[11px] font-semibold leading-4">{formatDateLabel(item.date)}</span>
-                      <span className="mt-0.5 block text-xs font-bold tabular-nums">{statusText}</span>
+                      <span className="mt-0.5 block text-xs font-bold tabular-nums">{finalStatusText}</span>
                     </button>
                     {item.date !== dayNavigationItems[dayNavigationItems.length - 1]?.date ? (
                       <span className="mx-1 my-1 w-px shrink-0 rounded-full bg-slate-200" aria-hidden="true" />
