@@ -112,6 +112,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const streamAbortRef = useRef(null);
   const snapshotRequestRef = useRef(false);
   const lastEventIdRef = useRef(0);
+  const daySectionRefs = useRef(new Map());
 
   const [settings, setSettings] = useState({
     enabled: false,
@@ -323,18 +324,42 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
   const lotsByDate = useMemo(() => {
     const grouped = new Map();
+    lotDates.forEach((date) => grouped.set(date, []));
     visibleLots.forEach((lot) => {
       const key = lot.shift_date || 'unknown';
       if (!grouped.has(key)) grouped.set(key, []);
       grouped.get(key).push(lot);
     });
     return Array.from(grouped.entries()).sort(([a], [b]) => a.localeCompare(b));
-  }, [visibleLots]);
+  }, [lotDates, visibleLots]);
 
   const myClaimedLots = useMemo(
     () => lots.filter((lot) => Number(lot.claimed_by) === Number(user?.id)),
     [lots, user?.id]
   );
+
+  const dayNavigationItems = useMemo(() => {
+    return lotDates.map((date) => {
+      const dayLots = lots.filter((lot) => lot.shift_date === date);
+      const claimedLots = dayLots.filter((lot) => lot.status === 'claimed');
+      const myClaimed = dayLots.filter((lot) => Number(lot.claimed_by) === Number(user?.id));
+      const isDayOff = myDayOffs.includes(date);
+      const availableCount = visibleLots.filter((lot) => lot.shift_date === date && lot.status === 'available').length;
+      let state = 'empty';
+      if (isDayOff) state = 'off';
+      else if (myClaimed.length > 0) state = 'shift';
+      else if (availableCount > 0) state = 'available';
+      return {
+        date,
+        total: dayLots.length,
+        claimed: claimedLots.length,
+        myClaimed: myClaimed.length,
+        available: availableCount,
+        isDayOff,
+        state
+      };
+    });
+  }, [lotDates, lots, myDayOffs, user?.id, visibleLots]);
 
   const countdown = settings.status === 'scheduled'
     ? formatCountdown(settings.starts_at, nowMs)
@@ -344,6 +369,18 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const canUseAuction = isTester || canManage;
   const canChoose = isTester && (settings.status === 'scheduled' || settings.status === 'open');
   const canClaim = isTester && settings.status === 'open';
+
+  const setDaySectionRef = useCallback((date, node) => {
+    if (!date) return;
+    if (node) daySectionRefs.current.set(date, node);
+    else daySectionRefs.current.delete(date);
+  }, []);
+
+  const scrollToDay = useCallback((date) => {
+    const node = daySectionRefs.current.get(date);
+    if (!node) return;
+    node.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, []);
 
   const toggleOperator = useCallback((operatorId) => {
     const id = normalizeOperatorId(operatorId);
@@ -507,7 +544,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         </div>
       </div>
 
-      <div className="mx-auto flex w-full max-w-7xl flex-col gap-6 px-4 py-6 md:px-6">
+      <div className={`mx-auto flex w-full max-w-7xl flex-col gap-6 px-4 py-6 md:px-6 ${canUseAuction && dayNavigationItems.length ? 'pb-28' : ''}`}>
         {renderStatusCard()}
 
         {!canUseAuction && (
@@ -591,12 +628,26 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
               <div className="p-5">
                 {lotsByDate.length ? (
                   <div className="space-y-5">
-                    {lotsByDate.map(([date, dateLots]) => (
-                      <div key={date}>
-                        <div className="mb-2 flex items-center justify-between">
-                          <h3 className="text-sm font-semibold text-slate-900">{formatDateLabel(date)}</h3>
+                    {lotsByDate.map(([date, dateLots]) => {
+                      const dayMeta = dayNavigationItems.find((item) => item.date === date);
+                      return (
+                      <div key={date} ref={(node) => setDaySectionRef(date, node)} className="scroll-mt-24 rounded-lg border border-slate-100 bg-slate-50/70 p-3">
+                        <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                          <div>
+                            <h3 className="text-base font-semibold text-slate-950">{formatDateLabel(date)}</h3>
+                            <p className="mt-0.5 text-xs text-slate-500">
+                              {canManage
+                                ? `Забрали ${dayMeta?.claimed || 0} из ${dayMeta?.total || 0} смен`
+                                : dayMeta?.isDayOff
+                                  ? 'День отмечен как выходной'
+                                  : dayMeta?.myClaimed
+                                    ? `Выбрано смен: ${dayMeta.myClaimed}`
+                                    : 'Смена или выходной еще не выбраны'}
+                            </p>
+                          </div>
                           {myDayOffs.includes(date) ? <span className="rounded-full bg-blue-50 px-2 py-1 text-xs font-semibold text-blue-700">Выходной</span> : null}
                         </div>
+                        {dateLots.length ? (
                         <div className="grid gap-2 md:grid-cols-2 2xl:grid-cols-3">
                           {dateLots.map((lot) => (
                             <div key={lot.id} className={`rounded-lg border p-3 ${lot.status === 'claimed' ? 'border-slate-200 bg-slate-50' : 'border-slate-200 bg-white'}`}>
@@ -626,8 +677,18 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                             </div>
                           ))}
                         </div>
+                        ) : (
+                          <div className="rounded-lg border border-dashed border-slate-300 bg-white px-4 py-6 text-center text-sm text-slate-500">
+                            {myDayOffs.includes(date)
+                              ? 'На этот день выбран выходной.'
+                              : canManage
+                                ? 'В этот день нет смен.'
+                                : 'Для вас на этот день сейчас нет доступных смен.'}
+                          </div>
+                        )}
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 ) : (
                   <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-4 py-10 text-center text-sm text-slate-500">
@@ -789,6 +850,43 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
           </section>
         )}
       </div>
+
+      {canUseAuction && dayNavigationItems.length ? (
+        <div className="fixed inset-x-0 bottom-3 z-30 px-3 pointer-events-none">
+          <div className="mx-auto max-w-5xl rounded-xl border border-slate-200 bg-white/95 p-2 shadow-2xl backdrop-blur pointer-events-auto">
+            <div className="flex gap-2 overflow-x-auto">
+              {dayNavigationItems.map((item) => {
+                const tone = canManage
+                  ? (item.claimed >= item.total && item.total > 0 ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : item.claimed > 0 ? 'border-blue-300 bg-blue-50 text-blue-800' : 'border-slate-200 bg-white text-slate-600')
+                  : item.state === 'shift'
+                    ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
+                    : item.state === 'off'
+                      ? 'border-blue-300 bg-blue-50 text-blue-800'
+                      : 'border-slate-200 bg-white text-slate-600';
+                const statusText = canManage
+                  ? `${item.claimed}/${item.total}`
+                  : item.state === 'shift'
+                    ? 'Смена'
+                    : item.state === 'off'
+                      ? 'Вых.'
+                      : 'Пусто';
+                return (
+                  <button
+                    key={item.date}
+                    type="button"
+                    onClick={() => scrollToDay(item.date)}
+                    className={`min-w-[76px] rounded-lg border px-2 py-1.5 text-left transition hover:-translate-y-0.5 hover:shadow-sm ${tone}`}
+                    title={formatDateLabel(item.date)}
+                  >
+                    <span className="block truncate text-[11px] font-semibold leading-4">{formatDateLabel(item.date)}</span>
+                    <span className="mt-0.5 block text-xs font-bold tabular-nums">{statusText}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 };
