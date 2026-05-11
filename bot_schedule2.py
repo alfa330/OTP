@@ -20,7 +20,7 @@ from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.dispatcher import FSMContext
-from flask import Flask, request, jsonify, send_file, g, redirect
+from flask import Flask, request, jsonify, send_file, g, redirect, Response, stream_with_context
 from flask_cors import CORS
 from functools import wraps, lru_cache
 from openpyxl import load_workbook, Workbook
@@ -2540,12 +2540,193 @@ def api_shift_auction_test_access():
             enabled=bool(payload.get('enabled')),
             operator_ids=payload.get('operator_ids') or payload.get('selected_operator_ids') or [],
             launch_note=payload.get('launch_note') or '',
-            updated_by=requester_id
+            updated_by=requester_id,
+            starts_at=_parse_shift_auction_test_datetime(payload.get('starts_at')),
+            ends_at=_parse_shift_auction_test_datetime(payload.get('ends_at'))
         )
         return jsonify({"status": "success", "test_access": updated}), 200
     except Exception as error:
         logging.error(f"Shift auction test access API error: {error}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
+
+
+def _parse_shift_auction_test_datetime(value):
+    if value is None:
+        return None
+    text = str(value or '').strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace('Z', '+00:00'))
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone().replace(tzinfo=None)
+        return parsed
+    except Exception:
+        raise ValueError("INVALID_AUCTION_DATETIME")
+
+
+def _shift_auction_test_error_response(error):
+    code = str(error)
+    mapping = {
+        "AUCTION_NOT_OPEN": ("Аукцион еще не открыт", 409),
+        "AUCTION_NOT_AVAILABLE": ("Аукцион недоступен", 409),
+        "NOT_TEST_PARTICIPANT": ("Вы не включены в тестовую группу аукциона", 403),
+        "OPERATOR_NOT_FOUND": ("Оператор не найден", 404),
+        "LOT_NOT_FOUND": ("Смена не найдена", 404),
+        "LOT_ALREADY_CLAIMED": ("Смену уже забрали", 409),
+        "RATE_TOO_LOW": ("Смена недоступна по вашей ставке", 403),
+        "DAY_OFF_SELECTED": ("На этот день выбран выходной", 409),
+        "DAY_ALREADY_HAS_SHIFT": ("На этот день уже выбрана смена", 409),
+        "DAY_HAS_CLAIMED_SHIFT": ("На этот день уже выбрана смена", 409),
+        "DAY_OFF_LIMIT": ("Можно выбрать только 2 выходных", 409),
+        "INVALID_AUCTION_DATETIME": ("Некорректная дата запуска аукциона", 400)
+    }
+    message, status = mapping.get(code, ("Ошибка аукциона смен", 400))
+    return jsonify({"error": message, "code": code}), status
+
+
+@app.route('/api/shift_auction/test_snapshot', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_shift_auction_test_snapshot():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        snapshot = db.get_shift_auction_test_snapshot(current_user_id=requester_id)
+        requester_role = _normalize_user_role(requester[3])
+        if not (_is_admin_role(requester_role) or snapshot.get('is_current_user_tester')):
+            snapshot["lots"] = []
+            snapshot["day_offs"] = []
+            snapshot["my_day_offs"] = []
+        return jsonify({"status": "success", "snapshot": snapshot}), 200
+    except Exception as error:
+        logging.error(f"Shift auction snapshot API error: {error}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/shift_auction/test_lots/seed', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_shift_auction_test_lots_seed():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if not _is_admin_role(requester[3]):
+            return jsonify({"error": "Only admins can seed test auction lots"}), 403
+        payload = request.get_json(silent=True) or {}
+        start_date_raw = str(payload.get('start_date') or '').strip()
+        start_date = datetime.strptime(start_date_raw, "%Y-%m-%d").date() if start_date_raw else None
+        result = db.seed_shift_auction_test_lots(updated_by=requester_id, start_date=start_date)
+        return jsonify({"status": "success", **result}), 200
+    except ValueError as error:
+        return _shift_auction_test_error_response(error)
+    except Exception as error:
+        logging.error(f"Shift auction seed API error: {error}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/shift_auction/test_lots/<int:lot_id>/claim', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_shift_auction_test_lot_claim(lot_id):
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if _normalize_user_role(requester[3]) != 'operator':
+            return jsonify({"error": "Only operators can claim shifts"}), 403
+        result = db.claim_shift_auction_test_lot(requester_id, lot_id)
+        return jsonify({"status": "success", **result}), 200
+    except ValueError as error:
+        return _shift_auction_test_error_response(error)
+    except Exception as error:
+        logging.error(f"Shift auction claim API error: {error}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/shift_auction/test_day_off', methods=['POST', 'DELETE', 'OPTIONS'])
+@require_api_key
+def api_shift_auction_test_day_off():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if _normalize_user_role(requester[3]) != 'operator':
+            return jsonify({"error": "Only operators can choose days off"}), 403
+        payload = request.get_json(silent=True) or {}
+        day_off_date = str(payload.get('date') or '').strip()
+        if not day_off_date:
+            return jsonify({"error": "Date is required"}), 400
+        result = db.set_shift_auction_test_day_off(
+            requester_id,
+            day_off_date,
+            selected=request.method != 'DELETE'
+        )
+        return jsonify({"status": "success", **result}), 200
+    except ValueError as error:
+        return _shift_auction_test_error_response(error)
+    except Exception as error:
+        logging.error(f"Shift auction day off API error: {error}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/shift_auction/test_events', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_shift_auction_test_events():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+
+    requester_id, requester, auth_error = _get_authenticated_requester()
+    if auth_error:
+        message, status_code = auth_error
+        return jsonify({"error": message}), status_code
+
+    snapshot = db.get_shift_auction_test_access(current_user_id=requester_id)
+    if not (_is_admin_role(requester[3]) or snapshot.get('is_current_user_tester')):
+        return jsonify({"error": "Forbidden"}), 403
+
+    try:
+        last_event_id = int(request.args.get('after') or 0)
+    except Exception:
+        last_event_id = 0
+
+    @stream_with_context
+    def generate():
+        nonlocal last_event_id
+        heartbeat_at = time.time()
+        while True:
+            events = db.get_shift_auction_test_events_after(last_event_id, limit=100)
+            if events:
+                for event in events:
+                    last_event_id = max(last_event_id, int(event.get('id') or 0))
+                    yield f"id: {event['id']}\n"
+                    yield f"event: {event['event_type']}\n"
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                heartbeat_at = time.time()
+            elif time.time() - heartbeat_at >= 15:
+                yield f": heartbeat {int(time.time())}\n\n"
+                heartbeat_at = time.time()
+            time.sleep(1)
+
+    response = Response(generate(), mimetype='text/event-stream')
+    response.headers['Cache-Control'] = 'no-cache'
+    response.headers['X-Accel-Buffering'] = 'no'
+    return response
 
 @app.route('/api/login', methods=['POST', 'OPTIONS'])
 def login():
