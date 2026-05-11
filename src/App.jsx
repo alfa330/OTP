@@ -56,6 +56,7 @@ const UserEditModal = lazyWithRetry(() => import('./components/modals/UserEditMo
 const AccountAvatarModal = lazyWithRetry(() => import('./components/modals/AccountAvatarModal'));
 const SalaryCalculatorChat = lazyWithRetry(() => import('./components/salary/SalaryCalculatorChat'));
 const ResourceFteView = lazyWithRetry(() => import('./components/resources/ResourceFteView'));
+const ShiftAuctionView = lazyWithRetry(() => import('./components/resources/ShiftAuctionView'));
 const DepartmentsView = lazyWithRetry(() => import('./components/departments/DepartmentsView'));
 
 
@@ -27865,7 +27866,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                 const requestedViewFromUrl = requestedViewFromLocation;
                 if (user.role === 'trainer') {
-                    const trainerAllowedViews = new Set(['surveys', 'manage_operators', 'tasks', 'lms']);
+                    const trainerAllowedViews = new Set(['surveys', 'manage_operators', 'tasks', 'lms', 'shift_auction']);
                     if (requestedViewFromUrl && trainerAllowedViews.has(requestedViewFromUrl)) {
                         setView(requestedViewFromUrl);
                         return;
@@ -27896,7 +27897,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // null, and the subsequent URL sync effect rewrites the
                 // pathname, erasing the original LMS sub-path on reload.
                 if (isAuthInitializing || !user) return;
-                if (user?.role === 'trainer' && !['surveys', 'manage_operators', 'tasks', 'lms'].includes(view)) {
+                if (user?.role === 'trainer' && !['surveys', 'manage_operators', 'tasks', 'lms', 'shift_auction'].includes(view)) {
                     setView('surveys');
                 }
                 if (view === 'lms' && !canAccessLmsSection) {
@@ -33035,6 +33036,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </li>
                                         )}
                                         <li>
+                                            <button
+                                                onClick={(e) => handleSidebarViewNavigation(e, 'shift_auction')}
+                                                className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'shift_auction' ? 'bg-blue-700' : ''}`}
+                                            >
+                                                <FaIcon className="fas fa-gavel" /> <span className="sidebar-text">Аукцион смен</span>
+                                            </button>
+                                        </li>
+                                        <li>
                                             <button onClick={(e) => handleSidebarViewNavigation(e, 'trainings')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'trainings' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-book"></FaIcon> <span className="sidebar-text">Учет тренингов</span>
                                             </button>
@@ -33140,6 +33149,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </li>
                                         )}
                                         <li>
+                                            <button
+                                                onClick={(e) => handleSidebarViewNavigation(e, 'shift_auction')}
+                                                className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'shift_auction' ? 'bg-blue-700' : ''}`}
+                                            >
+                                                <FaIcon className="fas fa-gavel" /> <span className="sidebar-text">Аукцион смен</span>
+                                            </button>
+                                        </li>
+                                        <li>
                                             <button onClick={(e) => handleSidebarViewNavigation(e, 'trainings')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'trainings' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-book"></FaIcon> <span className="sidebar-text">Учет тренингов</span>
                                             </button>
@@ -33189,6 +33206,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarCompactBadge()} {renderSurveysSidebarLabel()}
                                             </button>
                                         </li>
+                                        <li>
+                                            <button
+                                                onClick={(e) => handleSidebarViewNavigation(e, 'shift_auction')}
+                                                className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'shift_auction' ? 'bg-blue-700' : ''}`}
+                                            >
+                                                <FaIcon className="fas fa-gavel" /> <span className="sidebar-text">Аукцион смен</span>
+                                            </button>
+                                        </li>
                                     </>
                                 )}
                                 {currentUserRole === 'operator' && (
@@ -33207,6 +33232,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         <li>
                                             <button onClick={(e) => handleSidebarViewNavigation(e, 'work_schedules')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'work_schedules' ? 'bg-blue-700' : ''}`}>
                                                 <FaIcon className="fas fa-calendar-alt"></FaIcon> <span className="sidebar-text">Мои смены</span>
+                                            </button>
+                                        </li>
+                                        <li>
+                                            <button
+                                                onClick={(e) => handleSidebarViewNavigation(e, 'shift_auction')}
+                                                className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'shift_auction' ? 'bg-blue-700' : ''}`}
+                                            >
+                                                <FaIcon className="fas fa-gavel" /> <span className="sidebar-text">Аукцион смен</span>
                                             </button>
                                         </li>
                                         <li>
@@ -33342,7 +33375,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 ? 'p-0 h-screen overflow-hidden'
                                 : (canAccessLmsSection && view === 'lms')
                                     ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
-                                    : (view === 'tasks' || view === 'work_schedules' || (view === 'resource_fte' && canAccessResourceFteSection))
+                                    : (view === 'tasks' || view === 'work_schedules' || view === 'shift_auction' || (view === 'resource_fte' && canAccessResourceFteSection))
                                         ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
                                     : 'p-8 bg-gray-50 min-h-screen overflow-y-auto'
                         } ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}
@@ -33399,6 +33432,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             />
                         </div>
                         )}
+                        {(view === "shift_auction" && (
+                            <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
+                                <ShiftAuctionView
+                                    user={user}
+                                    operators={users}
+                                    showToast={showToast}
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                />
+                            </Suspense>
+                        ))}
                         {isAdminLikeRole && (
                         <>
                             {view === 'qr_access' && (

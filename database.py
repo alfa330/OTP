@@ -1465,6 +1465,29 @@ class Database:
                 ON CONFLICT (id) DO NOTHING;
             """)
 
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS shift_auction_test_access (
+                    id INTEGER PRIMARY KEY DEFAULT 1,
+                    enabled BOOLEAN NOT NULL DEFAULT FALSE,
+                    launch_note TEXT NOT NULL DEFAULT '',
+                    updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT shift_auction_test_access_singleton CHECK (id = 1)
+                );
+            """)
+            cursor.execute("""
+                INSERT INTO shift_auction_test_access (id)
+                VALUES (1)
+                ON CONFLICT (id) DO NOTHING;
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS shift_auction_test_participants (
+                    operator_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                    added_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+
             # Optimized Indexes (added more based on query patterns)
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_calls_month ON calls(month);
@@ -1556,6 +1579,7 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_raw_resource_uploads_report_date ON raw_resource_uploads(report_date DESC);
                 CREATE INDEX IF NOT EXISTS idx_daily_resource_hours_report_hour ON daily_resource_hours(report_date, hour);
                 CREATE INDEX IF NOT EXISTS idx_daily_resource_summary_weekday_date ON daily_resource_summary(weekday, report_date DESC);
+                CREATE INDEX IF NOT EXISTS idx_shift_auction_test_participants_created ON shift_auction_test_participants(created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_calibration_rooms_month ON calibration_rooms(month);
                 CREATE INDEX IF NOT EXISTS idx_calibration_rooms_operator_id ON calibration_rooms(operator_id);
                 CREATE INDEX IF NOT EXISTS idx_calibration_rooms_admin_id ON calibration_rooms(created_by_admin_id);
@@ -2408,6 +2432,128 @@ class Database:
                     "calculation_model_code": normalize_calculation_model_code(row[5], row[1])
                 } for row in cursor.fetchall()
             ]
+
+    def get_shift_auction_test_access(self, current_user_id=None):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    s.enabled,
+                    s.launch_note,
+                    s.updated_by,
+                    u.name AS updated_by_name,
+                    s.updated_at
+                FROM shift_auction_test_access s
+                LEFT JOIN users u ON u.id = s.updated_by
+                WHERE s.id = 1
+            """)
+            settings_row = cursor.fetchone()
+            if not settings_row:
+                cursor.execute("""
+                    INSERT INTO shift_auction_test_access (id)
+                    VALUES (1)
+                    ON CONFLICT (id) DO NOTHING
+                """)
+                settings_row = (False, '', None, None, None)
+
+            cursor.execute("""
+                SELECT
+                    u.id,
+                    u.name,
+                    u.role,
+                    u.status,
+                    u.rate,
+                    u.direction_id,
+                    d.name AS direction_name,
+                    u.supervisor_id,
+                    s.name AS supervisor_name,
+                    p.created_at
+                FROM shift_auction_test_participants p
+                JOIN users u ON u.id = p.operator_id
+                LEFT JOIN directions d ON d.id = u.direction_id
+                LEFT JOIN users s ON s.id = u.supervisor_id
+                ORDER BY u.name
+            """)
+            participant_rows = cursor.fetchall() or []
+
+        selected_operator_ids = [int(row[0]) for row in participant_rows if row and row[0] is not None]
+        current_id = None
+        try:
+            current_id = int(current_user_id) if current_user_id is not None else None
+        except Exception:
+            current_id = None
+
+        return {
+            "enabled": bool(settings_row[0]) if settings_row else False,
+            "launch_note": settings_row[1] or "",
+            "updated_by": settings_row[2] if settings_row else None,
+            "updated_by_name": settings_row[3] or "",
+            "updated_at": settings_row[4].isoformat() if settings_row and settings_row[4] else None,
+            "selected_operator_ids": selected_operator_ids,
+            "selected_operators": [
+                {
+                    "id": row[0],
+                    "name": row[1],
+                    "role": normalize_role_value(row[2]),
+                    "status": row[3],
+                    "rate": float(row[4]) if row[4] is not None else 1.0,
+                    "direction_id": row[5],
+                    "direction": row[6] or "",
+                    "supervisor_id": row[7],
+                    "supervisor_name": row[8] or "",
+                    "selected_at": row[9].isoformat() if row[9] else None
+                }
+                for row in participant_rows
+            ],
+            "is_current_user_tester": current_id in set(selected_operator_ids) if current_id is not None else False
+        }
+
+    def update_shift_auction_test_access(self, enabled=False, operator_ids=None, launch_note='', updated_by=None):
+        normalized_ids = []
+        seen = set()
+        for raw_id in (operator_ids or []):
+            try:
+                operator_id = int(raw_id)
+            except Exception:
+                continue
+            if operator_id > 0 and operator_id not in seen:
+                seen.add(operator_id)
+                normalized_ids.append(operator_id)
+
+        with self._get_cursor() as cursor:
+            valid_ids = []
+            if normalized_ids:
+                cursor.execute("""
+                    SELECT id
+                    FROM users
+                    WHERE id = ANY(%s)
+                      AND LOWER(COALESCE(role, '')) = 'operator'
+                      AND COALESCE(status, '') NOT IN ('fired', 'dismissal')
+                """, (normalized_ids,))
+                valid_ids = [int(row[0]) for row in (cursor.fetchall() or [])]
+
+            cursor.execute("""
+                UPDATE shift_auction_test_access
+                SET enabled = %s,
+                    launch_note = %s,
+                    updated_by = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = 1
+            """, (bool(enabled), str(launch_note or '').strip()[:1000], updated_by))
+
+            cursor.execute("DELETE FROM shift_auction_test_participants")
+            if valid_ids:
+                rows = [(operator_id, updated_by) for operator_id in valid_ids]
+                execute_values(
+                    cursor,
+                    """
+                    INSERT INTO shift_auction_test_participants (operator_id, added_by)
+                    VALUES %s
+                    ON CONFLICT (operator_id) DO NOTHING
+                    """,
+                    rows
+                )
+
+        return self.get_shift_auction_test_access(current_user_id=updated_by)
 
     # ── Department CRUD ──────────────────────────────────────────────
 
