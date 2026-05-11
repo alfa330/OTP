@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios';
 import {
   ArrowDownUp,
+  Gavel,
   GripVertical,
   Plus,
   Redo2,
@@ -1047,6 +1048,7 @@ const ResourceSchedulePlanner = ({
   onPeriodChange,
   weekPicker,
   notify,
+  onOpenShiftAuction,
 }) => {
   const [templates, setTemplates] = useState(() => loadStoredTemplates());
   const [selectedTemplateId, setSelectedTemplateId] = useState('');
@@ -1628,6 +1630,16 @@ const ResourceSchedulePlanner = ({
             )}
           </div>
           <div className="flex flex-wrap gap-2 xl:justify-end">
+            {typeof onOpenShiftAuction === 'function' ? (
+              <button
+                type="button"
+                onClick={onOpenShiftAuction}
+                className="inline-flex h-10 items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 text-sm font-semibold text-blue-700 transition hover:bg-blue-100"
+              >
+                <Gavel size={16} />
+                Аукцион смен
+              </button>
+            ) : null}
             <button
               type="button"
               onClick={loadDefaultTemplates}

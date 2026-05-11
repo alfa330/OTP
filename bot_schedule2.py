@@ -2721,7 +2721,7 @@ def api_shift_auction_test_events():
             elif time.time() - heartbeat_at >= 15:
                 yield f": heartbeat {int(time.time())}\n\n"
                 heartbeat_at = time.time()
-            time.sleep(1)
+            time.sleep(0.25)
 
     response = Response(generate(), mimetype='text/event-stream')
     response.headers['Cache-Control'] = 'no-cache'
