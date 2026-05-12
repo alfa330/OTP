@@ -35,6 +35,7 @@ from database import db, TECHNICAL_ISSUE_REASONS, normalize_role_value, get_calc
 from resource_fte_service import (
     build_resource_schedule_preview,
     get_resource_day,
+    get_resource_operator_availability_details,
     get_resource_overview,
     get_resource_settings,
     get_resource_shift_templates,
@@ -2444,6 +2445,27 @@ def api_resource_fte_day(report_date):
         return guard_response, guard_status
     try:
         return jsonify({"status": "success", "day": get_resource_day(db, report_date)}), 200
+    except Exception as error:
+        return _resource_fte_error_response(error)
+
+
+@app.route('/api/resource_fte/operator_availability', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_operator_availability():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    try:
+        payload = get_resource_operator_availability_details(
+            db,
+            as_of_date_value=request.args.get('as_of'),
+            forecast_week_start_value=request.args.get('forecast_week_start'),
+            forecast_date_from_value=request.args.get('forecast_date_from') or request.args.get('forecast_period_start'),
+            forecast_date_to_value=request.args.get('forecast_date_to') or request.args.get('forecast_period_end')
+        )
+        return jsonify({"status": "success", "availability": payload}), 200
     except Exception as error:
         return _resource_fte_error_response(error)
 

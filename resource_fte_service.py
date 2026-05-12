@@ -503,20 +503,224 @@ def _current_operator_fte_tx(cursor, settings: Optional[Dict[str, Any]] = None) 
     }
 
 
-def _period_operator_availability_tx(cursor, period_start, period_end, settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _period_operator_availability_tx(
+    cursor,
+    period_start,
+    period_end,
+    settings: Optional[Dict[str, Any]] = None,
+    include_details: bool = True,
+) -> Dict[str, Any]:
     if period_end < period_start:
         period_start, period_end = period_end, period_start
     period_days = max(1, (period_end - period_start).days + 1)
+    threshold_days = period_days / 2.0
     selected_direction_ids = _coerce_int_list((settings or {}).get("selected_direction_ids"))
     direction_filter = "AND u.direction_id = ANY(%s)" if selected_direction_ids else ""
     params = [period_start, period_end]
     if selected_direction_ids:
         params.append(selected_direction_ids)
 
+    if not include_details:
+        aggregate_params = list(params) + [threshold_days, threshold_days, threshold_days]
+        cursor.execute(
+            f"""
+            WITH period_days AS (
+                SELECT generate_series(%s::date, %s::date, interval '1 day')::date AS day
+            ),
+            status_history AS (
+                SELECT
+                    operator_id,
+                    BOOL_OR(status_code = 'dismissal') AS has_dismissal_history,
+                    BOOL_OR(status_code = 'bs') AS has_bs_history,
+                    BOOL_OR(status_code = 'sick_leave') AS has_sick_leave_history,
+                    BOOL_OR(status_code = 'annual_leave') AS has_annual_leave_history
+                FROM operator_schedule_status_periods
+                WHERE status_code IN ('dismissal', 'bs', 'sick_leave', 'annual_leave')
+                GROUP BY operator_id
+            ),
+            operators AS (
+                SELECT
+                    u.id,
+                    COALESCE(u.rate, 1.0) AS rate,
+                    LOWER(TRIM(COALESCE(u.status, 'working'))) AS current_status,
+                    COALESCE(h.has_dismissal_history, FALSE) AS has_dismissal_history,
+                    COALESCE(h.has_bs_history, FALSE) AS has_bs_history,
+                    COALESCE(h.has_sick_leave_history, FALSE) AS has_sick_leave_history,
+                    COALESCE(h.has_annual_leave_history, FALSE) AS has_annual_leave_history
+                FROM users u
+                LEFT JOIN status_history h ON h.operator_id = u.id
+                WHERE u.role = 'operator'
+                  {direction_filter}
+            ),
+            operator_days AS (
+                SELECT
+                    o.id,
+                    o.rate,
+                    CASE
+                        WHEN scheduled.status_code IS NOT NULL THEN
+                            CASE
+                                WHEN scheduled.status_code IN ('bs', 'sick_leave', 'annual_leave', 'dismissal')
+                                    THEN scheduled.status_code
+                                ELSE 'working'
+                            END
+                        WHEN o.current_status IN ('bs', 'unpaid_leave') AND o.has_bs_history THEN 'working'
+                        WHEN o.current_status = 'sick_leave' AND o.has_sick_leave_history THEN 'working'
+                        WHEN o.current_status = 'annual_leave' AND o.has_annual_leave_history THEN 'working'
+                        WHEN o.current_status IN ('fired', 'dismissal') AND o.has_dismissal_history THEN 'working'
+                        WHEN o.current_status <> 'working' THEN o.current_status
+                        ELSE 'working'
+                    END AS effective_status
+                FROM operators o
+                CROSS JOIN period_days d
+                LEFT JOIN LATERAL (
+                    SELECT p.status_code
+                    FROM operator_schedule_status_periods p
+                    WHERE p.operator_id = o.id
+                      AND p.start_date <= d.day
+                      AND COALESCE(p.end_date, DATE '9999-12-31') >= d.day
+                    ORDER BY p.start_date DESC, p.id DESC
+                    LIMIT 1
+                ) scheduled ON TRUE
+            ),
+            operator_summary AS (
+                SELECT
+                    id,
+                    rate,
+                    COUNT(*) FILTER (WHERE effective_status = 'working')::INT AS working_days,
+                    COUNT(*) FILTER (WHERE effective_status = 'bs')::INT AS bs_days,
+                    COUNT(*) FILTER (WHERE effective_status = 'unpaid_leave')::INT AS unpaid_leave_days,
+                    COUNT(*) FILTER (WHERE effective_status = 'sick_leave')::INT AS sick_leave_days,
+                    COUNT(*) FILTER (WHERE effective_status = 'annual_leave')::INT AS annual_leave_days,
+                    COUNT(*) FILTER (WHERE effective_status = 'dismissal')::INT AS dismissal_days,
+                    COUNT(*) FILTER (WHERE effective_status = 'fired')::INT AS fired_days
+                FROM operator_days
+                GROUP BY id, rate
+            )
+            SELECT
+                rate,
+                COUNT(*)::INT AS total_count,
+                COUNT(*) FILTER (WHERE working_days > %s)::INT AS available_count,
+                COUNT(*) FILTER (WHERE working_days > 0 AND working_days <= %s)::INT AS partial_count,
+                COUNT(*) FILTER (WHERE working_days = 0)::INT AS unavailable_count,
+                COALESCE(SUM(rate), 0) AS total_fte,
+                COALESCE(SUM(CASE WHEN working_days > %s THEN rate ELSE 0 END), 0) AS available_fte,
+                COALESCE(SUM(working_days), 0)::INT AS working_days,
+                COALESCE(SUM(bs_days), 0)::INT AS bs_days,
+                COALESCE(SUM(unpaid_leave_days), 0)::INT AS unpaid_leave_days,
+                COALESCE(SUM(sick_leave_days), 0)::INT AS sick_leave_days,
+                COALESCE(SUM(annual_leave_days), 0)::INT AS annual_leave_days,
+                COALESCE(SUM(dismissal_days), 0)::INT AS dismissal_days,
+                COALESCE(SUM(fired_days), 0)::INT AS fired_days
+            FROM operator_summary
+            GROUP BY rate
+            """,
+            aggregate_params,
+        )
+
+        by_rate = {
+            _resource_rate_key(rate): {
+                "rate": float(rate),
+                "count": 0,
+                "fte": 0.0,
+                "total_count": 0,
+                "total_fte": 0.0,
+            }
+            for rate in RESOURCE_RATE_VALUES
+        }
+        status_summary = {
+            "working": 0,
+            "bs": 0,
+            "unpaid_leave": 0,
+            "sick_leave": 0,
+            "annual_leave": 0,
+            "dismissal": 0,
+            "fired": 0,
+        }
+        total_operator_count = 0
+        available_operator_count = 0
+        partially_available_operator_count = 0
+        unavailable_operator_count = 0
+        available_operator_fte = 0.0
+
+        for row in cursor.fetchall():
+            (
+                rate_raw,
+                total_count_raw,
+                available_count_raw,
+                partial_count_raw,
+                unavailable_count_raw,
+                total_fte_raw,
+                available_fte_raw,
+                working_days_raw,
+                bs_days_raw,
+                unpaid_leave_days_raw,
+                sick_leave_days_raw,
+                annual_leave_days_raw,
+                dismissal_days_raw,
+                fired_days_raw,
+            ) = row
+            rate = _resource_rate_value(rate_raw)
+            rate_key = _resource_rate_key(rate)
+            total_count = _to_int(total_count_raw)
+            available_count = _to_int(available_count_raw)
+            partial_count = _to_int(partial_count_raw)
+            unavailable_count = _to_int(unavailable_count_raw)
+            available_fte = _to_float(available_fte_raw)
+            total_operator_count += total_count
+            available_operator_count += available_count
+            partially_available_operator_count += partial_count
+            unavailable_operator_count += unavailable_count
+            available_operator_fte += available_fte
+            by_rate[rate_key]["count"] += available_count
+            by_rate[rate_key]["fte"] += available_fte
+            by_rate[rate_key]["total_count"] += total_count
+            by_rate[rate_key]["total_fte"] += _to_float(total_fte_raw)
+            status_summary["working"] += _to_int(working_days_raw)
+            status_summary["bs"] += _to_int(bs_days_raw)
+            status_summary["unpaid_leave"] += _to_int(unpaid_leave_days_raw)
+            status_summary["sick_leave"] += _to_int(sick_leave_days_raw)
+            status_summary["annual_leave"] += _to_int(annual_leave_days_raw)
+            status_summary["dismissal"] += _to_int(dismissal_days_raw)
+            status_summary["fired"] += _to_int(fired_days_raw)
+
+        rate_capacity = [
+            {
+                **by_rate[_resource_rate_key(rate)],
+                "fte": round(_to_float(by_rate[_resource_rate_key(rate)].get("fte")), 4),
+                "total_fte": round(_to_float(by_rate[_resource_rate_key(rate)].get("total_fte")), 4),
+            }
+            for rate in RESOURCE_RATE_VALUES
+        ]
+        return {
+            "period_operator_count": total_operator_count,
+            "period_available_operator_count": available_operator_count,
+            "period_available_operator_fte": round(available_operator_fte, 4),
+            "period_partial_operator_count": partially_available_operator_count,
+            "period_unavailable_operator_count": unavailable_operator_count,
+            "period_working_days_threshold": round(threshold_days, 4),
+            "period_day_count": period_days,
+            "period_rate_capacity": rate_capacity,
+            "period_rate_counts": {item["rate"]: item["count"] for item in rate_capacity},
+            "period_status_summary": status_summary,
+            "period_operator_details": [],
+            "selected_direction_ids": selected_direction_ids,
+        }
+
     cursor.execute(
         f"""
         WITH period_days AS (
             SELECT generate_series(%s::date, %s::date, interval '1 day')::date AS day
+        ),
+        status_history AS (
+            SELECT
+                operator_id,
+                BOOL_OR(status_code = 'dismissal') AS has_dismissal_history,
+                BOOL_OR(status_code = 'bs') AS has_bs_history,
+                BOOL_OR(status_code = 'sick_leave') AS has_sick_leave_history,
+                BOOL_OR(status_code = 'annual_leave') AS has_annual_leave_history
+            FROM operator_schedule_status_periods
+            WHERE status_code IN ('dismissal', 'bs', 'sick_leave', 'annual_leave')
+            GROUP BY operator_id
         ),
         operators AS (
             SELECT
@@ -526,33 +730,14 @@ def _period_operator_availability_tx(cursor, period_start, period_end, settings:
                 supervisor.name AS supervisor_name,
                 COALESCE(u.rate, 1.0) AS rate,
                 LOWER(TRIM(COALESCE(u.status, 'working'))) AS current_status,
-                EXISTS (
-                    SELECT 1
-                    FROM operator_schedule_status_periods hp
-                    WHERE hp.operator_id = u.id
-                      AND hp.status_code = 'dismissal'
-                ) AS has_dismissal_history,
-                EXISTS (
-                    SELECT 1
-                    FROM operator_schedule_status_periods hp
-                    WHERE hp.operator_id = u.id
-                      AND hp.status_code = 'bs'
-                ) AS has_bs_history,
-                EXISTS (
-                    SELECT 1
-                    FROM operator_schedule_status_periods hp
-                    WHERE hp.operator_id = u.id
-                      AND hp.status_code = 'sick_leave'
-                ) AS has_sick_leave_history,
-                EXISTS (
-                    SELECT 1
-                    FROM operator_schedule_status_periods hp
-                    WHERE hp.operator_id = u.id
-                      AND hp.status_code = 'annual_leave'
-                ) AS has_annual_leave_history
+                COALESCE(h.has_dismissal_history, FALSE) AS has_dismissal_history,
+                COALESCE(h.has_bs_history, FALSE) AS has_bs_history,
+                COALESCE(h.has_sick_leave_history, FALSE) AS has_sick_leave_history,
+                COALESCE(h.has_annual_leave_history, FALSE) AS has_annual_leave_history
             FROM users u
             LEFT JOIN directions direction ON direction.id = u.direction_id
             LEFT JOIN users supervisor ON supervisor.id = u.supervisor_id
+            LEFT JOIN status_history h ON h.operator_id = u.id
             WHERE u.role = 'operator'
               {direction_filter}
         ),
@@ -633,7 +818,6 @@ def _period_operator_availability_tx(cursor, period_start, period_end, settings:
         "fired": 0,
     }
     operator_details = []
-    threshold_days = period_days / 2.0
     total_operator_count = 0
     available_operator_count = 0
     partially_available_operator_count = 0
@@ -1070,6 +1254,7 @@ def get_resource_overview(
             forecast_period_start,
             forecast_period_end,
             settings,
+            include_details=False,
         )
         actual_resource_by_day = _actual_resource_load_for_period_tx(cursor, forecast_period_start, forecast_period_end, settings)
         next_week_forecast = _build_forecast_payload(
@@ -1095,7 +1280,7 @@ def get_resource_overview(
             "periodAvailableOperatorRateCounts": period_operator_availability.get("period_rate_counts") or {},
             "periodAvailableOperatorRates": period_operator_availability.get("period_rate_capacity") or [],
             "periodOperatorStatusSummary": period_operator_availability.get("period_status_summary") or {},
-            "periodOperatorAvailabilityDetails": period_operator_availability.get("period_operator_details") or [],
+            "periodOperatorAvailabilityDetails": [],
         })
         directions = _resource_directions_tx(cursor)
 
@@ -1164,6 +1349,50 @@ def get_resource_overview(
         "loaded_report_dates": loaded_report_dates,
         "history": history,
     }
+
+
+def get_resource_operator_availability_details(
+    db,
+    as_of_date_value: Optional[str] = None,
+    forecast_week_start_value: Optional[str] = None,
+    forecast_date_from_value: Optional[str] = None,
+    forecast_date_to_value: Optional[str] = None,
+) -> Dict[str, Any]:
+    with db._get_cursor() as cursor:
+        settings = _get_settings_tx(cursor)
+        if as_of_date_value:
+            as_of_date = _parse_report_date(as_of_date_value)
+        else:
+            cursor.execute("SELECT CURRENT_DATE")
+            as_of_date = cursor.fetchone()[0]
+        period_start, period_end = _normalize_forecast_period(
+            as_of_date,
+            forecast_week_start_value=forecast_week_start_value,
+            forecast_date_from_value=forecast_date_from_value,
+            forecast_date_to_value=forecast_date_to_value,
+        )
+        availability = _period_operator_availability_tx(
+            cursor,
+            period_start,
+            period_end,
+            settings,
+            include_details=True,
+        )
+        return {
+            "period_start": period_start.isoformat(),
+            "period_end": period_end.isoformat(),
+            "periodDays": _to_int(availability.get("period_day_count")),
+            "periodAvailableOperatorFte": _to_float(availability.get("period_available_operator_fte")),
+            "periodAvailableOperatorCount": _to_int(availability.get("period_available_operator_count")),
+            "periodOperatorCount": _to_int(availability.get("period_operator_count")),
+            "periodPartialOperatorCount": _to_int(availability.get("period_partial_operator_count")),
+            "periodUnavailableOperatorCount": _to_int(availability.get("period_unavailable_operator_count")),
+            "periodWorkingDaysThreshold": _to_float(availability.get("period_working_days_threshold")),
+            "periodAvailableOperatorRateCounts": availability.get("period_rate_counts") or {},
+            "periodAvailableOperatorRates": availability.get("period_rate_capacity") or [],
+            "periodOperatorStatusSummary": availability.get("period_status_summary") or {},
+            "periodOperatorAvailabilityDetails": availability.get("period_operator_details") or [],
+        }
 
 
 def get_resource_day(db, report_date_value: str) -> Dict[str, Any]:
