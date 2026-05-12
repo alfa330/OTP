@@ -336,6 +336,7 @@ def _empty_incident_uplift_profile() -> Dict[str, Any]:
         "confidence_floor": INCIDENT_UPLIFT_CONFIDENCE_FLOOR,
         "future_min_weight": INCIDENT_UPLIFT_FUTURE_MIN_WEIGHT,
         "source_dates": [],
+        "source_anchor_date": None,
         "source_start": None,
         "source_end": None,
         "source_day_count": 0,
@@ -367,7 +368,7 @@ def _empty_incident_uplift_profile() -> Dict[str, Any]:
 
 def _compute_recent_incident_uplift_profile_tx(
     cursor,
-    period_start,
+    as_of_date,
     settings: Dict[str, Any],
     lookback_days: int = INCIDENT_UPLIFT_LOOKBACK_DAYS,
 ) -> Dict[str, Any]:
@@ -380,11 +381,14 @@ def _compute_recent_incident_uplift_profile_tx(
         ORDER BY report_date DESC
         LIMIT %s
         """,
-        (period_start, lookback_days),
+        (as_of_date, lookback_days),
     )
     source_dates = [row[0] for row in cursor.fetchall()]
     if not source_dates:
-        return _empty_incident_uplift_profile()
+        return {
+            **_empty_incident_uplift_profile(),
+            "source_anchor_date": as_of_date.isoformat(),
+        }
 
     weights_by_date = {
         report_date: lookback_days - index
@@ -510,6 +514,7 @@ def _compute_recent_incident_uplift_profile_tx(
         "confidence_floor": INCIDENT_UPLIFT_CONFIDENCE_FLOOR,
         "future_min_weight": INCIDENT_UPLIFT_FUTURE_MIN_WEIGHT,
         "source_dates": source_dates_iso,
+        "source_anchor_date": as_of_date.isoformat(),
         "source_start": min(source_dates).isoformat(),
         "source_end": max(source_dates).isoformat(),
         "source_day_count": len(source_dates),
