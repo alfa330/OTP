@@ -185,6 +185,8 @@ const plannerDaysSignature = (days) => JSON.stringify(
       templateId: shift.templateId,
       rate: shift.rate,
       label: shift.label,
+      source: shift.source,
+      tone: shift.tone,
       startMinute: shift.startMinute,
       endMinute: shift.endMinute,
       breaks: shift.breaks || [],
@@ -225,6 +227,18 @@ const buildCoverageFromDays = (days) => {
     const hour = index % 24;
     return Number(days[dayIndex]?.coverage?.[hour]?.rawNeeded || 0);
   });
+  const baseRawTarget = Array.from({ length: dayCount * 24 }, (_, index) => {
+    const dayIndex = Math.floor(index / 24);
+    const hour = index % 24;
+    const row = days[dayIndex]?.coverage?.[hour] || {};
+    return Number(row.baseRawNeeded ?? row.rawNeeded ?? 0);
+  });
+  const upliftRawTarget = Array.from({ length: dayCount * 24 }, (_, index) => {
+    const dayIndex = Math.floor(index / 24);
+    const hour = index % 24;
+    const row = days[dayIndex]?.coverage?.[hour] || {};
+    return Number(row.incidentUpliftNeeded || 0);
+  });
   const covered = Array.from({ length: dayCount * 24 }, () => 0);
 
   days.forEach((day, dayIndex) => {
@@ -247,19 +261,28 @@ const buildCoverageFromDays = (days) => {
       const needed = target[index];
       const currentCovered = Number(covered[index] || 0);
       const coveredRounded = roundMathFte(currentCovered);
+      const sourceRow = days[dayIndex]?.coverage?.[hour] || {};
       return {
         hour,
         needed,
         rawNeeded: rawTarget[index],
+        realNeeded: rawTarget[index],
+        baseRawNeeded: baseRawTarget[index],
+        baseNeeded: roundMathFte(baseRawTarget[index]),
+        incidentUpliftNeeded: upliftRawTarget[index],
+        incidentAdjustedNeeded: rawTarget[index],
         covered: currentCovered,
         coveredRounded,
         deficit: Math.max(0, needed - coveredRounded),
         over: Math.max(0, coveredRounded - needed),
+        incidentUpliftSources: sourceRow.incidentUpliftSources || sourceRow.incident_uplift_sources || [],
       };
     });
     const stats = coverage.reduce(
       (acc, row) => {
         acc.realNeededFteHours += Number(row.rawNeeded || 0);
+        acc.baseRealNeededFteHours += Number(row.baseRawNeeded ?? row.rawNeeded ?? 0);
+        acc.incidentUpliftFteHours += Number(row.incidentUpliftNeeded || 0);
         acc.neededFteHours += row.needed;
         acc.roundedNeededFteHours += row.needed;
         acc.realCoveredFteHours += row.covered;
@@ -272,6 +295,8 @@ const buildCoverageFromDays = (days) => {
       },
       {
         realNeededFteHours: 0,
+        baseRealNeededFteHours: 0,
+        incidentUpliftFteHours: 0,
         neededFteHours: 0,
         roundedNeededFteHours: 0,
         realCoveredFteHours: 0,
@@ -292,6 +317,8 @@ const buildCoverageFromDays = (days) => {
   const summary = nextDays.reduce(
     (acc, day) => {
       acc.realNeededFteHours += Number(day.stats?.realNeededFteHours || 0);
+      acc.baseRealNeededFteHours += Number(day.stats?.baseRealNeededFteHours || 0);
+      acc.incidentUpliftFteHours += Number(day.stats?.incidentUpliftFteHours || 0);
       acc.neededFteHours += Number(day.stats?.neededFteHours || 0);
       acc.roundedNeededFteHours += Number(day.stats?.roundedNeededFteHours || day.stats?.neededFteHours || 0);
       acc.realCoveredFteHours += Number(day.stats?.realCoveredFteHours || 0);
@@ -304,6 +331,8 @@ const buildCoverageFromDays = (days) => {
     },
     {
       realNeededFteHours: 0,
+      baseRealNeededFteHours: 0,
+      incidentUpliftFteHours: 0,
       neededFteHours: 0,
       roundedNeededFteHours: 0,
       realCoveredFteHours: 0,
@@ -606,7 +635,7 @@ const CoverageBars = ({ coverage = [] }) => {
                   <div
                     key={`${rowMeta.key}-${row.hour}`}
                     className="flex items-end rounded-md bg-slate-100 px-0.5"
-                    title={`${String(row.hour).padStart(2, '0')}:00 · нужно ${formatFte(row.needed || 0)} (без округления ${formatNumber(row.rawNeeded, 2)}) · покрыто ${formatFte(row.coveredRounded ?? roundMathFte(row.covered || 0))} (без округления ${formatNumber(row.covered, 2)})`}
+                    title={`${String(row.hour).padStart(2, '0')}:00 · нужно ${formatFte(row.needed || 0)} (база ${formatNumber(row.baseRawNeeded ?? row.rawNeeded, 2)}, прирост ${formatNumber(row.incidentUpliftNeeded, 2)}) · покрыто ${formatFte(row.coveredRounded ?? roundMathFte(row.covered || 0))} (без округления ${formatNumber(row.covered, 2)})`}
                   >
                     <div
                       className={`w-full rounded-sm ${coverageBarTone(row, rowMeta.key)}`}
@@ -823,13 +852,17 @@ const PlannerDayRow = ({
                     ? clamp(((carryoverBoundaryAbs - visibleStart) / visibleDuration) * 100, 0, 100)
                     : 100;
                   const isActive = activeDragId === shift.id;
+                  const isIncidentUplift = shift.isIncidentUplift || shift.source === 'incident_uplift' || shift.tone === 'emerald';
+                  const inactiveShiftClass = isIncidentUplift
+                    ? 'z-20 border-emerald-300 bg-emerald-100 text-emerald-800 hover:bg-emerald-200'
+                    : 'z-20 border-blue-300 bg-blue-100 text-blue-800 hover:bg-blue-200';
                   return (
                     <div
                       key={`${sourceDayIndex}-${shift.id}`}
                       className={`absolute flex h-7 cursor-grab items-center overflow-hidden rounded-md border px-1.5 text-xs font-semibold shadow-sm transition ${
                         isActive
                           ? 'z-30 border-slate-900 bg-slate-900 text-white'
-                          : 'z-20 border-blue-300 bg-blue-100 text-blue-800 hover:bg-blue-200'
+                          : inactiveShiftClass
                       }`}
                       style={{
                         top: 42 + lane * 34,
@@ -841,7 +874,7 @@ const PlannerDayRow = ({
                         onShiftPointerDown(event, sourceDayIndex, shift.id, 'move');
                       }}
                       onContextMenu={(event) => event.preventDefault()}
-                      title={`${formatTime(start)}-${formatTime(end)} · ${formatDurationHours(duration)} · ${shift.label}`}
+                      title={`${formatTime(start)}-${formatTime(end)} · ${formatDurationHours(duration)} · ${shift.label}${isIncidentUplift ? ' · доп. смена под прирост' : ''}`}
                     >
                       {hasCarryover ? (
                         <div
@@ -862,7 +895,7 @@ const PlannerDayRow = ({
                       <span className="relative z-10 min-w-0 flex-1 truncate">
                         {formatTime(start)}-{formatTime(end)} · {shift.rate}
                       </span>
-                      {end > 1440 ? <span className="relative z-10 ml-1 shrink-0 rounded bg-white/70 px-1 text-[10px] text-blue-800">+1</span> : null}
+                      {end > 1440 ? <span className={`relative z-10 ml-1 shrink-0 rounded bg-white/70 px-1 text-[10px] ${isIncidentUplift ? 'text-emerald-800' : 'text-blue-800'}`}>+1</span> : null}
                       <button
                         type="button"
                         onClick={(event) => {
@@ -994,6 +1027,10 @@ const PlannerDayCards = ({ days, selectedDayIndex, onSelect }) => (
       const active = Number(selectedDayIndex) === Number(dayIndex);
       const deficit = Number(day.stats?.deficitFteHours || 0);
       const coveragePercent = Number(day.stats?.coveragePercent || 0);
+      const incidentUpliftHours = Number(day.stats?.incidentUpliftFteHours || 0);
+      const incidentShiftCount = (day.shifts || []).filter((shift) => (
+        shift.isIncidentUplift || shift.source === 'incident_uplift' || shift.tone === 'emerald'
+      )).length;
       return (
         <button
           key={day.date || dayIndex}
@@ -1014,6 +1051,13 @@ const PlannerDayCards = ({ days, selectedDayIndex, onSelect }) => (
               {(day.shifts || []).length}
             </div>
           </div>
+          {incidentUpliftHours > 0.01 || incidentShiftCount > 0 ? (
+            <div className={`mt-2 inline-flex items-center rounded-md px-2 py-1 text-[11px] font-semibold ${
+              active ? 'bg-emerald-400/20 text-emerald-100' : 'bg-emerald-50 text-emerald-700'
+            }`}>
+              +{formatNumber(incidentUpliftHours, 1)} FTE-ч риска · {incidentShiftCount} доп.
+            </div>
+          ) : null}
           <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
             <div>
               <div className={active ? 'text-slate-300' : 'text-slate-500'}>Нужно</div>
@@ -1689,7 +1733,7 @@ const ResourceSchedulePlanner = ({
           </div>
         ) : null}
 
-        <div className="mt-4 grid gap-3 md:grid-cols-4">
+        <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
           <div className="rounded-lg bg-slate-50 px-3 py-2">
             <div className="text-xs text-slate-500">Покрыто</div>
             <FteSumValue
@@ -1703,6 +1747,13 @@ const ResourceSchedulePlanner = ({
               rounded={summary.roundedNeededFteHours ?? summary.neededFteHours}
               real={summary.realNeededFteHours ?? summary.neededFteHours}
             />
+          </div>
+          <div className="rounded-lg bg-emerald-50 px-3 py-2">
+            <div className="text-xs text-emerald-700">Риск прироста</div>
+            <b className="text-emerald-700">+{formatNumber(summary.incidentUpliftFteHours, 1)} FTE-ч</b>
+            <div className="mt-0.5 text-[11px] text-emerald-700">
+              база {formatNumber(summary.baseRealNeededFteHours, 2)} FTE-ч
+            </div>
           </div>
           <div className="rounded-lg bg-slate-50 px-3 py-2">
             <div className="text-xs text-slate-500">Дефицит</div>

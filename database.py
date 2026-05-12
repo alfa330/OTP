@@ -2724,12 +2724,29 @@ class Database:
 
     def seed_shift_auction_test_lots(self, updated_by=None, start_date=None):
         base_date = start_date or (date.today() + timedelta(days=1))
-        templates = [
-            ("08:00", "12:00", 0),
-            ("12:00", "16:00", 0),
-            ("16:00", "20:00", 0),
-            ("20:00", "00:00", 0)
+        template_labels = [
+            (1.0, ["7*16", "8*17", "9*18", "10*19", "11*20", "13*22", "15*00", "17*02"]),
+            (0.75, ["7*13/30", "8*14/30", "9*15/30", "10*16/30", "11*17/30", "12*18/30", "13*19/30", "14*20", "15*21/30", "15/30*22", "16/30*23", "17/30*00", "19/30*02"]),
+            (0.5, ["7*11", "8*12", "9*13", "10*14", "11*15", "12*16", "13*17", "14*18", "15*19", "16*20", "17*21", "18*22", "19*23", "20*00", "22*02"]),
+            (1.0, ["20*08"]),
         ]
+
+        def parse_template_time(part):
+            raw = str(part or '').strip()
+            if '/' in raw:
+                hour_raw, minute_raw = raw.split('/', 1)
+                minute = int(minute_raw or 0)
+            else:
+                hour_raw, minute = raw, 0
+            hour = int(hour_raw or 0) % 24
+            return f"{hour:02d}:{minute:02d}"
+
+        templates = []
+        for rate_min, labels in template_labels:
+            for label in labels:
+                start_raw, end_raw = str(label).split('*', 1)
+                templates.append((parse_template_time(start_raw), parse_template_time(end_raw), rate_min))
+
         rows = []
         for day_offset in range(7):
             lot_date = base_date + timedelta(days=day_offset)
