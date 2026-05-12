@@ -903,6 +903,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         { key: "trainings", label: "Тренинги", unit: "" }, // новый таб
         { key: "technical_issues", label: "Тех причины", unit: "ч" },
         { key: "offline_activity", label: "Офлайн активность", unit: "ч" },
+        { key: "no_phone", label: "Без телефона", unit: "ч" },
         { key: "bonuses", label: "Бонусы", unit: "₸" },
         { key: "fines", label: "Штрафы", unit: "₸" }
         ];
@@ -1060,6 +1061,25 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         let diff = e - s;
         if (diff < 0) diff += 24 * 60;
         return Number((diff / 60).toFixed(2));
+        }
+
+        function computeNoPhoneHoursFromDaily(dayData) {
+        if (!dayData || typeof dayData !== 'object') return 0;
+        const seconds = Number(dayData.no_phone_seconds ?? dayData.noPhoneSeconds ?? null);
+        if (Number.isFinite(seconds) && seconds > 0) return Number((seconds / 3600).toFixed(4));
+        const minutes = Number(dayData.no_phone_minutes ?? dayData.noPhoneMinutes ?? null);
+        if (Number.isFinite(minutes) && minutes > 0) return Number((minutes / 60).toFixed(4));
+        const hours = Number(dayData.no_phone_hours ?? dayData.noPhoneHours ?? null);
+        return Number.isFinite(hours) && hours > 0 ? Number(hours.toFixed(4)) : 0;
+        }
+
+        function getNoPhoneHoursForRow(op) {
+        const daily = (op?.daily && typeof op.daily === 'object' && !Array.isArray(op.daily)) ? op.daily : {};
+        let total = 0;
+        for (const dayData of Object.values(daily)) {
+            total += computeNoPhoneHoursFromDaily(dayData);
+        }
+        return Number(total.toFixed(4));
         }
 
         const PLANNER_SHIFT_TYPE_REGULAR = 'regular';
@@ -2033,6 +2053,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             return Math.max(1, max);
         }, [offlineActivitiesMap]);
 
+        const maxNoPhoneHours = useMemo(() => {
+            let max = 0;
+            for (const op of operators) {
+            const daily = (op?.daily && typeof op.daily === 'object' && !Array.isArray(op.daily)) ? op.daily : {};
+            for (const dayData of Object.values(daily)) {
+                const hours = computeNoPhoneHoursFromDaily(dayData);
+                if (hours > max) max = hours;
+            }
+            }
+            return Math.max(1, max);
+        }, [operators]);
+
         // Direction options derived from loaded operators (for filtering)
         const directionOptions = useMemo(() => {
             const s = new Set();
@@ -2132,7 +2164,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             hasNonZeroMetric(op.bonuses) ||
             hasNonZeroMetric(op.training_hours) ||
             hasNonZeroMetric(op.technical_issue_hours) ||
-            hasNonZeroMetric(op.offline_activity_hours)
+            hasNonZeroMetric(op.offline_activity_hours) ||
+            hasNonZeroMetric(op.no_phone_hours)
             ) {
             return true;
             }
@@ -2147,7 +2180,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 hasNonZeroMetric(dayData.talk_time) ||
                 hasNonZeroMetric(dayData.calls) ||
                 hasNonZeroMetric(dayData.efficiency) ||
-                hasNonZeroMetric(dayData.fine_amount)
+                hasNonZeroMetric(dayData.fine_amount) ||
+                hasNonZeroMetric(computeNoPhoneHoursFromDaily(dayData))
             ) {
                 return true;
             }
@@ -2378,6 +2412,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             let trainingsCounted = 0;
             let technicalIssuesTotal = 0;
             let offlineActivitiesTotal = 0;
+            let noPhoneTotal = 0;
             let sumFines = 0;
             let sumBonuses = 0;
 
@@ -2413,6 +2448,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 offlineHoursTotal += computeOfflineActivityDurationHours(item) || 0;
                 }
             }
+            const noPhoneHoursTotal = getNoPhoneHoursForRow(op);
 
             const displayedTotal = regular + totalHoursCounted + technicalHoursTotal + offlineHoursTotal;
             const prodDiff = displayedTotal - norm;
@@ -2426,6 +2462,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             trainingsCounted += totalHoursCounted;
             technicalIssuesTotal += technicalHoursTotal;
             offlineActivitiesTotal += offlineHoursTotal;
+            noPhoneTotal += noPhoneHoursTotal;
 
             // compute fines per operator (support both array of fines and legacy fine_amount)
             if (op.daily) {
@@ -2463,7 +2500,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             trainingsTotal,
             trainingsCounted,
             technicalIssuesTotal,
-            offlineActivitiesTotal
+            offlineActivitiesTotal,
+            noPhoneTotal
             };
         }, [filteredOperators, trainingsMap, technicalIssuesMap, offlineActivitiesMap]);
 
@@ -2632,6 +2670,28 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     title={title}
                 >
                     <span className={ratio > 0.5 ? 'text-white' : 'text-gray-900'}>{totalOfflineHours.toFixed(2)}</span>
+                </div>
+                </div>
+            );
+            }
+
+            if (selectedTab === 'no_phone') {
+            const noPhoneHours = computeNoPhoneHoursFromDaily(d);
+            if (!noPhoneHours) return <div className="text-sm text-gray-400">—</div>;
+
+            const ratio = Math.min(1, noPhoneHours / maxNoPhoneHours);
+            const alpha = 0.18 + 0.77 * ratio;
+            const minutes = Number(d?.no_phone_minutes ?? d?.noPhoneMinutes ?? Math.ceil(noPhoneHours * 60));
+            const title = `Без телефона: ${noPhoneHours.toFixed(2)} ч${Number.isFinite(minutes) && minutes > 0 ? ` (${Math.round(minutes)} мин)` : ''}`;
+
+            return (
+                <div className="relative flex items-center justify-center">
+                <div
+                    className="inline-flex items-center justify-center px-2 py-1 rounded-md text-sm font-medium"
+                    style={{ backgroundColor: `rgba(244,63,94,${alpha})` }}
+                    title={title}
+                >
+                    <span className={ratio > 0.5 ? 'text-white' : 'text-gray-900'}>{noPhoneHours.toFixed(2)}</span>
                 </div>
                 </div>
             );
@@ -3205,6 +3265,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Офлайн активность (ч)</div>
                     </>
                     )}
+                    {selectedTab === 'no_phone' && (
+                    <>
+                        <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Без телефона (ч)</div>
+                    </>
+                    )}
                     {selectedTab === 'bonuses' && (
                     <>
                         <div className="w-44 p-2 text-center border-l bg-gray-50 text-sm font-medium">Бонусы (₸)</div>
@@ -3239,6 +3304,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             let totalHoursNotCounted = 0;
                             let totalTechnicalIssuesHours = 0;
                             let totalOfflineActivityHours = 0;
+                            let totalNoPhoneHours = 0;
 
                             const byDay = trainingsMap[op.operator_id] || {};
                             for (const dKey of Object.keys(byDay)) {
@@ -3261,6 +3327,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 totalOfflineActivityHours += computeOfflineActivityDurationHours(item) || 0;
                             }
                             }
+                            totalNoPhoneHours = getNoPhoneHoursForRow(op);
 
                             const displayedTotal = regular + totalHoursCounted + totalTechnicalIssuesHours + totalOfflineActivityHours;
                             const prodDiff = displayedTotal - norm;
@@ -3383,6 +3450,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <div className="w-36 p-2 text-sm text-center border-l">{totalOfflineActivityHours.toFixed(2)}</div>
                                 </>
                                 )}
+                                {selectedTab === 'no_phone' && (
+                                <>
+                                    <div className="w-36 p-2 text-sm text-center border-l">{totalNoPhoneHours.toFixed(2)}</div>
+                                </>
+                                )}
                                 {selectedTab === 'bonuses' && (
                                 <div className="w-44 p-2 text-sm text-center border-l">
                                     {bonusesTotal ? (
@@ -3456,6 +3528,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         {selectedTab === 'offline_activity' && (
                         <>
                             <div className="w-36 p-2 text-sm text-center border-l">{footerTotals.offlineActivitiesTotal.toFixed(2)}</div>
+                        </>
+                        )}
+                        {selectedTab === 'no_phone' && (
+                        <>
+                            <div className="w-36 p-2 text-sm text-center border-l">{footerTotals.noPhoneTotal.toFixed(2)}</div>
                         </>
                         )}
                         {selectedTab === 'bonuses' && (
@@ -8171,6 +8248,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const overtimeMinutes = Math.max(0, Math.round(Number(raw?.overtimeMinutes ?? raw?.overtime_minutes ?? 0) || 0));
                 const trainingMinutes = Math.max(0, Math.round(Number(raw?.trainingMinutes ?? raw?.training_minutes ?? 0) || 0));
                 const technicalReasonMinutes = Math.max(0, Math.round(Number(raw?.technicalReasonMinutes ?? raw?.technical_reason_minutes ?? 0) || 0));
+                const noPhoneSeconds = Math.max(0, Math.round(Number(raw?.noPhoneSeconds ?? raw?.no_phone_seconds ?? 0) || 0));
+                const noPhoneMinutes = Math.max(
+                    Math.max(0, Math.round(Number(raw?.noPhoneMinutes ?? raw?.no_phone_minutes ?? 0) || 0)),
+                    Math.ceil(noPhoneSeconds / 60)
+                );
 
                 const lateStatus = (lateMinutes > 0)
                     ? (normalizePlannerAutoFlagStatus(raw?.lateStatus ?? raw?.late_status) || 'pending')
@@ -8200,6 +8282,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     overtimeMinutes,
                     trainingMinutes,
                     technicalReasonMinutes,
+                    noPhoneMinutes,
+                    noPhoneSeconds,
                     lateStatus,
                     earlyLeaveStatus,
                     trainingStatus,
@@ -17543,6 +17627,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             const liveLateMin = Number(shiftBoundaryMetricsForCell?.lateTotalMin ?? statusMatchMetricsForCell?.lateTotalMin ?? 0);
                                             const liveEarlyLeaveMin = Number(shiftBoundaryMetricsForCell?.earlyLeaveTotalMin ?? statusMatchMetricsForCell?.earlyLeaveTotalMin ?? 0);
                                             const liveNoPhoneSec = Number(noPhoneShiftMetricsForCell?.noPhoneSec || 0);
+                                            const aggregatedNoPhoneSec = Math.max(
+                                                Number(aggregatedFlagsForCell?.noPhoneSeconds || 0),
+                                                Number(aggregatedFlagsForCell?.noPhoneMinutes || 0) * 60
+                                            );
                                             const liveOvertimeOutsideShiftMin = Number(statusMatchMetricsForCell?.workOutsideShiftMin || 0);
                                             const shouldUseLiveBoundaryDefects = shouldComputeDefectMetrics || shouldComputeBoundaryDefectMetrics;
                                             let defectLateMin = shouldUseLiveBoundaryDefects
@@ -17555,7 +17643,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             if ((aggregatedFlagsForCell?.earlyLeaveStatus || null) === 'rejected') defectEarlyLeaveMin = 0;
                                             const defectTrainingMin = Number(aggregatedFlagsForCell?.trainingActive ? aggregatedFlagsForCell?.trainingMinutes : 0);
                                             const defectTechnicalReasonMin = Number(aggregatedFlagsForCell?.technicalReasonActive ? aggregatedFlagsForCell?.technicalReasonMinutes : 0);
-                                            const defectNoPhoneSec = shouldComputeDefectMetrics ? liveNoPhoneSec : 0;
+                                            const defectNoPhoneSec = shouldComputeDefectMetrics ? liveNoPhoneSec : aggregatedNoPhoneSec;
                                             const overtimeOutsideShiftMin = Math.max(
                                                 shouldComputeDefectMetrics ? liveOvertimeOutsideShiftMin : 0,
                                                 Number(aggregatedFlagsForCell?.overtimeMinutes || 0)

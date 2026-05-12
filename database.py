@@ -825,6 +825,8 @@ class Database:
                     training_seconds INTEGER NOT NULL DEFAULT 0,
                     technical_reason_minutes INTEGER NOT NULL DEFAULT 0,
                     technical_reason_seconds INTEGER NOT NULL DEFAULT 0,
+                    no_phone_minutes INTEGER NOT NULL DEFAULT 0,
+                    no_phone_seconds INTEGER NOT NULL DEFAULT 0,
                     late_status VARCHAR(16),
                     early_leave_status VARCHAR(16),
                     training_status VARCHAR(16),
@@ -842,6 +844,14 @@ class Database:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_daily_hours_operator_day
                 ON daily_hours(operator_id, day);
+            """)
+            cursor.execute("""
+                ALTER TABLE daily_hours
+                ADD COLUMN IF NOT EXISTS no_phone_minutes INTEGER NOT NULL DEFAULT 0;
+            """)
+            cursor.execute("""
+                ALTER TABLE daily_hours
+                ADD COLUMN IF NOT EXISTS no_phone_seconds INTEGER NOT NULL DEFAULT 0;
             """)
 
             # Table for multiple fines per day (new schema)
@@ -3545,7 +3555,8 @@ class Database:
             cursor.execute(
                 """
                 SELECT day, work_time, break_time, talk_time, calls, efficiency,
-                    fine_amount, fine_reason, fine_comment
+                    fine_amount, fine_reason, fine_comment,
+                    COALESCE(no_phone_minutes, 0), COALESCE(no_phone_seconds, 0)
                 FROM daily_hours
                 WHERE operator_id = %s AND day >= %s AND day <= %s
                 ORDER BY day
@@ -3556,10 +3567,15 @@ class Database:
 
             # build daily map: { "1": {...}, "2": {...}, ... }
             daily_map = {}
+            no_phone_hours = 0.0
             for row in daily_rows:
                 # row: (day, work_time, break_time, talk_time, calls, efficiency, fine_amount, fine_reason, fine_comment)
                 day_obj = row[0]
                 day_key = str(int(day_obj.day))
+                no_phone_minutes = int(row[9] or 0)
+                no_phone_seconds = int(row[10] or 0)
+                no_phone_day_hours = float(no_phone_seconds or 0) / 3600.0
+                no_phone_hours += no_phone_day_hours
                 daily_map[day_key] = {
                     "work_time": float(row[1]) if row[1] is not None else 0.0,
                     "break_time": float(row[2]) if row[2] is not None else 0.0,
@@ -3569,6 +3585,9 @@ class Database:
                     "fine_amount": float(row[6]) if row[6] is not None else 0.0,
                     "fine_reason": row[7],
                     "fine_comment": row[8],
+                    "no_phone_minutes": no_phone_minutes,
+                    "no_phone_seconds": no_phone_seconds,
+                    "no_phone_hours": round(float(no_phone_day_hours), 4),
                     "fines": [],  # will populate from daily_fines table if present
                     "bonuses": []  # will populate from daily_bonuses table if present
                 }
@@ -3736,6 +3755,7 @@ class Database:
             "norm_hours": float(norm_hours),
             "fines": float(fines),
             "training_hours": round(float(training_hours), 2),
+            "no_phone_hours": round(float(no_phone_hours), 2),
             "accounted_hours": round(float(accounted_hours), 2),
             "worked_hours_used": round(float(accounted_hours), 2),
             "daily": daily_map,
@@ -3808,7 +3828,8 @@ class Database:
             # Получаем daily_hours для этих операторов за месяц (с информацией о штрафах)
             cursor.execute("""
                 SELECT d.operator_id, d.day, d.work_time, d.break_time, d.talk_time, d.calls, d.efficiency,
-                    d.fine_amount, d.fine_reason, d.fine_comment
+                    d.fine_amount, d.fine_reason, d.fine_comment,
+                    COALESCE(d.no_phone_minutes, 0), COALESCE(d.no_phone_seconds, 0)
                 FROM daily_hours d
                 WHERE d.operator_id = ANY(%s)
                 AND d.day >= %s AND d.day <= %s
@@ -3818,9 +3839,14 @@ class Database:
 
             # Готовим словарь daily: operator_id -> {day_number: {...}}
             daily_map = {}
+            no_phone_totals_by_operator = {}
             for (op_id, day, work_time, break_time, talk_time, calls, eff,
-                fine_amount, fine_reason, fine_comment) in daily_rows:
+                fine_amount, fine_reason, fine_comment, no_phone_minutes, no_phone_seconds) in daily_rows:
                 day_num = str(int(day.day))
+                no_phone_minutes = int(no_phone_minutes or 0)
+                no_phone_seconds = int(no_phone_seconds or 0)
+                no_phone_day_hours = float(no_phone_seconds or 0) / 3600.0
+                no_phone_totals_by_operator[op_id] = no_phone_totals_by_operator.get(op_id, 0.0) + no_phone_day_hours
                 d = {
                     "work_time": float(work_time) if work_time is not None else 0.0,
                     "break_time": float(break_time) if break_time is not None else 0.0,
@@ -3830,6 +3856,9 @@ class Database:
                     "fine_amount": float(fine_amount) if fine_amount is not None else 0.0,
                     "fine_reason": fine_reason,
                     "fine_comment": fine_comment,
+                    "no_phone_minutes": no_phone_minutes,
+                    "no_phone_seconds": no_phone_seconds,
+                    "no_phone_hours": round(float(no_phone_day_hours), 4),
                     "fines": [],
                     "bonuses": []
                 }
@@ -3914,6 +3943,7 @@ class Database:
                 training_hours = float(training_totals_by_operator.get(op_id, 0.0)) if isinstance(training_totals_by_operator, dict) else 0.0
                 technical_issue_hours = float(technical_totals_by_operator.get(op_id, 0.0)) if isinstance(technical_totals_by_operator, dict) else 0.0
                 offline_activity_hours = float(offline_totals_by_operator.get(op_id, 0.0)) if isinstance(offline_totals_by_operator, dict) else 0.0
+                no_phone_hours = float(no_phone_totals_by_operator.get(op_id, 0.0))
                 accounted_hours = float(regular_hours or 0.0) + training_hours + technical_issue_hours + offline_activity_hours
                 chat_metrics_by_day = chat_metrics_by_operator.get(op_id, {}) if isinstance(chat_metrics_by_operator, dict) else {}
                 chat_metric_totals = chat_totals_by_operator.get(op_id, {}) if isinstance(chat_totals_by_operator, dict) else {}
@@ -3948,6 +3978,7 @@ class Database:
                     "status": status,
                     "norm_hours": float(norm_hours) if norm_hours is not None else 0.0,
                     "training_hours": round(float(training_hours), 2),
+                    "no_phone_hours": round(float(no_phone_hours), 2),
                     "accounted_hours": round(float(accounted_hours), 2),
                     "worked_hours_used": round(float(accounted_hours), 2),
                     "daily": op_daily,
@@ -4018,7 +4049,8 @@ class Database:
 
             cursor.execute("""
                 SELECT d.operator_id, d.day, d.work_time, d.break_time, d.talk_time, d.calls, d.efficiency,
-                    d.fine_amount, d.fine_reason, d.fine_comment
+                    d.fine_amount, d.fine_reason, d.fine_comment,
+                    COALESCE(d.no_phone_minutes, 0), COALESCE(d.no_phone_seconds, 0)
                 FROM daily_hours d
                 WHERE d.operator_id = ANY(%s)
                 AND d.day >= %s AND d.day <= %s
@@ -4027,9 +4059,14 @@ class Database:
             daily_rows = cursor.fetchall()
 
             daily_map = {}
+            no_phone_totals_by_operator = {}
             for (op_id, day, work_time, break_time, talk_time, calls, eff,
-                fine_amount, fine_reason, fine_comment) in daily_rows:
+                fine_amount, fine_reason, fine_comment, no_phone_minutes, no_phone_seconds) in daily_rows:
                 day_num = str(int(day.day))
+                no_phone_minutes = int(no_phone_minutes or 0)
+                no_phone_seconds = int(no_phone_seconds or 0)
+                no_phone_day_hours = float(no_phone_seconds or 0) / 3600.0
+                no_phone_totals_by_operator[op_id] = no_phone_totals_by_operator.get(op_id, 0.0) + no_phone_day_hours
                 d = {
                     "work_time": float(work_time) if work_time is not None else 0.0,
                     "break_time": float(break_time) if break_time is not None else 0.0,
@@ -4039,6 +4076,9 @@ class Database:
                     "fine_amount": float(fine_amount) if fine_amount is not None else 0.0,
                     "fine_reason": fine_reason,
                     "fine_comment": fine_comment,
+                    "no_phone_minutes": no_phone_minutes,
+                    "no_phone_seconds": no_phone_seconds,
+                    "no_phone_hours": round(float(no_phone_day_hours), 4),
                     "fines": [],
                     "bonuses": []
                 }
@@ -4121,6 +4161,7 @@ class Database:
                 training_hours = float(training_totals_by_operator.get(op_id, 0.0)) if isinstance(training_totals_by_operator, dict) else 0.0
                 technical_issue_hours = float(technical_totals_by_operator.get(op_id, 0.0)) if isinstance(technical_totals_by_operator, dict) else 0.0
                 offline_activity_hours = float(offline_totals_by_operator.get(op_id, 0.0)) if isinstance(offline_totals_by_operator, dict) else 0.0
+                no_phone_hours = float(no_phone_totals_by_operator.get(op_id, 0.0))
                 accounted_hours = float(regular_hours or 0.0) + training_hours + technical_issue_hours + offline_activity_hours
                 chat_metrics_by_day = chat_metrics_by_operator.get(op_id, {}) if isinstance(chat_metrics_by_operator, dict) else {}
                 chat_metric_totals = chat_totals_by_operator.get(op_id, {}) if isinstance(chat_totals_by_operator, dict) else {}
@@ -4155,6 +4196,7 @@ class Database:
                     "status": status,
                     "norm_hours": float(norm_hours) if norm_hours is not None else 0.0,
                     "training_hours": round(float(training_hours), 2),
+                    "no_phone_hours": round(float(no_phone_hours), 2),
                     "accounted_hours": round(float(accounted_hours), 2),
                     "worked_hours_used": round(float(accounted_hours), 2),
                     "daily": op_daily,
@@ -9981,7 +10023,7 @@ class Database:
     ) -> Tuple[str, bytes]:
         """
         Генерирует xlsx с листами: Отработанные часы, Перерыв, Звонки, Эффективность,
-        Штрафы, Тренинги, Тех. сбои, Офлайн активность.
+        Штрафы, Тренинги, Тех. сбои, Офлайн активность, Без телефона.
 
         Правила форматирования (по заданию пользователя):
         - Все числовые данные пишем без дополнительного округления.
@@ -10668,6 +10710,7 @@ class Database:
         build_generic_sheet('break_time', 'Перерыв', 'break_time', is_hour=True)
         build_calls_sheet()
         build_efficiency_sheet()
+        build_generic_sheet('no_phone', 'Без телефона', 'no_phone_hours', is_hour=True)
         build_fines_sheet()
 
         ws_t = wb.create_sheet(title='Тренинги'[:31])
@@ -12265,12 +12308,13 @@ class Database:
                 COALESCE(SUM(break_time),0),
                 COALESCE(SUM(talk_time),0),
                 COALESCE(SUM(calls),0),
-                COALESCE(SUM(efficiency),0)
+                COALESCE(SUM(efficiency),0),
+                COALESCE(SUM(no_phone_seconds),0)
             FROM daily_hours
             WHERE operator_id = %s AND day >= %s AND day <= %s
         """, (operator_id, start, end))
         row = cursor.fetchone()
-        total_work_time, total_training_time, total_break_time, total_talk_time, total_calls, total_efficiency_hours = row
+        total_work_time, total_training_time, total_break_time, total_talk_time, total_calls, total_efficiency_hours, total_no_phone_seconds = row
 
         chat_avg_score = None
         chat_avg_response_time_seconds = None
@@ -12380,6 +12424,7 @@ class Database:
             "calls_per_hour": float(calls_per_hour or 0.0),
             "fines": float(total_fines or 0.0),
             "offline_activity_hours": float(total_offline_hours or 0.0),
+            "no_phone_hours": float(total_no_phone_seconds or 0.0) / 3600.0,
             "chat_avg_score": chat_avg_score,
             "chat_avg_response_time_seconds": chat_avg_response_time_seconds,
             "chat_transfer_count": int(chat_transfer_count or 0)
@@ -12598,6 +12643,10 @@ class Database:
                 day_statuses,
                 lambda seg: self._schedule_auto_is_tech_reason_status_key(seg.get('status_key'))
             )
+            day_no_phone_status = pick_status_intervals(
+                day_statuses,
+                lambda seg: str(seg.get('status_key') or '') == SCHEDULE_AUTO_NO_PHONE_STATUS_KEY
+            )
             day_late_excused_status = pick_status_intervals(
                 day_statuses,
                 lambda seg: self._schedule_auto_is_late_excused_status_key(seg.get('status_key'))
@@ -12614,6 +12663,7 @@ class Database:
             training_intervals_effective = self._merge_break_intervals(day_training_status or [])
             training_seconds_in_shift = self._schedule_auto_overlap_minutes(day_shift_intervals, training_intervals_effective)
             technical_reason_seconds_in_shift = self._schedule_auto_overlap_minutes(day_shift_intervals, day_technical_reason_status)
+            no_phone_seconds_in_shift = self._schedule_auto_overlap_minutes(day_shift_intervals, day_no_phone_status)
 
             late_seconds_total = 0.0
             early_leave_seconds_total = 0.0
@@ -12709,12 +12759,14 @@ class Database:
             overtime_seconds_int = max(0, int(round(overtime_seconds_total)))
             training_seconds_int = max(0, int(round(training_seconds_in_shift)))
             technical_reason_seconds_int = max(0, int(round(technical_reason_seconds_in_shift)))
+            no_phone_seconds_int = max(0, int(round(no_phone_seconds_in_shift)))
 
             late_minutes_int = self._schedule_auto_seconds_to_display_minutes(late_seconds_int)
             early_leave_minutes_int = self._schedule_auto_seconds_to_display_minutes(early_leave_seconds_int)
             overtime_minutes_int = self._schedule_auto_seconds_to_display_minutes(overtime_seconds_int)
             training_minutes_int = self._schedule_auto_seconds_to_display_minutes(training_seconds_int)
             technical_reason_minutes_int = self._schedule_auto_seconds_to_display_minutes(technical_reason_seconds_int)
+            no_phone_minutes_int = self._schedule_auto_seconds_to_display_minutes(no_phone_seconds_int)
 
             existing = existing_by_day.get((op_id, day_value)) or {}
             prev_late_status = self._schedule_auto_normalize_flag_status(existing.get('late_status'))
@@ -12746,6 +12798,8 @@ class Database:
                 int(training_seconds_int),
                 int(technical_reason_minutes_int),
                 int(technical_reason_seconds_int),
+                int(no_phone_minutes_int),
+                int(no_phone_seconds_int),
                 late_status,
                 early_status,
                 training_status,
@@ -12769,6 +12823,7 @@ class Database:
                     overtime_minutes, overtime_seconds,
                     training_minutes, training_seconds,
                     technical_reason_minutes, technical_reason_seconds,
+                    no_phone_minutes, no_phone_seconds,
                     late_status, early_leave_status, training_status, technical_reason_status,
                     late_fine_id, early_leave_fine_id, training_fine_id, technical_reason_fine_id,
                     auto_aggregated, auto_aggregated_at
@@ -12792,6 +12847,8 @@ class Database:
                     training_seconds = EXCLUDED.training_seconds,
                     technical_reason_minutes = EXCLUDED.technical_reason_minutes,
                     technical_reason_seconds = EXCLUDED.technical_reason_seconds,
+                    no_phone_minutes = EXCLUDED.no_phone_minutes,
+                    no_phone_seconds = EXCLUDED.no_phone_seconds,
                     late_status = EXCLUDED.late_status,
                     early_leave_status = EXCLUDED.early_leave_status,
                     training_status = EXCLUDED.training_status,
@@ -12808,6 +12865,7 @@ class Database:
                 template="""(
                     %s, %s, %s, %s, %s, %s, %s,
                     %s,
+                    %s, %s,
                     %s, %s,
                     %s, %s,
                     %s, %s,
@@ -13487,6 +13545,8 @@ class Database:
                 COALESCE(training_seconds, 0),
                 COALESCE(technical_reason_minutes, 0),
                 COALESCE(technical_reason_seconds, 0),
+                COALESCE(no_phone_minutes, 0),
+                COALESCE(no_phone_seconds, 0),
                 late_status,
                 early_leave_status,
                 training_status,
@@ -13508,6 +13568,8 @@ class Database:
                  OR COALESCE(training_seconds, 0) > 0
                  OR COALESCE(technical_reason_minutes, 0) > 0
                  OR COALESCE(technical_reason_seconds, 0) > 0
+                 OR COALESCE(no_phone_minutes, 0) > 0
+                 OR COALESCE(no_phone_seconds, 0) > 0
                  OR late_status IS NOT NULL
                  OR early_leave_status IS NOT NULL
                  OR training_status IS NOT NULL
@@ -13544,6 +13606,8 @@ class Database:
                 training_seconds,
                 technical_reason_minutes,
                 technical_reason_seconds,
+                no_phone_minutes,
+                no_phone_seconds,
                 late_status,
                 early_status,
                 training_status,
@@ -13563,6 +13627,7 @@ class Database:
             overtime_seconds_int = max(0, int(overtime_seconds or 0))
             training_seconds_int = max(0, int(training_seconds or 0))
             technical_reason_seconds_int = max(0, int(technical_reason_seconds or 0))
+            no_phone_seconds_int = max(0, int(no_phone_seconds or 0))
 
             # Для совместимости с историческими данными берем максимум из старых минут
             # и минут, рассчитанных по секундам.
@@ -13586,6 +13651,10 @@ class Database:
                 max(0, int(technical_reason_minutes or 0)),
                 self._schedule_auto_seconds_to_display_minutes(technical_reason_seconds_int)
             )
+            no_phone_minutes_int = max(
+                max(0, int(no_phone_minutes or 0)),
+                self._schedule_auto_seconds_to_display_minutes(no_phone_seconds_int)
+            )
 
             late_status_norm = self._schedule_auto_flag_status_for_minutes(late_status, late_minutes_int)
             early_status_norm = self._schedule_auto_flag_status_for_minutes(early_status, early_leave_minutes_int)
@@ -13596,6 +13665,7 @@ class Database:
             has_early_leave = early_leave_minutes_int > 0 and early_status_norm != SCHEDULE_AUTO_FLAG_REJECTED
             has_training = training_minutes_int > 0 and training_status_norm != SCHEDULE_AUTO_FLAG_REJECTED
             has_technical_reason = technical_reason_minutes_int > 0 and technical_reason_status_norm != SCHEDULE_AUTO_FLAG_REJECTED
+            has_no_phone = no_phone_minutes_int > 0
             has_pending = (
                 (late_status_norm == SCHEDULE_AUTO_FLAG_PENDING and late_minutes_int > 0)
                 or (early_status_norm == SCHEDULE_AUTO_FLAG_PENDING and early_leave_minutes_int > 0)
@@ -13614,6 +13684,8 @@ class Database:
                 'trainingSeconds': training_seconds_int,
                 'technicalReasonMinutes': technical_reason_minutes_int,
                 'technicalReasonSeconds': technical_reason_seconds_int,
+                'noPhoneMinutes': no_phone_minutes_int,
+                'noPhoneSeconds': no_phone_seconds_int,
                 'lateStatus': late_status_norm,
                 'earlyLeaveStatus': early_status_norm,
                 'trainingStatus': training_status_norm,
@@ -13626,7 +13698,8 @@ class Database:
                 'hasEarlyLeave': bool(has_early_leave),
                 'hasTraining': bool(has_training),
                 'hasTechnicalReason': bool(has_technical_reason),
-                'hasDefect': bool(has_late or has_early_leave or has_training or has_technical_reason),
+                'hasNoPhone': bool(has_no_phone),
+                'hasDefect': bool(has_late or has_early_leave or has_training or has_technical_reason or has_no_phone),
                 'hasOvertime': bool(overtime_minutes_int > 0),
                 'hasPending': bool(has_pending)
             }
