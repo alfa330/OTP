@@ -353,6 +353,8 @@ const OPERATOR_STATUS_CHIP_CLASSES = {
   fired: 'bg-slate-100 text-slate-700 ring-slate-200',
 };
 
+const OPERATOR_DETAILS_PAGE_SIZE = 100;
+
 const operatorStatusEntries = (statusDays = {}) =>
   Object.entries(statusDays || {})
     .map(([status, days]) => ({ status, days: Number(days || 0) }))
@@ -445,12 +447,17 @@ const OperatorSummaryCard = ({
   );
 };
 
-const OperatorAvailabilityDetailsModal = ({ open, onClose, forecast }) => {
-  if (!open) return null;
-
+const OperatorAvailabilityDetailsModal = ({ open, onClose, forecast, isLoading = false, error = '' }) => {
   const details = Array.isArray(forecast?.periodOperatorAvailabilityDetails)
     ? forecast.periodOperatorAvailabilityDetails
     : [];
+  const [page, setPage] = useState(1);
+  useEffect(() => {
+    if (open) setPage(1);
+  }, [details.length, forecast?.period_end, forecast?.period_start, open]);
+
+  if (!open) return null;
+
   const rates = Array.isArray(forecast?.periodAvailableOperatorRates)
     ? forecast.periodAvailableOperatorRates
     : [];
@@ -463,6 +470,12 @@ const OperatorAvailabilityDetailsModal = ({ open, onClose, forecast }) => {
   const threshold = Number(forecast?.periodWorkingDaysThreshold || (periodDays ? periodDays / 2 : 0));
   const isDeficit = gap < 0;
   const statusEntries = operatorStatusEntries(statusSummary);
+  const totalPages = Math.max(1, Math.ceil(details.length / OPERATOR_DETAILS_PAGE_SIZE));
+  const currentPage = Math.min(page, totalPages);
+  const visibleDetails = details.slice(
+    (currentPage - 1) * OPERATOR_DETAILS_PAGE_SIZE,
+    currentPage * OPERATOR_DETAILS_PAGE_SIZE,
+  );
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm">
@@ -476,6 +489,15 @@ const OperatorAvailabilityDetailsModal = ({ open, onClose, forecast }) => {
             <p className="mt-1 text-sm text-slate-500">
               {formatDate(forecast?.period_start || forecast?.week_start)} - {formatDate(forecast?.period_end || forecast?.week_end)} · ставка входит, если Working больше {formatNumber(threshold, 1)} из {formatInt(periodDays)} дн.
             </p>
+            {isLoading ? (
+              <div className="mt-2 inline-flex items-center gap-2 rounded-lg bg-blue-50 px-2 py-1 text-xs font-semibold text-blue-700">
+                <RefreshCw size={13} className="animate-spin" />
+                Загрузка детализации
+              </div>
+            ) : null}
+            {error ? (
+              <div className="mt-2 rounded-lg bg-rose-50 px-2 py-1 text-xs font-semibold text-rose-700">{error}</div>
+            ) : null}
           </div>
           <button
             type="button"
@@ -556,7 +578,14 @@ const OperatorAvailabilityDetailsModal = ({ open, onClose, forecast }) => {
           <section className="mt-4 overflow-hidden rounded-xl border border-slate-200 bg-white">
             <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
               <div className="text-sm font-semibold text-slate-950">Операторы в расчете</div>
-              <div className="text-xs text-slate-500">{formatInt(details.length)} строк</div>
+              <div className="flex items-center gap-2 text-xs text-slate-500">
+                <span>{formatInt(details.length)} строк</span>
+                {details.length > OPERATOR_DETAILS_PAGE_SIZE ? (
+                  <span className="rounded-md bg-slate-100 px-2 py-1">
+                    {formatInt((currentPage - 1) * OPERATOR_DETAILS_PAGE_SIZE + 1)}-{formatInt(Math.min(currentPage * OPERATOR_DETAILS_PAGE_SIZE, details.length))}
+                  </span>
+                ) : null}
+              </div>
             </div>
             <div className="max-h-[420px] overflow-auto">
               <table className="min-w-full divide-y divide-slate-200 text-sm">
@@ -571,7 +600,7 @@ const OperatorAvailabilityDetailsModal = ({ open, onClose, forecast }) => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {details.map((operator) => (
+                  {visibleDetails.map((operator) => (
                     <tr key={operator.operatorId} className={operator.included ? 'bg-white' : 'bg-slate-50/70'}>
                       <td className="px-4 py-3">
                         <div className="font-semibold text-slate-900">{operator.name || `ID ${operator.operatorId}`}</div>
@@ -594,7 +623,17 @@ const OperatorAvailabilityDetailsModal = ({ open, onClose, forecast }) => {
                       <td className="px-4 py-3 text-right font-semibold text-slate-900">{formatNumber(operator.fteContribution, 2)}</td>
                     </tr>
                   ))}
-                  {!details.length ? (
+                  {isLoading ? (
+                    <tr>
+                      <td className="px-4 py-8 text-center text-sm text-slate-500" colSpan={6}>
+                        <span className="inline-flex items-center gap-2">
+                          <RefreshCw size={15} className="animate-spin" />
+                          Загрузка детализации...
+                        </span>
+                      </td>
+                    </tr>
+                  ) : null}
+                  {!isLoading && !details.length ? (
                     <tr>
                       <td className="px-4 py-8 text-center text-sm text-slate-500" colSpan={6}>Нет данных по операторам.</td>
                     </tr>
@@ -602,6 +641,31 @@ const OperatorAvailabilityDetailsModal = ({ open, onClose, forecast }) => {
                 </tbody>
               </table>
             </div>
+            {details.length > OPERATOR_DETAILS_PAGE_SIZE ? (
+              <div className="flex items-center justify-between gap-3 border-t border-slate-200 px-4 py-3">
+                <button
+                  type="button"
+                  onClick={() => setPage((current) => Math.max(1, current - 1))}
+                  disabled={currentPage <= 1}
+                  className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <ChevronLeft size={15} />
+                  Назад
+                </button>
+                <div className="text-sm font-semibold text-slate-700">
+                  {formatInt(currentPage)} / {formatInt(totalPages)}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
+                  disabled={currentPage >= totalPages}
+                  className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Вперед
+                  <ChevronRight size={15} />
+                </button>
+              </div>
+            ) : null}
           </section>
         </div>
       </div>
@@ -1118,6 +1182,9 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
   const [loadedDateCache, setLoadedDateCache] = useState([]);
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
   const [isOperatorDetailsOpen, setIsOperatorDetailsOpen] = useState(false);
+  const [operatorAvailabilityDetailsByKey, setOperatorAvailabilityDetailsByKey] = useState({});
+  const [isOperatorDetailsLoading, setIsOperatorDetailsLoading] = useState(false);
+  const [operatorDetailsError, setOperatorDetailsError] = useState('');
   const userId = user?.id || '';
 
   useEffect(() => {
@@ -1156,6 +1223,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
       });
       const payload = response.data || {};
       setOverview(payload);
+      setOperatorAvailabilityDetailsByKey({});
       setSettingsDraft(payload.settings || null);
       setLoadedDateCache((current) => {
         const next = new Set(current);
@@ -1622,6 +1690,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
   const selectedFileName = uploadFile?.name || 'Файл не выбран';
   const selectedDirectionIds = (settingsDraft?.selected_direction_ids || []).map((item) => Number(item)).filter(Boolean);
   const selectedDirectionSet = new Set(selectedDirectionIds);
+  const availabilityDirectionIds = (overview?.settings?.selected_direction_ids || []).map((item) => Number(item)).filter(Boolean);
   const periodAvailableOperatorFte = Number(
     nextWeekForecast.periodAvailableOperatorFte ?? nextWeekForecast.currentOperatorFte ?? 0,
   );
@@ -1634,6 +1703,64 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
       periodAvailableOperatorFte - Number(nextWeekForecast.operatorsWithShrinkage || 0)
     ),
   );
+  const operatorAvailabilityCacheKey = [
+    forecastPeriodStart || '',
+    forecastPeriodEnd || '',
+    availabilityDirectionIds.join(','),
+  ].join('|');
+  const operatorAvailabilityDetailsPayload = operatorAvailabilityDetailsByKey[operatorAvailabilityCacheKey] || null;
+  const operatorDetailsForecast = operatorAvailabilityDetailsPayload
+    ? { ...nextWeekForecast, ...operatorAvailabilityDetailsPayload }
+    : nextWeekForecast;
+
+  const fetchOperatorAvailabilityDetails = useCallback(async () => {
+    if (!apiRoot || !forecastPeriodStart || !forecastPeriodEnd) return null;
+    if (operatorAvailabilityDetailsByKey[operatorAvailabilityCacheKey]) {
+      setOperatorDetailsError('');
+      return operatorAvailabilityDetailsByKey[operatorAvailabilityCacheKey];
+    }
+    setIsOperatorDetailsLoading(true);
+    setOperatorDetailsError('');
+    try {
+      const response = await axios.get(`${apiRoot}/api/resource_fte/operator_availability`, {
+        params: {
+          forecast_date_from: forecastPeriodStart,
+          forecast_date_to: forecastPeriodEnd,
+        },
+        headers: buildHeaders(),
+      });
+      const payload = response.data?.availability || {};
+      setOperatorAvailabilityDetailsByKey((current) => ({
+        ...current,
+        [operatorAvailabilityCacheKey]: payload,
+      }));
+      return payload;
+    } catch (error) {
+      const message = error?.response?.data?.error || 'Не удалось загрузить детализацию операторов';
+      setOperatorDetailsError(message);
+      notify(message, 'error');
+      return null;
+    } finally {
+      setIsOperatorDetailsLoading(false);
+    }
+  }, [
+    apiRoot,
+    buildHeaders,
+    forecastPeriodEnd,
+    forecastPeriodStart,
+    notify,
+    operatorAvailabilityCacheKey,
+    operatorAvailabilityDetailsByKey,
+  ]);
+
+  const openOperatorDetails = useCallback(() => {
+    setIsOperatorDetailsOpen(true);
+    fetchOperatorAvailabilityDetails();
+  }, [fetchOperatorAvailabilityDetails]);
+
+  useEffect(() => {
+    if (isOperatorDetailsOpen) fetchOperatorAvailabilityDetails();
+  }, [fetchOperatorAvailabilityDetails, isOperatorDetailsOpen]);
 
   const toggleResourceDirection = (directionId, checked) => {
     setSettingsDraft((current) => {
@@ -1788,7 +1915,9 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
       <OperatorAvailabilityDetailsModal
         open={isOperatorDetailsOpen}
         onClose={() => setIsOperatorDetailsOpen(false)}
-        forecast={nextWeekForecast}
+        forecast={operatorDetailsForecast}
+        isLoading={isOperatorDetailsLoading}
+        error={operatorDetailsError}
       />
 
       <div className="space-y-6 p-4 md:p-6">
@@ -2435,7 +2564,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                     totalCount={periodOperatorCount}
                     partialCount={periodPartialOperatorCount}
                     unavailableCount={periodUnavailableOperatorCount}
-                    onOpen={() => setIsOperatorDetailsOpen(true)}
+                    onOpen={openOperatorDetails}
                   />
                 </div>
 

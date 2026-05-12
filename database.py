@@ -1127,6 +1127,18 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_op_sched_status_periods_operator_end
                 ON operator_schedule_status_periods(operator_id, end_date);
             """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_op_sched_status_periods_operator_range
+                ON operator_schedule_status_periods(operator_id, start_date DESC, end_date, id DESC);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_op_sched_status_periods_operator_status
+                ON operator_schedule_status_periods(operator_id, status_code);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_op_sched_status_periods_status_operator
+                ON operator_schedule_status_periods(status_code, operator_id);
+            """)
             # Status timeline imports (CSV transitions -> events/segments for analytics and KPI calculations)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS operator_status_import_batches (
