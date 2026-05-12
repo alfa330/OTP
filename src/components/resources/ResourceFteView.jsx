@@ -397,6 +397,7 @@ const OperatorStatusChips = ({ statusDays }) => {
 
 const OperatorSummaryCard = ({
   requiredFte,
+  requiredWithUplift,
   baseFte,
   availableFte,
   currentFte,
@@ -407,7 +408,11 @@ const OperatorSummaryCard = ({
   unavailableCount,
   onOpen,
 }) => {
-  const isDeficit = Number(gap || 0) < 0;
+  const requiredNumber = Number(requiredFte || 0);
+  const requiredWithUpliftNumber = Number(requiredWithUplift ?? requiredFte ?? 0);
+  const hasUpliftRequirement = Math.abs(requiredWithUpliftNumber - requiredNumber) > 0.005;
+  const upliftGap = Number(availableFte || 0) - requiredWithUpliftNumber;
+  const isDeficit = Number(hasUpliftRequirement ? upliftGap : gap || 0) < 0;
   return (
     <button
       type="button"
@@ -419,14 +424,20 @@ const OperatorSummaryCard = ({
       <div className="flex items-start justify-between gap-3">
         <div>
           <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Операторы</p>
-          <div className="mt-2 grid grid-cols-2 gap-3">
+          <div className={`mt-2 grid gap-3 ${hasUpliftRequirement ? 'grid-cols-3' : 'grid-cols-2'}`}>
             <div>
               <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Нужно</div>
-              <div className="text-2xl font-semibold text-slate-950">{formatNumber(requiredFte, 2)}</div>
+              <div className="text-xl font-semibold text-slate-950 sm:text-2xl">{formatNumber(requiredFte, 2)}</div>
             </div>
+            {hasUpliftRequirement ? (
+              <div>
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-emerald-600">С приростом</div>
+                <div className="text-xl font-semibold text-emerald-700 sm:text-2xl">{formatNumber(requiredWithUpliftNumber, 2)}</div>
+              </div>
+            ) : null}
             <div>
               <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Доступно</div>
-              <div className={`text-2xl font-semibold ${isDeficit ? 'text-rose-700' : 'text-emerald-700'}`}>
+              <div className={`text-xl font-semibold sm:text-2xl ${isDeficit ? 'text-rose-700' : 'text-emerald-700'}`}>
                 {formatNumber(availableFte, 2)}
               </div>
             </div>
@@ -436,11 +447,17 @@ const OperatorSummaryCard = ({
           <Users size={18} />
         </div>
       </div>
-      <div className="mt-3 grid gap-2 text-xs text-slate-600 sm:grid-cols-2">
+      <div className={`mt-3 grid gap-2 text-xs text-slate-600 ${hasUpliftRequirement ? 'sm:grid-cols-3' : 'sm:grid-cols-2'}`}>
         <div className="rounded-lg bg-slate-50 px-3 py-2">
           <span className="block text-slate-400">Разница</span>
-          <b className={isDeficit ? 'text-rose-700' : 'text-emerald-700'}>{formatSignedNumber(gap, 2)} FTE</b>
+          <b className={Number(gap || 0) < 0 ? 'text-rose-700' : 'text-emerald-700'}>{formatSignedNumber(gap, 2)} FTE</b>
         </div>
+        {hasUpliftRequirement ? (
+          <div className="rounded-lg bg-emerald-50 px-3 py-2">
+            <span className="block text-emerald-700">Разница с приростом</span>
+            <b className={upliftGap < 0 ? 'text-rose-700' : 'text-emerald-700'}>{formatSignedNumber(upliftGap, 2)} FTE</b>
+          </div>
+        ) : null}
         <div className="rounded-lg bg-slate-50 px-3 py-2">
           <span className="block text-slate-400">Сотрудники</span>
           <b className="text-slate-900">{formatInt(availableCount)} / {formatInt(totalCount)}</b>
@@ -2590,6 +2607,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                   />
                   <OperatorSummaryCard
                     requiredFte={nextWeekForecast.operatorsWithShrinkage}
+                    requiredWithUplift={nextWeekForecast.incidentAdjustedOperatorsWithShrinkage}
                     baseFte={nextWeekForecast.baseOperators}
                     availableFte={periodAvailableOperatorFte}
                     currentFte={nextWeekForecast.currentOperatorFte}
