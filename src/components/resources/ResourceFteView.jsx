@@ -1117,6 +1117,9 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
     operatorsWithShrinkage: 0,
     currentOperatorFte: 0,
     operatorFteGap: 0,
+    periodAvailableOperatorFte: 0,
+    periodAvailableOperatorCount: 0,
+    periodAvailableOperatorFteGap: 0,
     historyComplete: false,
     history_periods: getForecastHistoryPeriods(selectedForecastWeekStart, selectedForecastPeriodEnd),
   };
@@ -1335,6 +1338,15 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
   const selectedFileName = uploadFile?.name || 'Файл не выбран';
   const selectedDirectionIds = (settingsDraft?.selected_direction_ids || []).map((item) => Number(item)).filter(Boolean);
   const selectedDirectionSet = new Set(selectedDirectionIds);
+  const periodAvailableOperatorFte = Number(
+    nextWeekForecast.periodAvailableOperatorFte ?? nextWeekForecast.currentOperatorFte ?? 0,
+  );
+  const periodAvailableOperatorCount = Number(nextWeekForecast.periodAvailableOperatorCount ?? 0);
+  const periodAvailableOperatorFteGap = Number(
+    nextWeekForecast.periodAvailableOperatorFteGap ?? (
+      periodAvailableOperatorFte - Number(nextWeekForecast.operatorsWithShrinkage || 0)
+    ),
+  );
 
   const toggleResourceDirection = (directionId, checked) => {
     setSettingsDraft((current) => {
@@ -2124,8 +2136,15 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                     icon={Users}
                     label="Операторы"
                     value={formatNumber(nextWeekForecast.operatorsWithShrinkage, 2)}
-                    hint={`Без усушки: ${formatNumber(nextWeekForecast.baseOperators, 2)} · текущий FTE: ${formatNumber(nextWeekForecast.currentOperatorFte, 2)} · разница: ${formatSignedNumber(nextWeekForecast.operatorFteGap, 2)}`}
-                    tone={Number(nextWeekForecast.operatorFteGap || 0) < 0 ? 'rose' : 'emerald'}
+                    hint={(
+                      <span>
+                        Доступно в период: {formatNumber(periodAvailableOperatorFte, 2)} FTE
+                        {periodAvailableOperatorCount > 0 ? ` (${formatInt(periodAvailableOperatorCount)} чел.)` : ''} · разница: {formatSignedNumber(periodAvailableOperatorFteGap, 2)}
+                        <br />
+                        Без усушки: {formatNumber(nextWeekForecast.baseOperators, 2)} · текущий FTE: {formatNumber(nextWeekForecast.currentOperatorFte, 2)}
+                      </span>
+                    )}
+                    tone={periodAvailableOperatorFteGap < 0 ? 'rose' : 'emerald'}
                   />
                 </div>
 
