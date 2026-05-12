@@ -7,6 +7,8 @@ from .common import WEEKDAYS_RU, _round_value, _to_float, _to_int
 
 INCIDENT_UPLIFT_LOOKBACK_DAYS = 6
 INCIDENT_UPLIFT_MAX_RATIO = 2.0
+INCIDENT_UPLIFT_CONFIDENCE_FLOOR = 0.35
+INCIDENT_UPLIFT_FUTURE_MIN_WEIGHT = 0.55
 
 
 def _build_profile_from_history_dates_tx(
@@ -149,6 +151,18 @@ def _week_start_date(value):
 
 def _next_week_start_date(value):
     return _week_start_date(value) + timedelta(days=7)
+
+
+def _incident_future_weight(day_index: int, day_count: int) -> float:
+    day_count = max(1, int(day_count or 1))
+    if day_count <= 1:
+        return 1.0
+    safe_index = min(max(0, int(day_index or 0)), day_count - 1)
+    progress = safe_index / (day_count - 1)
+    return max(
+        INCIDENT_UPLIFT_FUTURE_MIN_WEIGHT,
+        1.0 - ((1.0 - INCIDENT_UPLIFT_FUTURE_MIN_WEIGHT) * progress),
+    )
 
 
 def _weighted_aht_from_profiles(profiles: List[Dict[str, Any]]) -> float:
@@ -319,18 +333,29 @@ def _empty_incident_uplift_profile() -> Dict[str, Any]:
     return {
         "lookback_days": INCIDENT_UPLIFT_LOOKBACK_DAYS,
         "max_ratio": INCIDENT_UPLIFT_MAX_RATIO,
+        "confidence_floor": INCIDENT_UPLIFT_CONFIDENCE_FLOOR,
+        "future_min_weight": INCIDENT_UPLIFT_FUTURE_MIN_WEIGHT,
         "source_dates": [],
         "source_start": None,
         "source_end": None,
         "source_day_count": 0,
         "average_growth_ratio": 0.0,
+        "raw_average_growth_ratio": 0.0,
         "max_hourly_growth_ratio": 0.0,
         "total_positive_delta_calls": 0.0,
+        "future_weights": [],
         "hourly": [
             {
                 "hour": hour,
                 "growth_ratio": 0.0,
+                "raw_growth_ratio": 0.0,
                 "weighted_delta_calls": 0.0,
+                "raw_weighted_delta_calls": 0.0,
+                "confidence": 0.0,
+                "coverage_factor": 0.0,
+                "persistence_factor": 0.0,
+                "positive_frequency": 0.0,
+                "positive_recency_share": 0.0,
                 "source_count": 0,
                 "positive_source_count": 0,
                 "sources": [],
@@ -382,6 +407,8 @@ def _compute_recent_incident_uplift_profile_tx(
             "ratio_weight": 0.0,
             "delta_weighted_sum": 0.0,
             "delta_weight": 0.0,
+            "source_weight": 0.0,
+            "positive_weight": 0.0,
             "source_count": 0,
             "positive_source_count": 0,
             "sources": [],
@@ -402,6 +429,7 @@ def _compute_recent_incident_uplift_profile_tx(
         received_calls = max(0.0, _to_float(received_raw))
         positive_delta = max(0.0, received_calls - forecast_calls)
         ratio = 0.0
+        hourly[hour]["source_weight"] += weight
         if forecast_calls > 0:
             ratio = min(positive_delta / forecast_calls, INCIDENT_UPLIFT_MAX_RATIO)
             hourly[hour]["ratio_weighted_sum"] += ratio * weight
@@ -414,6 +442,7 @@ def _compute_recent_incident_uplift_profile_tx(
         hourly[hour]["source_count"] += 1
         if positive_delta > 0:
             hourly[hour]["positive_source_count"] += 1
+            hourly[hour]["positive_weight"] += weight
             total_positive_delta += positive_delta
         hourly[hour]["sources"].append({
             "date": report_date.isoformat(),
@@ -425,31 +454,69 @@ def _compute_recent_incident_uplift_profile_tx(
         })
 
     hourly_rows = []
+    adjusted_total_weighted_ratio = 0.0
+    adjusted_total_ratio_weight = 0.0
     for hour in range(24):
         item = hourly[hour]
         ratio_weight = _to_float(item.get("ratio_weight"))
         delta_weight = _to_float(item.get("delta_weight"))
-        growth_ratio = item["ratio_weighted_sum"] / ratio_weight if ratio_weight > 0 else 0.0
-        weighted_delta_calls = item["delta_weighted_sum"] / delta_weight if delta_weight > 0 else 0.0
+        source_count = int(item.get("source_count") or 0)
+        positive_source_count = int(item.get("positive_source_count") or 0)
+        source_weight = _to_float(item.get("source_weight"))
+        positive_weight = _to_float(item.get("positive_weight"))
+        raw_growth_ratio = item["ratio_weighted_sum"] / ratio_weight if ratio_weight > 0 else 0.0
+        raw_weighted_delta_calls = item["delta_weighted_sum"] / delta_weight if delta_weight > 0 else 0.0
+        coverage_factor = min(1.0, source_count / lookback_days) if lookback_days > 0 else 0.0
+        positive_frequency = positive_source_count / source_count if source_count > 0 else 0.0
+        positive_recency_share = positive_weight / source_weight if source_weight > 0 else positive_frequency
+        persistence_factor = min(1.0, max(0.0, (positive_frequency + positive_recency_share) / 2))
+        confidence = 0.0
+        if positive_source_count > 0:
+            confidence = (coverage_factor ** 0.5) * (
+                INCIDENT_UPLIFT_CONFIDENCE_FLOOR
+                + ((1.0 - INCIDENT_UPLIFT_CONFIDENCE_FLOOR) * persistence_factor)
+            )
+        confidence = min(1.0, max(0.0, confidence))
+        growth_ratio = min(INCIDENT_UPLIFT_MAX_RATIO, raw_growth_ratio * confidence)
+        weighted_delta_calls = raw_weighted_delta_calls * confidence
+        if ratio_weight > 0:
+            adjusted_total_weighted_ratio += growth_ratio * ratio_weight
+            adjusted_total_ratio_weight += ratio_weight
         hourly_rows.append({
             "hour": hour,
             "growth_ratio": round(growth_ratio, 4),
+            "raw_growth_ratio": round(raw_growth_ratio, 4),
             "weighted_delta_calls": round(weighted_delta_calls, 4),
-            "source_count": int(item.get("source_count") or 0),
-            "positive_source_count": int(item.get("positive_source_count") or 0),
+            "raw_weighted_delta_calls": round(raw_weighted_delta_calls, 4),
+            "confidence": round(confidence, 4),
+            "coverage_factor": round(coverage_factor, 4),
+            "persistence_factor": round(persistence_factor, 4),
+            "positive_frequency": round(positive_frequency, 4),
+            "positive_recency_share": round(positive_recency_share, 4),
+            "source_count": source_count,
+            "positive_source_count": positive_source_count,
             "sources": item.get("sources") or [],
         })
 
     source_dates_iso = [item.isoformat() for item in source_dates]
+    raw_average_growth_ratio = total_weighted_ratio / total_ratio_weight if total_ratio_weight > 0 else 0.0
+    average_growth_ratio = (
+        adjusted_total_weighted_ratio / adjusted_total_ratio_weight
+        if adjusted_total_ratio_weight > 0 else 0.0
+    )
     return {
         "lookback_days": lookback_days,
         "max_ratio": INCIDENT_UPLIFT_MAX_RATIO,
+        "confidence_floor": INCIDENT_UPLIFT_CONFIDENCE_FLOOR,
+        "future_min_weight": INCIDENT_UPLIFT_FUTURE_MIN_WEIGHT,
         "source_dates": source_dates_iso,
         "source_start": min(source_dates).isoformat(),
         "source_end": max(source_dates).isoformat(),
         "source_day_count": len(source_dates),
-        "average_growth_ratio": round(total_weighted_ratio / total_ratio_weight, 4) if total_ratio_weight > 0 else 0.0,
-        "weighted_total_growth_ratio": round(total_positive_delta / total_forecast_for_ratio, 4) if total_forecast_for_ratio > 0 else 0.0,
+        "average_growth_ratio": round(average_growth_ratio, 4),
+        "raw_average_growth_ratio": round(raw_average_growth_ratio, 4),
+        "weighted_total_growth_ratio": round(average_growth_ratio, 4),
+        "raw_weighted_total_growth_ratio": round(total_positive_delta / total_forecast_for_ratio, 4) if total_forecast_for_ratio > 0 else 0.0,
         "max_hourly_growth_ratio": max((row["growth_ratio"] for row in hourly_rows), default=0.0),
         "total_positive_delta_calls": round(total_positive_delta, 4),
         "hourly": hourly_rows,
@@ -482,12 +549,20 @@ def _build_forecast_payload(
     second_history_period_start = period_start - timedelta(days=14)
     second_history_period_end = period_end - timedelta(days=14)
     days = []
+    future_weights = []
+    forecast_day_count = max(1, len(profiles))
     incident_period_calls = 0.0
     incident_period_workload_minutes = 0.0
     incident_period_fte_hours = 0.0
     for index, profile in enumerate(profiles):
         weekday = int(profile.get("weekday", 0))
         forecast_date_iso = profile.get("forecast_date") or (period_start + timedelta(days=index)).isoformat()
+        future_weight = _incident_future_weight(index, forecast_day_count)
+        future_weights.append({
+            "date": forecast_date_iso,
+            "day_index": index,
+            "weight": round(future_weight, 4),
+        })
         actual_day = actual_resource_by_day.get(forecast_date_iso, {})
         hourly_forecast = []
         day_incident_calls = 0.0
@@ -501,10 +576,12 @@ def _build_forecast_payload(
             forecast_workload_minutes = _to_float(row.get("workload_minutes"))
             forecast_fte = _to_float(row.get("fte"))
             uplift_hour = incident_uplift_by_hour.get(hour, {})
-            incident_ratio = _to_float(uplift_hour.get("growth_ratio"))
+            base_incident_ratio = _to_float(uplift_hour.get("growth_ratio"))
+            raw_incident_ratio = _to_float(uplift_hour.get("raw_growth_ratio"))
+            incident_ratio = base_incident_ratio * future_weight
             incident_calls = forecast_calls * incident_ratio
             if forecast_calls <= 0 and incident_calls <= 0:
-                incident_calls = _to_float(uplift_hour.get("weighted_delta_calls"))
+                incident_calls = _to_float(uplift_hour.get("weighted_delta_calls")) * future_weight
             incident_calls = max(0.0, incident_calls)
             incident_workload_minutes = incident_calls * settings["answer_rate"] * forecast_aht_seconds / 60
             incident_fte = incident_workload_minutes / effective_minutes if effective_minutes > 0 else 0.0
@@ -519,6 +596,14 @@ def _build_forecast_payload(
                     "forecast_workload_minutes": forecast_workload_minutes,
                     "forecast_fte": forecast_fte,
                     "incident_uplift_ratio": incident_ratio,
+                    "incident_base_uplift_ratio": base_incident_ratio,
+                    "incident_raw_uplift_ratio": raw_incident_ratio,
+                    "incident_future_weight": future_weight,
+                    "incident_uplift_confidence": _to_float(uplift_hour.get("confidence")),
+                    "incident_uplift_persistence_factor": _to_float(uplift_hour.get("persistence_factor")),
+                    "incident_uplift_coverage_factor": _to_float(uplift_hour.get("coverage_factor")),
+                    "incident_uplift_positive_frequency": _to_float(uplift_hour.get("positive_frequency")),
+                    "incident_uplift_positive_recency_share": _to_float(uplift_hour.get("positive_recency_share")),
                     "incident_uplift_calls": incident_calls,
                     "incident_uplift_workload_minutes": incident_workload_minutes,
                     "incident_uplift_fte": incident_fte,
@@ -554,6 +639,7 @@ def _build_forecast_payload(
                 "incident_uplift_workload_minutes": day_incident_workload_minutes,
                 "incident_uplift_fte": day_incident_fte,
                 "incident_uplift_ratio": (day_incident_calls / forecast_calls_total) if forecast_calls_total > 0 else 0.0,
+                "incident_future_weight": future_weight,
                 "incident_adjusted_calls": forecast_calls_total + day_incident_calls,
                 "incident_adjusted_workload_minutes": forecast_workload_minutes_total + day_incident_workload_minutes,
                 "incident_adjusted_daily_fte": forecast_daily_fte + day_incident_fte,
@@ -623,6 +709,8 @@ def _build_forecast_payload(
         "weeklyFteHours": period_totals["period_fte_hours"],
         "incidentUplift": {
             **incident_uplift_profile,
+            "future_min_weight": INCIDENT_UPLIFT_FUTURE_MIN_WEIGHT,
+            "future_weights": future_weights,
             "projected_calls": round(incident_period_calls, 4),
             "projected_workload_minutes": round(incident_period_workload_minutes, 4),
             "projected_fte_hours": round(incident_period_fte_hours, 4),

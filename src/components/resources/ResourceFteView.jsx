@@ -222,8 +222,24 @@ const formatWorkloadTooltip = (row, answerRate) => {
 
 const formatIncidentUpliftTooltip = (row) => {
   const sources = row?.incident_uplift_sources || row?.incidentUpliftSources || [];
-  if (!sources.length) return 'Нет данных последних 6 дней для этого часа';
+  const futureWeight = Number(row?.incident_future_weight ?? row?.incidentFutureWeight ?? 1);
+  const confidence = Number(row?.incident_uplift_confidence ?? row?.incidentUpliftConfidence ?? 0);
+  const baseRatio = Number(row?.incident_base_uplift_ratio ?? row?.incidentBaseUpliftRatio ?? 0);
+  const rawRatio = Number(row?.incident_raw_uplift_ratio ?? row?.incidentRawUpliftRatio ?? 0);
+  const modelLines = [
+    Number.isFinite(rawRatio) && rawRatio > 0 ? `сырой риск: ${formatPercent(rawRatio, 0)}` : null,
+    Number.isFinite(confidence) && confidence > 0 ? `надежность часа: ${formatPercent(confidence, 0)}` : null,
+    Number.isFinite(baseRatio) && baseRatio > 0 ? `после сглаживания: ${formatPercent(baseRatio, 0)}` : null,
+    Number.isFinite(futureWeight) && futureWeight > 0 ? `вес будущего дня: ${formatPercent(futureWeight, 0)}` : null,
+  ].filter(Boolean);
+  if (!sources.length) {
+    return [
+      ...modelLines,
+      'Нет данных последних 6 дней для этого часа',
+    ].join('\n');
+  }
   return [
+    ...modelLines,
     'Прирост считается только по превышению факта над прогнозом:',
     ...sources.map((item) => {
       const delta = Number(item.delta_calls || 0);
@@ -2602,7 +2618,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                     icon={TrendingUp}
                     label="Возможный прирост"
                     value={`+${formatInt(nextWeekForecast.incidentUpliftCalls)} зв.`}
-                    hint={`+${formatNumber(nextWeekForecast.incidentUpliftFteHours, 1)} FTE-ч · ${Number(nextWeekForecast.incidentUplift?.source_day_count || 0)}/6 дн.`}
+                    hint={`+${formatNumber(nextWeekForecast.incidentUpliftFteHours, 1)} FTE-ч · ${Number(nextWeekForecast.incidentUplift?.source_day_count || 0)}/6 дн. · дни ${formatPercent(1, 0)}-${formatPercent(nextWeekForecast.incidentUplift?.future_min_weight ?? 0.55, 0)}`}
                     tone="emerald"
                   />
                   <OperatorSummaryCard
@@ -2674,7 +2690,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                             <span>Звонки: <b className="text-slate-800">{formatInt(profile.forecast_calls)}</b></span>
                             <span>История: <b className={profile.insufficient_history ? 'text-amber-700' : 'text-emerald-700'}>{profile.history_count}/2</b></span>
                             {Number(profile.incident_uplift_calls || 0) > 0.01 ? (
-                              <span className="col-span-2 text-emerald-700">Возможный прирост: <b>+{formatInt(profile.incident_uplift_calls)} зв. · +{formatNumber(profile.incident_uplift_fte, 2)} FTE</b></span>
+                              <span className="col-span-2 text-emerald-700">Возможный прирост: <b>+{formatInt(profile.incident_uplift_calls)} зв. · +{formatNumber(profile.incident_uplift_fte, 2)} FTE · вес {formatPercent(profile.incident_future_weight ?? 1, 0)}</b></span>
                             ) : null}
                             {profile.has_actual_report && profile.forecast_date <= todayValue ? (
                               <span className="col-span-2 text-emerald-700">Факт отчета: <b>{formatNumber(profile.actual_report_fte, 2)} FTE</b></span>
@@ -2718,7 +2734,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                                   <div><span className="block text-[11px] text-blue-700">Прогноз</span><b>{formatInt(selectedForecastDay.forecast_calls)}</b></div>
                                   <div><span className="block text-[11px] text-emerald-700">Факт</span><b>{formatInt(selectedForecastDay.actual_received_calls)}</b></div>
                                 </div>
-                                <div className="mt-1 text-[11px] font-semibold text-emerald-700">+{formatInt(selectedForecastDay.incident_uplift_calls)} возможный прирост</div>
+                                <div className="mt-1 text-[11px] font-semibold text-emerald-700">+{formatInt(selectedForecastDay.incident_uplift_calls)} возможный прирост · вес {formatPercent(selectedForecastDay.incident_future_weight ?? 1, 0)}</div>
                               </div>
                               <div className="rounded-lg bg-slate-50 px-3 py-2">
                                 <div className="text-xs text-slate-500">Минуты нагрузки</div>
@@ -2745,7 +2761,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                             </div>
                           ) : (
                             <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-                              <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">Звонки</div><b>{formatInt(selectedForecastDay.forecast_calls)}</b><div className="mt-1 text-[11px] font-semibold text-emerald-700">+{formatInt(selectedForecastDay.incident_uplift_calls)} возможный прирост</div></div>
+                              <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">Звонки</div><b>{formatInt(selectedForecastDay.forecast_calls)}</b><div className="mt-1 text-[11px] font-semibold text-emerald-700">+{formatInt(selectedForecastDay.incident_uplift_calls)} возможный прирост · вес {formatPercent(selectedForecastDay.incident_future_weight ?? 1, 0)}</div></div>
                               <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">Минут нагрузки</div><b>{formatNumber(selectedForecastDay.forecast_workload_minutes, 1)}</b></div>
                               <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">FTE дня</div><b>{formatNumber(selectedForecastDay.forecast_daily_fte, 2)}</b><div className="mt-1 text-[11px] font-semibold text-emerald-700">с приростом {formatNumber(selectedForecastDay.incident_adjusted_daily_fte ?? selectedForecastDay.forecast_daily_fte, 2)}</div></div>
                               <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">Пиковый час</div><b>{selectedForecastPeakHours[0] ? `${String(selectedForecastPeakHours[0].hour).padStart(2, '0')}:00` : '-'}</b></div>
