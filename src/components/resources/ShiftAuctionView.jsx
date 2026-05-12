@@ -536,6 +536,27 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const closeCountdown = runtimeStatus === 'open' && settings.ends_at
     ? formatCountdown(settings.ends_at, nowMs)
     : '';
+  const auctionStatusLabel = runtimeStatus === 'scheduled'
+    ? 'Откроется'
+    : runtimeStatus === 'open'
+      ? 'Аукцион открыт'
+      : runtimeStatus === 'closed'
+        ? 'Аукцион закрыт'
+        : 'Аукцион выключен';
+  const auctionStatusDetail = runtimeStatus === 'scheduled'
+    ? (countdown || 'скоро')
+    : runtimeStatus === 'open'
+      ? (closeCountdown ? `до закрытия ${closeCountdown}` : 'идет выбор')
+      : runtimeStatus === 'closed'
+        ? 'выбор завершен'
+        : `${settings.selected_operator_ids.length} тест.`;
+  const auctionStatusTone = runtimeStatus === 'open'
+    ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+    : runtimeStatus === 'scheduled'
+      ? 'border-blue-200 bg-blue-50 text-blue-800'
+      : runtimeStatus === 'closed'
+        ? 'border-slate-200 bg-slate-100 text-slate-600'
+        : 'border-amber-200 bg-amber-50 text-amber-800';
 
   const isTester = Boolean(settings.enabled && settings.is_current_user_tester);
   const canUseAuction = isTester || canManage;
@@ -646,40 +667,12 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     }
   }, [apiRoot, buildHeaders, canChoose, fetchSnapshot, myDayOffs, notify]);
 
-  const renderStatusCard = () => (
-    <section className={`rounded-lg border ${isTester ? 'border-emerald-200 bg-emerald-50' : 'border-amber-200 bg-amber-50'} p-5`}>
-      <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-        <div className="flex items-start gap-3">
-          <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg ${isTester ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
-            {isTester ? <ShieldCheck size={21} /> : <Clock3 size={21} />}
-          </div>
-          <div>
-            <p className={`text-xs font-semibold uppercase tracking-wide ${isTester ? 'text-emerald-700' : 'text-amber-700'}`}>
-              {isTester ? 'Тестовый доступ включен' : 'Скоро'}
-            </p>
-            <h2 className="mt-1 text-xl font-semibold text-slate-950">
-              {isTester ? 'Вы в группе тестового запуска' : 'Аукцион смен готовится к запуску'}
-            </h2>
-            <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-700">
-              {isTester
-                ? 'В тестовом запуске можно проверить обратный отсчет, выбор двух выходных, захват смены и блокировку занятой смены у остальных участников в реальном времени.'
-                : 'Когда админ утвердит сгенерированные смены и назначит время старта, здесь появится таймер. После открытия аукциона вы будете выбирать доступные смены, а занятые смены будут сразу становиться недоступными у всех участников в реальном времени.'}
-            </p>
-            {settings.launch_note ? (
-              <p className="mt-3 rounded-md border border-white/70 bg-white/70 px-3 py-2 text-sm text-slate-700">
-                {settings.launch_note}
-              </p>
-            ) : null}
-          </div>
-        </div>
-        <div className="flex flex-col gap-2 rounded-md border border-white/70 bg-white/75 px-3 py-2 text-sm text-slate-700">
-          <span><span className="font-semibold">{settings.selected_operator_ids.length}</span> тестовых операторов</span>
-          <span className="capitalize">Статус: <span className="font-semibold">{runtimeStatus}</span></span>
-          {countdown ? <span>Старт через: <span className="font-semibold tabular-nums">{countdown}</span></span> : null}
-          {closeCountdown ? <span>Завершение через: <span className="font-semibold tabular-nums">{closeCountdown}</span></span> : null}
-        </div>
-      </div>
-    </section>
+  const renderStatusBar = () => (
+    <div title={settings.launch_note || `${auctionStatusLabel}: ${auctionStatusDetail}`} className={`inline-flex h-10 max-w-full items-center gap-2 rounded-lg border px-3 text-sm shadow-sm ${auctionStatusTone}`}>
+      {runtimeStatus === 'open' ? <ShieldCheck size={16} /> : <Clock3 size={16} />}
+      <span className="shrink-0 font-semibold">{auctionStatusLabel}</span>
+      <span className="min-w-0 truncate border-l border-current/20 pl-2 font-semibold tabular-nums">{auctionStatusDetail}</span>
+    </div>
   );
 
   return (
@@ -698,6 +691,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            {renderStatusBar()}
             {canManage && typeof onOpenResourceGeneration === 'function' ? (
               <button
                 type="button"
@@ -726,8 +720,6 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       </div>
 
       <div className={`mx-auto flex w-full max-w-7xl flex-col gap-6 px-4 py-6 md:px-6 ${canUseAuction && dayNavigationItems.length ? 'pb-28' : ''}`}>
-        {renderStatusCard()}
-
         {!canUseAuction && (
           <section className="grid gap-4 lg:grid-cols-4">
             {explainSteps.map((step) => {
