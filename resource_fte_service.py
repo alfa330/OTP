@@ -1048,10 +1048,12 @@ def build_resource_schedule_preview(db, payload: Optional[Dict[str, Any]] = None
 
     with db._get_cursor() as cursor:
         settings = _get_settings_tx(cursor)
+        cursor.execute("SELECT CURRENT_DATE")
+        incident_anchor_date = cursor.fetchone()[0]
         profiles = _compute_period_forecast_profiles_tx(cursor, period_start, period_end, settings)
         operator_capacity = _current_operator_fte_tx(cursor, settings)
         current_fte = operator_capacity.get("current_operator_fte", 0.0)
-        incident_uplift_profile = _compute_recent_incident_uplift_profile_tx(cursor, period_start, settings)
+        incident_uplift_profile = _compute_recent_incident_uplift_profile_tx(cursor, incident_anchor_date, settings)
         forecast_payload = _build_forecast_payload(
             period_start,
             period_end,
@@ -1260,7 +1262,7 @@ def get_resource_overview(
             include_details=False,
         )
         actual_resource_by_day = _actual_resource_load_for_period_tx(cursor, forecast_period_start, forecast_period_end, settings)
-        incident_uplift_profile = _compute_recent_incident_uplift_profile_tx(cursor, forecast_period_start, settings)
+        incident_uplift_profile = _compute_recent_incident_uplift_profile_tx(cursor, as_of_date, settings)
         next_week_forecast = _build_forecast_payload(
             forecast_period_start,
             forecast_period_end,
