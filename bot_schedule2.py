@@ -3,6 +3,7 @@ import os
 import threading
 import asyncio
 import requests
+import select
 import calendar
 import csv
 import hashlib
@@ -31,7 +32,13 @@ import xlsxwriter
 import json
 import html
 from concurrent.futures import ThreadPoolExecutor
-from database import db, TECHNICAL_ISSUE_REASONS, normalize_role_value, get_calculation_model_catalog
+from database import (
+    db,
+    TECHNICAL_ISSUE_REASONS,
+    SHIFT_AUCTION_TEST_EVENT_NOTIFY_CHANNEL,
+    normalize_role_value,
+    get_calculation_model_catalog,
+)
 from resource_fte_service import (
     build_resource_schedule_preview,
     get_resource_day,
@@ -51,6 +58,7 @@ import tempfile
 from datetime import datetime, timedelta, date as dt_date, timezone
 import time
 import math
+import psycopg2
 from urllib.parse import quote, urlparse, parse_qs
 from zoneinfo import ZoneInfo
 from zipfile import ZipFile
@@ -210,6 +218,98 @@ CORS(app, resources={
         "max_age": 86400
     }
 })
+
+SHIFT_AUCTION_EVENT_HEARTBEAT_SECONDS = 15
+SHIFT_AUCTION_EVENT_LISTENER_RETRY_SECONDS = 2
+shift_auction_event_condition = threading.Condition()
+shift_auction_event_signal_id = 0
+shift_auction_event_listener_started = False
+shift_auction_event_listener_lock = threading.Lock()
+
+
+def _build_postgres_connection_params():
+    return {
+        'dbname': os.getenv('POSTGRES_DB'),
+        'user': os.getenv('POSTGRES_USER'),
+        'password': os.getenv('POSTGRES_PASSWORD'),
+        'host': os.getenv('POSTGRES_HOST'),
+        'port': os.getenv('POSTGRES_PORT', 5432),
+    }
+
+
+def _signal_shift_auction_event_waiters():
+    global shift_auction_event_signal_id
+    with shift_auction_event_condition:
+        shift_auction_event_signal_id += 1
+        shift_auction_event_condition.notify_all()
+
+
+def _get_shift_auction_event_signal_id():
+    with shift_auction_event_condition:
+        return shift_auction_event_signal_id
+
+
+def _wait_for_shift_auction_event_signal(last_seen_signal_id, timeout_seconds):
+    timeout_seconds = max(0.1, float(timeout_seconds or 0.1))
+    with shift_auction_event_condition:
+        if shift_auction_event_signal_id <= last_seen_signal_id:
+            shift_auction_event_condition.wait(timeout=timeout_seconds)
+        return shift_auction_event_signal_id
+
+
+def _run_shift_auction_pg_listener():
+    while True:
+        conn = None
+        cursor = None
+        try:
+            conn = psycopg2.connect(**_build_postgres_connection_params())
+            conn.set_session(autocommit=True)
+            cursor = conn.cursor()
+            cursor.execute(f"LISTEN {SHIFT_AUCTION_TEST_EVENT_NOTIFY_CHANNEL}")
+            logging.info("Shift auction event listener connected")
+
+            while True:
+                readable, _, _ = select.select([conn], [], [], SHIFT_AUCTION_EVENT_HEARTBEAT_SECONDS)
+                if not readable:
+                    cursor.execute("SELECT 1")
+                    continue
+
+                conn.poll()
+                while conn.notifies:
+                    conn.notifies.pop(0)
+                    _signal_shift_auction_event_waiters()
+        except Exception as error:
+            logging.warning("Shift auction event listener reconnecting after error: %s", error, exc_info=True)
+            _signal_shift_auction_event_waiters()
+            time.sleep(SHIFT_AUCTION_EVENT_LISTENER_RETRY_SECONDS)
+        finally:
+            try:
+                if cursor is not None:
+                    cursor.close()
+            except Exception:
+                pass
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
+
+
+def _ensure_shift_auction_event_listener_started():
+    global shift_auction_event_listener_started
+    if shift_auction_event_listener_started:
+        return
+    with shift_auction_event_listener_lock:
+        if shift_auction_event_listener_started:
+            return
+        listener_thread = threading.Thread(
+            target=_run_shift_auction_pg_listener,
+            name="shift-auction-pg-listener",
+            daemon=True
+        )
+        listener_thread.start()
+        shift_auction_event_listener_started = True
+
 
 def get_gcs_client():
     # Если используется JSON из переменной окружения
@@ -2727,9 +2827,12 @@ def api_shift_auction_test_events():
     except Exception:
         last_event_id = 0
 
+    _ensure_shift_auction_event_listener_started()
+
     @stream_with_context
     def generate():
         nonlocal last_event_id
+        last_signal_id = _get_shift_auction_event_signal_id()
         heartbeat_at = time.time()
         while True:
             events = db.get_shift_auction_test_events_after(last_event_id, limit=100)
@@ -2740,10 +2843,16 @@ def api_shift_auction_test_events():
                     yield f"event: {event['event_type']}\n"
                     yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
                 heartbeat_at = time.time()
-            elif time.time() - heartbeat_at >= 15:
+                last_signal_id = _get_shift_auction_event_signal_id()
+                continue
+
+            elapsed = time.time() - heartbeat_at
+            wait_seconds = max(0.1, SHIFT_AUCTION_EVENT_HEARTBEAT_SECONDS - elapsed)
+            last_signal_id = _wait_for_shift_auction_event_signal(last_signal_id, wait_seconds)
+
+            if time.time() - heartbeat_at >= SHIFT_AUCTION_EVENT_HEARTBEAT_SECONDS:
                 yield f": heartbeat {int(time.time())}\n\n"
                 heartbeat_at = time.time()
-            time.sleep(0.25)
 
     response = Response(generate(), mimetype='text/event-stream')
     response.headers['Cache-Control'] = 'no-cache'

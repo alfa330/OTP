@@ -41,6 +41,7 @@ MIN_CONN = 1
 MAX_CONN = 20  # Adjust based on expected load
 POOL = None
 STATUS_IMPORT_INSERT_PAGE_SIZE = max(200, int(os.getenv('STATUS_IMPORT_INSERT_PAGE_SIZE', '2000')))
+SHIFT_AUCTION_TEST_EVENT_NOTIFY_CHANNEL = 'shift_auction_test_events'
 
 ROLE_ALIASES = {
     'supervisor': 'sv',
@@ -2524,8 +2525,14 @@ class Database:
             RETURNING id, created_at
         """, (str(event_type or '').strip()[:64], Json(payload or {})))
         row = cursor.fetchone()
+        event_id = row[0] if row else None
+        if event_id is not None:
+            cursor.execute(
+                "SELECT pg_notify(%s, %s)",
+                (SHIFT_AUCTION_TEST_EVENT_NOTIFY_CHANNEL, str(event_id))
+            )
         return {
-            "id": row[0],
+            "id": event_id,
             "event_type": event_type,
             "payload": payload or {},
             "created_at": row[1].isoformat() if row and row[1] else None
