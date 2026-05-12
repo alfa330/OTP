@@ -521,6 +521,9 @@ def _period_operator_availability_tx(cursor, period_start, period_end, settings:
         operators AS (
             SELECT
                 u.id,
+                u.name,
+                direction.name AS direction_name,
+                supervisor.name AS supervisor_name,
                 COALESCE(u.rate, 1.0) AS rate,
                 LOWER(TRIM(COALESCE(u.status, 'working'))) AS current_status,
                 EXISTS (
@@ -528,15 +531,39 @@ def _period_operator_availability_tx(cursor, period_start, period_end, settings:
                     FROM operator_schedule_status_periods hp
                     WHERE hp.operator_id = u.id
                       AND hp.status_code = 'dismissal'
-                ) AS has_dismissal_history
+                ) AS has_dismissal_history,
+                EXISTS (
+                    SELECT 1
+                    FROM operator_schedule_status_periods hp
+                    WHERE hp.operator_id = u.id
+                      AND hp.status_code = 'bs'
+                ) AS has_bs_history,
+                EXISTS (
+                    SELECT 1
+                    FROM operator_schedule_status_periods hp
+                    WHERE hp.operator_id = u.id
+                      AND hp.status_code = 'sick_leave'
+                ) AS has_sick_leave_history,
+                EXISTS (
+                    SELECT 1
+                    FROM operator_schedule_status_periods hp
+                    WHERE hp.operator_id = u.id
+                      AND hp.status_code = 'annual_leave'
+                ) AS has_annual_leave_history
             FROM users u
+            LEFT JOIN directions direction ON direction.id = u.direction_id
+            LEFT JOIN users supervisor ON supervisor.id = u.supervisor_id
             WHERE u.role = 'operator'
               {direction_filter}
         ),
         operator_days AS (
             SELECT
                 o.id,
+                o.name,
+                o.direction_name,
+                o.supervisor_name,
                 o.rate,
+                o.current_status,
                 d.day,
                 CASE
                     WHEN scheduled.status_code IS NOT NULL THEN
@@ -545,7 +572,11 @@ def _period_operator_availability_tx(cursor, period_start, period_end, settings:
                                 THEN scheduled.status_code
                             ELSE 'working'
                         END
-                    WHEN o.current_status IN ('fired', 'dismissal') AND NOT o.has_dismissal_history THEN o.current_status
+                    WHEN o.current_status IN ('bs', 'unpaid_leave') AND o.has_bs_history THEN 'working'
+                    WHEN o.current_status = 'sick_leave' AND o.has_sick_leave_history THEN 'working'
+                    WHEN o.current_status = 'annual_leave' AND o.has_annual_leave_history THEN 'working'
+                    WHEN o.current_status IN ('fired', 'dismissal') AND o.has_dismissal_history THEN 'working'
+                    WHEN o.current_status <> 'working' THEN o.current_status
                     ELSE 'working'
                 END AS effective_status
             FROM operators o
@@ -562,12 +593,22 @@ def _period_operator_availability_tx(cursor, period_start, period_end, settings:
         )
         SELECT
             id,
+            name,
+            direction_name,
+            supervisor_name,
             rate,
+            current_status,
             COUNT(*)::INT AS total_days,
-            COUNT(*) FILTER (WHERE effective_status = 'working')::INT AS working_days
+            COUNT(*) FILTER (WHERE effective_status = 'working')::INT AS working_days,
+            COUNT(*) FILTER (WHERE effective_status = 'bs')::INT AS bs_days,
+            COUNT(*) FILTER (WHERE effective_status = 'unpaid_leave')::INT AS unpaid_leave_days,
+            COUNT(*) FILTER (WHERE effective_status = 'sick_leave')::INT AS sick_leave_days,
+            COUNT(*) FILTER (WHERE effective_status = 'annual_leave')::INT AS annual_leave_days,
+            COUNT(*) FILTER (WHERE effective_status = 'dismissal')::INT AS dismissal_days,
+            COUNT(*) FILTER (WHERE effective_status = 'fired')::INT AS fired_days
         FROM operator_days
-        GROUP BY id, rate
-        ORDER BY id
+        GROUP BY id, name, direction_name, supervisor_name, rate, current_status
+        ORDER BY name, id
         """,
         params,
     )
@@ -577,9 +618,21 @@ def _period_operator_availability_tx(cursor, period_start, period_end, settings:
             "rate": float(rate),
             "count": 0,
             "fte": 0.0,
+            "total_count": 0,
+            "total_fte": 0.0,
         }
         for rate in RESOURCE_RATE_VALUES
     }
+    status_summary = {
+        "working": 0,
+        "bs": 0,
+        "unpaid_leave": 0,
+        "sick_leave": 0,
+        "annual_leave": 0,
+        "dismissal": 0,
+        "fired": 0,
+    }
+    operator_details = []
     threshold_days = period_days / 2.0
     total_operator_count = 0
     available_operator_count = 0
@@ -587,11 +640,41 @@ def _period_operator_availability_tx(cursor, period_start, period_end, settings:
     unavailable_operator_count = 0
     available_operator_fte = 0.0
 
-    for _operator_id, rate_raw, _total_days_raw, working_days_raw in cursor.fetchall():
+    for row in cursor.fetchall():
+        (
+            operator_id,
+            operator_name,
+            direction_name,
+            supervisor_name,
+            rate_raw,
+            current_status,
+            total_days_raw,
+            working_days_raw,
+            bs_days_raw,
+            unpaid_leave_days_raw,
+            sick_leave_days_raw,
+            annual_leave_days_raw,
+            dismissal_days_raw,
+            fired_days_raw,
+        ) = row
         total_operator_count += 1
         rate = _resource_rate_value(rate_raw)
         rate_key = _resource_rate_key(rate)
+        by_rate[rate_key]["total_count"] += 1
+        by_rate[rate_key]["total_fte"] += rate
+        total_days = max(0, _to_int(total_days_raw))
         working_days = max(0, _to_int(working_days_raw))
+        status_counts = {
+            "working": working_days,
+            "bs": max(0, _to_int(bs_days_raw)),
+            "unpaid_leave": max(0, _to_int(unpaid_leave_days_raw)),
+            "sick_leave": max(0, _to_int(sick_leave_days_raw)),
+            "annual_leave": max(0, _to_int(annual_leave_days_raw)),
+            "dismissal": max(0, _to_int(dismissal_days_raw)),
+            "fired": max(0, _to_int(fired_days_raw)),
+        }
+        for status_key, day_count in status_counts.items():
+            status_summary[status_key] = status_summary.get(status_key, 0) + int(day_count or 0)
         is_available = working_days > threshold_days
         if is_available:
             available_operator_count += 1
@@ -603,13 +686,34 @@ def _period_operator_availability_tx(cursor, period_start, period_end, settings:
         else:
             unavailable_operator_count += 1
 
+        operator_details.append({
+            "operatorId": int(operator_id),
+            "name": operator_name,
+            "directionName": direction_name,
+            "supervisorName": supervisor_name,
+            "rate": rate,
+            "currentStatus": current_status or "working",
+            "totalDays": total_days,
+            "workingDays": working_days,
+            "nonWorkingDays": max(0, total_days - working_days),
+            "included": bool(is_available),
+            "fteContribution": round(rate if is_available else 0.0, 4),
+            "statusDays": status_counts,
+        })
+
     rate_capacity = [
         {
             **by_rate[_resource_rate_key(rate)],
             "fte": round(_to_float(by_rate[_resource_rate_key(rate)].get("fte")), 4),
+            "total_fte": round(_to_float(by_rate[_resource_rate_key(rate)].get("total_fte")), 4),
         }
         for rate in RESOURCE_RATE_VALUES
     ]
+    operator_details.sort(key=lambda item: (
+        not bool(item.get("included")),
+        -int(item.get("workingDays") or 0),
+        str(item.get("name") or "").lower(),
+    ))
 
     return {
         "period_operator_count": total_operator_count,
@@ -621,6 +725,8 @@ def _period_operator_availability_tx(cursor, period_start, period_end, settings:
         "period_day_count": period_days,
         "period_rate_capacity": rate_capacity,
         "period_rate_counts": {item["rate"]: item["count"] for item in rate_capacity},
+        "period_status_summary": status_summary,
+        "period_operator_details": operator_details,
         "selected_direction_ids": selected_direction_ids,
     }
 
@@ -988,6 +1094,8 @@ def get_resource_overview(
             ),
             "periodAvailableOperatorRateCounts": period_operator_availability.get("period_rate_counts") or {},
             "periodAvailableOperatorRates": period_operator_availability.get("period_rate_capacity") or [],
+            "periodOperatorStatusSummary": period_operator_availability.get("period_status_summary") or {},
+            "periodOperatorAvailabilityDetails": period_operator_availability.get("period_operator_details") or [],
         })
         directions = _resource_directions_tx(cursor)
 

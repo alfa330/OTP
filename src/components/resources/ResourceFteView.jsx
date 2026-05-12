@@ -333,6 +333,282 @@ const StatCard = ({ icon: Icon, label, value, hint, tone = 'blue' }) => {
   );
 };
 
+const OPERATOR_STATUS_LABELS = {
+  working: 'Working',
+  bs: 'Б/С',
+  unpaid_leave: 'Б/С',
+  sick_leave: 'БЛ',
+  annual_leave: 'Отпуск',
+  dismissal: 'Увол.',
+  fired: 'Увол.',
+};
+
+const OPERATOR_STATUS_CHIP_CLASSES = {
+  working: 'bg-emerald-50 text-emerald-700 ring-emerald-100',
+  bs: 'bg-amber-50 text-amber-700 ring-amber-100',
+  unpaid_leave: 'bg-amber-50 text-amber-700 ring-amber-100',
+  sick_leave: 'bg-rose-50 text-rose-700 ring-rose-100',
+  annual_leave: 'bg-sky-50 text-sky-700 ring-sky-100',
+  dismissal: 'bg-slate-100 text-slate-700 ring-slate-200',
+  fired: 'bg-slate-100 text-slate-700 ring-slate-200',
+};
+
+const operatorStatusEntries = (statusDays = {}) =>
+  Object.entries(statusDays || {})
+    .map(([status, days]) => ({ status, days: Number(days || 0) }))
+    .filter((item) => item.days > 0)
+    .sort((a, b) => {
+      if (a.status === 'working') return -1;
+      if (b.status === 'working') return 1;
+      return b.days - a.days;
+    });
+
+const OperatorStatusChips = ({ statusDays }) => {
+  const entries = operatorStatusEntries(statusDays);
+  if (!entries.length) return <span className="text-slate-400">-</span>;
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {entries.map((item) => (
+        <span
+          key={item.status}
+          className={`inline-flex items-center rounded-md px-2 py-0.5 text-[11px] font-semibold ring-1 ${OPERATOR_STATUS_CHIP_CLASSES[item.status] || 'bg-slate-100 text-slate-700 ring-slate-200'}`}
+        >
+          {OPERATOR_STATUS_LABELS[item.status] || item.status}: {formatInt(item.days)}
+        </span>
+      ))}
+    </div>
+  );
+};
+
+const OperatorSummaryCard = ({
+  requiredFte,
+  baseFte,
+  availableFte,
+  currentFte,
+  gap,
+  availableCount,
+  totalCount,
+  partialCount,
+  unavailableCount,
+  onOpen,
+}) => {
+  const isDeficit = Number(gap || 0) < 0;
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className={`rounded-xl border bg-white p-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-blue-100 xl:col-span-2 ${
+        isDeficit ? 'border-rose-200' : 'border-emerald-200'
+      }`}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Операторы</p>
+          <div className="mt-2 grid grid-cols-2 gap-3">
+            <div>
+              <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Нужно</div>
+              <div className="text-2xl font-semibold text-slate-950">{formatNumber(requiredFte, 2)}</div>
+            </div>
+            <div>
+              <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Доступно</div>
+              <div className={`text-2xl font-semibold ${isDeficit ? 'text-rose-700' : 'text-emerald-700'}`}>
+                {formatNumber(availableFte, 2)}
+              </div>
+            </div>
+          </div>
+        </div>
+        <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg ring-1 ${isDeficit ? 'bg-rose-50 text-rose-700 ring-rose-100' : 'bg-emerald-50 text-emerald-700 ring-emerald-100'}`}>
+          <Users size={18} />
+        </div>
+      </div>
+      <div className="mt-3 grid gap-2 text-xs text-slate-600 sm:grid-cols-2">
+        <div className="rounded-lg bg-slate-50 px-3 py-2">
+          <span className="block text-slate-400">Разница</span>
+          <b className={isDeficit ? 'text-rose-700' : 'text-emerald-700'}>{formatSignedNumber(gap, 2)} FTE</b>
+        </div>
+        <div className="rounded-lg bg-slate-50 px-3 py-2">
+          <span className="block text-slate-400">Сотрудники</span>
+          <b className="text-slate-900">{formatInt(availableCount)} / {formatInt(totalCount)}</b>
+        </div>
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
+        <span>Без усушки: {formatNumber(baseFte, 2)}</span>
+        <span>Текущий FTE: {formatNumber(currentFte, 2)}</span>
+        <span>Часть периода: {formatInt(partialCount)}</span>
+        <span>Не работают: {formatInt(unavailableCount)}</span>
+      </div>
+      <div className="mt-3 inline-flex items-center gap-1.5 text-xs font-semibold text-blue-700">
+        <Eye size={14} />
+        Детали расчета
+      </div>
+    </button>
+  );
+};
+
+const OperatorAvailabilityDetailsModal = ({ open, onClose, forecast }) => {
+  if (!open) return null;
+
+  const details = Array.isArray(forecast?.periodOperatorAvailabilityDetails)
+    ? forecast.periodOperatorAvailabilityDetails
+    : [];
+  const rates = Array.isArray(forecast?.periodAvailableOperatorRates)
+    ? forecast.periodAvailableOperatorRates
+    : [];
+  const statusSummary = forecast?.periodOperatorStatusSummary || {};
+  const requiredFte = Number(forecast?.operatorsWithShrinkage || 0);
+  const baseFte = Number(forecast?.baseOperators || 0);
+  const availableFte = Number(forecast?.periodAvailableOperatorFte || 0);
+  const gap = Number(forecast?.periodAvailableOperatorFteGap ?? (availableFte - requiredFte));
+  const periodDays = Number(forecast?.periodDays || forecast?.period_day_count || details[0]?.totalDays || 0);
+  const threshold = Number(forecast?.periodWorkingDaysThreshold || (periodDays ? periodDays / 2 : 0));
+  const isDeficit = gap < 0;
+  const statusEntries = operatorStatusEntries(statusSummary);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm">
+      <div className="flex max-h-[90vh] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border-2 border-slate-200 bg-white shadow-2xl">
+        <div className="flex items-start justify-between gap-4 border-b border-slate-200 px-5 py-4">
+          <div>
+            <div className="flex items-center gap-2 text-base font-semibold text-slate-950">
+              <Users size={19} className={isDeficit ? 'text-rose-600' : 'text-emerald-600'} />
+              Детализация доступного FTE
+            </div>
+            <p className="mt-1 text-sm text-slate-500">
+              {formatDate(forecast?.period_start || forecast?.week_start)} - {formatDate(forecast?.period_end || forecast?.week_end)} · ставка входит, если Working больше {formatNumber(threshold, 1)} из {formatInt(periodDays)} дн.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border-2 border-slate-200 text-slate-500 transition hover:bg-slate-100 hover:text-slate-900"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="overflow-y-auto px-5 py-4">
+          <div className="grid gap-3 md:grid-cols-4">
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Нужно с усушкой</div>
+              <div className="mt-1 text-2xl font-semibold text-slate-950">{formatNumber(requiredFte, 2)}</div>
+              <div className="mt-1 text-xs text-slate-500">Без усушки: {formatNumber(baseFte, 2)}</div>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Доступно</div>
+              <div className={`mt-1 text-2xl font-semibold ${isDeficit ? 'text-rose-700' : 'text-emerald-700'}`}>{formatNumber(availableFte, 2)}</div>
+              <div className="mt-1 text-xs text-slate-500">{formatInt(forecast?.periodAvailableOperatorCount)} сотрудников</div>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Разница</div>
+              <div className={`mt-1 text-2xl font-semibold ${isDeficit ? 'text-rose-700' : 'text-emerald-700'}`}>{formatSignedNumber(gap, 2)}</div>
+              <div className="mt-1 text-xs text-slate-500">Доступно - нужно</div>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Текущий FTE</div>
+              <div className="mt-1 text-2xl font-semibold text-slate-950">{formatNumber(forecast?.currentOperatorFte, 2)}</div>
+              <div className="mt-1 text-xs text-slate-500">Сумма на текущий момент</div>
+            </div>
+          </div>
+
+          <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]">
+            <section className="rounded-xl border border-slate-200 bg-white p-4">
+              <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-950">
+                <ListChecks size={16} className="text-blue-600" />
+                Разбивка по ставкам
+              </div>
+              <div className="space-y-2">
+                {rates.map((item) => (
+                  <div key={item.rate} className="grid grid-cols-[70px_1fr_auto] items-center gap-3 rounded-lg bg-slate-50 px-3 py-2 text-sm">
+                    <div className="font-semibold text-slate-900">{formatNumber(item.rate, 2)}</div>
+                    <div className="h-2 overflow-hidden rounded-full bg-slate-200">
+                      <div
+                        className="h-full rounded-full bg-emerald-500"
+                        style={{ width: `${Math.min(100, (Number(item.count || 0) / Math.max(1, Number(item.total_count || item.count || 0))) * 100)}%` }}
+                      />
+                    </div>
+                    <div className="text-right text-xs text-slate-600">
+                      <b className="text-slate-950">{formatInt(item.count)}</b> / {formatInt(item.total_count ?? item.count)} чел.
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            <section className="rounded-xl border border-slate-200 bg-white p-4">
+              <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-950">
+                <CalendarDays size={16} className="text-blue-600" />
+                Дни по статусам
+              </div>
+              <OperatorStatusChips statusDays={statusSummary} />
+              {statusEntries.length ? (
+                <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                  {statusEntries.map((item) => (
+                    <div key={item.status} className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-sm">
+                      <span className="text-slate-600">{OPERATOR_STATUS_LABELS[item.status] || item.status}</span>
+                      <b className="text-slate-950">{formatInt(item.days)} дн.</b>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </section>
+          </div>
+
+          <section className="mt-4 overflow-hidden rounded-xl border border-slate-200 bg-white">
+            <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
+              <div className="text-sm font-semibold text-slate-950">Операторы в расчете</div>
+              <div className="text-xs text-slate-500">{formatInt(details.length)} строк</div>
+            </div>
+            <div className="max-h-[420px] overflow-auto">
+              <table className="min-w-full divide-y divide-slate-200 text-sm">
+                <thead className="sticky top-0 bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+                  <tr>
+                    <th className="px-4 py-3 text-left font-semibold">Оператор</th>
+                    <th className="px-4 py-3 text-right font-semibold">Ставка</th>
+                    <th className="px-4 py-3 text-right font-semibold">Working</th>
+                    <th className="px-4 py-3 text-left font-semibold">Статусы</th>
+                    <th className="px-4 py-3 text-center font-semibold">Итог</th>
+                    <th className="px-4 py-3 text-right font-semibold">Вклад</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {details.map((operator) => (
+                    <tr key={operator.operatorId} className={operator.included ? 'bg-white' : 'bg-slate-50/70'}>
+                      <td className="px-4 py-3">
+                        <div className="font-semibold text-slate-900">{operator.name || `ID ${operator.operatorId}`}</div>
+                        <div className="text-xs text-slate-500">
+                          {[operator.directionName, operator.supervisorName].filter(Boolean).join(' · ') || '-'}
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 text-right font-semibold text-slate-900">{formatNumber(operator.rate, 2)}</td>
+                      <td className="px-4 py-3 text-right text-slate-700">
+                        <b>{formatInt(operator.workingDays)}</b> / {formatInt(operator.totalDays)}
+                      </td>
+                      <td className="px-4 py-3">
+                        <OperatorStatusChips statusDays={operator.statusDays} />
+                      </td>
+                      <td className="px-4 py-3 text-center">
+                        <span className={`inline-flex rounded-md px-2 py-1 text-xs font-semibold ring-1 ${operator.included ? 'bg-emerald-50 text-emerald-700 ring-emerald-100' : 'bg-slate-100 text-slate-600 ring-slate-200'}`}>
+                          {operator.included ? 'Засчитан' : 'Не засчитан'}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-right font-semibold text-slate-900">{formatNumber(operator.fteContribution, 2)}</td>
+                    </tr>
+                  ))}
+                  {!details.length ? (
+                    <tr>
+                      <td className="px-4 py-8 text-center text-sm text-slate-500" colSpan={6}>Нет данных по операторам.</td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const EmptyState = ({ title, text }) => (
   <div className="flex min-h-[220px] flex-col items-center justify-center rounded-xl border border-dashed border-slate-300 bg-white p-8 text-center">
     <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-slate-100 text-slate-500">
@@ -841,6 +1117,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
   const [callsChartMode, setCallsChartMode] = useState('losses');
   const [loadedDateCache, setLoadedDateCache] = useState([]);
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
+  const [isOperatorDetailsOpen, setIsOperatorDetailsOpen] = useState(false);
   const userId = user?.id || '';
 
   useEffect(() => {
@@ -1120,6 +1397,13 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
     periodAvailableOperatorFte: 0,
     periodAvailableOperatorCount: 0,
     periodAvailableOperatorFteGap: 0,
+    periodOperatorCount: 0,
+    periodPartialOperatorCount: 0,
+    periodUnavailableOperatorCount: 0,
+    periodWorkingDaysThreshold: 0,
+    periodAvailableOperatorRates: [],
+    periodOperatorStatusSummary: {},
+    periodOperatorAvailabilityDetails: [],
     historyComplete: false,
     history_periods: getForecastHistoryPeriods(selectedForecastWeekStart, selectedForecastPeriodEnd),
   };
@@ -1342,6 +1626,9 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
     nextWeekForecast.periodAvailableOperatorFte ?? nextWeekForecast.currentOperatorFte ?? 0,
   );
   const periodAvailableOperatorCount = Number(nextWeekForecast.periodAvailableOperatorCount ?? 0);
+  const periodOperatorCount = Number(nextWeekForecast.periodOperatorCount ?? periodAvailableOperatorCount);
+  const periodPartialOperatorCount = Number(nextWeekForecast.periodPartialOperatorCount ?? 0);
+  const periodUnavailableOperatorCount = Number(nextWeekForecast.periodUnavailableOperatorCount ?? 0);
   const periodAvailableOperatorFteGap = Number(
     nextWeekForecast.periodAvailableOperatorFteGap ?? (
       periodAvailableOperatorFte - Number(nextWeekForecast.operatorsWithShrinkage || 0)
@@ -1497,6 +1784,12 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
           </form>
         </div>
       )}
+
+      <OperatorAvailabilityDetailsModal
+        open={isOperatorDetailsOpen}
+        onClose={() => setIsOperatorDetailsOpen(false)}
+        forecast={nextWeekForecast}
+      />
 
       <div className="space-y-6 p-4 md:p-6">
         <div className="flex flex-col gap-3 rounded-xl border-2 border-slate-200 bg-white p-2 shadow-sm lg:flex-row lg:items-center lg:justify-between">
@@ -2126,25 +2419,23 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                   </div>
                 </div>
 
-                <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-6">
+                <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-6 2xl:grid-cols-7">
                   <StatCard icon={Clock3} label="AHT периода" value={formatSeconds(nextWeekForecast.periodAhtSeconds ?? nextWeekForecast.weeklyAhtSeconds)} hint="Среднее по дневным AHT" tone="blue" />
                   <StatCard icon={PhoneCall} label="Принято" value={formatPercent(nextWeekForecast.answerRate)} hint="Коэффициент периода" tone="slate" />
                   <StatCard icon={Users} label="OCC / UR" value={`${formatPercent(nextWeekForecast.occ, 0)} / ${formatPercent(nextWeekForecast.ur, 0)}`} hint={`Эфф. мин/час: ${formatNumber(nextWeekForecast.effectiveMinutes, 1)}`} tone="emerald" />
                   <StatCard icon={ShieldAlert} label="Усушка" value={formatPercent(nextWeekForecast.shrinkage, 0)} hint="Коэффициент периода" tone="amber" />
                   <StatCard icon={TrendingUp} label="FTE-часы периода" value={formatNumber(nextWeekForecast.periodFteHours ?? nextWeekForecast.weeklyFteHours, 1)} hint={`${formatInt(nextWeekForecast.periodDays || (nextWeekForecast.days || []).length)} дн.`} tone="blue" />
-                  <StatCard
-                    icon={Users}
-                    label="Операторы"
-                    value={formatNumber(nextWeekForecast.operatorsWithShrinkage, 2)}
-                    hint={(
-                      <span>
-                        Доступно в период: {formatNumber(periodAvailableOperatorFte, 2)} FTE
-                        {periodAvailableOperatorCount > 0 ? ` (${formatInt(periodAvailableOperatorCount)} чел.)` : ''} · разница: {formatSignedNumber(periodAvailableOperatorFteGap, 2)}
-                        <br />
-                        Без усушки: {formatNumber(nextWeekForecast.baseOperators, 2)} · текущий FTE: {formatNumber(nextWeekForecast.currentOperatorFte, 2)}
-                      </span>
-                    )}
-                    tone={periodAvailableOperatorFteGap < 0 ? 'rose' : 'emerald'}
+                  <OperatorSummaryCard
+                    requiredFte={nextWeekForecast.operatorsWithShrinkage}
+                    baseFte={nextWeekForecast.baseOperators}
+                    availableFte={periodAvailableOperatorFte}
+                    currentFte={nextWeekForecast.currentOperatorFte}
+                    gap={periodAvailableOperatorFteGap}
+                    availableCount={periodAvailableOperatorCount}
+                    totalCount={periodOperatorCount}
+                    partialCount={periodPartialOperatorCount}
+                    unavailableCount={periodUnavailableOperatorCount}
+                    onOpen={() => setIsOperatorDetailsOpen(true)}
                   />
                 </div>
 
