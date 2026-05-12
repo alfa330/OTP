@@ -503,6 +503,128 @@ def _current_operator_fte_tx(cursor, settings: Optional[Dict[str, Any]] = None) 
     }
 
 
+def _period_operator_availability_tx(cursor, period_start, period_end, settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if period_end < period_start:
+        period_start, period_end = period_end, period_start
+    period_days = max(1, (period_end - period_start).days + 1)
+    selected_direction_ids = _coerce_int_list((settings or {}).get("selected_direction_ids"))
+    direction_filter = "AND u.direction_id = ANY(%s)" if selected_direction_ids else ""
+    params = [period_start, period_end]
+    if selected_direction_ids:
+        params.append(selected_direction_ids)
+
+    cursor.execute(
+        f"""
+        WITH period_days AS (
+            SELECT generate_series(%s::date, %s::date, interval '1 day')::date AS day
+        ),
+        operators AS (
+            SELECT
+                u.id,
+                COALESCE(u.rate, 1.0) AS rate,
+                LOWER(TRIM(COALESCE(u.status, 'working'))) AS current_status,
+                EXISTS (
+                    SELECT 1
+                    FROM operator_schedule_status_periods hp
+                    WHERE hp.operator_id = u.id
+                      AND hp.status_code = 'dismissal'
+                ) AS has_dismissal_history
+            FROM users u
+            WHERE u.role = 'operator'
+              {direction_filter}
+        ),
+        operator_days AS (
+            SELECT
+                o.id,
+                o.rate,
+                d.day,
+                CASE
+                    WHEN scheduled.status_code IS NOT NULL THEN
+                        CASE
+                            WHEN scheduled.status_code IN ('bs', 'sick_leave', 'annual_leave', 'dismissal')
+                                THEN scheduled.status_code
+                            ELSE 'working'
+                        END
+                    WHEN o.current_status IN ('fired', 'dismissal') AND NOT o.has_dismissal_history THEN o.current_status
+                    ELSE 'working'
+                END AS effective_status
+            FROM operators o
+            CROSS JOIN period_days d
+            LEFT JOIN LATERAL (
+                SELECT p.status_code
+                FROM operator_schedule_status_periods p
+                WHERE p.operator_id = o.id
+                  AND p.start_date <= d.day
+                  AND COALESCE(p.end_date, DATE '9999-12-31') >= d.day
+                ORDER BY p.start_date DESC, p.id DESC
+                LIMIT 1
+            ) scheduled ON TRUE
+        )
+        SELECT
+            id,
+            rate,
+            COUNT(*)::INT AS total_days,
+            COUNT(*) FILTER (WHERE effective_status = 'working')::INT AS working_days
+        FROM operator_days
+        GROUP BY id, rate
+        ORDER BY id
+        """,
+        params,
+    )
+
+    by_rate = {
+        _resource_rate_key(rate): {
+            "rate": float(rate),
+            "count": 0,
+            "fte": 0.0,
+        }
+        for rate in RESOURCE_RATE_VALUES
+    }
+    threshold_days = period_days / 2.0
+    total_operator_count = 0
+    available_operator_count = 0
+    partially_available_operator_count = 0
+    unavailable_operator_count = 0
+    available_operator_fte = 0.0
+
+    for _operator_id, rate_raw, _total_days_raw, working_days_raw in cursor.fetchall():
+        total_operator_count += 1
+        rate = _resource_rate_value(rate_raw)
+        rate_key = _resource_rate_key(rate)
+        working_days = max(0, _to_int(working_days_raw))
+        is_available = working_days > threshold_days
+        if is_available:
+            available_operator_count += 1
+            available_operator_fte += rate
+            by_rate[rate_key]["count"] += 1
+            by_rate[rate_key]["fte"] += rate
+        elif working_days > 0:
+            partially_available_operator_count += 1
+        else:
+            unavailable_operator_count += 1
+
+    rate_capacity = [
+        {
+            **by_rate[_resource_rate_key(rate)],
+            "fte": round(_to_float(by_rate[_resource_rate_key(rate)].get("fte")), 4),
+        }
+        for rate in RESOURCE_RATE_VALUES
+    ]
+
+    return {
+        "period_operator_count": total_operator_count,
+        "period_available_operator_count": available_operator_count,
+        "period_available_operator_fte": round(available_operator_fte, 4),
+        "period_partial_operator_count": partially_available_operator_count,
+        "period_unavailable_operator_count": unavailable_operator_count,
+        "period_working_days_threshold": round(threshold_days, 4),
+        "period_day_count": period_days,
+        "period_rate_capacity": rate_capacity,
+        "period_rate_counts": {item["rate"]: item["count"] for item in rate_capacity},
+        "selected_direction_ids": selected_direction_ids,
+    }
+
+
 def _refresh_daily_summary_tx(cursor, report_date) -> None:
     cursor.execute(
         """
@@ -837,6 +959,12 @@ def get_resource_overview(
         profiles = _compute_period_forecast_profiles_tx(cursor, forecast_period_start, forecast_period_end, settings)
         operator_capacity = _current_operator_fte_tx(cursor, settings)
         current_operator_fte = operator_capacity["current_operator_fte"]
+        period_operator_availability = _period_operator_availability_tx(
+            cursor,
+            forecast_period_start,
+            forecast_period_end,
+            settings,
+        )
         actual_resource_by_day = _actual_resource_load_for_period_tx(cursor, forecast_period_start, forecast_period_end, settings)
         next_week_forecast = _build_forecast_payload(
             forecast_period_start,
@@ -846,6 +974,21 @@ def get_resource_overview(
             current_operator_fte,
             actual_resource_by_day,
         )
+        period_available_operator_fte = _to_float(period_operator_availability.get("period_available_operator_fte"))
+        next_week_forecast.update({
+            "periodAvailableOperatorFte": period_available_operator_fte,
+            "periodAvailableOperatorCount": _to_int(period_operator_availability.get("period_available_operator_count")),
+            "periodOperatorCount": _to_int(period_operator_availability.get("period_operator_count")),
+            "periodPartialOperatorCount": _to_int(period_operator_availability.get("period_partial_operator_count")),
+            "periodUnavailableOperatorCount": _to_int(period_operator_availability.get("period_unavailable_operator_count")),
+            "periodWorkingDaysThreshold": _to_float(period_operator_availability.get("period_working_days_threshold")),
+            "periodAvailableOperatorFteGap": round(
+                period_available_operator_fte - _to_float(next_week_forecast.get("operatorsWithShrinkage")),
+                4,
+            ),
+            "periodAvailableOperatorRateCounts": period_operator_availability.get("period_rate_counts") or {},
+            "periodAvailableOperatorRates": period_operator_availability.get("period_rate_capacity") or [],
+        })
         directions = _resource_directions_tx(cursor)
 
         where = []
