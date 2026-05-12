@@ -16,6 +16,7 @@ from resource_fte.calculations import (
     _build_forecast_payload,
     _compute_historical_forecast_profile_for_day_tx,
     _compute_period_forecast_profiles_tx,
+    _compute_recent_incident_uplift_profile_tx,
     _compute_week_forecast_profiles_tx,
     _next_week_start_date,
     _week_start_date,
@@ -1050,12 +1051,14 @@ def build_resource_schedule_preview(db, payload: Optional[Dict[str, Any]] = None
         profiles = _compute_period_forecast_profiles_tx(cursor, period_start, period_end, settings)
         operator_capacity = _current_operator_fte_tx(cursor, settings)
         current_fte = operator_capacity.get("current_operator_fte", 0.0)
+        incident_uplift_profile = _compute_recent_incident_uplift_profile_tx(cursor, period_start, settings)
         forecast_payload = _build_forecast_payload(
             period_start,
             period_end,
             profiles,
             settings,
             current_operator_fte=current_fte,
+            incident_uplift_profile=incident_uplift_profile,
         )
     return _generate_schedule_preview_from_forecast(forecast_payload, templates, operator_capacity)
 
@@ -1257,6 +1260,7 @@ def get_resource_overview(
             include_details=False,
         )
         actual_resource_by_day = _actual_resource_load_for_period_tx(cursor, forecast_period_start, forecast_period_end, settings)
+        incident_uplift_profile = _compute_recent_incident_uplift_profile_tx(cursor, forecast_period_start, settings)
         next_week_forecast = _build_forecast_payload(
             forecast_period_start,
             forecast_period_end,
@@ -1264,6 +1268,7 @@ def get_resource_overview(
             settings,
             current_operator_fte,
             actual_resource_by_day,
+            incident_uplift_profile,
         )
         period_available_operator_fte = _to_float(period_operator_availability.get("period_available_operator_fte"))
         next_week_forecast.update({

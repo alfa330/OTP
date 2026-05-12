@@ -364,6 +364,40 @@ def _shift_preview_usage_by_rate(selected: List[Dict[str, Any]], day_count: int 
     return usage
 
 
+def _shift_preview_usage_state(
+    selected: Optional[List[Dict[str, Any]]],
+    total_hours: int,
+) -> Dict[str, Any]:
+    total_hours = max(24, int(total_hours or SHIFT_PREVIEW_HOURS))
+    weekly_usage = defaultdict(int)
+    daily_usage = defaultdict(lambda: defaultdict(int))
+    hourly_usage = {
+        _resource_rate_key(rate): [0.0 for _ in range(total_hours)]
+        for rate in RESOURCE_RATE_VALUES
+    }
+    for item in selected or []:
+        template = item.get("template") or {}
+        rate_key = _resource_rate_key(template.get("rate"))
+        day_index = int(item.get("dayIndex") or 0)
+        weekly_usage[rate_key] += 1
+        daily_usage[day_index][rate_key] += 1
+        presence_vector = item.get("presenceVector")
+        if presence_vector is None:
+            presence_vector = _shift_preview_presence_vector(day_index, template, total_hours)
+        for index, amount in enumerate(presence_vector or []):
+            if index >= total_hours:
+                break
+            hourly_usage[rate_key][index] = round(
+                float(hourly_usage[rate_key][index] or 0) + float(amount or 0),
+                4,
+            )
+    return {
+        "weekly_usage": weekly_usage,
+        "daily_usage": daily_usage,
+        "hourly_usage": hourly_usage,
+    }
+
+
 def _shift_preview_presence_vector(day_index: int, template: Dict[str, Any], total_hours: int = SHIFT_PREVIEW_HOURS) -> List[float]:
     total_hours = max(24, int(total_hours or SHIFT_PREVIEW_HOURS))
     vector = [0.0 for _ in range(total_hours)]
@@ -584,10 +618,20 @@ def _shift_preview_totals(
     target: List[float],
     coverage: List[float],
     raw_target: Optional[List[float]] = None,
+    base_raw_target: Optional[List[float]] = None,
 ) -> Dict[str, Any]:
     effective_raw_target = raw_target if raw_target is not None else target
+    effective_base_raw_target = base_raw_target if base_raw_target is not None else effective_raw_target
     total_needed = sum(float(item or 0) for item in target)
     real_needed = sum(float(item or 0) for item in effective_raw_target)
+    base_real_needed = sum(float(item or 0) for item in effective_base_raw_target)
+    incident_uplift_needed = sum(
+        max(
+            0.0,
+            float(effective_raw_target[index] or 0) - float(effective_base_raw_target[index] or 0),
+        )
+        for index in range(len(target))
+    )
     real_coverage = sum(float(item or 0) for item in coverage)
     rounded_coverage = [_round_fte_to_half(float(item or 0)) for item in coverage]
     rounded_coverage_total = sum(float(item or 0) for item in rounded_coverage)
@@ -605,6 +649,8 @@ def _shift_preview_totals(
         "neededFteHours": round(total_needed, 4),
         "roundedNeededFteHours": round(total_needed, 4),
         "realNeededFteHours": round(real_needed, 4),
+        "baseRealNeededFteHours": round(base_real_needed, 4),
+        "incidentUpliftFteHours": round(incident_uplift_needed, 4),
         "coveredFteHours": round(covered_need, 4),
         "roundedCoveredFteHours": round(rounded_coverage_total, 4),
         "realCoveredFteHours": round(real_coverage, 4),
@@ -670,19 +716,25 @@ def _run_shift_preview_greedy_strategy(
     candidates: List[Dict[str, Any]],
     rate_capacity: Dict[str, Dict[str, Any]],
     strategy: Dict[str, Any],
+    initial_coverage: Optional[List[float]] = None,
+    initial_selected: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     total_hours = len(target)
-    coverage = [0.0 for _ in range(total_hours)]
+    coverage = [
+        round(float((initial_coverage or [])[index] if initial_coverage and index < len(initial_coverage) else 0.0), 4)
+        for index in range(total_hours)
+    ]
     selected = []
-    weekly_usage = defaultdict(int)
-    daily_usage = defaultdict(lambda: defaultdict(int))
-    hourly_usage = {
-        _resource_rate_key(rate): [0.0 for _ in range(total_hours)]
-        for rate in RESOURCE_RATE_VALUES
-    }
+    usage_state = _shift_preview_usage_state(initial_selected, total_hours)
+    weekly_usage = usage_state["weekly_usage"]
+    daily_usage = usage_state["daily_usage"]
+    hourly_usage = usage_state["hourly_usage"]
     total_weekly_capacity = sum(int(item.get("weekly_shift_capacity") or 0) for item in rate_capacity.values())
-    target_based_limit = max(0, min(800, int(sum(target) / 3) + 80))
-    max_shifts = min(target_based_limit, total_weekly_capacity)
+    used_weekly_capacity = sum(int(value or 0) for value in weekly_usage.values())
+    remaining_weekly_capacity = max(0, total_weekly_capacity - used_weekly_capacity)
+    remaining_deficit = sum(max(0.0, float(target[index] or 0) - float(coverage[index] or 0)) for index in range(total_hours))
+    target_based_limit = max(0, min(800, int(remaining_deficit / 3) + 80))
+    max_shifts = min(target_based_limit, remaining_weekly_capacity)
     min_covered_need = float(strategy.get("min_covered_need", 0.05))
     min_score = float(strategy.get("min_score", 0.0))
     day_deficit_weight = float(strategy.get("day_deficit_weight", 0.12))
@@ -746,6 +798,8 @@ def _run_shift_preview_greedy_strategy(
             "dayIndex": best["dayIndex"],
             "template": best["template"],
             "vector": list(best["vector"]),
+            "presenceVector": list(best.get("presenceVector") or []),
+            "source": best.get("source"),
             "score": best_score,
         })
         best_rate_key = best["rateKey"]
@@ -894,6 +948,8 @@ def _run_shift_preview_cp_sat_strategy(
             "dayIndex": candidate["dayIndex"],
             "template": candidate["template"],
             "vector": list(candidate["vector"]),
+            "presenceVector": list(candidate.get("presenceVector") or []),
+            "source": candidate.get("source"),
             "score": {
                 "method": "cp_sat",
                 "status": status_name,
@@ -918,13 +974,25 @@ def _select_shift_preview_strategy(
     target: List[float],
     candidates: List[Dict[str, Any]],
     rate_capacity: Dict[str, Dict[str, Any]],
+    initial_coverage: Optional[List[float]] = None,
+    initial_selected: Optional[List[Dict[str, Any]]] = None,
+    allow_cp_sat: bool = True,
 ) -> Dict[str, Any]:
-    cp_sat_result = _run_shift_preview_cp_sat_strategy(target, candidates, rate_capacity)
+    cp_sat_result = None
+    if allow_cp_sat and not initial_coverage and not initial_selected:
+        cp_sat_result = _run_shift_preview_cp_sat_strategy(target, candidates, rate_capacity)
     strategy_results = []
     if cp_sat_result is not None:
         strategy_results.append(cp_sat_result)
     strategy_results.extend([
-        _run_shift_preview_greedy_strategy(target, candidates, rate_capacity, strategy)
+        _run_shift_preview_greedy_strategy(
+            target,
+            candidates,
+            rate_capacity,
+            strategy,
+            initial_coverage=initial_coverage,
+            initial_selected=initial_selected,
+        )
         for strategy in SHIFT_PREVIEW_GREEDY_STRATEGIES
     ])
     best_result = min(
@@ -974,12 +1042,16 @@ def _shift_preview_days(
     raw_target: List[float],
     coverage: List[float],
     selected: List[Dict[str, Any]],
+    base_target: Optional[List[float]] = None,
+    base_raw_target: Optional[List[float]] = None,
+    uplift_raw_target: Optional[List[float]] = None,
 ) -> List[Dict[str, Any]]:
     shifts_by_day = defaultdict(list)
     for index, selected_item in enumerate(selected, start=1):
         template = selected_item["template"]
         day_index = int(selected_item["dayIndex"])
-        source = str(template.get("source") or selected_item.get("source") or "template")
+        source = str(selected_item.get("source") or template.get("source") or "template")
+        is_incident_uplift = source == "incident_uplift"
         shift = {
             "id": f"gen-{source}-{day_index}-{index}",
             "templateId": template["id"],
@@ -992,6 +1064,9 @@ def _shift_preview_days(
             "durationMinutes": int(template["durationMinutes"]),
             "overnight": bool(template.get("overnight")),
             "source": source,
+            "baseSource": template.get("source") or source,
+            "isIncidentUplift": is_incident_uplift,
+            "tone": "emerald" if is_incident_uplift else "blue",
             "breaks": template.get("breaks") or [],
         }
         shifts_by_day[day_index].append(shift)
@@ -1004,11 +1079,18 @@ def _shift_preview_days(
             needed = float(target[absolute_hour] or 0)
             covered = float(coverage[absolute_hour] or 0)
             covered_rounded = _round_fte_to_half(covered)
+            base_needed = float((base_target or target)[absolute_hour] or 0)
+            base_raw_needed = float((base_raw_target or raw_target)[absolute_hour] or 0)
+            uplift_needed = float((uplift_raw_target or [0.0 for _ in range(len(target))])[absolute_hour] or 0)
             coverage_rows.append({
                 "hour": hour,
                 "needed": round(needed, 4),
                 "rawNeeded": round(float(raw_target[absolute_hour] or 0), 4),
                 "realNeeded": round(float(raw_target[absolute_hour] or 0), 4),
+                "baseNeeded": round(base_needed, 4),
+                "baseRawNeeded": round(base_raw_needed, 4),
+                "incidentUpliftNeeded": round(uplift_needed, 4),
+                "incidentAdjustedNeeded": round(float(raw_target[absolute_hour] or 0), 4),
                 "covered": round(covered, 4),
                 "coveredRounded": round(covered_rounded, 4),
                 "deficit": round(max(0.0, needed - covered_rounded), 4),
@@ -1016,6 +1098,7 @@ def _shift_preview_days(
             })
         day_target = target[day_index * 24:(day_index + 1) * 24]
         day_raw_target = raw_target[day_index * 24:(day_index + 1) * 24]
+        day_base_raw_target = (base_raw_target or raw_target)[day_index * 24:(day_index + 1) * 24]
         day_coverage = coverage[day_index * 24:(day_index + 1) * 24]
         preview_days.append({
             "date": day.get("forecast_date"),
@@ -1024,7 +1107,7 @@ def _shift_preview_days(
             "label": day.get("label"),
             "coverage": coverage_rows,
             "shifts": shifts_by_day.get(day_index, []),
-            "stats": _shift_preview_totals(day_target, day_coverage, day_raw_target),
+            "stats": _shift_preview_totals(day_target, day_coverage, day_raw_target, day_base_raw_target),
         })
     return preview_days
 
@@ -1037,23 +1120,66 @@ def _build_schedule_preview_variant(
     raw_target: List[float],
     candidates: List[Dict[str, Any]],
     rate_capacity: Dict[str, Dict[str, Any]],
+    adjusted_target: Optional[List[float]] = None,
+    adjusted_raw_target: Optional[List[float]] = None,
+    uplift_raw_target: Optional[List[float]] = None,
 ) -> Dict[str, Any]:
     selected_result = _select_shift_preview_strategy(target, candidates, rate_capacity)
     best_result = selected_result["best"]
-    selected = best_result["selected"]
-    coverage = best_result["coverage"]
+    base_selected = best_result["selected"]
+    base_coverage = best_result["coverage"]
+    effective_target = adjusted_target if adjusted_target is not None else target
+    effective_raw_target = adjusted_raw_target if adjusted_raw_target is not None else raw_target
+    has_incident_uplift = any(float(item or 0) > 0.001 for item in (uplift_raw_target or []))
+    incident_result = None
+    if has_incident_uplift:
+        incident_result = _select_shift_preview_strategy(
+            effective_target,
+            candidates,
+            rate_capacity,
+            initial_coverage=base_coverage,
+            initial_selected=base_selected,
+            allow_cp_sat=False,
+        )
+        incident_selected = [
+            {
+                **item,
+                "source": "incident_uplift",
+            }
+            for item in ((incident_result.get("best") or {}).get("selected") or [])
+        ]
+        selected = [*base_selected, *incident_selected]
+        coverage = (incident_result.get("best") or {}).get("coverage") or base_coverage
+    else:
+        incident_selected = []
+        selected = base_selected
+        coverage = base_coverage
     return {
         "key": key,
         "label": label,
-        "days": _shift_preview_days(days, target, raw_target, coverage, selected),
-        "summary": _shift_preview_totals(target, coverage, raw_target),
+        "days": _shift_preview_days(
+            days,
+            effective_target,
+            effective_raw_target,
+            coverage,
+            selected,
+            base_target=target,
+            base_raw_target=raw_target,
+            uplift_raw_target=uplift_raw_target,
+        ),
+        "summary": _shift_preview_totals(effective_target, coverage, effective_raw_target, raw_target),
         "capacityRates": _shift_preview_capacity_summary(rate_capacity, selected, len(days)),
         "generation": {
             "variant": key,
             "method": best_result.get("method"),
+            "baseMethod": best_result.get("method"),
+            "incidentUpliftMethod": ((incident_result or {}).get("best") or {}).get("method"),
+            "baseShifts": len(base_selected),
+            "incidentUpliftShifts": len(incident_selected),
             "strategiesTried": len(selected_result["strategy_results"]),
+            "incidentStrategiesTried": len((incident_result or {}).get("strategy_results") or []),
             "candidateCount": len(candidates),
-            "qualityScore": round(float(best_result.get("quality") or 0), 4),
+            "qualityScore": round(float(_shift_preview_quality_score(_shift_preview_totals(effective_target, coverage, effective_raw_target, raw_target), len(selected)) or 0), 4),
             "strategySummaries": [
                 {
                     "method": item.get("method"),
@@ -1063,6 +1189,16 @@ def _build_schedule_preview_variant(
                     "qualityScore": round(float(item.get("quality") or 0), 4),
                 }
                 for item in selected_result["strategy_results"]
+            ],
+            "incidentStrategySummaries": [
+                {
+                    "method": item.get("method"),
+                    "shifts": len(item.get("selected") or []),
+                    "deficitFteHours": (item.get("totals") or {}).get("deficitFteHours"),
+                    "overFteHours": (item.get("totals") or {}).get("overFteHours"),
+                    "qualityScore": round(float(item.get("quality") or 0), 4),
+                }
+                for item in ((incident_result or {}).get("strategy_results") or [])
             ],
         },
     }
@@ -1122,6 +1258,9 @@ def _generate_schedule_preview_from_forecast(
     total_hours = day_count * 24
     target = [0.0 for _ in range(total_hours)]
     raw_target = [0.0 for _ in range(total_hours)]
+    adjusted_target = [0.0 for _ in range(total_hours)]
+    adjusted_raw_target = [0.0 for _ in range(total_hours)]
+    uplift_raw_target = [0.0 for _ in range(total_hours)]
     for day_index, day in enumerate(days):
         for row in day.get("hourly_forecast") or []:
             hour = _to_int(row.get("hour"), -1)
@@ -1129,8 +1268,13 @@ def _generate_schedule_preview_from_forecast(
                 continue
             absolute_hour = day_index * 24 + hour
             raw_value = max(0.0, _to_float(row.get("forecast_fte")))
+            uplift_value = max(0.0, _to_float(row.get("incident_uplift_fte")))
+            adjusted_value = raw_value + uplift_value
             raw_target[absolute_hour] = round(raw_value, 4)
             target[absolute_hour] = float(_round_fte_to_half(raw_value))
+            uplift_raw_target[absolute_hour] = round(uplift_value, 4)
+            adjusted_raw_target[absolute_hour] = round(adjusted_value, 4)
+            adjusted_target[absolute_hour] = float(_round_fte_to_half(adjusted_value))
 
     enabled_templates = [item for item in templates if item.get("enabled", True)]
     operator_capacity = _operator_capacity_for_period(operator_capacity, day_count)
@@ -1147,6 +1291,9 @@ def _generate_schedule_preview_from_forecast(
         raw_target,
         template_candidates,
         rate_capacity,
+        adjusted_target=adjusted_target,
+        adjusted_raw_target=adjusted_raw_target,
+        uplift_raw_target=uplift_raw_target,
     )
     freeform_variant = _build_schedule_preview_variant(
         "freeform",
@@ -1156,6 +1303,9 @@ def _generate_schedule_preview_from_forecast(
         raw_target,
         freeform_candidates,
         rate_capacity,
+        adjusted_target=adjusted_target,
+        adjusted_raw_target=adjusted_raw_target,
+        uplift_raw_target=uplift_raw_target,
     )
     variants = [template_variant, freeform_variant]
     default_variant = min(variants, key=_schedule_preview_variant_rank)
@@ -1180,6 +1330,7 @@ def _generate_schedule_preview_from_forecast(
         "days": default_variant["days"],
         "summary": default_variant["summary"],
         "generation": default_variant["generation"],
+        "incidentUplift": forecast_payload.get("incidentUplift") or {},
         "selectedVariant": default_variant["key"],
         "variants": variants,
     }

@@ -220,6 +220,19 @@ const formatWorkloadTooltip = (row, answerRate) => {
   ].join('\n');
 };
 
+const formatIncidentUpliftTooltip = (row) => {
+  const sources = row?.incident_uplift_sources || row?.incidentUpliftSources || [];
+  if (!sources.length) return 'Нет данных последних 6 дней для этого часа';
+  return [
+    'Прирост считается только по превышению факта над прогнозом:',
+    ...sources.map((item) => {
+      const delta = Number(item.delta_calls || 0);
+      const ratio = Number(item.growth_ratio || 0);
+      return `${formatDate(item.date)} · вес ${formatNumber(item.weight, 0)} · факт ${formatNumber(item.actual_calls, 1)} / прогноз ${formatNumber(item.forecast_calls, 1)} · +${formatNumber(delta, 1)} (${formatPercent(ratio, 0)})`;
+    }),
+  ].join('\n');
+};
+
 const formatActualLoadTooltip = (row, effectiveMinutes) => {
   const accepted = Number(row.actual_accepted_calls || 0);
   const talkSeconds = Number(row.actual_talk_time_seconds || 0);
@@ -1501,8 +1514,14 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
         hourNumber: Number(row.hour),
         hour: `${String(row.hour).padStart(2, '0')}:00`,
         calls: Number(row.forecast_calls || 0),
+        upliftCalls: Number(row.incident_uplift_calls || 0),
+        adjustedCalls: Number(row.incident_adjusted_calls ?? row.forecast_calls ?? 0),
         fte: Number(row.forecast_fte || 0),
+        upliftFte: Number(row.incident_uplift_fte || 0),
+        adjustedFte: Number(row.incident_adjusted_fte ?? row.forecast_fte ?? 0),
         workload: Number(row.forecast_workload_minutes || 0),
+        upliftWorkload: Number(row.incident_uplift_workload_minutes || 0),
+        adjustedWorkload: Number(row.incident_adjusted_workload_minutes ?? row.forecast_workload_minutes ?? 0),
         actualWorkload: row.has_actual_report ? Number(row.actual_workload_minutes || 0) : null,
         actualFte: row.has_actual_report ? Number(row.actual_report_fte || 0) : null,
       })),
@@ -1533,6 +1552,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
   const forecastActualLoadAvailable = (nextWeekForecast.days || []).some(
     (day) => day?.has_actual_report && day?.forecast_date <= todayValue,
   );
+  const incidentUpliftAvailable = Number(nextWeekForecast.incidentUpliftFteHours || 0) > 0.01;
   const activeForecastHour = hoveredForecastHour ?? pinnedForecastHour;
   const activeForecastHourLabel = activeForecastHour !== null ? `${String(activeForecastHour).padStart(2, '0')}:00` : null;
   useEffect(() => {
@@ -1565,24 +1585,31 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
               <div className="rounded-md bg-slate-50 px-2 py-1.5">
                 <div className="mb-1 font-medium text-slate-500">Звонки</div>
                 <div className="flex justify-between gap-6"><span>Прогноз</span><b className="text-blue-700">{formatNumber(row.forecast_calls, 1)}</b></div>
+                <div className="flex justify-between gap-6"><span>Возможный прирост</span><b className="text-emerald-700">+{formatNumber(row.incident_uplift_calls, 1)}</b></div>
+                <div className="flex justify-between gap-6"><span>С учетом прироста</span><b className="text-slate-900">{formatNumber(row.incident_adjusted_calls ?? row.forecast_calls, 1)}</b></div>
                 <div className="flex justify-between gap-6"><span>Факт</span><b className="text-emerald-700">{row.has_actual_report ? formatInt(row.actual_received_calls) : '-'}</b></div>
               </div>
               <div className="rounded-md bg-slate-50 px-2 py-1.5">
                 <div className="mb-1 font-medium text-slate-500">Минуты нагрузки</div>
                 <div className="flex justify-between gap-6"><span>Прогноз</span><b className="text-blue-700">{formatNumber(row.forecast_workload_minutes, 1)}</b></div>
+                <div className="flex justify-between gap-6"><span>Прирост</span><b className="text-emerald-700">+{formatNumber(row.incident_uplift_workload_minutes, 1)}</b></div>
                 <div className="flex justify-between gap-6"><span>Факт</span><b className="text-emerald-700">{row.has_actual_report ? formatNumber(row.actual_workload_minutes, 1) : '-'}</b></div>
               </div>
               <div className="rounded-md bg-slate-50 px-2 py-1.5">
                 <div className="mb-1 font-medium text-slate-500">FTE</div>
                 <div className="flex justify-between gap-6"><span>Прогноз</span><b className="text-blue-700">{formatNumber(row.forecast_fte, 2)}</b></div>
+                <div className="flex justify-between gap-6"><span>Прирост</span><b className="text-emerald-700">+{formatNumber(row.incident_uplift_fte, 2)}</b></div>
                 <div className="flex justify-between gap-6"><span>Факт</span><b className="text-emerald-700">{row.has_actual_report ? formatNumber(row.actual_report_fte, 2) : '-'}</b></div>
               </div>
             </div>
           ) : (
             <div className="space-y-1 text-slate-600">
               <div className="flex justify-between gap-6"><span>Прогноз звонков</span><b className="text-slate-900">{formatNumber(row.forecast_calls, 1)}</b></div>
+              <div className="flex justify-between gap-6"><span>Возможный прирост</span><b className="text-emerald-700">+{formatNumber(row.incident_uplift_calls, 1)}</b></div>
+              <div className="flex justify-between gap-6"><span>Звонков с приростом</span><b className="text-slate-900">{formatNumber(row.incident_adjusted_calls ?? row.forecast_calls, 1)}</b></div>
               <div className="flex justify-between gap-6"><span>Прогноз минут</span><b className="text-blue-700">{formatNumber(row.forecast_workload_minutes, 1)}</b></div>
               <div className="flex justify-between gap-6"><span>Прогноз FTE</span><b className="text-blue-700">{formatNumber(row.forecast_fte, 2)}</b></div>
+              <div className="flex justify-between gap-6"><span>FTE с приростом</span><b className="text-emerald-700">{formatNumber(row.incident_adjusted_fte ?? row.forecast_fte, 2)}</b></div>
             </div>
           )}
           {pinnedForecastHour !== null && Number(pinnedForecastHour) === Number(row.hour) ? (
@@ -2554,6 +2581,13 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                   <StatCard icon={Users} label="OCC / UR" value={`${formatPercent(nextWeekForecast.occ, 0)} / ${formatPercent(nextWeekForecast.ur, 0)}`} hint={`Эфф. мин/час: ${formatNumber(nextWeekForecast.effectiveMinutes, 1)}`} tone="emerald" />
                   <StatCard icon={ShieldAlert} label="Усушка" value={formatPercent(nextWeekForecast.shrinkage, 0)} hint="Коэффициент периода" tone="amber" />
                   <StatCard icon={TrendingUp} label="FTE-часы периода" value={formatNumber(nextWeekForecast.periodFteHours ?? nextWeekForecast.weeklyFteHours, 1)} hint={`${formatInt(nextWeekForecast.periodDays || (nextWeekForecast.days || []).length)} дн.`} tone="blue" />
+                  <StatCard
+                    icon={TrendingUp}
+                    label="Возможный прирост"
+                    value={`+${formatInt(nextWeekForecast.incidentUpliftCalls)} зв.`}
+                    hint={`+${formatNumber(nextWeekForecast.incidentUpliftFteHours, 1)} FTE-ч · ${Number(nextWeekForecast.incidentUplift?.source_day_count || 0)}/6 дн.`}
+                    tone="emerald"
+                  />
                   <OperatorSummaryCard
                     requiredFte={nextWeekForecast.operatorsWithShrinkage}
                     baseFte={nextWeekForecast.baseOperators}
@@ -2621,6 +2655,9 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                           <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-500">
                             <span>Звонки: <b className="text-slate-800">{formatInt(profile.forecast_calls)}</b></span>
                             <span>История: <b className={profile.insufficient_history ? 'text-amber-700' : 'text-emerald-700'}>{profile.history_count}/2</b></span>
+                            {Number(profile.incident_uplift_calls || 0) > 0.01 ? (
+                              <span className="col-span-2 text-emerald-700">Возможный прирост: <b>+{formatInt(profile.incident_uplift_calls)} зв. · +{formatNumber(profile.incident_uplift_fte, 2)} FTE</b></span>
+                            ) : null}
                             {profile.has_actual_report && profile.forecast_date <= todayValue ? (
                               <span className="col-span-2 text-emerald-700">Факт отчета: <b>{formatNumber(profile.actual_report_fte, 2)} FTE</b></span>
                             ) : null}
@@ -2663,6 +2700,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                                   <div><span className="block text-[11px] text-blue-700">Прогноз</span><b>{formatInt(selectedForecastDay.forecast_calls)}</b></div>
                                   <div><span className="block text-[11px] text-emerald-700">Факт</span><b>{formatInt(selectedForecastDay.actual_received_calls)}</b></div>
                                 </div>
+                                <div className="mt-1 text-[11px] font-semibold text-emerald-700">+{formatInt(selectedForecastDay.incident_uplift_calls)} возможный прирост</div>
                               </div>
                               <div className="rounded-lg bg-slate-50 px-3 py-2">
                                 <div className="text-xs text-slate-500">Минуты нагрузки</div>
@@ -2677,6 +2715,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                                   <div><span className="block text-[11px] text-blue-700">Прогноз</span><b>{formatNumber(selectedForecastDay.forecast_daily_fte, 2)}</b></div>
                                   <div><span className="block text-[11px] text-emerald-700">Факт</span><b>{formatNumber(selectedForecastDay.actual_report_fte, 2)}</b></div>
                                 </div>
+                                <div className="mt-1 text-[11px] font-semibold text-emerald-700">с приростом {formatNumber(selectedForecastDay.incident_adjusted_daily_fte ?? selectedForecastDay.forecast_daily_fte, 2)}</div>
                               </div>
                               <div className="rounded-lg bg-slate-50 px-3 py-2">
                                 <div className="text-xs text-slate-500">Пиковый час</div>
@@ -2688,9 +2727,9 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                             </div>
                           ) : (
                             <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-                              <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">Звонки</div><b>{formatInt(selectedForecastDay.forecast_calls)}</b></div>
+                              <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">Звонки</div><b>{formatInt(selectedForecastDay.forecast_calls)}</b><div className="mt-1 text-[11px] font-semibold text-emerald-700">+{formatInt(selectedForecastDay.incident_uplift_calls)} возможный прирост</div></div>
                               <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">Минут нагрузки</div><b>{formatNumber(selectedForecastDay.forecast_workload_minutes, 1)}</b></div>
-                              <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">FTE дня</div><b>{formatNumber(selectedForecastDay.forecast_daily_fte, 2)}</b></div>
+                              <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">FTE дня</div><b>{formatNumber(selectedForecastDay.forecast_daily_fte, 2)}</b><div className="mt-1 text-[11px] font-semibold text-emerald-700">с приростом {formatNumber(selectedForecastDay.incident_adjusted_daily_fte ?? selectedForecastDay.forecast_daily_fte, 2)}</div></div>
                               <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">Пиковый час</div><b>{selectedForecastPeakHours[0] ? `${String(selectedForecastPeakHours[0].hour).padStart(2, '0')}:00` : '-'}</b></div>
                             </div>
                           )}
@@ -2712,7 +2751,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                                 {activeForecastHourLabel ? (
                                   <ReferenceLine yAxisId="left" x={activeForecastHourLabel} stroke={pinnedForecastHour !== null ? '#0f172a' : '#64748b'} strokeDasharray="4 4" />
                                 ) : null}
-                                <Bar yAxisId="left" dataKey="calls" fill="#bfdbfe" radius={[4, 4, 0, 0]}>
+                                <Bar yAxisId="left" dataKey="calls" stackId="calls" fill="#bfdbfe" radius={incidentUpliftAvailable ? [0, 0, 0, 0] : [4, 4, 0, 0]}>
                                   {selectedForecastHourlyData.map((item) => (
                                     <Cell
                                       key={item.hour}
@@ -2720,8 +2759,21 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                                     />
                                   ))}
                                 </Bar>
+                                {incidentUpliftAvailable ? (
+                                  <Bar yAxisId="left" dataKey="upliftCalls" stackId="calls" fill="#bbf7d0" radius={[4, 4, 0, 0]}>
+                                    {selectedForecastHourlyData.map((item) => (
+                                      <Cell
+                                        key={`uplift-${item.hour}`}
+                                        fill={activeForecastHour !== null && Number(item.hourNumber) === Number(activeForecastHour) ? '#34d399' : '#bbf7d0'}
+                                      />
+                                    ))}
+                                  </Bar>
+                                ) : null}
                                 <Line yAxisId="left" type="monotone" dataKey="workload" stroke="#3b82f6" strokeWidth={2} dot={false} activeDot={{ r: 5 }} />
                                 <Line yAxisId="right" type="monotone" dataKey="fte" stroke="#2563eb" strokeWidth={2} dot={false} activeDot={{ r: 5 }} />
+                                {incidentUpliftAvailable ? (
+                                  <Line yAxisId="right" type="monotone" dataKey="adjustedFte" stroke="#059669" strokeWidth={2} strokeDasharray="4 3" dot={false} activeDot={{ r: 5 }} />
+                                ) : null}
                                 {showForecastActualLoad && selectedForecastHasActualLoad && (
                                   <>
                                     <Line yAxisId="left" type="monotone" dataKey="actualWorkload" stroke="#10b981" strokeWidth={2} dot={false} activeDot={{ r: 5 }} />
@@ -2740,11 +2792,14 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
 
                         <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_300px]">
                           <div className="overflow-x-auto rounded-lg border border-slate-200">
-                            <table className={`${showForecastActualLoad && selectedForecastHasActualLoad ? 'min-w-[1080px]' : 'min-w-[760px]'} w-full divide-y divide-slate-200 text-sm`}>
+                            <table className={`${showForecastActualLoad && selectedForecastHasActualLoad ? (incidentUpliftAvailable ? 'min-w-[1240px]' : 'min-w-[1080px]') : (incidentUpliftAvailable ? 'min-w-[960px]' : 'min-w-[760px]')} w-full divide-y divide-slate-200 text-sm`}>
                               <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
                                 <tr>
                                   <th className="px-3 py-3 text-left">Час</th>
                                   <th className="px-3 py-3 text-right">Звонки</th>
+                                  {incidentUpliftAvailable ? (
+                                    <th className="px-3 py-3 text-right">Прирост</th>
+                                  ) : null}
                                   {showForecastActualLoad && selectedForecastHasActualLoad ? (
                                     <th className="px-3 py-3 text-right">Факт звонков</th>
                                   ) : null}
@@ -2754,6 +2809,9 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                                     <th className="px-3 py-3 text-right">Факт нагрузки</th>
                                   ) : null}
                                   <th className="px-3 py-3 text-right">FTE</th>
+                                  {incidentUpliftAvailable ? (
+                                    <th className="px-3 py-3 text-right">FTE с приростом</th>
+                                  ) : null}
                                   {showForecastActualLoad && selectedForecastHasActualLoad ? (
                                     <th className="px-3 py-3 text-right">Факт FTE</th>
                                   ) : null}
@@ -2790,6 +2848,18 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                                           {formatNumber(row.forecast_calls, 1)}
                                         </span>
                                       </td>
+                                      {incidentUpliftAvailable ? (
+                                        <td className="px-3 py-2 text-right">
+                                          <span
+                                            title={formatIncidentUpliftTooltip(row)}
+                                            className={`inline-flex cursor-help items-center justify-end rounded-md border px-2 py-1 font-medium text-emerald-700 transition ${
+                                              rowIsActive ? 'border-emerald-200 bg-emerald-50' : 'border-transparent hover:border-emerald-200 hover:bg-emerald-50'
+                                            }`}
+                                          >
+                                            +{formatNumber(row.incident_uplift_calls, 1)}
+                                          </span>
+                                        </td>
+                                      ) : null}
                                       {showForecastActualLoad && selectedForecastHasActualLoad ? (
                                         <td className="px-3 py-2 text-right">
                                           <span
@@ -2834,6 +2904,9 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                                         </td>
                                       ) : null}
                                       <td className="px-3 py-2 text-right font-semibold text-blue-700">{formatNumber(row.forecast_fte, 2)}</td>
+                                      {incidentUpliftAvailable ? (
+                                        <td className="px-3 py-2 text-right font-semibold text-emerald-700">{formatNumber(row.incident_adjusted_fte ?? row.forecast_fte, 2)}</td>
+                                      ) : null}
                                       {showForecastActualLoad && selectedForecastHasActualLoad ? (
                                         <td className="px-3 py-2 text-right font-semibold text-emerald-700">
                                           {row.has_actual_report ? formatNumber(row.actual_report_fte, 2) : '-'}

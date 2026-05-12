@@ -81,6 +81,108 @@ const formatCountdown = (targetValue, nowMs) => {
     : `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
 };
 
+const AUCTION_RATE_GROUPS = [
+  { id: 'rate-1', title: 'Ставка 1', rate: 1, description: 'Полная ставка' },
+  { id: 'rate-0.75', title: 'Ставка 0.75', rate: 0.75, description: 'Смены для 0.75 и выше' },
+  { id: 'rate-0.5', title: 'Ставка 0.5', rate: 0.5, description: 'Короткие смены' },
+  { id: 'night-20-08', title: 'Ночные 20*08', rate: 1, description: '20:00 - 08:00' }
+];
+
+const normalizeClockValue = (value) => {
+  const raw = String(value || '').trim();
+  const match = raw.match(/^(\d{1,2}):(\d{2})/);
+  if (!match) return raw;
+  return `${String(Number(match[1]) % 24).padStart(2, '0')}:${match[2]}`;
+};
+
+const clockToMinutes = (value) => {
+  const normalized = normalizeClockValue(value);
+  const match = normalized.match(/^(\d{2}):(\d{2})$/);
+  if (!match) return 0;
+  return Number(match[1]) * 60 + Number(match[2]);
+};
+
+const formatRate = (value) => {
+  const rate = Number(value);
+  if (!Number.isFinite(rate)) return '0';
+  return rate.toFixed(2).replace(/\.?0+$/, '');
+};
+
+const isNightAuctionLot = (lot) => (
+  normalizeClockValue(lot?.start_time) === '20:00'
+  && normalizeClockValue(lot?.end_time) === '08:00'
+);
+
+const getAuctionRateGroupId = (lot) => {
+  if (isNightAuctionLot(lot)) return 'night-20-08';
+  const rate = Number(lot?.rate_min);
+  if (!Number.isFinite(rate) || rate <= 0.5) return 'rate-0.5';
+  if (rate <= 0.75) return 'rate-0.75';
+  return 'rate-1';
+};
+
+const formatAuctionShiftLabel = (lot) => {
+  if (isNightAuctionLot(lot)) return '20*08';
+  const start = normalizeClockValue(lot?.start_time);
+  const end = normalizeClockValue(lot?.end_time);
+  return `${start} - ${end}`;
+};
+
+const AuctionLotCell = ({
+  lot,
+  canClaim,
+  canManage,
+  claimingLotId,
+  onClaimLot,
+  userId,
+  userRate
+}) => {
+  if (!lot) return null;
+
+  const isLotClaimed = lot.status === 'claimed';
+  const lotClaimedByCurrentUser = Number(lot.claimed_by) === Number(userId);
+  const minRate = Number(lot.rate_min || 0);
+  const rateTooLow = !canManage && Number.isFinite(Number(userRate)) && minRate > Number(userRate) + 0.001;
+  const isClaiming = Number(claimingLotId) === Number(lot.id);
+
+  if (lot.status === 'available' && !canManage) {
+    return (
+      <button
+        type="button"
+        onClick={() => onClaimLot(lot.id)}
+        disabled={!canClaim || isClaiming || rateTooLow}
+        className={`flex min-h-[66px] w-full flex-col justify-between rounded-md border px-2.5 py-2 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-1 disabled:cursor-not-allowed ${
+          rateTooLow
+            ? 'border-slate-200 bg-slate-50 text-slate-400'
+            : 'border-blue-200 bg-white text-slate-900 hover:border-blue-400 hover:bg-blue-50'
+        }`}
+      >
+        <span className="text-sm font-semibold leading-5">
+          {rateTooLow ? 'Недоступна' : isClaiming ? '...' : 'Забрать'}
+        </span>
+        <span className="text-[11px] text-slate-500">мин. ставка {formatRate(minRate)}</span>
+      </button>
+    );
+  }
+
+  const tone = isLotClaimed
+    ? (lotClaimedByCurrentUser ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-slate-200 bg-slate-50 text-slate-500')
+    : 'border-slate-200 bg-white text-slate-700';
+  const statusText = isLotClaimed
+    ? (lotClaimedByCurrentUser ? 'Моя смена' : 'Занята')
+    : 'Доступна';
+
+  return (
+    <div className={`min-h-[66px] rounded-md border px-2.5 py-2 text-sm ${tone}`}>
+      <div className="font-semibold leading-5">{statusText}</div>
+      <div className="mt-1 text-[11px] opacity-80">мин. ставка {formatRate(minRate)}</div>
+      {canManage && lot.claimed_by_name ? (
+        <div className="mt-1 truncate text-[11px] font-medium text-emerald-700">Забрал: {lot.claimed_by_name}</div>
+      ) : null}
+    </div>
+  );
+};
+
 const getAuctionRuntimeStatus = (settings, nowMs) => {
   if (!settings?.enabled) return 'disabled';
   const startsAtMs = settings.starts_at ? new Date(settings.starts_at).getTime() : null;
@@ -332,16 +434,64 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     return lots.filter((lot) => !myDayOffs.includes(lot.shift_date));
   }, [canManage, lots, myDayOffs]);
 
-  const lotsByDate = useMemo(() => {
-    const grouped = new Map();
-    lotDates.forEach((date) => grouped.set(date, []));
+  const auctionTableGroups = useMemo(() => {
+    const groupMap = new Map(AUCTION_RATE_GROUPS.map((group) => [
+      group.id,
+      {
+        ...group,
+        rowsMap: new Map(),
+        total: 0,
+        claimed: 0,
+        available: 0
+      }
+    ]));
+
     visibleLots.forEach((lot) => {
-      const key = lot.shift_date || 'unknown';
-      if (!grouped.has(key)) grouped.set(key, []);
-      grouped.get(key).push(lot);
+      const groupId = getAuctionRateGroupId(lot);
+      const group = groupMap.get(groupId) || groupMap.get('rate-0.5');
+      if (!group || !lot.shift_date) return;
+
+      const start = normalizeClockValue(lot.start_time);
+      const end = normalizeClockValue(lot.end_time);
+      const rowKey = `${start}-${end}`;
+      if (!group.rowsMap.has(rowKey)) {
+        group.rowsMap.set(rowKey, {
+          key: rowKey,
+          label: formatAuctionShiftLabel(lot),
+          startMinute: clockToMinutes(start),
+          endMinute: clockToMinutes(end),
+          lotsByDate: new Map(),
+          total: 0,
+          claimed: 0,
+          available: 0
+        });
+      }
+
+      const row = group.rowsMap.get(rowKey);
+      if (!row.lotsByDate.has(lot.shift_date)) row.lotsByDate.set(lot.shift_date, []);
+      row.lotsByDate.get(lot.shift_date).push(lot);
+      row.total += 1;
+      group.total += 1;
+      if (lot.status === 'claimed') {
+        row.claimed += 1;
+        group.claimed += 1;
+      } else if (lot.status === 'available') {
+        row.available += 1;
+        group.available += 1;
+      }
     });
-    return Array.from(grouped.entries()).sort(([a], [b]) => a.localeCompare(b));
-  }, [lotDates, visibleLots]);
+
+    return Array.from(groupMap.values())
+      .map((group) => ({
+        ...group,
+        rows: Array.from(group.rowsMap.values()).sort((a, b) => (
+          a.startMinute - b.startMinute
+          || a.endMinute - b.endMinute
+          || a.label.localeCompare(b.label, 'ru')
+        ))
+      }))
+      .filter((group) => group.rows.length > 0);
+  }, [visibleLots]);
 
   const myClaimedLots = useMemo(
     () => lots.filter((lot) => Number(lot.claimed_by) === Number(user?.id)),
@@ -398,6 +548,13 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const canUseAuction = isTester || canManage;
   const canChoose = isTester && (runtimeStatus === 'scheduled' || runtimeStatus === 'open');
   const canClaim = isTester && runtimeStatus === 'open';
+  const userRate = useMemo(() => {
+    const directRate = Number(user?.rate);
+    if (Number.isFinite(directRate) && directRate > 0) return directRate;
+    const snapshotOperator = (settings.selected_operators || []).find((operator) => Number(operator?.id) === Number(user?.id));
+    const snapshotRate = Number(snapshotOperator?.rate);
+    return Number.isFinite(snapshotRate) && snapshotRate > 0 ? snapshotRate : 1;
+  }, [settings.selected_operators, user?.id, user?.rate]);
 
   const setDaySectionRef = useCallback((date, node) => {
     if (!date) return;
@@ -409,7 +566,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     const node = daySectionRefs.current.get(date);
     if (!node) return;
     setActiveDayDate(date);
-    node.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    node.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
   }, []);
 
   const toggleOperator = useCallback((operatorId) => {
@@ -657,91 +814,109 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                 </p>
               </div>
               <div className="p-5">
-                {lotsByDate.length ? (
-                  <div className="space-y-5">
-                    {lotsByDate.map(([date, dateLots]) => {
-                      const dayMeta = dayNavigationItems.find((item) => item.date === date);
-                      const isActiveDay = activeDayDate === date;
-                      return (
-                      <div
-                        key={date}
-                        ref={(node) => setDaySectionRef(date, node)}
-                        className={`scroll-mt-24 rounded-lg border p-3 transition-colors ${isActiveDay ? 'border-blue-300 bg-blue-50/50 shadow-sm' : 'border-slate-100 bg-slate-50/70'}`}
-                      >
-                        <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                          <div>
-                            <h3 className="text-base font-semibold text-slate-950">{formatDateLabel(date)}</h3>
-                            <p className="mt-0.5 text-xs text-slate-500">
-                              {canManage
-                                ? `Забрали ${dayMeta?.claimed || 0} из ${dayMeta?.total || 0} смен`
-                                : dayMeta?.isDayOff
-                                  ? 'День отмечен как выходной'
-                                  : dayMeta?.myClaimed
-                                    ? `Выбрано смен: ${dayMeta.myClaimed}`
-                                    : 'Смена или выходной еще не выбраны'}
-                            </p>
-                          </div>
-                          {myDayOffs.includes(date) ? <span className="rounded-full bg-blue-50 px-2 py-1 text-xs font-semibold text-blue-700">Выходной</span> : null}
-                        </div>
-                        {dateLots.length ? (
-                        <div className="grid gap-2 md:grid-cols-2 2xl:grid-cols-3">
-                          {dateLots.map((lot) => {
-                            const isLotClaimed = lot.status === 'claimed';
-                            const lotClaimedByCurrentUser = Number(lot.claimed_by) === Number(user?.id);
-                            const cardTone = isLotClaimed
-                              ? (lotClaimedByCurrentUser ? 'border-emerald-200 bg-emerald-50/70' : 'border-slate-200 bg-slate-50 text-slate-500')
-                              : 'border-slate-200 bg-white';
-                            const statusTone = isLotClaimed
-                              ? (lotClaimedByCurrentUser ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-200 text-slate-600')
-                              : 'bg-slate-100 text-slate-600';
-                            return (
-                            <div key={lot.id} className={`rounded-lg border p-3 transition-colors ${cardTone}`}>
-                              <div className="flex items-start justify-between gap-3">
-                                <div>
-                                  <div className={`text-base font-semibold ${isLotClaimed && !lotClaimedByCurrentUser ? 'text-slate-500' : 'text-slate-950'}`}>{lot.start_time} - {lot.end_time}</div>
-                                  <div className="mt-1 text-xs text-slate-500">Мин. ставка: {Number(lot.rate_min || 0).toFixed(2)}</div>
-                                  {canManage && lot.claimed_by_name ? (
-                                    <div className="mt-1 text-xs font-medium text-emerald-700">Забрал: {lot.claimed_by_name}</div>
-                                  ) : null}
-                                  {!canManage && isLotClaimed && !lotClaimedByCurrentUser ? (
-                                    <div className="mt-1 text-xs font-medium text-slate-500">Эту смену уже забрали</div>
-                                  ) : null}
-                                </div>
-                                {lot.status === 'available' && !canManage ? (
-                                  <button
-                                    type="button"
-                                    onClick={() => handleClaimLot(lot.id)}
-                                    disabled={!canClaim || claimingLotId === lot.id}
-                                    className="inline-flex h-9 items-center rounded-md bg-blue-700 px-3 text-sm font-semibold text-white transition hover:bg-blue-800 disabled:cursor-not-allowed disabled:bg-blue-300"
-                                  >
-                                    {claimingLotId === lot.id ? '...' : 'Забрать'}
-                                  </button>
-                                ) : (
-                                  <span className={`rounded-full px-2 py-1 text-xs font-semibold ${statusTone}`}>
-                                    {lot.status === 'claimed' ? 'Занята' : 'Доступна'}
-                                  </span>
-                                )}
-                              </div>
-                            </div>
-                            );
-                          })}
-                        </div>
-                        ) : (
-                          <div className="rounded-lg border border-dashed border-slate-300 bg-white px-4 py-6 text-center text-sm text-slate-500">
-                            {myDayOffs.includes(date)
-                              ? 'На этот день выбран выходной.'
-                              : canManage
-                                ? 'В этот день нет смен.'
-                                : 'Для вас на этот день сейчас нет доступных смен.'}
-                          </div>
-                        )}
-                      </div>
-                      );
-                    })}
+                {auctionTableGroups.length && lotDates.length ? (
+                  <div className="overflow-hidden rounded-lg border border-slate-200">
+                    <div className="overflow-x-auto">
+                      <table className="min-w-[980px] border-separate border-spacing-0 text-sm">
+                        <thead>
+                          <tr>
+                            <th className="sticky left-0 z-20 w-44 border-b border-r border-slate-200 bg-slate-50 px-3 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                              Смена
+                            </th>
+                            {lotDates.map((date) => {
+                              const dayMeta = dayNavigationItems.find((item) => item.date === date);
+                              const isActiveDay = activeDayDate === date;
+                              return (
+                                <th
+                                  key={date}
+                                  ref={(node) => setDaySectionRef(date, node)}
+                                  className={`min-w-[132px] border-b border-r border-slate-200 px-3 py-3 text-left align-top last:border-r-0 ${isActiveDay ? 'bg-blue-50' : 'bg-slate-50'}`}
+                                >
+                                  <div className="font-semibold text-slate-950">{formatDateLabel(date)}</div>
+                                  <div className="mt-1 text-[11px] font-medium text-slate-500">
+                                    {canManage
+                                      ? `${dayMeta?.claimed || 0}/${dayMeta?.total || 0} занято`
+                                      : dayMeta?.isDayOff
+                                        ? 'Выходной'
+                                        : dayMeta?.myClaimed
+                                          ? 'Смена выбрана'
+                                          : `${dayMeta?.available || 0} доступно`}
+                                  </div>
+                                </th>
+                              );
+                            })}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {auctionTableGroups.map((group) => (
+                            <React.Fragment key={group.id}>
+                              <tr>
+                                <td colSpan={lotDates.length + 1} className="border-b border-slate-200 bg-slate-100 px-3 py-2">
+                                  <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                                    <div>
+                                      <div className="text-sm font-semibold text-slate-950">{group.title}</div>
+                                      <div className="text-xs text-slate-500">{group.description}</div>
+                                    </div>
+                                    <div className="text-xs font-medium text-slate-500">
+                                      {group.available} доступно · {group.claimed} занято · {group.total} всего
+                                    </div>
+                                  </div>
+                                </td>
+                              </tr>
+                              {group.rows.map((row) => (
+                                <tr key={`${group.id}-${row.key}`} className="group">
+                                  <th className="sticky left-0 z-10 border-b border-r border-slate-200 bg-white px-3 py-3 text-left align-top group-hover:bg-slate-50">
+                                    <div className="font-semibold text-slate-950">{row.label}</div>
+                                    <div className="mt-1 text-[11px] font-medium text-slate-500">
+                                      {row.available} доступно из {row.total}
+                                    </div>
+                                  </th>
+                                  {lotDates.map((date) => {
+                                    const cellLots = row.lotsByDate.get(date) || [];
+                                    const isDayOff = myDayOffs.includes(date);
+                                    return (
+                                      <td
+                                        key={`${group.id}-${row.key}-${date}`}
+                                        className={`border-b border-r border-slate-200 p-2 align-top last:border-r-0 ${activeDayDate === date ? 'bg-blue-50/40' : 'bg-white'} group-hover:bg-slate-50`}
+                                      >
+                                        {cellLots.length ? (
+                                          <div className="space-y-1.5">
+                                            {cellLots.map((lot) => (
+                                              <AuctionLotCell
+                                                key={lot.id}
+                                                lot={lot}
+                                                canClaim={canClaim}
+                                                canManage={canManage}
+                                                claimingLotId={claimingLotId}
+                                                onClaimLot={handleClaimLot}
+                                                userId={user?.id}
+                                                userRate={userRate}
+                                              />
+                                            ))}
+                                          </div>
+                                        ) : (
+                                          <div className={`flex min-h-[66px] items-center justify-center rounded-md border border-dashed px-2 text-center text-xs ${isDayOff ? 'border-blue-200 bg-blue-50 text-blue-700' : 'border-slate-200 bg-slate-50 text-slate-400'}`}>
+                                            {isDayOff ? 'Выходной' : '—'}
+                                          </div>
+                                        )}
+                                      </td>
+                                    );
+                                  })}
+                                </tr>
+                              ))}
+                            </React.Fragment>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 ) : (
                   <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-4 py-10 text-center text-sm text-slate-500">
-                    {canManage ? 'Создайте тестовые смены для проверки realtime.' : 'Пока нет доступных смен.'}
+                    {lotDates.length
+                      ? 'Для выбранных дней сейчас нет доступных смен.'
+                      : canManage
+                        ? 'Создайте тестовые смены для проверки realtime.'
+                        : 'Пока нет доступных смен.'}
                   </div>
                 )}
               </div>
