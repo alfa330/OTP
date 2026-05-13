@@ -912,16 +912,16 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
               <div className="min-w-0 sm:p-5">
                 {auctionTableGroups.length && lotDates.length ? (
                   <div className="min-w-0 max-w-full sm:border-y sm:border-slate-200">
-                    <div className="sticky top-[46px] z-30 overflow-hidden bg-white shadow-[0_1px_0_rgba(148,163,184,0.45)] sm:top-14">
+                    <div className="sticky top-[46px] z-30 overflow-hidden bg-white shadow-[0_1px_0_rgba(148,163,184,0.45)] sm:hidden">
                       <div
                         ref={auctionDateBarScrollRef}
                         onScroll={() => syncAuctionScroll('dates')}
                         className="max-w-full overflow-x-auto overscroll-x-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
                       >
-                        <table className="border-separate border-spacing-0" style={{ tableLayout: 'fixed' }}>
+                        <table className="w-max table-fixed border-separate border-spacing-0">
                           <colgroup>
                             {lotDates.map((date) => (
-                              <col key={date} className="w-[50px] sm:w-[88px]" />
+                              <col key={date} className="w-[50px]" />
                             ))}
                           </colgroup>
                           <thead>
@@ -935,7 +935,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                     data-auction-date-cell
                                     title={formatDateLabel(date)}
                                     onClick={() => scrollToDay(date)}
-                                    className={`cursor-pointer border-b border-r border-slate-200 px-1 py-1.5 text-center align-top last:border-r-0 sm:px-2 sm:py-2 ${isActiveDay ? 'bg-blue-50' : 'bg-slate-50'}`}
+                                    className={`cursor-pointer border-b border-r border-slate-200 px-1 py-1.5 text-center align-top last:border-r-0 ${isActiveDay ? 'bg-blue-50' : 'bg-slate-50'}`}
                                   >
                                     <div className="text-xs font-semibold tabular-nums text-slate-950">{formatShortDateLabel(date)}</div>
                                     {dayMeta?.isDayOff ? <div className="mt-0.5 text-[10px] font-semibold text-blue-700">вых.</div> : null}
@@ -952,12 +952,31 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                       onScroll={() => syncAuctionScroll('table')}
                       className="max-w-full overflow-x-auto overscroll-x-contain"
                     >
-                      <table className="border-separate border-spacing-0 text-sm" style={{ tableLayout: 'fixed' }}>
+                      <table className="w-max min-w-full table-fixed border-separate border-spacing-0 text-sm sm:table-auto">
                         <colgroup>
                           {lotDates.map((date) => (
-                            <col key={date} className="w-[50px] sm:w-[88px]" />
+                            <col key={date} className="w-[50px] sm:w-auto" />
                           ))}
                         </colgroup>
+                        <thead className="hidden sm:table-header-group">
+                          <tr>
+                            {lotDates.map((date) => {
+                              const dayMeta = dayNavigationItems.find((item) => item.date === date);
+                              const isActiveDay = activeDayDate === date;
+                              return (
+                                <th
+                                  key={date}
+                                  title={formatDateLabel(date)}
+                                  onClick={() => scrollToDay(date)}
+                                  className={`sticky top-14 z-20 min-w-[88px] cursor-pointer border-b border-r border-slate-200 px-2 py-2 text-center align-top last:border-r-0 ${isActiveDay ? 'bg-blue-50' : 'bg-slate-50'}`}
+                                >
+                                  <div className="text-xs font-semibold tabular-nums text-slate-950">{formatShortDateLabel(date)}</div>
+                                  {dayMeta?.isDayOff ? <div className="mt-0.5 text-[10px] font-semibold text-blue-700">вых.</div> : null}
+                                </th>
+                              );
+                            })}
+                          </tr>
+                        </thead>
                         <tbody>
                           {auctionTableGroups.map((group) => (
                             <React.Fragment key={group.id}>
@@ -974,7 +993,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                     return (
                                       <td
                                         key={`${group.id}-${rowIndex}-${date}`}
-                                        className={`border-b border-r border-slate-200 p-px align-top last:border-r-0 sm:p-1 ${activeDayDate === date ? 'bg-blue-50/40' : 'bg-white'} group-hover:bg-slate-50`}
+                                        className={`border-b border-r border-slate-200 p-px align-top last:border-r-0 sm:min-w-[88px] sm:p-1 ${activeDayDate === date ? 'bg-blue-50/40' : 'bg-white'} group-hover:bg-slate-50`}
                                       >
                                         {lot ? (
                                           <AuctionLotCell
