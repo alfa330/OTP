@@ -1263,6 +1263,55 @@ def get_resource_overview(
         )
         actual_resource_by_day = _actual_resource_load_for_period_tx(cursor, forecast_period_start, forecast_period_end, settings)
         incident_uplift_profile = _compute_recent_incident_uplift_profile_tx(cursor, as_of_date, settings)
+        incident_projection_start = as_of_date
+        incident_projection_end = as_of_date + timedelta(days=6)
+        incident_projection_profiles = _compute_period_forecast_profiles_tx(
+            cursor,
+            incident_projection_start,
+            incident_projection_end,
+            settings,
+        )
+        incident_projection_actual_by_day = _actual_resource_load_for_period_tx(
+            cursor,
+            incident_projection_start,
+            incident_projection_end,
+            settings,
+        )
+        incident_projection_payload = _build_forecast_payload(
+            incident_projection_start,
+            incident_projection_end,
+            incident_projection_profiles,
+            settings,
+            current_operator_fte,
+            incident_projection_actual_by_day,
+            incident_uplift_profile,
+        )
+        incident_uplift_dashboard = {
+            **incident_uplift_profile,
+            "projection": {
+                "period_start": incident_projection_start.isoformat(),
+                "period_end": incident_projection_end.isoformat(),
+                "incident_uplift_calls": _to_float(incident_projection_payload.get("incidentUpliftCalls")),
+                "incident_uplift_fte_hours": _to_float(incident_projection_payload.get("incidentUpliftFteHours")),
+                "incident_adjusted_period_fte_hours": _to_float(incident_projection_payload.get("incidentAdjustedPeriodFteHours")),
+                "incident_adjusted_operators_with_shrinkage": _to_float(incident_projection_payload.get("incidentAdjustedOperatorsWithShrinkage")),
+                "days": [
+                    {
+                        "date": day.get("forecast_date"),
+                        "weekday_short": day.get("short"),
+                        "forecast_calls": _to_float(day.get("forecast_calls")),
+                        "forecast_daily_fte": _to_float(day.get("forecast_daily_fte")),
+                        "incident_uplift_calls": _to_float(day.get("incident_uplift_calls")),
+                        "incident_uplift_fte": _to_float(day.get("incident_uplift_fte")),
+                        "incident_uplift_ratio": _to_float(day.get("incident_uplift_ratio")),
+                        "incident_future_weight": _to_float(day.get("incident_future_weight")),
+                        "incident_adjusted_calls": _to_float(day.get("incident_adjusted_calls")),
+                        "incident_adjusted_daily_fte": _to_float(day.get("incident_adjusted_daily_fte")),
+                    }
+                    for day in incident_projection_payload.get("days", [])
+                ],
+            },
+        }
         next_week_forecast = _build_forecast_payload(
             forecast_period_start,
             forecast_period_end,
@@ -1352,6 +1401,7 @@ def get_resource_overview(
         "settings": _json_safe(settings),
         "as_of_date": as_of_date.isoformat(),
         "directions": directions,
+        "incident_uplift_dashboard": _json_safe(incident_uplift_dashboard),
         "next_week_forecast": _json_safe(next_week_forecast),
         "loaded_report_dates": loaded_report_dates,
         "history": history,

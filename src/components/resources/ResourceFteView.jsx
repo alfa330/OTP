@@ -807,6 +807,40 @@ const OverviewTrendTooltip = ({ active, label, payload }) => {
   );
 };
 
+const IncidentRiskTooltip = ({ active, label, payload }) => {
+  if (!active || !payload?.length) return null;
+  const row = payload[0]?.payload || {};
+  return (
+    <div className="min-w-60 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs shadow-lg">
+      <div className="mb-2 font-semibold text-slate-900">{label}</div>
+      <div className="space-y-1.5">
+        <div className="flex justify-between gap-6"><span className="text-slate-500">Прогноз</span><b className="text-blue-700">{formatNumber(row.forecastCalls, 0)}</b></div>
+        <div className="flex justify-between gap-6"><span className="text-slate-500">Факт</span><b className="text-slate-900">{formatNumber(row.actualCalls, 0)}</b></div>
+        <div className="flex justify-between gap-6"><span className="text-slate-500">Факт - прогноз</span><b className={Number(row.deltaCalls || 0) > 0 ? 'text-rose-700' : 'text-emerald-700'}>{formatSignedNumber(row.deltaCalls, 0)}</b></div>
+        <div className="flex justify-between gap-6"><span className="text-slate-500">Превышение по часам</span><b className="text-rose-700">+{formatNumber(row.positiveDeltaCalls, 0)}</b></div>
+        <div className="flex justify-between gap-6"><span className="text-slate-500">Часы риска</span><b className="text-slate-900">{formatInt(row.positiveHourCount)} / {formatInt(row.sourceHourCount)}</b></div>
+      </div>
+    </div>
+  );
+};
+
+const IncidentProjectionTooltip = ({ active, label, payload }) => {
+  if (!active || !payload?.length) return null;
+  const row = payload[0]?.payload || {};
+  return (
+    <div className="min-w-60 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs shadow-lg">
+      <div className="mb-2 font-semibold text-slate-900">{label}</div>
+      <div className="space-y-1.5">
+        <div className="flex justify-between gap-6"><span className="text-slate-500">Прогноз звонков</span><b className="text-blue-700">{formatNumber(row.forecastCalls, 0)}</b></div>
+        <div className="flex justify-between gap-6"><span className="text-slate-500">Возможный прирост</span><b className="text-emerald-700">+{formatNumber(row.upliftCalls, 0)}</b></div>
+        <div className="flex justify-between gap-6"><span className="text-slate-500">С учетом прироста</span><b className="text-slate-900">{formatNumber(row.adjustedCalls, 0)}</b></div>
+        <div className="flex justify-between gap-6"><span className="text-slate-500">Доп. FTE дня</span><b className="text-emerald-700">+{formatNumber(row.upliftFte, 2)}</b></div>
+        <div className="flex justify-between gap-6"><span className="text-slate-500">Вес дня</span><b className="text-slate-900">{formatPercent(row.futureWeight, 0)}</b></div>
+      </div>
+    </div>
+  );
+};
+
 const CallsTrendTooltip = ({ active, label, payload, mode }) => {
   if (!active || !payload?.length) return null;
   const row = payload[0]?.payload || {};
@@ -1586,6 +1620,110 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
     (day) => day?.has_actual_report && day?.forecast_date <= todayValue,
   );
   const incidentUpliftAvailable = Number(nextWeekForecast.incidentUpliftFteHours || 0) > 0.01;
+  const incidentRiskProfile = overview?.incident_uplift_dashboard || nextWeekForecast.incidentUplift || {};
+  const incidentRiskDailyData = useMemo(
+    () =>
+      [...(incidentRiskProfile.daily || [])]
+        .reverse()
+        .map((row) => {
+          const forecastCalls = Number(row.forecast_calls || 0);
+          const actualCalls = Number(row.actual_calls || 0);
+          const positiveDeltaCalls = Number(row.positive_delta_calls || 0);
+          const deltaCalls = Number(row.delta_calls ?? (actualCalls - forecastCalls));
+          const sourceHourCount = Number(row.source_hour_count || 0);
+          const positiveHourCount = Number(row.positive_hour_count || 0);
+          return {
+            date: row.date,
+            dateLabel: formatDate(row.date).slice(0, 5),
+            forecastCalls,
+            actualCalls,
+            deltaCalls,
+            positiveDeltaCalls,
+            growthRatio: Number(row.growth_ratio || 0),
+            completionRatio: Number(row.completion_ratio || 0),
+            positiveHourCount,
+            sourceHourCount,
+            positiveHourShare: Number(row.positive_hour_share || 0),
+            weight: Number(row.weight || 0),
+            status: row.status || (positiveDeltaCalls > 0 ? 'overload' : 'held'),
+          };
+        }),
+    [incidentRiskProfile.daily],
+  );
+  const incidentRiskTopHours = useMemo(
+    () =>
+      [...(incidentRiskProfile.hourly || [])]
+        .map((row) => ({
+          hour: Number(row.hour || 0),
+          hourLabel: `${String(row.hour || 0).padStart(2, '0')}:00`,
+          growthRatio: Number(row.growth_ratio || 0),
+          rawGrowthRatio: Number(row.raw_growth_ratio || 0),
+          weightedDeltaCalls: Number(row.weighted_delta_calls || 0),
+          confidence: Number(row.confidence || 0),
+          positiveSourceCount: Number(row.positive_source_count || 0),
+          sourceCount: Number(row.source_count || 0),
+          persistenceFactor: Number(row.persistence_factor || 0),
+        }))
+        .filter((row) => row.growthRatio > 0 || row.weightedDeltaCalls > 0)
+        .sort((a, b) => {
+          const byDelta = b.weightedDeltaCalls - a.weightedDeltaCalls;
+          if (byDelta !== 0) return byDelta;
+          return b.growthRatio - a.growthRatio;
+        })
+        .slice(0, 6),
+    [incidentRiskProfile.hourly],
+  );
+  const incidentRiskSummary = useMemo(() => {
+    const rawSummary = incidentRiskProfile.daily_summary || {};
+    const sourceDayCount = Number(rawSummary.source_day_count ?? incidentRiskDailyData.length);
+    const overloadDayCount = Number(
+      rawSummary.overload_day_count ?? incidentRiskDailyData.filter((row) => row.status === 'overload').length,
+    );
+    const heldDayCount = Number(rawSummary.held_day_count ?? Math.max(0, sourceDayCount - overloadDayCount));
+    const totalForecastCalls = Number(
+      rawSummary.total_forecast_calls ?? incidentRiskDailyData.reduce((sum, row) => sum + row.forecastCalls, 0),
+    );
+    const totalActualCalls = Number(
+      rawSummary.total_actual_calls ?? incidentRiskDailyData.reduce((sum, row) => sum + row.actualCalls, 0),
+    );
+    const totalPositiveDeltaCalls = Number(
+      rawSummary.total_positive_delta_calls ?? incidentRiskDailyData.reduce((sum, row) => sum + row.positiveDeltaCalls, 0),
+    );
+    return {
+      sourceDayCount,
+      overloadDayCount,
+      heldDayCount,
+      totalForecastCalls,
+      totalActualCalls,
+      totalDeltaCalls: Number(rawSummary.total_delta_calls ?? (totalActualCalls - totalForecastCalls)),
+      totalPositiveDeltaCalls,
+      weightedDailyGrowthRatio: Number(rawSummary.weighted_daily_growth_ratio || 0),
+      averageGrowthRatio: Number(incidentRiskProfile.average_growth_ratio || 0),
+      rawAverageGrowthRatio: Number(incidentRiskProfile.raw_average_growth_ratio || 0),
+    };
+  }, [incidentRiskDailyData, incidentRiskProfile.average_growth_ratio, incidentRiskProfile.daily_summary, incidentRiskProfile.raw_average_growth_ratio]);
+  const incidentProjection = incidentRiskProfile.projection || {};
+  const incidentProjectionData = useMemo(
+    () =>
+      (incidentProjection.days || []).map((row) => {
+        const forecastCalls = Number(row.forecast_calls || 0);
+        const upliftCalls = Number(row.incident_uplift_calls || 0);
+        return {
+          date: row.date,
+          dateLabel: formatDate(row.date).slice(0, 5),
+          weekday: row.weekday_short || '',
+          forecastCalls,
+          upliftCalls,
+          adjustedCalls: Number(row.incident_adjusted_calls ?? (forecastCalls + upliftCalls)),
+          forecastFte: Number(row.forecast_daily_fte || 0),
+          upliftFte: Number(row.incident_uplift_fte || 0),
+          adjustedFte: Number(row.incident_adjusted_daily_fte || 0),
+          upliftRatio: Number(row.incident_uplift_ratio || 0),
+          futureWeight: Number(row.incident_future_weight || 0),
+        };
+      }),
+    [incidentProjection.days],
+  );
   const activeForecastHour = hoveredForecastHour ?? pinnedForecastHour;
   const activeForecastHourLabel = activeForecastHour !== null ? `${String(activeForecastHour).padStart(2, '0')}:00` : null;
   useEffect(() => {
@@ -2044,6 +2182,160 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
               <StatCard icon={ShieldAlert} label="Доля потерь" value={formatPercent(periodLossSummary.lossRate)} hint={periodLossSummary.worstDay ? `Пик: ${formatDate(periodLossSummary.worstDay.report_date)}` : 'За выбранный период'} tone={periodLossSummary.lossRate > 0.08 ? 'rose' : 'amber'} />
             )}
           </div>
+        )}
+
+        {activeDashboardView === 'overview' && (
+          <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+              <div>
+                <h2 className="text-lg font-semibold text-slate-950">Прирост и выдержка прогноза</h2>
+                <p className="text-sm text-slate-500">Последние 6 дней до текущего дня формируют риск, а ближайшие 7 дней показывают уже построенный прирост.</p>
+              </div>
+              <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
+                Источник: {incidentRiskProfile.source_start ? formatDate(incidentRiskProfile.source_start) : '-'} - {incidentRiskProfile.source_end ? formatDate(incidentRiskProfile.source_end) : '-'}
+              </div>
+            </div>
+
+            <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+              <div className={`rounded-lg border px-3 py-3 ${incidentRiskSummary.overloadDayCount > 0 ? 'border-rose-200 bg-rose-50' : 'border-emerald-200 bg-emerald-50'}`}>
+                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Выдержка</div>
+                <div className={`mt-1 text-2xl font-semibold ${incidentRiskSummary.overloadDayCount > 0 ? 'text-rose-700' : 'text-emerald-700'}`}>
+                  {formatInt(incidentRiskSummary.heldDayCount)} / {formatInt(incidentRiskSummary.sourceDayCount)}
+                </div>
+                <div className="mt-1 text-xs text-slate-500">дней без почасового превышения</div>
+              </div>
+              <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Факт - прогноз</div>
+                <div className={`mt-1 text-2xl font-semibold ${incidentRiskSummary.totalDeltaCalls > 0 ? 'text-rose-700' : incidentRiskSummary.totalDeltaCalls < 0 ? 'text-emerald-700' : 'text-slate-900'}`}>{formatSignedNumber(incidentRiskSummary.totalDeltaCalls, 0)}</div>
+                <div className="mt-1 text-xs text-slate-500">{formatInt(incidentRiskSummary.totalActualCalls)} факт / {formatInt(incidentRiskSummary.totalForecastCalls)} прогноз</div>
+              </div>
+              <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-3">
+                <div className="text-xs font-semibold uppercase tracking-wide text-rose-600">Превышение</div>
+                <div className="mt-1 text-2xl font-semibold text-rose-700">+{formatInt(incidentRiskSummary.totalPositiveDeltaCalls)}</div>
+                <div className="mt-1 text-xs text-rose-700">только часы выше прогноза</div>
+              </div>
+              <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-3">
+                <div className="text-xs font-semibold uppercase tracking-wide text-emerald-700">Прирост 7 дней</div>
+                <div className="mt-1 text-2xl font-semibold text-emerald-700">+{formatInt(incidentProjection.incident_uplift_calls)}</div>
+                <div className="mt-1 text-xs text-emerald-700">звонков: {formatDate(incidentProjection.period_start)} - {formatDate(incidentProjection.period_end)}</div>
+              </div>
+              <div className="rounded-lg border border-emerald-200 bg-white px-3 py-3">
+                <div className="text-xs font-semibold uppercase tracking-wide text-emerald-700">Доп. FTE</div>
+                <div className="mt-1 text-2xl font-semibold text-emerald-700">+{formatNumber(incidentProjection.incident_uplift_fte_hours, 1)}</div>
+                <div className="mt-1 text-xs text-slate-500">FTE-ч на ближайшие 7 дней</div>
+              </div>
+            </div>
+
+            <div className="mt-5 grid gap-4 xl:grid-cols-2">
+              <div className="min-w-0 rounded-lg border border-slate-200 bg-white p-3">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+                    <ShieldAlert size={16} />
+                    Последние 6 дней
+                  </div>
+                  <span className="text-xs font-medium text-slate-500">ближайшие дни в истории имеют больший вес</span>
+                </div>
+                {incidentRiskDailyData.length ? (
+                  <div className="h-72">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <ComposedChart data={incidentRiskDailyData} margin={{ top: 10, right: 18, left: 0, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                        <XAxis dataKey="dateLabel" tick={{ fontSize: 11 }} />
+                        <YAxis yAxisId="left" tick={{ fontSize: 11 }} />
+                        <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} />
+                        <Tooltip content={<IncidentRiskTooltip />} />
+                        <Bar yAxisId="left" dataKey="forecastCalls" fill="#bfdbfe" radius={[4, 4, 0, 0]} />
+                        <Bar yAxisId="left" dataKey="positiveDeltaCalls" fill="#fecdd3" radius={[4, 4, 0, 0]} />
+                        <Line yAxisId="right" type="monotone" dataKey="actualCalls" stroke="#0f172a" strokeWidth={2} dot={{ r: 3 }} />
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                  </div>
+                ) : (
+                  <EmptyState title="Нет данных для риска" text="Нужно загрузить отчеты за последние дни, чтобы увидеть выдержку прогноза." />
+                )}
+              </div>
+
+              <div className="min-w-0 rounded-lg border border-slate-200 bg-white p-3">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+                    <TrendingUp size={16} />
+                    Построенный прирост на 7 дней
+                  </div>
+                  <span className="text-xs font-medium text-slate-500">от текущего дня, без влияния выбранного периода</span>
+                </div>
+                {incidentProjectionData.length ? (
+                  <div className="h-72">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <ComposedChart data={incidentProjectionData} margin={{ top: 10, right: 18, left: 0, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                        <XAxis dataKey="dateLabel" tick={{ fontSize: 11 }} />
+                        <YAxis yAxisId="left" tick={{ fontSize: 11 }} />
+                        <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} />
+                        <Tooltip content={<IncidentProjectionTooltip />} />
+                        <Bar yAxisId="left" dataKey="forecastCalls" stackId="calls" fill="#bfdbfe" radius={[0, 0, 0, 0]} />
+                        <Bar yAxisId="left" dataKey="upliftCalls" stackId="calls" fill="#86efac" radius={[4, 4, 0, 0]} />
+                        <Line yAxisId="right" type="monotone" dataKey="upliftFte" stroke="#059669" strokeWidth={2} dot={{ r: 3 }} />
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                  </div>
+                ) : (
+                  <EmptyState title="Нет прогноза прироста" text="После расчета FTE здесь появится разложение риска на ближайшие 7 дней." />
+                )}
+              </div>
+            </div>
+
+            <div className="mt-5 grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+                <div className="mb-3 text-sm font-semibold text-slate-900">Дни, которые сформировали риск</div>
+                <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+                  {incidentRiskDailyData.length ? incidentRiskDailyData.map((row) => (
+                    <div key={row.date} className={`rounded-lg border bg-white px-3 py-2 ${row.status === 'overload' ? 'border-rose-200' : 'border-emerald-200'}`}>
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="font-semibold text-slate-900">{formatDate(row.date)}</div>
+                        <span className={`rounded-md px-2 py-0.5 text-[11px] font-semibold ${row.status === 'overload' ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                          {row.status === 'overload' ? 'не выдержал' : 'выдержал'}
+                        </span>
+                      </div>
+                      <div className="mt-2 grid grid-cols-3 gap-2 text-xs text-slate-500">
+                        <span>прогноз <b className="text-blue-700">{formatNumber(row.forecastCalls, 0)}</b></span>
+                        <span>факт <b className="text-slate-900">{formatNumber(row.actualCalls, 0)}</b></span>
+                        <span>вес <b className="text-slate-900">{formatNumber(row.weight, 0)}</b></span>
+                      </div>
+                      <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-200">
+                        <div className={`h-full rounded-full ${row.status === 'overload' ? 'bg-rose-500' : 'bg-emerald-500'}`} style={{ width: `${Math.min(100, Math.max(6, row.positiveHourShare * 100))}%` }} />
+                      </div>
+                    </div>
+                  )) : (
+                    <div className="rounded-lg border border-dashed border-slate-300 bg-white p-4 text-sm text-slate-500 md:col-span-2 xl:col-span-3">Нет загруженных дней для расчета риска.</div>
+                  )}
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-slate-200 bg-white p-4">
+                <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-900">
+                  <Clock3 size={16} />
+                  Часы прироста
+                </div>
+                <div className="space-y-3">
+                  {incidentRiskTopHours.length ? incidentRiskTopHours.map((row) => (
+                    <div key={row.hour} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="font-semibold text-slate-900">{row.hourLabel}</div>
+                        <div className="rounded-md bg-emerald-100 px-2 py-1 text-xs font-semibold text-emerald-700">+{formatNumber(row.weightedDeltaCalls, 1)} зв.</div>
+                      </div>
+                      <div className="mt-2 grid grid-cols-3 gap-2 text-xs text-slate-500">
+                        <span>риск <b className="text-emerald-700">{formatPercent(row.growthRatio, 0)}</b></span>
+                        <span>надежн. <b className="text-slate-900">{formatPercent(row.confidence, 0)}</b></span>
+                        <span>дней <b className="text-slate-900">{formatInt(row.positiveSourceCount)}/{formatInt(row.sourceCount)}</b></span>
+                      </div>
+                    </div>
+                  )) : (
+                    <div className="rounded-lg border border-dashed border-slate-300 p-4 text-sm text-slate-500">За последние 6 дней нет часов, где факт был выше прогноза.</div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </section>
         )}
 
         {activeDashboardView === 'overview' && (
