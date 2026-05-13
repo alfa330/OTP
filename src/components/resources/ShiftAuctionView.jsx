@@ -243,7 +243,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const auctionLayoutRef = useRef(null);
   const auctionTableScrollRef = useRef(null);
   const auctionDateBarScrollRef = useRef(null);
-  const isSyncingAuctionScrollRef = useRef(false);
+  const auctionScrollSyncRef = useRef({ ignoredNode: null, ignoredLeft: 0 });
 
   const [settings, setSettings] = useState({
     enabled: false,
@@ -687,21 +687,22 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const syncAuctionScroll = useCallback((source) => {
     const dateBar = auctionDateBarScrollRef.current;
     const table = auctionTableScrollRef.current;
-    if (!dateBar || !table || isSyncingAuctionScrollRef.current) return;
+    if (!dateBar || !table) return;
 
     const sourceNode = source === 'dates' ? dateBar : table;
     const targetNode = source === 'dates' ? table : dateBar;
-    const maxTargetLeft = Math.max(0, targetNode.scrollWidth - targetNode.clientWidth);
-    isSyncingAuctionScrollRef.current = true;
-    targetNode.scrollLeft = Math.min(sourceNode.scrollLeft, maxTargetLeft);
+    const syncState = auctionScrollSyncRef.current;
+    if (syncState.ignoredNode === sourceNode && Math.abs(sourceNode.scrollLeft - syncState.ignoredLeft) <= 1) {
+      syncState.ignoredNode = null;
+      return;
+    }
 
-    const releaseSync = () => {
-      isSyncingAuctionScrollRef.current = false;
-    };
-    if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
-      window.requestAnimationFrame(releaseSync);
-    } else {
-      releaseSync();
+    const maxTargetLeft = Math.max(0, targetNode.scrollWidth - targetNode.clientWidth);
+    const nextLeft = Math.min(sourceNode.scrollLeft, maxTargetLeft);
+    if (Math.abs(targetNode.scrollLeft - nextLeft) > 0.5) {
+      syncState.ignoredNode = targetNode;
+      syncState.ignoredLeft = nextLeft;
+      targetNode.scrollLeft = nextLeft;
     }
   }, []);
 
