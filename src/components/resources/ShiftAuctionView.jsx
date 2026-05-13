@@ -830,7 +830,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         </div>
       </div>
 
-      <div className={`mx-auto flex w-full max-w-7xl flex-col gap-4 px-3 py-4 sm:gap-6 sm:px-4 sm:py-6 md:px-6 ${canUseAuction && dayNavigationItems.length ? 'pb-32 sm:pb-28' : ''}`}>
+      <div className="mx-auto flex w-full max-w-7xl flex-col gap-4 px-3 py-4 sm:gap-6 sm:px-4 sm:py-6 md:px-6">
         {!canUseAuction && (
           <section className="grid gap-4 lg:grid-cols-4">
             {explainSteps.map((step) => {
@@ -982,6 +982,50 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                         </tbody>
                       </table>
                     </div>
+                    {dayNavigationItems.length ? (
+                      <div className="sticky bottom-2 z-30 mt-2 overflow-hidden rounded-xl border border-slate-200 bg-white/95 shadow-2xl backdrop-blur sm:bottom-3">
+                        <div
+                          ref={auctionDateBarScrollRef}
+                          onScroll={() => syncAuctionScroll('dates')}
+                          className="overflow-x-auto overscroll-x-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+                        >
+                          <div className="flex w-max items-stretch">
+                            {dayNavigationItems.map((item) => {
+                              const active = activeDayDate === item.date;
+                              const tone = canManage
+                                ? (item.claimed >= item.total && item.total > 0 ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : item.claimed > 0 ? 'border-blue-300 bg-blue-50 text-blue-800' : 'border-slate-200 bg-white text-slate-600')
+                                : item.state === 'shift'
+                                  ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
+                                  : item.state === 'off'
+                                    ? 'border-blue-300 bg-blue-50 text-blue-800'
+                                    : 'border-slate-200 bg-white text-slate-600';
+                              const statusText = canManage
+                                ? `${item.claimed}/${item.total}`
+                                : item.state === 'shift'
+                                  ? 'Смена'
+                                  : item.state === 'off'
+                                    ? 'Вых.'
+                                    : 'Пусто';
+                              const finalStatusText = !canManage && item.state === 'locked' ? 'Занято' : statusText;
+                              const hoverTone = active ? 'hover:bg-blue-100' : 'hover:bg-slate-50';
+                              return (
+                                <button
+                                  key={item.date}
+                                  type="button"
+                                  onClick={() => scrollToDay(item.date)}
+                                  aria-current={active ? 'true' : undefined}
+                                  className={`h-11 min-w-[50px] shrink-0 border-r border-slate-200 px-1 py-1 text-center transition-colors last:border-r-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-inset sm:h-[52px] sm:min-w-[88px] sm:px-2 sm:py-1.5 ${tone} ${hoverTone} ${active ? 'bg-blue-100 text-blue-900' : ''}`}
+                                  title={formatDateLabel(item.date)}
+                                >
+                                  <span className="block truncate text-[10px] font-semibold leading-4 sm:text-[11px]">{formatShortDateLabel(item.date)}</span>
+                                  <span className="mt-0.5 block text-[11px] font-bold tabular-nums sm:text-xs">{finalStatusText}</span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
                 ) : (
                   <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-4 py-10 text-center text-sm text-slate-500">
@@ -1148,52 +1192,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         )}
       </div>
 
-      {canUseAuction && dayNavigationItems.length ? (
-        <div className="fixed inset-x-0 bottom-2 z-30 flex justify-center px-2 pointer-events-none sm:bottom-3 sm:px-3">
-          <div className="pointer-events-auto max-w-[calc(100vw-1rem)] overflow-hidden rounded-xl border border-slate-200 bg-white/95 shadow-2xl backdrop-blur sm:max-w-[calc(100vw-1.5rem)]">
-            <div
-              ref={auctionDateBarScrollRef}
-              onScroll={() => syncAuctionScroll('dates')}
-              className="overflow-x-auto overscroll-x-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-            >
-              <div className="flex w-max items-stretch">
-                {dayNavigationItems.map((item) => {
-                  const active = activeDayDate === item.date;
-                  const tone = canManage
-                    ? (item.claimed >= item.total && item.total > 0 ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : item.claimed > 0 ? 'border-blue-300 bg-blue-50 text-blue-800' : 'border-slate-200 bg-white text-slate-600')
-                    : item.state === 'shift'
-                      ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
-                      : item.state === 'off'
-                        ? 'border-blue-300 bg-blue-50 text-blue-800'
-                        : 'border-slate-200 bg-white text-slate-600';
-                  const statusText = canManage
-                    ? `${item.claimed}/${item.total}`
-                    : item.state === 'shift'
-                      ? 'Смена'
-                      : item.state === 'off'
-                        ? 'Вых.'
-                        : 'Пусто';
-                  const finalStatusText = !canManage && item.state === 'locked' ? 'Занято' : statusText;
-                  const hoverTone = active ? 'hover:bg-blue-100' : 'hover:bg-slate-50';
-                  return (
-                    <button
-                      key={item.date}
-                      type="button"
-                      onClick={() => scrollToDay(item.date)}
-                      aria-current={active ? 'true' : undefined}
-                      className={`h-11 min-w-[50px] shrink-0 border-r border-slate-200 px-1 py-1 text-center transition-colors last:border-r-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-inset sm:h-[52px] sm:min-w-[88px] sm:px-2 sm:py-1.5 ${tone} ${hoverTone} ${active ? 'bg-blue-100 text-blue-900' : ''}`}
-                      title={formatDateLabel(item.date)}
-                    >
-                      <span className="block truncate text-[10px] font-semibold leading-4 sm:text-[11px]">{formatShortDateLabel(item.date)}</span>
-                      <span className="mt-0.5 block text-[11px] font-bold tabular-nums sm:text-xs">{finalStatusText}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          </div>
-        </div>
-      ) : null}
+      {null}
     </div>
   );
 };
