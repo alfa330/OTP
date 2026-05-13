@@ -1101,6 +1101,7 @@ const ResourceSchedulePlanner = ({
   const [capacityInfo, setCapacityInfo] = useState(null);
   const [scheduleVariants, setScheduleVariants] = useState([]);
   const [selectedVariantKey, setSelectedVariantKey] = useState('');
+  const [includeIncidentUplift, setIncludeIncidentUplift] = useState(false);
   const [previewCapacityBase, setPreviewCapacityBase] = useState(null);
   const [isTemplatesLoading, setIsTemplatesLoading] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
@@ -1224,6 +1225,7 @@ const ResourceSchedulePlanner = ({
     plannerDaysRef.current = nextDays;
     setPlannerDays(nextDays);
     setSelectedVariantKey(variant.key || '');
+    setIncludeIncidentUplift(Boolean(variant.includesIncidentUplift));
     setSelectedDayIndex(0);
     setHistoryPast([]);
     setHistoryFuture([]);
@@ -1238,6 +1240,20 @@ const ResourceSchedulePlanner = ({
     const variant = scheduleVariants.find((item) => item.key === variantKey);
     applyGeneratedVariant(variant);
   }, [applyGeneratedVariant, scheduleVariants]);
+
+  const switchIncidentUpliftMode = useCallback((nextIncludeIncidentUplift) => {
+    const activeVariant = scheduleVariants.find((item) => item.key === selectedVariantKey) || scheduleVariants[0];
+    const activeBaseKey = activeVariant?.baseVariantKey || activeVariant?.key || '';
+    const nextVariant = scheduleVariants.find((variant) => (
+      String(variant.baseVariantKey || variant.key || '') === String(activeBaseKey)
+      && Boolean(variant.includesIncidentUplift) === Boolean(nextIncludeIncidentUplift)
+    ));
+    if (!nextVariant) {
+      if (nextIncludeIncidentUplift) emit('Для выбранного периода нет рассчитанного прироста', 'error');
+      return;
+    }
+    applyGeneratedVariant(nextVariant);
+  }, [applyGeneratedVariant, emit, scheduleVariants, selectedVariantKey]);
 
   const generatePreview = useCallback(async () => {
     if (!apiRoot) return;
@@ -1285,6 +1301,29 @@ const ResourceSchedulePlanner = ({
   const computed = useMemo(() => buildCoverageFromDays(plannerDays), [plannerDays]);
   const computedDays = computed.days;
   const summary = computed.summary;
+  const visibleScheduleVariants = useMemo(() => {
+    const filtered = scheduleVariants.filter((variant) => (
+      Boolean(variant.includesIncidentUplift) === Boolean(includeIncidentUplift)
+    ));
+    return filtered.length ? filtered : scheduleVariants.filter((variant) => !variant.includesIncidentUplift);
+  }, [includeIncidentUplift, scheduleVariants]);
+  const selectedGeneratedVariant = useMemo(
+    () => scheduleVariants.find((variant) => variant.key === selectedVariantKey) || null,
+    [scheduleVariants, selectedVariantKey],
+  );
+  const selectedBaseVariantKey = selectedGeneratedVariant?.baseVariantKey || selectedGeneratedVariant?.key || '';
+  const matchingIncidentUpliftVariant = useMemo(() => (
+    scheduleVariants.find((variant) => (
+      Boolean(variant.includesIncidentUplift)
+      && String(variant.baseVariantKey || variant.key || '') === String(selectedBaseVariantKey)
+    )) || null
+  ), [scheduleVariants, selectedBaseVariantKey]);
+  const incidentUpliftAvailable = Boolean(matchingIncidentUpliftVariant);
+  const displayedIncidentUpliftFteHours = Number(
+    includeIncidentUplift
+      ? summary.incidentUpliftFteHours
+      : matchingIncidentUpliftVariant?.summary?.incidentUpliftFteHours,
+  ) || 0;
 
   useEffect(() => {
     if (!computedDays.length) {
@@ -1711,25 +1750,50 @@ const ResourceSchedulePlanner = ({
           </div>
         ) : null}
 
-        {scheduleVariants.length > 1 ? (
-          <div className="mt-3 inline-flex flex-wrap rounded-lg border border-slate-200 bg-slate-50 p-1">
-            {scheduleVariants.map((variant) => {
-              const active = variant.key === selectedVariantKey;
-              return (
-                <button
-                  key={variant.key}
-                  type="button"
-                  onClick={() => selectGeneratedVariant(variant.key)}
-                  className={`h-8 rounded-md px-3 text-xs font-semibold transition ${
-                    active
-                      ? 'bg-white text-slate-950 shadow-sm'
-                      : 'text-slate-600 hover:bg-white/70 hover:text-slate-900'
-                  }`}
-                >
-                  {variant.label || variant.key}
-                </button>
-              );
-            })}
+        {scheduleVariants.length ? (
+          <div className="mt-3 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <label className={`inline-flex max-w-max items-center gap-3 rounded-lg border px-3 py-2 text-sm font-semibold transition ${
+              includeIncidentUplift
+                ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                : 'border-slate-200 bg-slate-50 text-slate-700'
+            } ${!incidentUpliftAvailable || isGenerating ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'}`}>
+              <input
+                type="checkbox"
+                checked={includeIncidentUplift}
+                disabled={!incidentUpliftAvailable || isGenerating}
+                onChange={(event) => switchIncidentUpliftMode(event.target.checked)}
+                className="sr-only"
+              />
+              <span className={`relative h-5 w-9 rounded-full transition ${includeIncidentUplift ? 'bg-emerald-600' : 'bg-slate-300'}`}>
+                <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition ${includeIncidentUplift ? 'left-4' : 'left-0.5'}`} />
+              </span>
+              <span>Сгенерировать с учетом прироста</span>
+              <span className={includeIncidentUplift ? 'text-emerald-700' : 'text-slate-500'}>
+                +{formatNumber(displayedIncidentUpliftFteHours, 1)} FTE-ч
+              </span>
+            </label>
+
+            {visibleScheduleVariants.length > 1 ? (
+              <div className="inline-flex flex-wrap rounded-lg border border-slate-200 bg-slate-50 p-1">
+                {visibleScheduleVariants.map((variant) => {
+                  const active = variant.key === selectedVariantKey;
+                  return (
+                    <button
+                      key={variant.key}
+                      type="button"
+                      onClick={() => selectGeneratedVariant(variant.key)}
+                      className={`h-8 rounded-md px-3 text-xs font-semibold transition ${
+                        active
+                          ? 'bg-white text-slate-950 shadow-sm'
+                          : 'text-slate-600 hover:bg-white/70 hover:text-slate-900'
+                      }`}
+                    >
+                      {variant.label || variant.key}
+                    </button>
+                  );
+                })}
+              </div>
+            ) : null}
           </div>
         ) : null}
 
@@ -1748,11 +1812,17 @@ const ResourceSchedulePlanner = ({
               real={summary.realNeededFteHours ?? summary.neededFteHours}
             />
           </div>
-          <div className="rounded-lg bg-emerald-50 px-3 py-2">
-            <div className="text-xs text-emerald-700">Риск прироста</div>
-            <b className="text-emerald-700">+{formatNumber(summary.incidentUpliftFteHours, 1)} FTE-ч</b>
-            <div className="mt-0.5 text-[11px] text-emerald-700">
-              база {formatNumber(summary.baseRealNeededFteHours, 2)} FTE-ч
+          <div className={`rounded-lg px-3 py-2 ${includeIncidentUplift ? 'bg-emerald-50' : 'bg-slate-50'}`}>
+            <div className={`text-xs ${includeIncidentUplift ? 'text-emerald-700' : 'text-slate-500'}`}>
+              {includeIncidentUplift ? 'Прирост учтен' : 'Риск прироста'}
+            </div>
+            <b className={includeIncidentUplift ? 'text-emerald-700' : 'text-slate-700'}>
+              +{formatNumber(displayedIncidentUpliftFteHours, 1)} FTE-ч
+            </b>
+            <div className={`mt-0.5 text-[11px] ${includeIncidentUplift ? 'text-emerald-700' : 'text-slate-500'}`}>
+              {includeIncidentUplift
+                ? `база ${formatNumber(summary.baseRealNeededFteHours, 2)} FTE-ч`
+                : 'не включен в основной график'}
             </div>
           </div>
           <div className="rounded-lg bg-slate-50 px-3 py-2">
