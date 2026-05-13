@@ -1123,14 +1123,16 @@ def _build_schedule_preview_variant(
     adjusted_target: Optional[List[float]] = None,
     adjusted_raw_target: Optional[List[float]] = None,
     uplift_raw_target: Optional[List[float]] = None,
+    include_incident_uplift: bool = False,
+    base_variant_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     selected_result = _select_shift_preview_strategy(target, candidates, rate_capacity)
     best_result = selected_result["best"]
     base_selected = best_result["selected"]
     base_coverage = best_result["coverage"]
-    effective_target = adjusted_target if adjusted_target is not None else target
-    effective_raw_target = adjusted_raw_target if adjusted_raw_target is not None else raw_target
-    has_incident_uplift = any(float(item or 0) > 0.001 for item in (uplift_raw_target or []))
+    effective_target = adjusted_target if include_incident_uplift and adjusted_target is not None else target
+    effective_raw_target = adjusted_raw_target if include_incident_uplift and adjusted_raw_target is not None else raw_target
+    has_incident_uplift = include_incident_uplift and any(float(item or 0) > 0.001 for item in (uplift_raw_target or []))
     incident_result = None
     if has_incident_uplift:
         incident_result = _select_shift_preview_strategy(
@@ -1157,6 +1159,8 @@ def _build_schedule_preview_variant(
     return {
         "key": key,
         "label": label,
+        "baseVariantKey": base_variant_key or key,
+        "includesIncidentUplift": bool(has_incident_uplift),
         "days": _shift_preview_days(
             days,
             effective_target,
@@ -1165,12 +1169,14 @@ def _build_schedule_preview_variant(
             selected,
             base_target=target,
             base_raw_target=raw_target,
-            uplift_raw_target=uplift_raw_target,
+            uplift_raw_target=uplift_raw_target if has_incident_uplift else None,
         ),
         "summary": _shift_preview_totals(effective_target, coverage, effective_raw_target, raw_target),
         "capacityRates": _shift_preview_capacity_summary(rate_capacity, selected, len(days)),
         "generation": {
             "variant": key,
+            "baseVariant": base_variant_key or key,
+            "includesIncidentUplift": bool(has_incident_uplift),
             "method": best_result.get("method"),
             "baseMethod": best_result.get("method"),
             "incidentUpliftMethod": ((incident_result or {}).get("best") or {}).get("method"),
@@ -1291,9 +1297,6 @@ def _generate_schedule_preview_from_forecast(
         raw_target,
         template_candidates,
         rate_capacity,
-        adjusted_target=adjusted_target,
-        adjusted_raw_target=adjusted_raw_target,
-        uplift_raw_target=uplift_raw_target,
     )
     freeform_variant = _build_schedule_preview_variant(
         "freeform",
@@ -1303,12 +1306,43 @@ def _generate_schedule_preview_from_forecast(
         raw_target,
         freeform_candidates,
         rate_capacity,
-        adjusted_target=adjusted_target,
-        adjusted_raw_target=adjusted_raw_target,
-        uplift_raw_target=uplift_raw_target,
     )
-    variants = [template_variant, freeform_variant]
-    default_variant = min(variants, key=_schedule_preview_variant_rank)
+
+    base_variants = [template_variant, freeform_variant]
+    variants = list(base_variants)
+    has_incident_uplift = any(float(item or 0) > 0.001 for item in uplift_raw_target)
+    if has_incident_uplift:
+        variants.extend([
+            _build_schedule_preview_variant(
+                "templates_incident_uplift",
+                "По шаблонам + прирост",
+                days,
+                target,
+                raw_target,
+                template_candidates,
+                rate_capacity,
+                adjusted_target=adjusted_target,
+                adjusted_raw_target=adjusted_raw_target,
+                uplift_raw_target=uplift_raw_target,
+                include_incident_uplift=True,
+                base_variant_key="templates",
+            ),
+            _build_schedule_preview_variant(
+                "freeform_incident_uplift",
+                "Без шаблонов + прирост",
+                days,
+                target,
+                raw_target,
+                freeform_candidates,
+                rate_capacity,
+                adjusted_target=adjusted_target,
+                adjusted_raw_target=adjusted_raw_target,
+                uplift_raw_target=uplift_raw_target,
+                include_incident_uplift=True,
+                base_variant_key="freeform",
+            ),
+        ])
+    default_variant = min(base_variants, key=_schedule_preview_variant_rank)
 
     return {
         "week_start": forecast_payload.get("week_start"),
@@ -1331,6 +1365,7 @@ def _generate_schedule_preview_from_forecast(
         "summary": default_variant["summary"],
         "generation": default_variant["generation"],
         "incidentUplift": forecast_payload.get("incidentUplift") or {},
+        "incidentUpliftFteHours": round(sum(float(item or 0) for item in uplift_raw_target), 4),
         "selectedVariant": default_variant["key"],
         "variants": variants,
     }
