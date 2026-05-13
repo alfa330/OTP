@@ -670,18 +670,21 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     const dateIndex = lotDates.indexOf(date);
     if (dateIndex < 0) return;
 
-    const scrollers = [auctionTableScrollRef.current, auctionDateBarScrollRef.current].filter(Boolean);
-    if (!scrollers.length) return;
+    const table = auctionTableScrollRef.current;
+    const bar = auctionDateBarScrollRef.current;
 
-    const measureRoot = auctionDateBarScrollRef.current || auctionTableScrollRef.current;
-    const dateCell = measureRoot?.querySelector?.('[data-auction-date-cell]');
-    const measuredWidth = dateCell?.getBoundingClientRect?.().width || dateCell?.offsetWidth || 0;
-    const columnWidth = measuredWidth > 0 ? measuredWidth : 50;
-
-    scrollers.forEach((scroller) => {
-      const targetLeft = (dateIndex * columnWidth) - ((scroller.clientWidth - columnWidth) / 2);
-      scroller.scrollTo({ left: Math.max(0, targetLeft), behavior: 'smooth' });
-    });
+    if (table) {
+      const dateCell = table.querySelector('[data-auction-date-cell]');
+      const columnWidth = dateCell?.getBoundingClientRect?.().width || dateCell?.offsetWidth || 50;
+      const targetLeft = (dateIndex * columnWidth) - ((table.clientWidth - columnWidth) / 2);
+      table.scrollTo({ left: Math.max(0, targetLeft), behavior: 'smooth' });
+    }
+    if (bar) {
+      const barItem = bar.querySelector('button');
+      const itemWidth = barItem?.getBoundingClientRect?.().width || barItem?.offsetWidth || 50;
+      const targetLeft = (dateIndex * itemWidth) - ((bar.clientWidth - itemWidth) / 2);
+      bar.scrollTo({ left: Math.max(0, targetLeft), behavior: 'smooth' });
+    }
   }, [lotDates]);
 
   const toggleOperator = useCallback((operatorId) => {
@@ -912,53 +915,13 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
               <div className="min-w-0 sm:p-5">
                 {auctionTableGroups.length && lotDates.length ? (
                   <div className="min-w-0 max-w-full sm:border-y sm:border-slate-200">
-                    <div className="sticky top-[46px] z-30 overflow-hidden bg-white shadow-[0_1px_0_rgba(148,163,184,0.45)] sm:hidden">
-                      <div
-                        ref={auctionDateBarScrollRef}
-                        onScroll={() => syncAuctionScroll('dates')}
-                        className="max-w-full overflow-x-auto overscroll-x-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-                      >
-                        <table className="w-max table-fixed border-separate border-spacing-0">
-                          <colgroup>
-                            {lotDates.map((date) => (
-                              <col key={date} className="w-[50px]" />
-                            ))}
-                          </colgroup>
-                          <thead>
-                            <tr>
-                              {lotDates.map((date) => {
-                                const dayMeta = dayNavigationItems.find((item) => item.date === date);
-                                const isActiveDay = activeDayDate === date;
-                                return (
-                                  <th
-                                    key={date}
-                                    data-auction-date-cell
-                                    title={formatDateLabel(date)}
-                                    onClick={() => scrollToDay(date)}
-                                    className={`cursor-pointer border-b border-r border-slate-200 px-1 py-1.5 text-center align-top last:border-r-0 ${isActiveDay ? 'bg-blue-50' : 'bg-slate-50'}`}
-                                  >
-                                    <div className="text-xs font-semibold tabular-nums text-slate-950">{formatShortDateLabel(date)}</div>
-                                    {dayMeta?.isDayOff ? <div className="mt-0.5 text-[10px] font-semibold text-blue-700">вых.</div> : null}
-                                  </th>
-                                );
-                              })}
-                            </tr>
-                          </thead>
-                        </table>
-                      </div>
-                    </div>
                     <div
                       ref={auctionTableScrollRef}
                       onScroll={() => syncAuctionScroll('table')}
                       className="max-w-full overflow-x-auto overscroll-x-contain"
                     >
-                      <table className="w-max min-w-full table-fixed border-separate border-spacing-0 text-sm sm:table-auto">
-                        <colgroup>
-                          {lotDates.map((date) => (
-                            <col key={date} className="w-[50px] sm:w-auto" />
-                          ))}
-                        </colgroup>
-                        <thead className="hidden sm:table-header-group">
+                      <table className="w-max min-w-full border-separate border-spacing-0 text-sm">
+                        <thead>
                           <tr>
                             {lotDates.map((date) => {
                               const dayMeta = dayNavigationItems.find((item) => item.date === date);
@@ -966,9 +929,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                               return (
                                 <th
                                   key={date}
+                                  data-auction-date-cell
                                   title={formatDateLabel(date)}
                                   onClick={() => scrollToDay(date)}
-                                  className={`sticky top-14 z-20 min-w-[88px] cursor-pointer border-b border-r border-slate-200 px-2 py-2 text-center align-top last:border-r-0 ${isActiveDay ? 'bg-blue-50' : 'bg-slate-50'}`}
+                                  className={`min-w-[50px] cursor-pointer border-b border-r border-slate-200 px-1 py-1.5 text-center align-top last:border-r-0 sm:min-w-[88px] sm:px-2 sm:py-2 ${isActiveDay ? 'bg-blue-50' : 'bg-slate-50'}`}
                                 >
                                   <div className="text-xs font-semibold tabular-nums text-slate-950">{formatShortDateLabel(date)}</div>
                                   {dayMeta?.isDayOff ? <div className="mt-0.5 text-[10px] font-semibold text-blue-700">вых.</div> : null}
@@ -993,7 +957,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                     return (
                                       <td
                                         key={`${group.id}-${rowIndex}-${date}`}
-                                        className={`border-b border-r border-slate-200 p-px align-top last:border-r-0 sm:min-w-[88px] sm:p-1 ${activeDayDate === date ? 'bg-blue-50/40' : 'bg-white'} group-hover:bg-slate-50`}
+                                        className={`min-w-[50px] border-b border-r border-slate-200 p-px align-top last:border-r-0 sm:min-w-[88px] sm:p-1 ${activeDayDate === date ? 'bg-blue-50/40' : 'bg-white'} group-hover:bg-slate-50`}
                                       >
                                         {lot ? (
                                           <AuctionLotCell
@@ -1186,44 +1150,46 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
       {canUseAuction && dayNavigationItems.length ? (
         <div className="fixed inset-x-0 bottom-2 z-30 flex justify-center px-2 pointer-events-none sm:bottom-3 sm:px-3">
-          <div className="inline-flex w-fit max-w-[calc(100vw-1rem)] rounded-xl border border-slate-200 bg-white/95 p-1.5 shadow-2xl backdrop-blur pointer-events-auto sm:max-w-[calc(100vw-1.5rem)] sm:p-2">
-            <div className="flex max-w-full items-stretch overflow-x-auto">
-              {dayNavigationItems.map((item) => {
-                const active = activeDayDate === item.date;
-                const tone = canManage
-                  ? (item.claimed >= item.total && item.total > 0 ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : item.claimed > 0 ? 'border-blue-300 bg-blue-50 text-blue-800' : 'border-slate-200 bg-white text-slate-600')
-                  : item.state === 'shift'
-                    ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
-                    : item.state === 'off'
-                      ? 'border-blue-300 bg-blue-50 text-blue-800'
-                      : 'border-slate-200 bg-white text-slate-600';
-                const statusText = canManage
-                  ? `${item.claimed}/${item.total}`
-                  : item.state === 'shift'
-                    ? 'Смена'
-                    : item.state === 'off'
-                      ? 'Вых.'
-                      : 'Пусто';
-                const finalStatusText = !canManage && item.state === 'locked' ? 'Занято' : statusText;
-                const hoverTone = active ? 'hover:border-blue-600 hover:bg-blue-100' : 'hover:border-slate-300 hover:bg-slate-50';
-                return (
-                  <React.Fragment key={item.date}>
+          <div className="pointer-events-auto max-w-[calc(100vw-1rem)] overflow-hidden rounded-xl border border-slate-200 bg-white/95 shadow-2xl backdrop-blur sm:max-w-[calc(100vw-1.5rem)]">
+            <div
+              ref={auctionDateBarScrollRef}
+              onScroll={() => syncAuctionScroll('dates')}
+              className="overflow-x-auto overscroll-x-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+            >
+              <div className="flex w-max items-stretch">
+                {dayNavigationItems.map((item) => {
+                  const active = activeDayDate === item.date;
+                  const tone = canManage
+                    ? (item.claimed >= item.total && item.total > 0 ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : item.claimed > 0 ? 'border-blue-300 bg-blue-50 text-blue-800' : 'border-slate-200 bg-white text-slate-600')
+                    : item.state === 'shift'
+                      ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
+                      : item.state === 'off'
+                        ? 'border-blue-300 bg-blue-50 text-blue-800'
+                        : 'border-slate-200 bg-white text-slate-600';
+                  const statusText = canManage
+                    ? `${item.claimed}/${item.total}`
+                    : item.state === 'shift'
+                      ? 'Смена'
+                      : item.state === 'off'
+                        ? 'Вых.'
+                        : 'Пусто';
+                  const finalStatusText = !canManage && item.state === 'locked' ? 'Занято' : statusText;
+                  const hoverTone = active ? 'hover:bg-blue-100' : 'hover:bg-slate-50';
+                  return (
                     <button
+                      key={item.date}
                       type="button"
                       onClick={() => scrollToDay(item.date)}
                       aria-current={active ? 'true' : undefined}
-                      className={`h-11 min-w-[62px] rounded-lg border px-1.5 py-1 text-left transition-colors hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-1 sm:h-[52px] sm:min-w-[76px] sm:px-2 sm:py-1.5 ${tone} ${hoverTone} ${active ? 'border-blue-600 bg-blue-100 text-blue-900 shadow-sm' : ''}`}
+                      className={`h-11 min-w-[50px] shrink-0 border-r border-slate-200 px-1 py-1 text-center transition-colors last:border-r-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-inset sm:h-[52px] sm:min-w-[88px] sm:px-2 sm:py-1.5 ${tone} ${hoverTone} ${active ? 'bg-blue-100 text-blue-900' : ''}`}
                       title={formatDateLabel(item.date)}
                     >
                       <span className="block truncate text-[10px] font-semibold leading-4 sm:text-[11px]">{formatShortDateLabel(item.date)}</span>
                       <span className="mt-0.5 block text-[11px] font-bold tabular-nums sm:text-xs">{finalStatusText}</span>
                     </button>
-                    {item.date !== dayNavigationItems[dayNavigationItems.length - 1]?.date ? (
-                      <span className="mx-0.5 my-1 w-px shrink-0 rounded-full bg-slate-200 sm:mx-1" aria-hidden="true" />
-                    ) : null}
-                  </React.Fragment>
-                );
-              })}
+                  );
+                })}
+              </div>
             </div>
           </div>
         </div>
