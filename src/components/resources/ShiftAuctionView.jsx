@@ -133,7 +133,7 @@ const formatAuctionShiftLabel = (lot) => {
   if (isNightAuctionLot(lot)) return '20*08';
   const start = normalizeClockValue(lot?.start_time);
   const end = normalizeClockValue(lot?.end_time);
-  return `${start} - ${end}`;
+  return `${start}-${end}`;
 };
 
 const AuctionLotCell = ({
@@ -162,7 +162,7 @@ const AuctionLotCell = ({
         onClick={() => onClaimLot(lot.id)}
         disabled={!canClaim || isClaiming || rateTooLow}
         title={title}
-        className={`flex h-8 w-full items-center justify-center rounded border px-2 text-xs font-semibold tabular-nums transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-1 disabled:cursor-not-allowed ${
+        className={`flex h-7 w-full items-center justify-center rounded border px-1.5 text-[11px] font-semibold tabular-nums transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-1 disabled:cursor-not-allowed sm:h-8 sm:px-2 sm:text-xs ${
           rateTooLow
             ? 'border-slate-200 bg-slate-50 text-slate-400'
             : 'border-blue-600 bg-blue-600 text-white hover:border-blue-700 hover:bg-blue-700'
@@ -178,7 +178,7 @@ const AuctionLotCell = ({
     : 'border-blue-600 bg-blue-600 text-white';
 
   return (
-    <div title={title} className={`flex h-8 items-center justify-center rounded border px-2 text-xs font-semibold tabular-nums ${tone}`}>
+    <div title={title} className={`flex h-7 items-center justify-center rounded border px-1.5 text-[11px] font-semibold tabular-nums sm:h-8 sm:px-2 sm:text-xs ${tone}`}>
       <span className="truncate">{label}</span>
     </div>
   );
@@ -543,6 +543,13 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       : runtimeStatus === 'closed'
         ? 'Аукцион закрыт'
         : 'Аукцион выключен';
+  const auctionStatusShortLabel = runtimeStatus === 'scheduled'
+    ? 'Старт'
+    : runtimeStatus === 'open'
+      ? 'Открыт'
+      : runtimeStatus === 'closed'
+        ? 'Закрыт'
+        : 'Выкл.';
   const auctionStatusDetail = runtimeStatus === 'scheduled'
     ? (countdown || 'скоро')
     : runtimeStatus === 'open'
@@ -550,6 +557,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       : runtimeStatus === 'closed'
         ? 'выбор завершен'
         : `${settings.selected_operator_ids.length} тест.`;
+  const auctionStatusShortDetail = runtimeStatus === 'open' && closeCountdown
+    ? closeCountdown
+    : auctionStatusDetail;
   const auctionStatusTone = runtimeStatus === 'open'
     ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
     : runtimeStatus === 'scheduled'
@@ -668,30 +678,32 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   }, [apiRoot, buildHeaders, canChoose, fetchSnapshot, myDayOffs, notify]);
 
   const renderStatusBar = () => (
-    <div title={settings.launch_note || `${auctionStatusLabel}: ${auctionStatusDetail}`} className={`inline-flex h-10 max-w-full items-center gap-2 rounded-lg border px-3 text-sm shadow-sm ${auctionStatusTone}`}>
-      {runtimeStatus === 'open' ? <ShieldCheck size={16} /> : <Clock3 size={16} />}
-      <span className="shrink-0 font-semibold">{auctionStatusLabel}</span>
-      <span className="min-w-0 truncate border-l border-current/20 pl-2 font-semibold tabular-nums">{auctionStatusDetail}</span>
+    <div title={settings.launch_note || `${auctionStatusLabel}: ${auctionStatusDetail}`} className={`inline-flex h-9 max-w-[calc(100vw-1rem)] items-center gap-1.5 rounded-lg border px-2.5 text-xs shadow-lg backdrop-blur sm:h-10 sm:gap-2 sm:px-3 sm:text-sm ${auctionStatusTone}`}>
+      {runtimeStatus === 'open' ? <ShieldCheck size={15} /> : <Clock3 size={15} />}
+      <span className="shrink-0 font-semibold sm:hidden">{auctionStatusShortLabel}</span>
+      <span className="hidden shrink-0 font-semibold sm:inline">{auctionStatusLabel}</span>
+      <span className="min-w-0 truncate border-l border-current/20 pl-1.5 font-semibold tabular-nums sm:hidden">{auctionStatusShortDetail}</span>
+      <span className="hidden min-w-0 truncate border-l border-current/20 pl-2 font-semibold tabular-nums sm:inline">{auctionStatusDetail}</span>
     </div>
   );
 
   return (
     <div className="min-h-screen bg-slate-50">
-      <div className="fixed right-3 top-3 z-40 flex max-w-[calc(100vw-1.5rem)] justify-end pointer-events-none">
+      <div className="fixed right-2 top-2 z-40 flex max-w-[calc(100vw-1rem)] justify-end pointer-events-none sm:right-3 sm:top-3 sm:max-w-[calc(100vw-1.5rem)]">
         <div className="pointer-events-auto">
           {renderStatusBar()}
         </div>
       </div>
 
-      <div className="border-b border-slate-200 bg-white px-4 py-5 md:px-6">
+      <div className="border-b border-slate-200 bg-white px-3 pb-4 pt-14 sm:px-4 sm:py-5 md:px-6">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex items-start gap-3">
-            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-700">
-              <Gavel size={22} />
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-700 sm:h-11 sm:w-11">
+              <Gavel size={20} className="sm:h-[22px] sm:w-[22px]" />
             </div>
-            <div>
-              <h1 className="text-2xl font-semibold text-slate-950">Аукцион смен</h1>
-              <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-600">
+            <div className="min-w-0">
+              <h1 className="text-xl font-semibold text-slate-950 sm:text-2xl">Аукцион смен</h1>
+              <p className="mt-1 max-w-3xl text-xs leading-5 text-slate-600 sm:text-sm sm:leading-6">
                 Тестовый realtime-раздел для проверки будущего выбора утвержденных смен по направлению.
               </p>
             </div>
@@ -701,21 +713,21 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
               <button
                 type="button"
                 onClick={onOpenResourceGeneration}
-                className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-slate-900 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800"
+                className="inline-flex h-9 flex-1 items-center justify-center gap-2 rounded-lg bg-slate-900 px-3 text-xs font-semibold text-white shadow-sm transition hover:bg-slate-800 sm:h-10 sm:flex-none sm:px-4 sm:text-sm"
               >
                 <CalendarClock size={16} />
                 Генерация графиков
               </button>
             ) : null}
-            <div className={`inline-flex h-10 items-center gap-2 rounded-lg border px-3 text-sm ${connectionState === 'online' ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-white text-slate-600'}`}>
+            <div className={`inline-flex h-9 flex-1 items-center justify-center gap-2 rounded-lg border px-2.5 text-xs sm:h-10 sm:flex-none sm:px-3 sm:text-sm ${connectionState === 'online' ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-white text-slate-600'}`}>
               <Wifi size={15} />
-              {connectionState === 'online' ? 'Realtime online' : connectionState === 'connecting' ? 'Подключение...' : connectionState === 'reconnecting' ? 'Переподключение...' : 'Realtime idle'}
+              <span className="truncate">{connectionState === 'online' ? 'Realtime online' : connectionState === 'connecting' ? 'Подключение...' : connectionState === 'reconnecting' ? 'Переподключение...' : 'Realtime idle'}</span>
             </div>
             <button
               type="button"
               onClick={() => fetchSnapshot()}
               disabled={isLoading}
-              className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-100 disabled:cursor-wait disabled:opacity-60"
+              className="inline-flex h-9 flex-1 items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700 shadow-sm transition hover:bg-slate-100 disabled:cursor-wait disabled:opacity-60 sm:h-10 sm:flex-none sm:px-4 sm:text-sm"
             >
               <RefreshCw size={16} className={isLoading ? 'animate-spin' : ''} />
               Обновить
@@ -724,7 +736,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         </div>
       </div>
 
-      <div className={`mx-auto flex w-full max-w-7xl flex-col gap-6 px-4 py-6 md:px-6 ${canUseAuction && dayNavigationItems.length ? 'pb-28' : ''}`}>
+      <div className={`mx-auto flex w-full max-w-7xl flex-col gap-4 px-3 py-4 sm:gap-6 sm:px-4 sm:py-6 md:px-6 ${canUseAuction && dayNavigationItems.length ? 'pb-32 sm:pb-28' : ''}`}>
         {!canUseAuction && (
           <section className="grid gap-4 lg:grid-cols-4">
             {explainSteps.map((step) => {
@@ -741,15 +753,15 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         )}
 
         {canUseAuction && (
-          <section className="grid gap-6 xl:grid-cols-[280px_minmax(0,1fr)]">
-            <aside className="space-y-4">
-              <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+          <section className="grid gap-4 xl:grid-cols-[280px_minmax(0,1fr)] xl:gap-6">
+            <aside className="grid gap-3 sm:grid-cols-2 xl:block xl:space-y-4">
+              <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm sm:p-4">
                 <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
                   <ListChecks size={17} className="text-blue-700" />
                   Мои выходные
                 </div>
-                <p className="mt-2 text-sm text-slate-500">Можно выбрать любые 2 дня периода.</p>
-                <div className="mt-3 space-y-2">
+                <p className="mt-1 text-xs text-slate-500 sm:mt-2 sm:text-sm">Можно выбрать любые 2 дня периода.</p>
+                <div className="mt-3 flex gap-2 overflow-x-auto pb-1 xl:block xl:space-y-2 xl:overflow-visible xl:pb-0">
                   {lotDates.length ? lotDates.map((date) => {
                     const active = myDayOffs.includes(date);
                     return (
@@ -758,9 +770,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                         type="button"
                         onClick={() => toggleDayOff(date)}
                         disabled={!canChoose || dayOffLoadingDate === date}
-                        className={`flex w-full items-center justify-between rounded-md border px-3 py-2 text-sm transition disabled:cursor-not-allowed disabled:opacity-60 ${active ? 'border-blue-300 bg-blue-50 text-blue-800' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'}`}
+                        className={`flex min-w-[92px] shrink-0 items-center justify-between rounded-md border px-2.5 py-2 text-xs transition disabled:cursor-not-allowed disabled:opacity-60 sm:min-w-[112px] sm:text-sm xl:w-full ${active ? 'border-blue-300 bg-blue-50 text-blue-800' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'}`}
                       >
-                        <span>{formatDateLabel(date)}</span>
+                        <span className="sm:hidden">{formatShortDateLabel(date)}</span>
+                        <span className="hidden sm:inline">{formatDateLabel(date)}</span>
                         {active ? <CheckCircle2 size={16} /> : null}
                       </button>
                     );
@@ -772,19 +785,20 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                 </div>
               </div>
 
-              <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+              <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm sm:p-4">
                 <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
                   <Sparkles size={17} className="text-blue-700" />
                   Мои смены
                 </div>
-                <div className="mt-3 space-y-2">
+                <div className="mt-3 flex gap-2 overflow-x-auto pb-1 xl:block xl:space-y-2 xl:overflow-visible xl:pb-0">
                   {myClaimedLots.length ? myClaimedLots.map((lot) => (
-                    <div key={lot.id} className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm">
-                      <div className="font-semibold text-emerald-900">{formatDateLabel(lot.shift_date)}</div>
+                    <div key={lot.id} className="min-w-[118px] shrink-0 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs sm:text-sm xl:w-auto">
+                      <div className="font-semibold text-emerald-900 sm:hidden">{formatShortDateLabel(lot.shift_date)}</div>
+                      <div className="hidden font-semibold text-emerald-900 sm:block">{formatDateLabel(lot.shift_date)}</div>
                       <div className="text-emerald-700">{lot.start_time} - {lot.end_time}</div>
                     </div>
                   )) : (
-                    <p className="rounded-md border border-dashed border-slate-300 bg-slate-50 px-3 py-4 text-sm text-slate-500">
+                    <p className="min-w-full rounded-md border border-dashed border-slate-300 bg-slate-50 px-3 py-4 text-sm text-slate-500">
                       Вы еще не забрали смены.
                     </p>
                   )}
@@ -793,9 +807,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
             </aside>
 
             <main className="rounded-lg border border-slate-200 bg-white shadow-sm">
-              <div className="border-b border-slate-200 px-5 py-4">
-                <h2 className="text-lg font-semibold text-slate-950">Доступные смены</h2>
-                <p className="mt-1 text-sm text-slate-600">
+              <div className="border-b border-slate-200 px-3 py-3 sm:px-5 sm:py-4">
+                <h2 className="text-base font-semibold text-slate-950 sm:text-lg">Доступные смены</h2>
+                <p className="mt-1 text-xs text-slate-600 sm:text-sm">
                   {runtimeStatus === 'scheduled'
                     ? `Аукцион откроется через ${countdown || 'несколько секунд'}.`
                     : runtimeStatus === 'open'
@@ -803,11 +817,11 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                       : 'Сейчас аукцион закрыт.'}
                 </p>
               </div>
-              <div className="p-5">
+              <div className="p-2 sm:p-5">
                 {auctionTableGroups.length && lotDates.length ? (
                   <div className="overflow-hidden rounded-lg border border-slate-200">
                     <div className="overflow-x-auto">
-                      <table className="w-full min-w-[720px] border-separate border-spacing-0 text-sm">
+                      <table className="w-full min-w-[520px] border-separate border-spacing-0 text-sm sm:min-w-[720px]">
                         <thead>
                           <tr>
                             {lotDates.map((date) => {
@@ -818,7 +832,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                   key={date}
                                   ref={(node) => setDaySectionRef(date, node)}
                                   title={formatDateLabel(date)}
-                                  className={`min-w-[88px] border-b border-r border-slate-200 px-2 py-2 text-center align-top last:border-r-0 ${isActiveDay ? 'bg-blue-50' : 'bg-slate-50'}`}
+                                  className={`min-w-[72px] border-b border-r border-slate-200 px-1.5 py-1.5 text-center align-top last:border-r-0 sm:min-w-[88px] sm:px-2 sm:py-2 ${isActiveDay ? 'bg-blue-50' : 'bg-slate-50'}`}
                                 >
                                   <div className="text-xs font-semibold tabular-nums text-slate-950">{formatShortDateLabel(date)}</div>
                                   {dayMeta?.isDayOff ? <div className="mt-0.5 text-[10px] font-semibold text-blue-700">вых.</div> : null}
@@ -831,8 +845,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                           {auctionTableGroups.map((group) => (
                             <React.Fragment key={group.id}>
                               <tr>
-                                <td colSpan={lotDates.length} className="border-b border-slate-200 bg-slate-100 px-2 py-1">
-                                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-600">{group.title}</div>
+                                <td colSpan={lotDates.length} className="border-b border-slate-200 bg-slate-100 px-2 py-1 sm:py-1.5">
+                                  <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600 sm:text-xs">{group.title}</div>
                                 </td>
                               </tr>
                               {group.rows.map((rowIndex) => (
@@ -843,7 +857,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                     return (
                                       <td
                                         key={`${group.id}-${rowIndex}-${date}`}
-                                        className={`border-b border-r border-slate-200 p-1 align-top last:border-r-0 ${activeDayDate === date ? 'bg-blue-50/40' : 'bg-white'} group-hover:bg-slate-50`}
+                                        className={`border-b border-r border-slate-200 p-0.5 align-top last:border-r-0 sm:p-1 ${activeDayDate === date ? 'bg-blue-50/40' : 'bg-white'} group-hover:bg-slate-50`}
                                       >
                                         {lot ? (
                                           <AuctionLotCell
@@ -856,7 +870,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                             userRate={userRate}
                                           />
                                         ) : (
-                                          <div className={`h-8 rounded border border-dashed ${isDayOff ? 'border-blue-100 bg-blue-50/60' : 'border-transparent bg-slate-50/70'}`} />
+                                          <div className={`h-7 rounded border border-dashed sm:h-8 ${isDayOff ? 'border-blue-100 bg-blue-50/60' : 'border-transparent bg-slate-50/70'}`} />
                                         )}
                                       </td>
                                     );
@@ -885,20 +899,20 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
         {canManage && (
           <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
-            <div className="border-b border-slate-200 px-5 py-4">
+            <div className="border-b border-slate-200 px-3 py-3 sm:px-5 sm:py-4">
               <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                 <div>
-                  <h2 className="text-lg font-semibold text-slate-950">Тестовый запуск</h2>
-                  <p className="mt-1 text-sm text-slate-600">
+                  <h2 className="text-base font-semibold text-slate-950 sm:text-lg">Тестовый запуск</h2>
+                  <p className="mt-1 text-xs text-slate-600 sm:text-sm">
                     Выберите операторов, задайте время открытия и создайте тестовые смены.
                   </p>
                 </div>
-                <div className="flex flex-wrap gap-2">
+                <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
                   <button
                     type="button"
                     onClick={handleSeedLots}
                     disabled={isSeeding}
-                    className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-wait disabled:opacity-60"
+                    className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-wait disabled:opacity-60 sm:h-10 sm:px-4 sm:text-sm"
                   >
                     <Sparkles size={16} />
                     {isSeeding ? 'Создание...' : 'Создать тестовые смены'}
@@ -907,7 +921,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                     type="button"
                     onClick={handleSave}
                     disabled={isSaving}
-                    className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-blue-700 px-4 text-sm font-semibold text-white transition hover:bg-blue-800 disabled:cursor-wait disabled:bg-blue-400"
+                    className="inline-flex h-9 items-center justify-center gap-2 rounded-lg bg-blue-700 px-3 text-xs font-semibold text-white transition hover:bg-blue-800 disabled:cursor-wait disabled:bg-blue-400 sm:h-10 sm:px-4 sm:text-sm"
                   >
                     <Save size={16} />
                     {isSaving ? 'Сохранение...' : 'Сохранить'}
@@ -916,12 +930,12 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
               </div>
             </div>
 
-            <div className="grid gap-5 p-5 xl:grid-cols-[minmax(0,1fr)_360px]">
+            <div className="grid gap-4 p-3 sm:p-5 xl:grid-cols-[minmax(0,1fr)_360px]">
               <div className="space-y-4">
-                <label className="flex items-center justify-between gap-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+                <label className="flex items-center justify-between gap-4 rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 sm:px-4">
                   <span>
                     <span className="block text-sm font-semibold text-slate-900">Включить тестовый режим</span>
-                    <span className="block text-sm text-slate-500">Выбранные операторы увидят realtime-полигон аукциона.</span>
+                    <span className="block text-xs text-slate-500 sm:text-sm">Выбранные операторы увидят realtime-полигон аукциона.</span>
                   </span>
                   <input
                     type="checkbox"
@@ -1035,8 +1049,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       </div>
 
       {canUseAuction && dayNavigationItems.length ? (
-        <div className="fixed inset-x-0 bottom-3 z-30 flex justify-center px-3 pointer-events-none">
-          <div className="inline-flex w-fit max-w-[calc(100vw-1.5rem)] rounded-xl border border-slate-200 bg-white/95 p-2 shadow-2xl backdrop-blur pointer-events-auto">
+        <div className="fixed inset-x-0 bottom-2 z-30 flex justify-center px-2 pointer-events-none sm:bottom-3 sm:px-3">
+          <div className="inline-flex w-fit max-w-[calc(100vw-1rem)] rounded-xl border border-slate-200 bg-white/95 p-1.5 shadow-2xl backdrop-blur pointer-events-auto sm:max-w-[calc(100vw-1.5rem)] sm:p-2">
             <div className="flex max-w-full items-stretch overflow-x-auto">
               {dayNavigationItems.map((item) => {
                 const active = activeDayDate === item.date;
@@ -1062,14 +1076,14 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                       type="button"
                       onClick={() => scrollToDay(item.date)}
                       aria-current={active ? 'true' : undefined}
-                      className={`h-[52px] min-w-[76px] rounded-lg border px-2 py-1.5 text-left transition-colors hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-1 ${tone} ${hoverTone} ${active ? 'border-blue-600 bg-blue-100 text-blue-900 shadow-sm' : ''}`}
+                      className={`h-11 min-w-[62px] rounded-lg border px-1.5 py-1 text-left transition-colors hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-1 sm:h-[52px] sm:min-w-[76px] sm:px-2 sm:py-1.5 ${tone} ${hoverTone} ${active ? 'border-blue-600 bg-blue-100 text-blue-900 shadow-sm' : ''}`}
                       title={formatDateLabel(item.date)}
                     >
-                      <span className="block truncate text-[11px] font-semibold leading-4">{formatDateLabel(item.date)}</span>
-                      <span className="mt-0.5 block text-xs font-bold tabular-nums">{finalStatusText}</span>
+                      <span className="block truncate text-[10px] font-semibold leading-4 sm:text-[11px]">{formatShortDateLabel(item.date)}</span>
+                      <span className="mt-0.5 block text-[11px] font-bold tabular-nums sm:text-xs">{finalStatusText}</span>
                     </button>
                     {item.date !== dayNavigationItems[dayNavigationItems.length - 1]?.date ? (
-                      <span className="mx-1 my-1 w-px shrink-0 rounded-full bg-slate-200" aria-hidden="true" />
+                      <span className="mx-0.5 my-1 w-px shrink-0 rounded-full bg-slate-200 sm:mx-1" aria-hidden="true" />
                     ) : null}
                   </React.Fragment>
                 );
