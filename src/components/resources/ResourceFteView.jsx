@@ -2186,6 +2186,38 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
 
         {activeDashboardView === 'overview' && (
           <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+              <div>
+                <h2 className="text-lg font-semibold text-slate-950">Сводка по периоду</h2>
+                <p className="text-sm text-slate-500">Динамика звонков и FTE по загруженным дням в выбранном диапазоне.</p>
+              </div>
+              <div className="text-sm text-slate-500">{(overview?.history || []).length} дней в истории</div>
+            </div>
+            {historyTrendData.length ? (
+              <div className="mt-5 h-72">
+                <ResponsiveContainer width="100%" height="100%">
+                  <ComposedChart data={historyTrendData} margin={{ top: 10, right: 18, left: 0, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                    <XAxis dataKey="date" tick={{ fontSize: 11 }} />
+                    <YAxis yAxisId="left" tick={{ fontSize: 11 }} />
+                    <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} />
+                    <Tooltip content={<OverviewTrendTooltip />} />
+                    {displayOptions.chartCalls && <Bar yAxisId="left" dataKey="calls" fill="#bfdbfe" radius={[4, 4, 0, 0]} />}
+                    {displayOptions.chartLosses && <Bar yAxisId="left" dataKey="lost" fill="#fecdd3" radius={[4, 4, 0, 0]} />}
+                    {displayOptions.chartFte && <Line yAxisId="right" type="monotone" dataKey="forecastFte" stroke="#2563eb" strokeWidth={2} dot={false} />}
+                    {displayOptions.chartActual && <Line yAxisId="right" type="monotone" dataKey="actualFte" stroke="#059669" strokeWidth={2} dot={false} />}
+                    {displayOptions.chartLossRate && <Line yAxisId="right" type="monotone" dataKey="lossRate" stroke="#e11d48" strokeWidth={2} dot={false} />}
+                  </ComposedChart>
+                </ResponsiveContainer>
+              </div>
+            ) : (
+              <EmptyState title="Нет данных для сводки" text="Загрузите первый ежедневный CSV, чтобы увидеть динамику." />
+            )}
+          </section>
+        )}
+
+        {activeDashboardView === 'overview' && (
+          <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
             <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
               <div>
                 <h2 className="text-lg font-semibold text-slate-950">Прирост и выдержка прогноза</h2>
@@ -2335,38 +2367,6 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                 </div>
               </div>
             </div>
-          </section>
-        )}
-
-        {activeDashboardView === 'overview' && (
-          <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-              <div>
-                <h2 className="text-lg font-semibold text-slate-950">Сводка по периоду</h2>
-                <p className="text-sm text-slate-500">Динамика звонков и FTE по загруженным дням в выбранном диапазоне.</p>
-              </div>
-              <div className="text-sm text-slate-500">{(overview?.history || []).length} дней в истории</div>
-            </div>
-            {historyTrendData.length ? (
-              <div className="mt-5 h-72">
-                <ResponsiveContainer width="100%" height="100%">
-                  <ComposedChart data={historyTrendData} margin={{ top: 10, right: 18, left: 0, bottom: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                    <XAxis dataKey="date" tick={{ fontSize: 11 }} />
-                    <YAxis yAxisId="left" tick={{ fontSize: 11 }} />
-                    <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} />
-                    <Tooltip content={<OverviewTrendTooltip />} />
-                    {displayOptions.chartCalls && <Bar yAxisId="left" dataKey="calls" fill="#bfdbfe" radius={[4, 4, 0, 0]} />}
-                    {displayOptions.chartLosses && <Bar yAxisId="left" dataKey="lost" fill="#fecdd3" radius={[4, 4, 0, 0]} />}
-                    {displayOptions.chartFte && <Line yAxisId="right" type="monotone" dataKey="forecastFte" stroke="#2563eb" strokeWidth={2} dot={false} />}
-                    {displayOptions.chartActual && <Line yAxisId="right" type="monotone" dataKey="actualFte" stroke="#059669" strokeWidth={2} dot={false} />}
-                    {displayOptions.chartLossRate && <Line yAxisId="right" type="monotone" dataKey="lossRate" stroke="#e11d48" strokeWidth={2} dot={false} />}
-                  </ComposedChart>
-                </ResponsiveContainer>
-              </div>
-            ) : (
-              <EmptyState title="Нет данных для сводки" text="Загрузите первый ежедневный CSV, чтобы увидеть динамику." />
-            )}
           </section>
         )}
 
