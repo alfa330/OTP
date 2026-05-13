@@ -1,5 +1,5 @@
 from collections import defaultdict
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from .common import WEEKDAYS_RU, _round_value, _to_float, _to_int
@@ -8,6 +8,7 @@ from .common import WEEKDAYS_RU, _round_value, _to_float, _to_int
 INCIDENT_UPLIFT_LOOKBACK_DAYS = 6
 INCIDENT_UPLIFT_MAX_RATIO = 2.0
 INCIDENT_UPLIFT_CONFIDENCE_FLOOR = 0.35
+INCIDENT_UPLIFT_FORECAST_DAYS = 7
 INCIDENT_UPLIFT_FUTURE_MIN_WEIGHT = 0.55
 
 
@@ -163,6 +164,19 @@ def _incident_future_weight(day_index: int, day_count: int) -> float:
         INCIDENT_UPLIFT_FUTURE_MIN_WEIGHT,
         1.0 - ((1.0 - INCIDENT_UPLIFT_FUTURE_MIN_WEIGHT) * progress),
     )
+
+
+def _incident_anchor_date(value: Any):
+    if isinstance(value, datetime):
+        return value.date()
+    if hasattr(value, "isoformat") and hasattr(value, "weekday"):
+        return value
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value)).date()
+    except Exception:
+        return None
 
 
 def _weighted_aht_from_profiles(profiles: List[Dict[str, Any]]) -> float:
@@ -334,9 +348,12 @@ def _empty_incident_uplift_profile() -> Dict[str, Any]:
         "lookback_days": INCIDENT_UPLIFT_LOOKBACK_DAYS,
         "max_ratio": INCIDENT_UPLIFT_MAX_RATIO,
         "confidence_floor": INCIDENT_UPLIFT_CONFIDENCE_FLOOR,
+        "forecast_window_days": INCIDENT_UPLIFT_FORECAST_DAYS,
         "future_min_weight": INCIDENT_UPLIFT_FUTURE_MIN_WEIGHT,
         "source_dates": [],
         "source_anchor_date": None,
+        "forecast_window_start": None,
+        "forecast_window_end": None,
         "source_start": None,
         "source_end": None,
         "source_day_count": 0,
@@ -344,6 +361,17 @@ def _empty_incident_uplift_profile() -> Dict[str, Any]:
         "raw_average_growth_ratio": 0.0,
         "max_hourly_growth_ratio": 0.0,
         "total_positive_delta_calls": 0.0,
+        "daily": [],
+        "daily_summary": {
+            "held_day_count": 0,
+            "overload_day_count": 0,
+            "source_day_count": 0,
+            "total_forecast_calls": 0.0,
+            "total_actual_calls": 0.0,
+            "total_delta_calls": 0.0,
+            "total_positive_delta_calls": 0.0,
+            "weighted_daily_growth_ratio": 0.0,
+        },
         "future_weights": [],
         "hourly": [
             {
@@ -373,6 +401,9 @@ def _compute_recent_incident_uplift_profile_tx(
     lookback_days: int = INCIDENT_UPLIFT_LOOKBACK_DAYS,
 ) -> Dict[str, Any]:
     lookback_days = max(1, int(lookback_days or INCIDENT_UPLIFT_LOOKBACK_DAYS))
+    as_of_date = _incident_anchor_date(as_of_date)
+    if as_of_date is None:
+        return _empty_incident_uplift_profile()
     cursor.execute(
         """
         SELECT report_date
@@ -388,11 +419,26 @@ def _compute_recent_incident_uplift_profile_tx(
         return {
             **_empty_incident_uplift_profile(),
             "source_anchor_date": as_of_date.isoformat(),
+            "forecast_window_start": as_of_date.isoformat(),
+            "forecast_window_end": (as_of_date + timedelta(days=INCIDENT_UPLIFT_FORECAST_DAYS - 1)).isoformat(),
         }
 
     weights_by_date = {
         report_date: lookback_days - index
         for index, report_date in enumerate(source_dates)
+    }
+    daily = {
+        report_date: {
+            "report_date": report_date,
+            "weight": float(weights_by_date.get(report_date, 1)),
+            "forecast_calls": 0.0,
+            "actual_calls": 0.0,
+            "positive_delta_calls": 0.0,
+            "positive_hour_count": 0,
+            "source_hour_count": 0,
+            "max_hourly_growth_ratio": 0.0,
+        }
+        for report_date in source_dates
     }
     cursor.execute(
         """
@@ -433,9 +479,19 @@ def _compute_recent_incident_uplift_profile_tx(
         received_calls = max(0.0, _to_float(received_raw))
         positive_delta = max(0.0, received_calls - forecast_calls)
         ratio = 0.0
+        day = daily.get(report_date)
+        if day is not None:
+            day["forecast_calls"] += forecast_calls
+            day["actual_calls"] += received_calls
+            day["positive_delta_calls"] += positive_delta
+            day["source_hour_count"] += 1
+            if positive_delta > 0:
+                day["positive_hour_count"] += 1
         hourly[hour]["source_weight"] += weight
         if forecast_calls > 0:
             ratio = min(positive_delta / forecast_calls, INCIDENT_UPLIFT_MAX_RATIO)
+            if day is not None:
+                day["max_hourly_growth_ratio"] = max(day["max_hourly_growth_ratio"], ratio)
             hourly[hour]["ratio_weighted_sum"] += ratio * weight
             hourly[hour]["ratio_weight"] += weight
             total_weighted_ratio += ratio * weight
@@ -508,13 +564,70 @@ def _compute_recent_incident_uplift_profile_tx(
         adjusted_total_weighted_ratio / adjusted_total_ratio_weight
         if adjusted_total_ratio_weight > 0 else 0.0
     )
+    daily_rows = []
+    total_daily_forecast_calls = 0.0
+    total_daily_actual_calls = 0.0
+    total_daily_positive_delta_calls = 0.0
+    weighted_daily_growth_sum = 0.0
+    weighted_daily_growth_weight = 0.0
+    for report_date in source_dates:
+        day = daily.get(report_date, {})
+        forecast_calls = _to_float(day.get("forecast_calls"))
+        actual_calls = _to_float(day.get("actual_calls"))
+        positive_delta_calls = _to_float(day.get("positive_delta_calls"))
+        delta_calls = actual_calls - forecast_calls
+        source_hour_count = int(day.get("source_hour_count") or 0)
+        positive_hour_count = int(day.get("positive_hour_count") or 0)
+        growth_ratio = positive_delta_calls / forecast_calls if forecast_calls > 0 else 0.0
+        growth_ratio = min(growth_ratio, INCIDENT_UPLIFT_MAX_RATIO)
+        weight = _to_float(day.get("weight"), 1.0)
+        if forecast_calls > 0:
+            weighted_daily_growth_sum += growth_ratio * weight
+            weighted_daily_growth_weight += weight
+        total_daily_forecast_calls += forecast_calls
+        total_daily_actual_calls += actual_calls
+        total_daily_positive_delta_calls += positive_delta_calls
+        daily_rows.append({
+            "date": report_date.isoformat(),
+            "weight": round(weight, 4),
+            "forecast_calls": round(forecast_calls, 4),
+            "actual_calls": round(actual_calls, 4),
+            "delta_calls": round(delta_calls, 4),
+            "positive_delta_calls": round(positive_delta_calls, 4),
+            "growth_ratio": round(growth_ratio, 4),
+            "completion_ratio": round(actual_calls / forecast_calls, 4) if forecast_calls > 0 else 0.0,
+            "positive_hour_count": positive_hour_count,
+            "source_hour_count": source_hour_count,
+            "positive_hour_share": round(positive_hour_count / source_hour_count, 4) if source_hour_count > 0 else 0.0,
+            "max_hourly_growth_ratio": round(_to_float(day.get("max_hourly_growth_ratio")), 4),
+            "status": "overload" if positive_delta_calls > 0 else "held",
+            "daily_total_status": "overload" if delta_calls > 0 else "held",
+            "is_within_forecast": positive_delta_calls <= 0,
+        })
+    overload_day_count = sum(1 for row in daily_rows if row["status"] == "overload")
+    daily_summary = {
+        "held_day_count": len(daily_rows) - overload_day_count,
+        "overload_day_count": overload_day_count,
+        "source_day_count": len(daily_rows),
+        "total_forecast_calls": round(total_daily_forecast_calls, 4),
+        "total_actual_calls": round(total_daily_actual_calls, 4),
+        "total_delta_calls": round(total_daily_actual_calls - total_daily_forecast_calls, 4),
+        "total_positive_delta_calls": round(total_daily_positive_delta_calls, 4),
+        "weighted_daily_growth_ratio": round(
+            weighted_daily_growth_sum / weighted_daily_growth_weight,
+            4,
+        ) if weighted_daily_growth_weight > 0 else 0.0,
+    }
     return {
         "lookback_days": lookback_days,
         "max_ratio": INCIDENT_UPLIFT_MAX_RATIO,
         "confidence_floor": INCIDENT_UPLIFT_CONFIDENCE_FLOOR,
+        "forecast_window_days": INCIDENT_UPLIFT_FORECAST_DAYS,
         "future_min_weight": INCIDENT_UPLIFT_FUTURE_MIN_WEIGHT,
         "source_dates": source_dates_iso,
         "source_anchor_date": as_of_date.isoformat(),
+        "forecast_window_start": as_of_date.isoformat(),
+        "forecast_window_end": (as_of_date + timedelta(days=INCIDENT_UPLIFT_FORECAST_DAYS - 1)).isoformat(),
         "source_start": min(source_dates).isoformat(),
         "source_end": max(source_dates).isoformat(),
         "source_day_count": len(source_dates),
@@ -524,6 +637,8 @@ def _compute_recent_incident_uplift_profile_tx(
         "raw_weighted_total_growth_ratio": round(total_positive_delta / total_forecast_for_ratio, 4) if total_forecast_for_ratio > 0 else 0.0,
         "max_hourly_growth_ratio": max((row["growth_ratio"] for row in hourly_rows), default=0.0),
         "total_positive_delta_calls": round(total_positive_delta, 4),
+        "daily": daily_rows,
+        "daily_summary": daily_summary,
         "hourly": hourly_rows,
     }
 
@@ -549,25 +664,38 @@ def _build_forecast_payload(
         for item in incident_uplift_profile.get("hourly", [])
         if item.get("hour") is not None
     }
+    incident_window_start = (
+        _incident_anchor_date(incident_uplift_profile.get("forecast_window_start"))
+        or _incident_anchor_date(incident_uplift_profile.get("source_anchor_date"))
+        or period_start
+    )
+    incident_window_end = incident_window_start + timedelta(days=INCIDENT_UPLIFT_FORECAST_DAYS - 1)
+    future_weights = [
+        {
+            "date": (incident_window_start + timedelta(days=day_index)).isoformat(),
+            "day_index": day_index,
+            "weight": round(_incident_future_weight(day_index, INCIDENT_UPLIFT_FORECAST_DAYS), 4),
+        }
+        for day_index in range(INCIDENT_UPLIFT_FORECAST_DAYS)
+    ]
     first_history_period_start = period_start - timedelta(days=21)
     first_history_period_end = period_end - timedelta(days=21)
     second_history_period_start = period_start - timedelta(days=14)
     second_history_period_end = period_end - timedelta(days=14)
     days = []
-    future_weights = []
-    forecast_day_count = max(1, len(profiles))
     incident_period_calls = 0.0
     incident_period_workload_minutes = 0.0
     incident_period_fte_hours = 0.0
     for index, profile in enumerate(profiles):
         weekday = int(profile.get("weekday", 0))
         forecast_date_iso = profile.get("forecast_date") or (period_start + timedelta(days=index)).isoformat()
-        future_weight = _incident_future_weight(index, forecast_day_count)
-        future_weights.append({
-            "date": forecast_date_iso,
-            "day_index": index,
-            "weight": round(future_weight, 4),
-        })
+        forecast_date = _incident_anchor_date(forecast_date_iso) or (period_start + timedelta(days=index))
+        incident_window_day_index = (forecast_date - incident_window_start).days
+        incident_window_active = 0 <= incident_window_day_index < INCIDENT_UPLIFT_FORECAST_DAYS
+        future_weight = (
+            _incident_future_weight(incident_window_day_index, INCIDENT_UPLIFT_FORECAST_DAYS)
+            if incident_window_active else 0.0
+        )
         actual_day = actual_resource_by_day.get(forecast_date_iso, {})
         hourly_forecast = []
         day_incident_calls = 0.0
@@ -580,7 +708,7 @@ def _build_forecast_payload(
             forecast_aht_seconds = _to_float(row.get("aht_seconds"))
             forecast_workload_minutes = _to_float(row.get("workload_minutes"))
             forecast_fte = _to_float(row.get("fte"))
-            uplift_hour = incident_uplift_by_hour.get(hour, {})
+            uplift_hour = incident_uplift_by_hour.get(hour, {}) if incident_window_active else {}
             base_incident_ratio = _to_float(uplift_hour.get("growth_ratio"))
             raw_incident_ratio = _to_float(uplift_hour.get("raw_growth_ratio"))
             incident_ratio = base_incident_ratio * future_weight
@@ -604,6 +732,8 @@ def _build_forecast_payload(
                     "incident_base_uplift_ratio": base_incident_ratio,
                     "incident_raw_uplift_ratio": raw_incident_ratio,
                     "incident_future_weight": future_weight,
+                    "incident_uplift_window_active": incident_window_active,
+                    "incident_uplift_window_day_index": incident_window_day_index if incident_window_active else None,
                     "incident_uplift_confidence": _to_float(uplift_hour.get("confidence")),
                     "incident_uplift_persistence_factor": _to_float(uplift_hour.get("persistence_factor")),
                     "incident_uplift_coverage_factor": _to_float(uplift_hour.get("coverage_factor")),
@@ -645,6 +775,8 @@ def _build_forecast_payload(
                 "incident_uplift_fte": day_incident_fte,
                 "incident_uplift_ratio": (day_incident_calls / forecast_calls_total) if forecast_calls_total > 0 else 0.0,
                 "incident_future_weight": future_weight,
+                "incident_uplift_window_active": incident_window_active,
+                "incident_uplift_window_day_index": incident_window_day_index if incident_window_active else None,
                 "incident_adjusted_calls": forecast_calls_total + day_incident_calls,
                 "incident_adjusted_workload_minutes": forecast_workload_minutes_total + day_incident_workload_minutes,
                 "incident_adjusted_daily_fte": forecast_daily_fte + day_incident_fte,
@@ -714,6 +846,9 @@ def _build_forecast_payload(
         "weeklyFteHours": period_totals["period_fte_hours"],
         "incidentUplift": {
             **incident_uplift_profile,
+            "forecast_window_days": INCIDENT_UPLIFT_FORECAST_DAYS,
+            "forecast_window_start": incident_window_start.isoformat(),
+            "forecast_window_end": incident_window_end.isoformat(),
             "future_min_weight": INCIDENT_UPLIFT_FUTURE_MIN_WEIGHT,
             "future_weights": future_weights,
             "projected_calls": round(incident_period_calls, 4),
