@@ -136,6 +136,19 @@ const formatAuctionShiftLabel = (lot) => {
   return `${start}-${end}`;
 };
 
+const formatCompactClockValue = (value) => {
+  const normalized = normalizeClockValue(value);
+  if (!normalized.includes(':')) return normalized;
+  const [hourRaw, minuteRaw] = normalized.split(':');
+  const hour = String(Number(hourRaw || 0));
+  return minuteRaw === '00' ? hour : `${hour}:${minuteRaw}`;
+};
+
+const formatCompactAuctionShiftLabel = (lot) => {
+  if (isNightAuctionLot(lot)) return '20*08';
+  return `${formatCompactClockValue(lot?.start_time)}-${formatCompactClockValue(lot?.end_time)}`;
+};
+
 const AuctionLotCell = ({
   lot,
   canClaim,
@@ -153,6 +166,7 @@ const AuctionLotCell = ({
   const rateTooLow = !canManage && Number.isFinite(Number(userRate)) && minRate > Number(userRate) + 0.001;
   const isClaiming = Number(claimingLotId) === Number(lot.id);
   const label = formatAuctionShiftLabel(lot);
+  const compactLabel = formatCompactAuctionShiftLabel(lot);
   const title = `${label}${minRate ? ` · ставка ${formatRate(minRate)}` : ''}${lot.claimed_by_name ? ` · ${lot.claimed_by_name}` : ''}`;
 
   if (lot.status === 'available' && !canManage) {
@@ -162,13 +176,14 @@ const AuctionLotCell = ({
         onClick={() => onClaimLot(lot.id)}
         disabled={!canClaim || isClaiming || rateTooLow}
         title={title}
-        className={`flex h-7 w-full items-center justify-center rounded border px-1.5 text-[11px] font-semibold tabular-nums transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-1 disabled:cursor-not-allowed sm:h-8 sm:px-2 sm:text-xs ${
+        className={`flex h-6 w-full items-center justify-center rounded border px-1 text-[10px] font-semibold tabular-nums transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-1 disabled:cursor-not-allowed sm:h-8 sm:px-2 sm:text-xs ${
           rateTooLow
             ? 'border-slate-200 bg-slate-50 text-slate-400'
             : 'border-blue-600 bg-blue-600 text-white hover:border-blue-700 hover:bg-blue-700'
         }`}
       >
-        <span className="truncate">{isClaiming ? '...' : label}</span>
+        <span className="truncate sm:hidden">{isClaiming ? '...' : compactLabel}</span>
+        <span className="hidden truncate sm:inline">{isClaiming ? '...' : label}</span>
       </button>
     );
   }
@@ -178,8 +193,9 @@ const AuctionLotCell = ({
     : 'border-blue-600 bg-blue-600 text-white';
 
   return (
-    <div title={title} className={`flex h-7 items-center justify-center rounded border px-1.5 text-[11px] font-semibold tabular-nums sm:h-8 sm:px-2 sm:text-xs ${tone}`}>
-      <span className="truncate">{label}</span>
+    <div title={title} className={`flex h-6 items-center justify-center rounded border px-1 text-[10px] font-semibold tabular-nums sm:h-8 sm:px-2 sm:text-xs ${tone}`}>
+      <span className="truncate sm:hidden">{compactLabel}</span>
+      <span className="hidden truncate sm:inline">{label}</span>
     </div>
   );
 };
@@ -753,15 +769,15 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         )}
 
         {canUseAuction && (
-          <section className="grid gap-4 xl:grid-cols-[280px_minmax(0,1fr)] xl:gap-6">
-            <aside className="grid gap-3 sm:grid-cols-2 xl:block xl:space-y-4">
+          <section className="grid min-w-0 gap-3 xl:grid-cols-[260px_minmax(0,1fr)] xl:gap-5">
+            <aside className="grid min-w-0 gap-2 sm:grid-cols-2 xl:block xl:space-y-3">
               <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm sm:p-4">
                 <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
                   <ListChecks size={17} className="text-blue-700" />
                   Мои выходные
                 </div>
                 <p className="mt-1 text-xs text-slate-500 sm:mt-2 sm:text-sm">Можно выбрать любые 2 дня периода.</p>
-                <div className="mt-3 flex gap-2 overflow-x-auto pb-1 xl:block xl:space-y-2 xl:overflow-visible xl:pb-0">
+                <div className="mt-2 flex gap-1.5 overflow-x-auto pb-1 xl:block xl:space-y-2 xl:overflow-visible xl:pb-0">
                   {lotDates.length ? lotDates.map((date) => {
                     const active = myDayOffs.includes(date);
                     return (
@@ -770,7 +786,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                         type="button"
                         onClick={() => toggleDayOff(date)}
                         disabled={!canChoose || dayOffLoadingDate === date}
-                        className={`flex min-w-[92px] shrink-0 items-center justify-between rounded-md border px-2.5 py-2 text-xs transition disabled:cursor-not-allowed disabled:opacity-60 sm:min-w-[112px] sm:text-sm xl:w-full ${active ? 'border-blue-300 bg-blue-50 text-blue-800' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'}`}
+                        className={`flex min-w-[64px] shrink-0 items-center justify-between rounded-md border px-2 py-1.5 text-[11px] transition disabled:cursor-not-allowed disabled:opacity-60 sm:min-w-[112px] sm:py-2 sm:text-sm xl:w-full ${active ? 'border-blue-300 bg-blue-50 text-blue-800' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'}`}
                       >
                         <span className="sm:hidden">{formatShortDateLabel(date)}</span>
                         <span className="hidden sm:inline">{formatDateLabel(date)}</span>
@@ -790,12 +806,13 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                   <Sparkles size={17} className="text-blue-700" />
                   Мои смены
                 </div>
-                <div className="mt-3 flex gap-2 overflow-x-auto pb-1 xl:block xl:space-y-2 xl:overflow-visible xl:pb-0">
+                <div className="mt-2 flex gap-1.5 overflow-x-auto pb-1 xl:block xl:space-y-2 xl:overflow-visible xl:pb-0">
                   {myClaimedLots.length ? myClaimedLots.map((lot) => (
-                    <div key={lot.id} className="min-w-[118px] shrink-0 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs sm:text-sm xl:w-auto">
+                    <div key={lot.id} className="min-w-[88px] shrink-0 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1.5 text-[11px] sm:min-w-[118px] sm:px-3 sm:py-2 sm:text-sm xl:w-auto">
                       <div className="font-semibold text-emerald-900 sm:hidden">{formatShortDateLabel(lot.shift_date)}</div>
                       <div className="hidden font-semibold text-emerald-900 sm:block">{formatDateLabel(lot.shift_date)}</div>
-                      <div className="text-emerald-700">{lot.start_time} - {lot.end_time}</div>
+                      <div className="text-emerald-700 sm:hidden">{formatCompactAuctionShiftLabel(lot)}</div>
+                      <div className="hidden text-emerald-700 sm:block">{lot.start_time} - {lot.end_time}</div>
                     </div>
                   )) : (
                     <p className="min-w-full rounded-md border border-dashed border-slate-300 bg-slate-50 px-3 py-4 text-sm text-slate-500">
@@ -806,7 +823,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
               </div>
             </aside>
 
-            <main className="rounded-lg border border-slate-200 bg-white shadow-sm">
+            <main className="min-w-0 rounded-lg border border-slate-200 bg-white shadow-sm">
               <div className="border-b border-slate-200 px-3 py-3 sm:px-5 sm:py-4">
                 <h2 className="text-base font-semibold text-slate-950 sm:text-lg">Доступные смены</h2>
                 <p className="mt-1 text-xs text-slate-600 sm:text-sm">
@@ -817,11 +834,11 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                       : 'Сейчас аукцион закрыт.'}
                 </p>
               </div>
-              <div className="p-2 sm:p-5">
+              <div className="min-w-0 p-1.5 sm:p-5">
                 {auctionTableGroups.length && lotDates.length ? (
-                  <div className="overflow-hidden rounded-lg border border-slate-200">
-                    <div className="overflow-x-auto">
-                      <table className="w-full min-w-[520px] border-separate border-spacing-0 text-sm sm:min-w-[720px]">
+                  <div className="min-w-0 max-w-full overflow-hidden rounded-lg border border-slate-200">
+                    <div className="max-w-full overflow-x-auto overscroll-x-contain">
+                      <table className="w-max min-w-full border-separate border-spacing-0 text-sm">
                         <thead>
                           <tr>
                             {lotDates.map((date) => {
@@ -832,7 +849,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                   key={date}
                                   ref={(node) => setDaySectionRef(date, node)}
                                   title={formatDateLabel(date)}
-                                  className={`min-w-[72px] border-b border-r border-slate-200 px-1.5 py-1.5 text-center align-top last:border-r-0 sm:min-w-[88px] sm:px-2 sm:py-2 ${isActiveDay ? 'bg-blue-50' : 'bg-slate-50'}`}
+                                  className={`min-w-[50px] border-b border-r border-slate-200 px-1 py-1 text-center align-top last:border-r-0 sm:min-w-[88px] sm:px-2 sm:py-2 ${isActiveDay ? 'bg-blue-50' : 'bg-slate-50'}`}
                                 >
                                   <div className="text-xs font-semibold tabular-nums text-slate-950">{formatShortDateLabel(date)}</div>
                                   {dayMeta?.isDayOff ? <div className="mt-0.5 text-[10px] font-semibold text-blue-700">вых.</div> : null}
@@ -845,8 +862,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                           {auctionTableGroups.map((group) => (
                             <React.Fragment key={group.id}>
                               <tr>
-                                <td colSpan={lotDates.length} className="border-b border-slate-200 bg-slate-100 px-2 py-1 sm:py-1.5">
-                                  <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600 sm:text-xs">{group.title}</div>
+                                <td colSpan={lotDates.length} className="border-b border-slate-200 bg-slate-100 px-1.5 py-0.5 sm:px-2 sm:py-1.5">
+                                  <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-600 sm:text-xs">{group.title}</div>
                                 </td>
                               </tr>
                               {group.rows.map((rowIndex) => (
@@ -857,7 +874,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                     return (
                                       <td
                                         key={`${group.id}-${rowIndex}-${date}`}
-                                        className={`border-b border-r border-slate-200 p-0.5 align-top last:border-r-0 sm:p-1 ${activeDayDate === date ? 'bg-blue-50/40' : 'bg-white'} group-hover:bg-slate-50`}
+                                        className={`border-b border-r border-slate-200 p-px align-top last:border-r-0 sm:p-1 ${activeDayDate === date ? 'bg-blue-50/40' : 'bg-white'} group-hover:bg-slate-50`}
                                       >
                                         {lot ? (
                                           <AuctionLotCell
@@ -870,7 +887,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                             userRate={userRate}
                                           />
                                         ) : (
-                                          <div className={`h-7 rounded border border-dashed sm:h-8 ${isDayOff ? 'border-blue-100 bg-blue-50/60' : 'border-transparent bg-slate-50/70'}`} />
+                                          <div className={`h-6 rounded border border-dashed sm:h-8 ${isDayOff ? 'border-blue-100 bg-blue-50/60' : 'border-transparent bg-slate-50/70'}`} />
                                         )}
                                       </td>
                                     );
