@@ -88,6 +88,12 @@ const AUCTION_RATE_GROUPS = [
   { id: 'night-20-08', title: 'Ночные 20*08' }
 ];
 
+const AUCTION_DAY_COLUMN_STYLE = {
+  width: 'var(--auction-day-column)',
+  minWidth: 'var(--auction-day-column)',
+  maxWidth: 'var(--auction-day-column)'
+};
+
 const normalizeClockValue = (value) => {
   const raw = String(value || '').trim();
   const match = raw.match(/^(\d{1,2}):(\d{2})/);
@@ -176,7 +182,7 @@ const AuctionLotCell = ({
         onClick={() => onClaimLot(lot.id)}
         disabled={!canClaim || isClaiming || rateTooLow}
         title={title}
-        className={`flex h-6 w-full items-center justify-center rounded border px-1 text-[10px] font-semibold tabular-nums transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-1 disabled:cursor-not-allowed sm:h-8 sm:px-2 sm:text-xs ${
+        className={`flex h-6 w-full min-w-0 items-center justify-center overflow-hidden rounded border px-1 text-[10px] font-semibold tabular-nums transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-1 disabled:cursor-not-allowed sm:h-8 sm:px-2 sm:text-xs ${
           rateTooLow
             ? 'border-slate-200 bg-slate-50 text-slate-400'
             : 'border-blue-600 bg-blue-600 text-white hover:border-blue-700 hover:bg-blue-700'
@@ -193,7 +199,7 @@ const AuctionLotCell = ({
     : 'border-blue-600 bg-blue-600 text-white';
 
   return (
-    <div title={title} className={`flex h-6 items-center justify-center rounded border px-1 text-[10px] font-semibold tabular-nums sm:h-8 sm:px-2 sm:text-xs ${tone}`}>
+    <div title={title} className={`flex h-6 w-full min-w-0 items-center justify-center overflow-hidden rounded border px-1 text-[10px] font-semibold tabular-nums sm:h-8 sm:px-2 sm:text-xs ${tone}`}>
       <span className="truncate sm:hidden">{compactLabel}</span>
       <span className="hidden truncate sm:inline">{label}</span>
     </div>
@@ -652,8 +658,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
     const sourceNode = source === 'dates' ? dateBar : table;
     const targetNode = source === 'dates' ? table : dateBar;
+    const maxTargetLeft = Math.max(0, targetNode.scrollWidth - targetNode.clientWidth);
     isSyncingAuctionScrollRef.current = true;
-    targetNode.scrollLeft = sourceNode.scrollLeft;
+    targetNode.scrollLeft = Math.min(sourceNode.scrollLeft, maxTargetLeft);
 
     const releaseSync = () => {
       isSyncingAuctionScrollRef.current = false;
@@ -673,18 +680,23 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     const table = auctionTableScrollRef.current;
     const bar = auctionDateBarScrollRef.current;
 
-    if (table) {
-      const dateCell = table.querySelector('[data-auction-date-cell]');
-      const columnWidth = dateCell?.getBoundingClientRect?.().width || dateCell?.offsetWidth || 50;
-      const targetLeft = (dateIndex * columnWidth) - ((table.clientWidth - columnWidth) / 2);
-      table.scrollTo({ left: Math.max(0, targetLeft), behavior: 'smooth' });
-    }
-    if (bar) {
-      const barItem = bar.querySelector('button');
-      const itemWidth = barItem?.getBoundingClientRect?.().width || barItem?.offsetWidth || 50;
-      const targetLeft = (dateIndex * itemWidth) - ((bar.clientWidth - itemWidth) / 2);
-      bar.scrollTo({ left: Math.max(0, targetLeft), behavior: 'smooth' });
-    }
+    const dateCell = table?.querySelector('[data-auction-date-cell]');
+    const barItem = bar?.querySelector('[data-auction-date-bar-cell]');
+    const columnWidth = dateCell?.getBoundingClientRect?.().width
+      || barItem?.getBoundingClientRect?.().width
+      || dateCell?.offsetWidth
+      || barItem?.offsetWidth
+      || 64;
+
+    const scrollNodeToDay = (node) => {
+      if (!node) return;
+      const maxLeft = Math.max(0, node.scrollWidth - node.clientWidth);
+      const targetLeft = (dateIndex * columnWidth) - ((node.clientWidth - columnWidth) / 2);
+      node.scrollTo({ left: Math.min(Math.max(0, targetLeft), maxLeft), behavior: 'smooth' });
+    };
+
+    scrollNodeToDay(table);
+    scrollNodeToDay(bar);
   }, [lotDates]);
 
   const toggleOperator = useCallback((operatorId) => {
@@ -914,13 +926,18 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
               </div>
               <div className="min-w-0 sm:p-5">
                 {auctionTableGroups.length && lotDates.length ? (
-                  <div className="min-w-0 max-w-full sm:border-y sm:border-slate-200">
+                  <div className="min-w-0 max-w-full [--auction-day-column:4rem] sm:border-y sm:border-slate-200 sm:[--auction-day-column:7rem]">
                     <div
                       ref={auctionTableScrollRef}
                       onScroll={() => syncAuctionScroll('table')}
                       className="max-w-full overflow-x-auto overscroll-x-contain"
                     >
-                      <table className="w-max min-w-full border-separate border-spacing-0 text-sm">
+                      <table className="w-max table-fixed border-separate border-spacing-0 text-sm">
+                        <colgroup>
+                          {lotDates.map((date) => (
+                            <col key={`auction-col-${date}`} style={AUCTION_DAY_COLUMN_STYLE} />
+                          ))}
+                        </colgroup>
                         <thead>
                           <tr>
                             {lotDates.map((date) => {
@@ -932,7 +949,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                   data-auction-date-cell
                                   title={formatDateLabel(date)}
                                   onClick={() => scrollToDay(date)}
-                                  className={`min-w-[50px] cursor-pointer border-b border-r border-slate-200 px-1 py-1.5 text-center align-top last:border-r-0 sm:min-w-[88px] sm:px-2 sm:py-2 ${isActiveDay ? 'bg-blue-50' : 'bg-slate-50'}`}
+                                  style={AUCTION_DAY_COLUMN_STYLE}
+                                  className={`cursor-pointer border-b border-r border-slate-200 px-1 py-1.5 text-center align-top last:border-r-0 sm:px-2 sm:py-2 ${isActiveDay ? 'bg-blue-50' : 'bg-slate-50'}`}
                                 >
                                   <div className="text-xs font-semibold tabular-nums text-slate-950">{formatShortDateLabel(date)}</div>
                                   {dayMeta?.isDayOff ? <div className="mt-0.5 text-[10px] font-semibold text-blue-700">вых.</div> : null}
@@ -957,7 +975,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                     return (
                                       <td
                                         key={`${group.id}-${rowIndex}-${date}`}
-                                        className={`min-w-[50px] border-b border-r border-slate-200 p-px align-top last:border-r-0 sm:min-w-[88px] sm:p-1 ${activeDayDate === date ? 'bg-blue-50/40' : 'bg-white'} group-hover:bg-slate-50`}
+                                        style={AUCTION_DAY_COLUMN_STYLE}
+                                        className={`border-b border-r border-slate-200 p-px align-top last:border-r-0 sm:p-1 ${activeDayDate === date ? 'bg-blue-50/40' : 'bg-white'} group-hover:bg-slate-50`}
                                       >
                                         {lot ? (
                                           <AuctionLotCell
@@ -989,7 +1008,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                           onScroll={() => syncAuctionScroll('dates')}
                           className="overflow-x-auto overscroll-x-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
                         >
-                          <div className="flex w-max items-stretch">
+                          <div
+                            className="grid w-max items-stretch"
+                            style={{ gridTemplateColumns: `repeat(${dayNavigationItems.length}, var(--auction-day-column))` }}
+                          >
                             {dayNavigationItems.map((item) => {
                               const active = activeDayDate === item.date;
                               const tone = canManage
@@ -1013,8 +1035,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                   key={item.date}
                                   type="button"
                                   onClick={() => scrollToDay(item.date)}
+                                  data-auction-date-bar-cell
                                   aria-current={active ? 'true' : undefined}
-                                  className={`h-11 min-w-[50px] shrink-0 border-r border-slate-200 px-1 py-1 text-center transition-colors last:border-r-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-inset sm:h-[52px] sm:min-w-[88px] sm:px-2 sm:py-1.5 ${tone} ${hoverTone} ${active ? 'bg-blue-100 text-blue-900' : ''}`}
+                                  className={`h-11 min-w-0 border-r border-slate-200 px-1 py-1 text-center transition-colors last:border-r-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-inset sm:h-[52px] sm:px-2 sm:py-1.5 ${tone} ${hoverTone} ${active ? 'bg-blue-100 text-blue-900' : ''}`}
                                   title={formatDateLabel(item.date)}
                                 >
                                   <span className="block truncate text-[10px] font-semibold leading-4 sm:text-[11px]">{formatShortDateLabel(item.date)}</span>
