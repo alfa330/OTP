@@ -241,6 +241,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const snapshotRequestRef = useRef(false);
   const lastEventIdRef = useRef(0);
   const auctionTableScrollRef = useRef(null);
+  const auctionDateBarScrollRef = useRef(null);
+  const isSyncingAuctionScrollRef = useRef(false);
 
   const [settings, setSettings] = useState({
     enabled: false,
@@ -643,20 +645,43 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     return Number.isFinite(snapshotRate) && snapshotRate > 0 ? snapshotRate : 1;
   }, [settings.selected_operators, user?.id, user?.rate]);
 
+  const syncAuctionScroll = useCallback((source) => {
+    const dateBar = auctionDateBarScrollRef.current;
+    const table = auctionTableScrollRef.current;
+    if (!dateBar || !table || isSyncingAuctionScrollRef.current) return;
+
+    const sourceNode = source === 'dates' ? dateBar : table;
+    const targetNode = source === 'dates' ? table : dateBar;
+    isSyncingAuctionScrollRef.current = true;
+    targetNode.scrollLeft = sourceNode.scrollLeft;
+
+    const releaseSync = () => {
+      isSyncingAuctionScrollRef.current = false;
+    };
+    if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+      window.requestAnimationFrame(releaseSync);
+    } else {
+      releaseSync();
+    }
+  }, []);
+
   const scrollToDay = useCallback((date) => {
     setActiveDayDate(date);
     const dateIndex = lotDates.indexOf(date);
     if (dateIndex < 0) return;
 
-    const scroller = auctionTableScrollRef.current;
-    if (!scroller) return;
+    const scrollers = [auctionTableScrollRef.current, auctionDateBarScrollRef.current].filter(Boolean);
+    if (!scrollers.length) return;
 
-    const dateCell = scroller.querySelector('[data-auction-date-cell]');
+    const measureRoot = auctionDateBarScrollRef.current || auctionTableScrollRef.current;
+    const dateCell = measureRoot?.querySelector?.('[data-auction-date-cell]');
     const measuredWidth = dateCell?.getBoundingClientRect?.().width || dateCell?.offsetWidth || 0;
     const columnWidth = measuredWidth > 0 ? measuredWidth : 50;
 
-    const targetLeft = (dateIndex * columnWidth) - ((scroller.clientWidth - columnWidth) / 2);
-    scroller.scrollTo({ left: Math.max(0, targetLeft), behavior: 'smooth' });
+    scrollers.forEach((scroller) => {
+      const targetLeft = (dateIndex * columnWidth) - ((scroller.clientWidth - columnWidth) / 2);
+      scroller.scrollTo({ left: Math.max(0, targetLeft), behavior: 'smooth' });
+    });
   }, [lotDates]);
 
   const toggleOperator = useCallback((operatorId) => {
@@ -887,31 +912,52 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
               <div className="min-w-0 sm:p-5">
                 {auctionTableGroups.length && lotDates.length ? (
                   <div className="min-w-0 max-w-full sm:border-y sm:border-slate-200">
+                    <div className="sticky top-[46px] z-30 overflow-hidden bg-white shadow-[0_1px_0_rgba(148,163,184,0.45)] sm:top-14">
+                      <div
+                        ref={auctionDateBarScrollRef}
+                        onScroll={() => syncAuctionScroll('dates')}
+                        className="max-w-full overflow-x-auto overscroll-x-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+                      >
+                        <table className="border-separate border-spacing-0" style={{ tableLayout: 'fixed' }}>
+                          <colgroup>
+                            {lotDates.map((date) => (
+                              <col key={date} className="w-[50px] sm:w-[88px]" />
+                            ))}
+                          </colgroup>
+                          <thead>
+                            <tr>
+                              {lotDates.map((date) => {
+                                const dayMeta = dayNavigationItems.find((item) => item.date === date);
+                                const isActiveDay = activeDayDate === date;
+                                return (
+                                  <th
+                                    key={date}
+                                    data-auction-date-cell
+                                    title={formatDateLabel(date)}
+                                    onClick={() => scrollToDay(date)}
+                                    className={`cursor-pointer border-b border-r border-slate-200 px-1 py-1.5 text-center align-top last:border-r-0 sm:px-2 sm:py-2 ${isActiveDay ? 'bg-blue-50' : 'bg-slate-50'}`}
+                                  >
+                                    <div className="text-xs font-semibold tabular-nums text-slate-950">{formatShortDateLabel(date)}</div>
+                                    {dayMeta?.isDayOff ? <div className="mt-0.5 text-[10px] font-semibold text-blue-700">вых.</div> : null}
+                                  </th>
+                                );
+                              })}
+                            </tr>
+                          </thead>
+                        </table>
+                      </div>
+                    </div>
                     <div
                       ref={auctionTableScrollRef}
+                      onScroll={() => syncAuctionScroll('table')}
                       className="max-w-full overflow-x-auto overscroll-x-contain"
                     >
-                      <table className="w-max min-w-full border-separate border-spacing-0 text-sm">
-                        <thead>
-                          <tr>
-                            {lotDates.map((date) => {
-                              const dayMeta = dayNavigationItems.find((item) => item.date === date);
-                              const isActiveDay = activeDayDate === date;
-                              return (
-                                <th
-                                  key={date}
-                                  data-auction-date-cell
-                                  title={formatDateLabel(date)}
-                                  onClick={() => scrollToDay(date)}
-                                  className={`sticky top-[46px] z-20 min-w-[50px] cursor-pointer border-b border-r border-slate-200 px-1 py-1.5 text-center align-top last:border-r-0 sm:top-14 sm:min-w-[88px] sm:px-2 sm:py-2 ${isActiveDay ? 'bg-blue-50' : 'bg-slate-50'}`}
-                                >
-                                  <div className="text-xs font-semibold tabular-nums text-slate-950">{formatShortDateLabel(date)}</div>
-                                  {dayMeta?.isDayOff ? <div className="mt-0.5 text-[10px] font-semibold text-blue-700">вых.</div> : null}
-                                </th>
-                              );
-                            })}
-                          </tr>
-                        </thead>
+                      <table className="border-separate border-spacing-0 text-sm" style={{ tableLayout: 'fixed' }}>
+                        <colgroup>
+                          {lotDates.map((date) => (
+                            <col key={date} className="w-[50px] sm:w-[88px]" />
+                          ))}
+                        </colgroup>
                         <tbody>
                           {auctionTableGroups.map((group) => (
                             <React.Fragment key={group.id}>
@@ -928,7 +974,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                     return (
                                       <td
                                         key={`${group.id}-${rowIndex}-${date}`}
-                                        className={`min-w-[50px] border-b border-r border-slate-200 p-px align-top last:border-r-0 sm:min-w-[88px] sm:p-1 ${activeDayDate === date ? 'bg-blue-50/40' : 'bg-white'} group-hover:bg-slate-50`}
+                                        className={`border-b border-r border-slate-200 p-px align-top last:border-r-0 sm:p-1 ${activeDayDate === date ? 'bg-blue-50/40' : 'bg-white'} group-hover:bg-slate-50`}
                                       >
                                         {lot ? (
                                           <AuctionLotCell
