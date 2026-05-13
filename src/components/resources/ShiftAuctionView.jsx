@@ -677,6 +677,12 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
   return (
     <div className="min-h-screen bg-slate-50">
+      <div className="fixed right-3 top-3 z-40 flex max-w-[calc(100vw-1.5rem)] justify-end pointer-events-none">
+        <div className="pointer-events-auto">
+          {renderStatusBar()}
+        </div>
+      </div>
+
       <div className="border-b border-slate-200 bg-white px-4 py-5 md:px-6">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex items-start gap-3">
@@ -690,8 +696,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
               </p>
             </div>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            {renderStatusBar()}
+          <div className="flex flex-wrap items-center gap-2 lg:pr-[280px]">
             {canManage && typeof onOpenResourceGeneration === 'function' ? (
               <button
                 type="button"
