@@ -367,11 +367,31 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     if (!canOpenStream) return undefined;
 
     let cancelled = false;
-    const abortController = new AbortController();
-    streamAbortRef.current?.abort?.();
-    streamAbortRef.current = abortController;
+    let currentAbortController = null;
+    let reconnectTimer = null;
+    let pollTimer = null;
+
+    const stopPolling = () => {
+      if (pollTimer) {
+        window.clearInterval(pollTimer);
+        pollTimer = null;
+      }
+    };
+
+    const startPolling = () => {
+      stopPolling();
+      pollTimer = window.setInterval(() => {
+        if (!cancelled) fetchSnapshot({ silent: true });
+      }, 5000);
+    };
 
     const readStream = async () => {
+      if (cancelled) return;
+      const abortController = new AbortController();
+      currentAbortController = abortController;
+      streamAbortRef.current?.abort?.();
+      streamAbortRef.current = abortController;
+
       setConnectionState('connecting');
       try {
         const response = await fetch(`${apiRoot}/api/shift_auction/test_events?after=${encodeURIComponent(lastEventIdRef.current || 0)}`, {
@@ -381,6 +401,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         });
         if (!response.ok || !response.body) throw new Error('SSE connection failed');
         setConnectionState('online');
+        stopPolling();
+        fetchSnapshot({ silent: true });
         const reader = response.body.getReader();
         const decoder = new TextDecoder('utf-8');
         let buffer = '';
@@ -406,19 +428,44 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
           }
         }
       } catch (error) {
-        if (!cancelled && error?.name !== 'AbortError') {
-          setConnectionState('reconnecting');
-          window.setTimeout(() => {
-            if (!cancelled) fetchSnapshot({ silent: true });
-          }, 1200);
-        }
+        if (cancelled || error?.name === 'AbortError') return;
+        setConnectionState('reconnecting');
+        startPolling();
+      }
+
+      if (!cancelled) {
+        setConnectionState('reconnecting');
+        startPolling();
+        reconnectTimer = window.setTimeout(() => {
+          if (!cancelled) readStream();
+        }, 2000);
       }
     };
+
+    const handleVisibilityChange = () => {
+      if (cancelled) return;
+      if (document.visibilityState === 'visible') {
+        fetchSnapshot({ silent: true });
+        currentAbortController?.abort?.();
+        if (reconnectTimer) {
+          window.clearTimeout(reconnectTimer);
+          reconnectTimer = null;
+        }
+        readStream();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleVisibilityChange);
 
     readStream();
     return () => {
       cancelled = true;
-      abortController.abort();
+      stopPolling();
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      currentAbortController?.abort?.();
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleVisibilityChange);
     };
   }, [apiRoot, buildHeaders, canOpenStream, fetchSnapshot, handleRealtimeEvent, user?.id]);
 
@@ -845,7 +892,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                       className="max-w-full overflow-x-auto overscroll-x-contain"
                     >
                       <table className="w-max min-w-full border-separate border-spacing-0 text-sm">
-                        <thead className="sticky top-[46px] z-20 sm:top-14">
+                        <thead>
                           <tr>
                             {lotDates.map((date) => {
                               const dayMeta = dayNavigationItems.find((item) => item.date === date);
@@ -856,7 +903,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                   data-auction-date-cell
                                   title={formatDateLabel(date)}
                                   onClick={() => scrollToDay(date)}
-                                  className={`min-w-[50px] cursor-pointer border-b border-r border-slate-200 px-1 py-1.5 text-center align-top last:border-r-0 sm:min-w-[88px] sm:px-2 sm:py-2 ${isActiveDay ? 'bg-blue-50' : 'bg-slate-50'}`}
+                                  className={`sticky top-[46px] z-20 min-w-[50px] cursor-pointer border-b border-r border-slate-200 px-1 py-1.5 text-center align-top last:border-r-0 sm:top-14 sm:min-w-[88px] sm:px-2 sm:py-2 ${isActiveDay ? 'bg-blue-50' : 'bg-slate-50'}`}
                                 >
                                   <div className="text-xs font-semibold tabular-nums text-slate-950">{formatShortDateLabel(date)}</div>
                                   {dayMeta?.isDayOff ? <div className="mt-0.5 text-[10px] font-semibold text-blue-700">вых.</div> : null}
