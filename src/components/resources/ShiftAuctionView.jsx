@@ -851,10 +851,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
               </div>
             </aside>
 
-            <main className=”min-w-0 sm:rounded-lg sm:border sm:border-slate-200 sm:bg-white sm:shadow-sm”>
-              <div className=”hidden border-b border-slate-200 sm:block sm:px-5 sm:py-4”>
-                <h2 className=”text-base font-semibold text-slate-950 sm:text-lg”>Доступные смены</h2>
-                <p className=”mt-1 text-xs text-slate-600 sm:text-sm”>
+            <main className="min-w-0 sm:rounded-lg sm:border sm:border-slate-200 sm:bg-white sm:shadow-sm">
+              <div className="hidden border-b border-slate-200 sm:block sm:px-5 sm:py-4">
+                <h2 className="text-base font-semibold text-slate-950 sm:text-lg">Доступные смены</h2>
+                <p className="mt-1 text-xs text-slate-600 sm:text-sm">
                   {runtimeStatus === 'scheduled'
                     ? `Аукцион откроется через ${countdown || 'несколько секунд'}.`
                     : runtimeStatus === 'open'
@@ -862,7 +862,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                       : 'Сейчас аукцион закрыт.'}
                 </p>
               </div>
-              <div className=”min-w-0 sm:p-5”>
+              <div className="min-w-0 sm:p-5">
                 {auctionTableGroups.length && lotDates.length ? (
                   <div className="min-w-0 max-w-full sm:border-y sm:border-slate-200">
                     <div className="sticky top-[46px] z-30 bg-white/95 shadow-[0_1px_0_rgba(148,163,184,0.45)] backdrop-blur sm:hidden">
