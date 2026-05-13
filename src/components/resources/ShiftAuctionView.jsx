@@ -241,6 +241,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const snapshotRequestRef = useRef(false);
   const lastEventIdRef = useRef(0);
   const daySectionRefs = useRef(new Map());
+  const auctionTableScrollRef = useRef(null);
 
   const [settings, setSettings] = useState({
     enabled: false,
@@ -604,9 +605,14 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
   const scrollToDay = useCallback((date) => {
     const node = daySectionRefs.current.get(date);
-    if (!node) return;
     setActiveDayDate(date);
-    node.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+    const scroller = auctionTableScrollRef.current;
+    if (node && scroller) {
+      const targetLeft = node.offsetLeft - ((scroller.clientWidth - node.offsetWidth) / 2);
+      scroller.scrollTo({ left: Math.max(0, targetLeft), behavior: 'smooth' });
+      return;
+    }
+    if (node) node.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
   }, []);
 
   const toggleOperator = useCallback((operatorId) => {
@@ -771,13 +777,13 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         {canUseAuction && (
           <section className="grid min-w-0 gap-3 xl:grid-cols-[260px_minmax(0,1fr)] xl:gap-5">
             <aside className="grid min-w-0 gap-2 sm:grid-cols-2 xl:block xl:space-y-3">
-              <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm sm:p-4">
+              <div className="min-w-0 max-w-full overflow-hidden rounded-lg border border-slate-200 bg-white p-3 shadow-sm sm:p-4">
                 <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
                   <ListChecks size={17} className="text-blue-700" />
                   Мои выходные
                 </div>
                 <p className="mt-1 text-xs text-slate-500 sm:mt-2 sm:text-sm">Можно выбрать любые 2 дня периода.</p>
-                <div className="mt-2 flex gap-1.5 overflow-x-auto pb-1 xl:block xl:space-y-2 xl:overflow-visible xl:pb-0">
+                <div className="mt-2 flex min-w-0 max-w-full gap-1.5 overflow-x-auto overscroll-x-contain pb-1 xl:block xl:space-y-2 xl:overflow-visible xl:pb-0">
                   {lotDates.length ? lotDates.map((date) => {
                     const active = myDayOffs.includes(date);
                     return (
@@ -801,12 +807,12 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                 </div>
               </div>
 
-              <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm sm:p-4">
+              <div className="min-w-0 max-w-full overflow-hidden rounded-lg border border-slate-200 bg-white p-3 shadow-sm sm:p-4">
                 <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
                   <Sparkles size={17} className="text-blue-700" />
                   Мои смены
                 </div>
-                <div className="mt-2 flex gap-1.5 overflow-x-auto pb-1 xl:block xl:space-y-2 xl:overflow-visible xl:pb-0">
+                <div className="mt-2 flex min-w-0 max-w-full gap-1.5 overflow-x-auto overscroll-x-contain pb-1 xl:block xl:space-y-2 xl:overflow-visible xl:pb-0">
                   {myClaimedLots.length ? myClaimedLots.map((lot) => (
                     <div key={lot.id} className="min-w-[88px] shrink-0 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1.5 text-[11px] sm:min-w-[118px] sm:px-3 sm:py-2 sm:text-sm xl:w-auto">
                       <div className="font-semibold text-emerald-900 sm:hidden">{formatShortDateLabel(lot.shift_date)}</div>
@@ -837,9 +843,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
               <div className="min-w-0 p-1.5 sm:p-5">
                 {auctionTableGroups.length && lotDates.length ? (
                   <div className="min-w-0 max-w-full overflow-hidden rounded-lg border border-slate-200">
-                    <div className="max-w-full overflow-x-auto overscroll-x-contain">
+                    <div ref={auctionTableScrollRef} className="max-w-full overflow-x-auto overscroll-x-contain">
                       <table className="w-max min-w-full border-separate border-spacing-0 text-sm">
-                        <thead>
+                        <thead className="sticky top-11 z-20 sm:top-14">
                           <tr>
                             {lotDates.map((date) => {
                               const dayMeta = dayNavigationItems.find((item) => item.date === date);
