@@ -945,42 +945,49 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     }
   }, [apiRoot, buildHeaders, canChoose, fetchSnapshot, myDayOffs, notify]);
 
-  const renderStatusBar = () => (
-    <div title={settings.launch_note || `${auctionStatusLabel}: ${auctionStatusDetail}`} className={`inline-flex h-9 max-w-[calc(100vw-1rem)] items-center gap-1.5 rounded-lg border px-2.5 text-xs shadow-lg backdrop-blur sm:h-10 sm:gap-2 sm:px-3 sm:text-sm ${auctionStatusTone}`}>
-      {runtimeStatus === 'open' ? <ShieldCheck size={15} /> : <Clock3 size={15} />}
-      <span className="shrink-0 font-semibold sm:hidden">{auctionStatusShortLabel}</span>
-      <span className="hidden shrink-0 font-semibold sm:inline">{auctionStatusLabel}</span>
-      <span className="min-w-0 truncate border-l border-current/20 pl-1.5 font-semibold tabular-nums sm:hidden">{auctionStatusShortDetail}</span>
-      <span className="hidden min-w-0 truncate border-l border-current/20 pl-2 font-semibold tabular-nums sm:inline">{auctionStatusDetail}</span>
-    </div>
-  );
-
-  const renderOperatorWorkloadBar = () => {
-    if (canManage || !canUseAuction) return null;
+  const renderStatusBar = () => {
+    const showWorkload = !canManage && canUseAuction;
     const progressWidth = clampNumber(myAuctionWorkload.progress, 0, 100);
     const progressTone = myAuctionWorkload.overMinutes > 0 ? 'bg-rose-500' : myAuctionWorkload.isComplete ? 'bg-emerald-500' : 'bg-blue-600';
     const balanceLabel = myAuctionWorkload.overMinutes > 0
       ? `перебор ${formatAuctionHours(myAuctionWorkload.overMinutes)} ч`
       : `осталось ${formatAuctionHours(myAuctionWorkload.remainingMinutes)} ч`;
-    const title = `Набрано ${formatAuctionHours(myAuctionWorkload.claimedNetMinutes)} ч из ${formatAuctionHours(myAuctionWorkload.normMinutes)} ч. Перерывы: ${formatAuctionHours(myAuctionWorkload.claimedBreakMinutes)} ч. Норма: ${myAuctionWorkload.workdayCount} раб. дн. × 8 × ${formatRate(userRate)}.`;
+    const workloadTitle = showWorkload
+      ? ` Набрано ${formatAuctionHours(myAuctionWorkload.claimedNetMinutes)} ч из ${formatAuctionHours(myAuctionWorkload.normMinutes)} ч. Перерывы: ${formatAuctionHours(myAuctionWorkload.claimedBreakMinutes)} ч.`
+      : '';
+    const title = `${settings.launch_note || `${auctionStatusLabel}: ${auctionStatusDetail}`}${workloadTitle}`;
     return (
-      <div title={title} className="w-[min(360px,calc(100vw-1rem))] rounded-xl border border-slate-200 bg-white/95 px-3 py-2 text-xs text-slate-700 shadow-lg backdrop-blur">
-        <div className="flex items-center justify-between gap-3">
-          <div className="min-w-0">
-            <div className="font-semibold text-slate-950">
-              {formatAuctionHours(myAuctionWorkload.claimedNetMinutes)} / {formatAuctionHours(myAuctionWorkload.normMinutes)} ч
+      <div
+        title={title}
+        className={`max-w-[calc(100vw-1rem)] rounded-xl border text-xs shadow-lg backdrop-blur sm:max-w-[calc(100vw-1.5rem)] sm:text-sm ${showWorkload ? 'w-[min(360px,calc(100vw-1rem))] px-3 py-2' : 'inline-flex h-9 items-center px-2.5 sm:h-10 sm:px-3'} ${auctionStatusTone}`}
+      >
+        <div className="flex min-w-0 items-center gap-1.5 sm:gap-2">
+          {runtimeStatus === 'open' ? <ShieldCheck size={15} className="shrink-0" /> : <Clock3 size={15} className="shrink-0" />}
+          <span className="shrink-0 font-semibold sm:hidden">{auctionStatusShortLabel}</span>
+          <span className="hidden shrink-0 font-semibold sm:inline">{auctionStatusLabel}</span>
+          <span className="min-w-0 truncate border-l border-current/20 pl-1.5 font-semibold tabular-nums sm:hidden">{auctionStatusShortDetail}</span>
+          <span className="hidden min-w-0 truncate border-l border-current/20 pl-2 font-semibold tabular-nums sm:inline">{auctionStatusDetail}</span>
+        </div>
+        {showWorkload ? (
+          <div className="mt-2 border-t border-current/20 pt-2">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="font-semibold text-slate-950">
+                  {formatAuctionHours(myAuctionWorkload.claimedNetMinutes)} / {formatAuctionHours(myAuctionWorkload.normMinutes)} ч
+                </div>
+                <div className="truncate text-[11px] text-slate-600">
+                  {balanceLabel} · перерывы {formatAuctionHours(myAuctionWorkload.claimedBreakMinutes)} ч
+                </div>
+              </div>
+              <div className={`shrink-0 rounded-md px-2 py-1 text-[11px] font-semibold ${myAuctionWorkload.overMinutes > 0 ? 'bg-rose-50 text-rose-700' : myAuctionWorkload.isComplete ? 'bg-emerald-50 text-emerald-700' : 'bg-white/70 text-slate-700'}`}>
+                {myAuctionWorkload.isComplete ? 'Норма' : formatAuctionHours(myAuctionWorkload.remainingMinutes)}
+              </div>
             </div>
-            <div className="truncate text-[11px] text-slate-500">
-              {balanceLabel} · перерывы {formatAuctionHours(myAuctionWorkload.claimedBreakMinutes)} ч
+            <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/60">
+              <div className={`h-full rounded-full ${progressTone}`} style={{ width: `${progressWidth}%` }} />
             </div>
           </div>
-          <div className={`shrink-0 rounded-md px-2 py-1 text-[11px] font-semibold ${myAuctionWorkload.isComplete ? 'bg-emerald-50 text-emerald-700' : 'bg-blue-50 text-blue-700'}`}>
-            {myAuctionWorkload.workdayCount} дн. × 8 × {formatRate(userRate)}
-          </div>
-        </div>
-        <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-200">
-          <div className={`h-full rounded-full ${progressTone}`} style={{ width: `${progressWidth}%` }} />
-        </div>
+        ) : null}
       </div>
     );
   };
@@ -988,9 +995,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   return (
     <div className="min-h-screen bg-slate-50">
       <div className="fixed right-2 top-2 z-40 flex max-w-[calc(100vw-1rem)] justify-end pointer-events-none sm:right-3 sm:top-3 sm:max-w-[calc(100vw-1.5rem)]">
-        <div className="pointer-events-auto flex flex-col items-end gap-2">
+        <div className="pointer-events-auto">
           {renderStatusBar()}
-          {renderOperatorWorkloadBar()}
         </div>
       </div>
 
