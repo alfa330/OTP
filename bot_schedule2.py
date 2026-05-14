@@ -2734,10 +2734,11 @@ def _shift_auction_test_error_response(error):
         "LOT_ALREADY_CLAIMED": ("Смену уже забрали", 409),
         "RATE_TOO_LOW": ("Смена недоступна по вашей ставке", 403),
         "SHIFT_NORM_EXCEEDED": ("Эта смена превысит вашу норму часов на период", 409),
+        "SHIFT_AUCTION_STATUS_PERIOD_BLOCKED": ("Этот день закрыт статусным периодом оператора", 409),
         "DAY_OFF_SELECTED": ("На этот день выбран выходной", 409),
         "DAY_ALREADY_HAS_SHIFT": ("На этот день уже выбрана смена", 409),
         "DAY_HAS_CLAIMED_SHIFT": ("На этот день уже выбрана смена", 409),
-        "DAY_OFF_LIMIT": ("Можно выбрать только 2 выходных", 409),
+        "DAY_OFF_LIMIT": ("Лимит выходных уже занят статусными периодами или выбранными выходными", 409),
         "INVALID_AUCTION_DATETIME": ("Некорректная дата запуска аукциона", 400)
     }
     message, status = mapping.get(code, ("Ошибка аукциона смен", 400))
@@ -2761,6 +2762,7 @@ def api_shift_auction_test_snapshot():
             snapshot["lots"] = []
             snapshot["day_offs"] = []
             snapshot["my_day_offs"] = []
+            snapshot["my_blocked_dates"] = []
         return jsonify({"status": "success", "snapshot": snapshot}), 200
     except Exception as error:
         logging.error(f"Shift auction snapshot API error: {error}", exc_info=True)

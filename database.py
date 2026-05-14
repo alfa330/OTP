@@ -3094,20 +3094,118 @@ class Database:
             "net_minutes": max(0, duration_minutes - break_minutes),
         }
 
-    def _shift_auction_norm_workday_count(self, total_days):
+    def _shift_auction_day_off_quota(self, total_days):
         try:
             total = int(total_days or 0)
         except Exception:
             total = 0
-        if total <= 0:
+        return min(2, max(0, total))
+
+    def _shift_auction_norm_workday_count(self, total_days, blocked_days=0):
+        try:
+            total = int(total_days or 0)
+        except Exception:
+            total = 0
+        try:
+            blocked = int(blocked_days or 0)
+        except Exception:
+            blocked = 0
+        blocked = min(max(0, blocked), max(0, total))
+        available_days = max(0, total - blocked)
+        if available_days <= 0:
             return 0
-        day_off_quota = min(2, total)
-        return max(1, total - day_off_quota)
+        day_off_quota = self._shift_auction_day_off_quota(total)
+        manual_day_off_quota = max(0, day_off_quota - blocked)
+        return max(1, available_days - manual_day_off_quota)
+
+    def _shift_auction_status_period_label(self, status_code, dismissal_reason=None, is_blacklist=False):
+        code = str(status_code or '').strip().lower()
+        if code in ('bs', 'unpaid_leave'):
+            return 'Б/С'
+        if code == 'sick_leave':
+            return 'Больничный'
+        if code == 'annual_leave':
+            return 'Отпуск'
+        if code == 'dismissal':
+            reason = str(dismissal_reason or '').strip()
+            if is_blacklist:
+                return 'ЧС'
+            return reason or 'Увольнение'
+        return str(status_code or '').strip() or 'Период'
+
+    def _get_shift_auction_lot_dates_tx(self, cursor):
+        cursor.execute("""
+            SELECT DISTINCT shift_date
+            FROM shift_auction_test_lots
+            WHERE shift_date IS NOT NULL
+            ORDER BY shift_date
+        """)
+        return [row[0] for row in (cursor.fetchall() or []) if row and row[0]]
+
+    def _get_shift_auction_operator_blocked_dates_tx(self, cursor, operator_id, lot_dates=None):
+        try:
+            operator_id = int(operator_id or 0)
+        except Exception:
+            operator_id = 0
+        if operator_id <= 0:
+            return []
+
+        auction_dates = list(lot_dates) if lot_dates is not None else self._get_shift_auction_lot_dates_tx(cursor)
+        auction_dates = [item for item in auction_dates if item]
+        if not auction_dates:
+            return []
+
+        auction_date_set = set(auction_dates)
+        period_start = min(auction_dates)
+        period_end = max(auction_dates)
+        cursor.execute("""
+            SELECT id, status_code, start_date, end_date, dismissal_reason, is_blacklist, comment
+            FROM operator_schedule_status_periods
+            WHERE operator_id = %s
+              AND start_date <= %s
+              AND COALESCE(end_date, %s) >= %s
+            ORDER BY start_date DESC, COALESCE(end_date, %s) DESC, id DESC
+        """, (operator_id, period_end, period_end, period_start, period_end))
+
+        blocked_by_date = {}
+        for period_id, status_code, start_date, end_date, dismissal_reason, is_blacklist, comment in (cursor.fetchall() or []):
+            if not start_date:
+                continue
+            effective_start = max(start_date, period_start)
+            effective_end = min(end_date or period_end, period_end)
+            label = self._shift_auction_status_period_label(status_code, dismissal_reason, is_blacklist)
+            current_day = effective_start
+            while current_day <= effective_end:
+                if current_day in auction_date_set:
+                    date_key = current_day.strftime('%Y-%m-%d')
+                    if date_key not in blocked_by_date:
+                        blocked_by_date[date_key] = {
+                            "date": date_key,
+                            "period_id": period_id,
+                            "status_code": status_code,
+                            "label": label,
+                            "start_date": start_date.strftime('%Y-%m-%d') if start_date else None,
+                            "end_date": end_date.strftime('%Y-%m-%d') if end_date else None,
+                            "dismissal_reason": dismissal_reason or "",
+                            "is_blacklist": bool(is_blacklist),
+                            "comment": comment or ""
+                        }
+                current_day += timedelta(days=1)
+
+        return [blocked_by_date[key] for key in sorted(blocked_by_date)]
+
+    def _get_shift_auction_operator_blocked_date_map_tx(self, cursor, operator_id, lot_dates=None):
+        return {
+            item["date"]: item
+            for item in self._get_shift_auction_operator_blocked_dates_tx(cursor, operator_id, lot_dates=lot_dates)
+            if item.get("date")
+        }
 
     def _get_shift_auction_operator_workload_tx(self, cursor, operator_id, operator_rate):
-        cursor.execute("SELECT COUNT(DISTINCT shift_date) FROM shift_auction_test_lots")
-        period_days = int((cursor.fetchone() or [0])[0] or 0)
-        workday_count = self._shift_auction_norm_workday_count(period_days)
+        lot_dates = self._get_shift_auction_lot_dates_tx(cursor)
+        period_days = len(lot_dates)
+        blocked_dates = self._get_shift_auction_operator_blocked_dates_tx(cursor, operator_id, lot_dates=lot_dates)
+        workday_count = self._shift_auction_norm_workday_count(period_days, len(blocked_dates))
         norm_minutes = int(round(workday_count * 8 * 60 * max(0.0, float(operator_rate or 0))))
 
         cursor.execute("""
@@ -3129,6 +3227,7 @@ class Database:
 
         return {
             "period_days": period_days,
+            "blocked_days": len(blocked_dates),
             "workday_count": workday_count,
             "norm_minutes": norm_minutes,
             "claimed_net_minutes": int(claimed_net_minutes),
@@ -3277,6 +3376,12 @@ class Database:
 
     def get_shift_auction_test_snapshot(self, current_user_id=None):
         access = self.get_shift_auction_test_access(current_user_id=current_user_id)
+        current_id = None
+        try:
+            current_id = int(current_user_id) if current_user_id is not None else None
+        except Exception:
+            current_id = None
+
         with self._get_cursor() as cursor:
             cursor.execute("""
                 SELECT
@@ -3308,11 +3413,10 @@ class Database:
             cursor.execute("SELECT COALESCE(MAX(id), 0) FROM shift_auction_test_events")
             last_event_id = int((cursor.fetchone() or [0])[0] or 0)
 
-        current_id = None
-        try:
-            current_id = int(current_user_id) if current_user_id is not None else None
-        except Exception:
-            current_id = None
+            my_blocked_dates = (
+                self._get_shift_auction_operator_blocked_dates_tx(cursor, current_id)
+                if current_id else []
+            )
 
         day_offs = [
             {
@@ -3327,6 +3431,7 @@ class Database:
             "lots": lots,
             "day_offs": day_offs,
             "my_day_offs": [item["date"] for item in day_offs if current_id and int(item["operator_id"]) == current_id],
+            "my_blocked_dates": my_blocked_dates,
             "last_event_id": last_event_id
         }
 
@@ -3446,6 +3551,11 @@ class Database:
             if lot[5] != 'available':
                 raise ValueError("LOT_ALREADY_CLAIMED")
 
+            blocked_date_map = self._get_shift_auction_operator_blocked_date_map_tx(cursor, operator_id)
+            lot_date_key = lot[1].strftime('%Y-%m-%d') if lot[1] else ''
+            if lot_date_key and lot_date_key in blocked_date_map:
+                raise ValueError("SHIFT_AUCTION_STATUS_PERIOD_BLOCKED")
+
             cursor.execute("""
                 SELECT 1
                 FROM shift_auction_test_day_offs
@@ -3529,6 +3639,12 @@ class Database:
             if not cursor.fetchone():
                 raise ValueError("LOT_NOT_FOUND")
 
+            lot_dates = self._get_shift_auction_lot_dates_tx(cursor)
+            blocked_date_map = self._get_shift_auction_operator_blocked_date_map_tx(cursor, operator_id, lot_dates=lot_dates)
+            day_key = day_value.strftime('%Y-%m-%d') if day_value else ''
+            if selected and day_key and day_key in blocked_date_map:
+                raise ValueError("SHIFT_AUCTION_STATUS_PERIOD_BLOCKED")
+
             if selected:
                 cursor.execute("""
                     SELECT 1
@@ -3541,15 +3657,22 @@ class Database:
                 if cursor.fetchone():
                     raise ValueError("DAY_HAS_CLAIMED_SHIFT")
 
-                cursor.execute("SELECT COUNT(*) FROM shift_auction_test_day_offs WHERE operator_id = %s", (operator_id,))
-                count = int((cursor.fetchone() or [0])[0] or 0)
                 cursor.execute("""
-                    SELECT 1
+                    SELECT day_off_date
                     FROM shift_auction_test_day_offs
-                    WHERE operator_id = %s AND day_off_date = %s
-                """, (operator_id, day_value))
-                already_selected = cursor.fetchone() is not None
-                if count >= 2 and not already_selected:
+                    WHERE operator_id = %s
+                    ORDER BY day_off_date
+                """, (operator_id,))
+                selected_day_offs = [
+                    row[0].strftime('%Y-%m-%d')
+                    for row in (cursor.fetchall() or [])
+                    if row and row[0]
+                ]
+                day_off_quota = self._shift_auction_day_off_quota(len(lot_dates))
+                blocked_quota_count = min(day_off_quota, len(blocked_date_map))
+                count = len([item for item in selected_day_offs if item not in blocked_date_map])
+                already_selected = day_key in selected_day_offs
+                if count + blocked_quota_count >= day_off_quota and not already_selected:
                     raise ValueError("DAY_OFF_LIMIT")
                 cursor.execute("""
                     INSERT INTO shift_auction_test_day_offs (operator_id, day_off_date)
