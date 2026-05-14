@@ -1487,6 +1487,47 @@ class Database:
                 VALUES (1)
                 ON CONFLICT (id) DO NOTHING;
             """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS resource_saved_schedule_plans (
+                    id SERIAL PRIMARY KEY,
+                    date_from DATE NOT NULL,
+                    date_to DATE NOT NULL,
+                    title TEXT NOT NULL DEFAULT '',
+                    selected_variant_key VARCHAR(120) NOT NULL DEFAULT '',
+                    include_incident_uplift BOOLEAN NOT NULL DEFAULT FALSE,
+                    summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    capacity JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    templates JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    meta JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    archived_at TIMESTAMP NULL
+                );
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS resource_saved_schedule_shifts (
+                    id SERIAL PRIMARY KEY,
+                    plan_id INTEGER NOT NULL REFERENCES resource_saved_schedule_plans(id) ON DELETE CASCADE,
+                    client_shift_id TEXT NOT NULL DEFAULT '',
+                    shift_date DATE NOT NULL,
+                    start_minute INTEGER NOT NULL DEFAULT 0,
+                    end_minute INTEGER NOT NULL DEFAULT 0,
+                    start_time TIME NOT NULL,
+                    end_time TIME NOT NULL,
+                    duration_minutes INTEGER NOT NULL DEFAULT 0,
+                    rate_min NUMERIC(8,2) NOT NULL DEFAULT 0,
+                    label TEXT NOT NULL DEFAULT '',
+                    template_id TEXT NOT NULL DEFAULT '',
+                    source TEXT NOT NULL DEFAULT '',
+                    tone TEXT NOT NULL DEFAULT '',
+                    overnight BOOLEAN NOT NULL DEFAULT FALSE,
+                    breaks JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    meta JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS shift_auction_test_access (
@@ -1521,6 +1562,9 @@ class Database:
                     start_time TIME NOT NULL,
                     end_time TIME NOT NULL,
                     rate_min NUMERIC(8,2) NOT NULL DEFAULT 0,
+                    breaks JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    source_schedule_plan_id INTEGER NULL REFERENCES resource_saved_schedule_plans(id) ON DELETE SET NULL,
+                    source_schedule_shift_id INTEGER NULL REFERENCES resource_saved_schedule_shifts(id) ON DELETE SET NULL,
                     status VARCHAR(20) NOT NULL DEFAULT 'available'
                         CHECK (status IN ('available', 'claimed', 'cancelled')),
                     claimed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
@@ -1529,6 +1573,9 @@ class Database:
                     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
             """)
+            cursor.execute("ALTER TABLE shift_auction_test_lots ADD COLUMN IF NOT EXISTS breaks JSONB NOT NULL DEFAULT '[]'::jsonb;")
+            cursor.execute("ALTER TABLE shift_auction_test_lots ADD COLUMN IF NOT EXISTS source_schedule_plan_id INTEGER NULL;")
+            cursor.execute("ALTER TABLE shift_auction_test_lots ADD COLUMN IF NOT EXISTS source_schedule_shift_id INTEGER NULL;")
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS shift_auction_test_day_offs (
                     operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -1637,9 +1684,12 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_raw_resource_uploads_report_date ON raw_resource_uploads(report_date DESC);
                 CREATE INDEX IF NOT EXISTS idx_daily_resource_hours_report_hour ON daily_resource_hours(report_date, hour);
                 CREATE INDEX IF NOT EXISTS idx_daily_resource_summary_weekday_date ON daily_resource_summary(weekday, report_date DESC);
+                CREATE INDEX IF NOT EXISTS idx_resource_saved_schedule_plans_period ON resource_saved_schedule_plans(date_from, date_to, archived_at, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_resource_saved_schedule_shifts_plan_date ON resource_saved_schedule_shifts(plan_id, shift_date, start_time);
                 CREATE INDEX IF NOT EXISTS idx_shift_auction_test_participants_created ON shift_auction_test_participants(created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_shift_auction_test_lots_status_date ON shift_auction_test_lots(status, shift_date, start_time);
                 CREATE INDEX IF NOT EXISTS idx_shift_auction_test_lots_claimed_by ON shift_auction_test_lots(claimed_by);
+                CREATE INDEX IF NOT EXISTS idx_shift_auction_test_lots_source_schedule ON shift_auction_test_lots(source_schedule_plan_id, source_schedule_shift_id);
                 CREATE INDEX IF NOT EXISTS idx_shift_auction_test_day_offs_operator ON shift_auction_test_day_offs(operator_id, day_off_date);
                 CREATE INDEX IF NOT EXISTS idx_shift_auction_test_events_id ON shift_auction_test_events(id);
                 CREATE INDEX IF NOT EXISTS idx_calibration_rooms_month ON calibration_rooms(month);
@@ -2495,6 +2545,484 @@ class Database:
                 } for row in cursor.fetchall()
             ]
 
+    def _parse_resource_schedule_date_value(self, value, field_name="date"):
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        text = str(value or '').strip()
+        if not text:
+            raise ValueError(f"{field_name.upper()}_REQUIRED")
+        try:
+            return datetime.strptime(text[:10], "%Y-%m-%d").date()
+        except Exception as exc:
+            raise ValueError("INVALID_RESOURCE_SCHEDULE_DATE") from exc
+
+    def _format_resource_schedule_clock(self, minutes):
+        try:
+            minute_value = int(round(float(minutes or 0)))
+        except Exception:
+            minute_value = 0
+        normalized = minute_value % (24 * 60)
+        return f"{normalized // 60:02d}:{normalized % 60:02d}"
+
+    def _coerce_resource_schedule_direction_ids(self, value):
+        if value is None:
+            return []
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except Exception:
+                value = [value]
+        if not isinstance(value, (list, tuple, set)):
+            value = [value]
+        result = []
+        seen = set()
+        for item in value:
+            try:
+                direction_id = int(item)
+            except Exception:
+                continue
+            if direction_id <= 0 or direction_id in seen:
+                continue
+            seen.add(direction_id)
+            result.append(direction_id)
+        return result
+
+    def _resolve_resource_schedule_direction_context_tx(self, cursor, payload):
+        safe_payload = payload or {}
+        capacity = safe_payload.get("capacity") if isinstance(safe_payload.get("capacity"), dict) else {}
+        meta = safe_payload.get("meta") if isinstance(safe_payload.get("meta"), dict) else {}
+        explicit_name = (
+            meta.get("directionName")
+            or meta.get("direction_name")
+            or safe_payload.get("directionName")
+            or safe_payload.get("direction_name")
+        )
+        direction_ids = (
+            capacity.get("selectedDirectionIds")
+            or capacity.get("selected_direction_ids")
+            or meta.get("selectedDirectionIds")
+            or meta.get("selected_direction_ids")
+            or safe_payload.get("selectedDirectionIds")
+            or safe_payload.get("selected_direction_ids")
+        )
+        direction_ids = self._coerce_resource_schedule_direction_ids(direction_ids)
+        if not direction_ids:
+            cursor.execute("SELECT selected_direction_ids FROM resource_settings WHERE id = 1")
+            settings_row = cursor.fetchone()
+            direction_ids = self._coerce_resource_schedule_direction_ids(settings_row[0] if settings_row else [])
+
+        directions = []
+        if direction_ids:
+            cursor.execute("""
+                SELECT id, name
+                FROM directions
+                WHERE id = ANY(%s)
+                ORDER BY array_position(%s::int[], id), name
+            """, (direction_ids, direction_ids))
+            directions = [
+                {"id": int(row[0]), "name": row[1] or ""}
+                for row in (cursor.fetchall() or [])
+            ]
+
+        direction_name = str(explicit_name or '').strip()
+        if not direction_name and directions:
+            direction_name = directions[0]["name"]
+        direction_rules = self._get_work_schedule_break_rules_for_direction_tx(cursor, direction_name) if direction_name else []
+        if not explicit_name and directions and not direction_rules:
+            for item in directions[1:]:
+                candidate_name = item.get("name") or ""
+                candidate_rules = self._get_work_schedule_break_rules_for_direction_tx(cursor, candidate_name)
+                if candidate_rules:
+                    direction_name = candidate_name
+                    direction_rules = candidate_rules
+                    break
+        return {
+            "direction_id": directions[0]["id"] if directions else None,
+            "direction_name": direction_name,
+            "selected_direction_ids": direction_ids,
+            "selected_directions": directions,
+            "break_rules": direction_rules,
+        }
+
+    def _normalize_resource_saved_schedule_shifts(self, days, direction_name=None, direction_rules=None):
+        rows = []
+        for day_index, day in enumerate(days or []):
+            if not isinstance(day, dict):
+                continue
+            try:
+                shift_date = self._parse_resource_schedule_date_value(day.get("date"), "shift_date")
+            except ValueError:
+                continue
+            for shift_index, shift in enumerate(day.get("shifts") or []):
+                if not isinstance(shift, dict):
+                    continue
+                try:
+                    start_minute = int(round(float(shift.get("startMinute", 0) or 0)))
+                    end_minute = int(round(float(shift.get("endMinute", start_minute + 60) or (start_minute + 60))))
+                except Exception:
+                    continue
+                start_minute = max(0, min(start_minute, (24 * 60) - 1))
+                end_minute = max(start_minute + 1, min(end_minute, 32 * 60))
+                duration_minutes = max(1, end_minute - start_minute)
+                incoming_breaks = shift.get("breaks") if isinstance(shift.get("breaks"), list) else []
+                computed_breaks = self._compute_auto_shift_breaks_minutes(
+                    start_minute,
+                    end_minute,
+                    direction_name=direction_name,
+                    direction_rules=direction_rules
+                )
+                meta = {
+                    key: value for key, value in shift.items()
+                    if key not in {
+                        "id", "templateId", "rate", "label", "start", "end",
+                        "startMinute", "endMinute", "durationMinutes", "overnight",
+                        "source", "tone", "breaks"
+                    }
+                }
+                if incoming_breaks:
+                    meta["clientBreaks"] = incoming_breaks
+                meta["breakSource"] = "work_schedule_break_rules"
+                if direction_name:
+                    meta["breakDirectionName"] = direction_name
+                rows.append({
+                    "client_shift_id": str(shift.get("id") or f"saved-{day_index}-{shift_index}")[:180],
+                    "shift_date": shift_date,
+                    "start_minute": start_minute,
+                    "end_minute": end_minute,
+                    "start_time": self._format_resource_schedule_clock(start_minute),
+                    "end_time": self._format_resource_schedule_clock(end_minute),
+                    "duration_minutes": duration_minutes,
+                    "rate_min": float(shift.get("rate") or shift.get("rate_min") or 0),
+                    "label": str(shift.get("label") or "")[:255],
+                    "template_id": str(shift.get("templateId") or shift.get("template_id") or "")[:180],
+                    "source": str(shift.get("source") or "")[:80],
+                    "tone": str(shift.get("tone") or "")[:40],
+                    "overnight": bool(shift.get("overnight") or end_minute >= 24 * 60),
+                    "breaks": computed_breaks,
+                    "meta": meta,
+                })
+        rows.sort(key=lambda item: (item["shift_date"], item["start_minute"], item["end_minute"], item["client_shift_id"]))
+        return rows
+
+    def _serialize_resource_saved_schedule_shift_row(self, row):
+        shift_meta = row[14] if isinstance(row[14], dict) else {}
+        payload = {
+            **shift_meta,
+            "id": row[1] or f"saved-{row[0]}",
+            "savedShiftId": row[0],
+            "templateId": row[10] or "",
+            "rate": float(row[8]) if row[8] is not None else 0,
+            "label": row[9] or "",
+            "start": row[5].strftime('%H:%M') if row[5] else None,
+            "end": row[6].strftime('%H:%M') if row[6] else None,
+            "startMinute": int(row[3] or 0),
+            "endMinute": int(row[4] or 0),
+            "durationMinutes": int(row[7] or 0),
+            "overnight": bool(row[13]),
+            "source": row[11] or "",
+            "tone": row[12] or "",
+            "breaks": row[15] if isinstance(row[15], list) else [],
+        }
+        return payload
+
+    def _serialize_resource_saved_schedule_plan(self, plan_row, shift_rows):
+        if not plan_row:
+            return None
+        meta = plan_row[9] if isinstance(plan_row[9], dict) else {}
+        shifts_by_date = defaultdict(list)
+        for row in shift_rows or []:
+            date_key = row[2].strftime('%Y-%m-%d') if row[2] else None
+            if date_key:
+                shifts_by_date[date_key].append(self._serialize_resource_saved_schedule_shift_row(row))
+
+        stored_days = meta.get("days") if isinstance(meta.get("days"), list) else []
+        days = []
+        if stored_days:
+            for day in stored_days:
+                if not isinstance(day, dict):
+                    continue
+                date_key = str(day.get("date") or "")
+                days.append({
+                    **day,
+                    "shifts": shifts_by_date.pop(date_key, []),
+                })
+        for date_key in sorted(shifts_by_date.keys()):
+            days.append({
+                "date": date_key,
+                "short": date_key[5:],
+                "label": date_key,
+                "coverage": [],
+                "stats": {},
+                "shifts": shifts_by_date[date_key],
+            })
+
+        return {
+            "id": plan_row[0],
+            "date_from": plan_row[1].strftime('%Y-%m-%d') if plan_row[1] else None,
+            "date_to": plan_row[2].strftime('%Y-%m-%d') if plan_row[2] else None,
+            "title": plan_row[3] or "",
+            "selectedVariantKey": plan_row[4] or "",
+            "includeIncidentUplift": bool(plan_row[5]),
+            "summary": plan_row[6] or {},
+            "capacity": plan_row[7] or {},
+            "templates": plan_row[8] or [],
+            "meta": {key: value for key, value in meta.items() if key != "days"},
+            "days": days,
+            "created_by": plan_row[10],
+            "updated_by": plan_row[11],
+            "created_at": plan_row[12].isoformat() if plan_row[12] else None,
+            "updated_at": plan_row[13].isoformat() if plan_row[13] else None,
+        }
+
+    def get_resource_saved_schedule(self, date_from=None, date_to=None, plan_id=None):
+        with self._get_cursor() as cursor:
+            if plan_id:
+                cursor.execute("""
+                    SELECT id, date_from, date_to, title, selected_variant_key,
+                           include_incident_uplift, summary, capacity, templates, meta,
+                           created_by, updated_by, created_at, updated_at
+                    FROM resource_saved_schedule_plans
+                    WHERE id = %s AND archived_at IS NULL
+                """, (int(plan_id),))
+            else:
+                start_date = self._parse_resource_schedule_date_value(date_from, "date_from")
+                end_date = self._parse_resource_schedule_date_value(date_to or date_from, "date_to")
+                cursor.execute("""
+                    SELECT id, date_from, date_to, title, selected_variant_key,
+                           include_incident_uplift, summary, capacity, templates, meta,
+                           created_by, updated_by, created_at, updated_at
+                    FROM resource_saved_schedule_plans
+                    WHERE date_from = %s
+                      AND date_to = %s
+                      AND archived_at IS NULL
+                    ORDER BY updated_at DESC, id DESC
+                    LIMIT 1
+                """, (start_date, end_date))
+            plan_row = cursor.fetchone()
+            if not plan_row:
+                return None
+            cursor.execute("""
+                SELECT id, client_shift_id, shift_date, start_minute, end_minute,
+                       start_time, end_time, duration_minutes, rate_min, label,
+                       template_id, source, tone, overnight, meta, breaks
+                FROM resource_saved_schedule_shifts
+                WHERE plan_id = %s
+                ORDER BY shift_date, start_minute, end_minute, id
+            """, (plan_row[0],))
+            shift_rows = cursor.fetchall() or []
+            return self._serialize_resource_saved_schedule_plan(plan_row, shift_rows)
+
+    def save_resource_saved_schedule(self, payload, updated_by=None):
+        safe_payload = payload or {}
+        days = safe_payload.get("days") if isinstance(safe_payload.get("days"), list) else []
+        if not days:
+            raise ValueError("RESOURCE_SCHEDULE_EMPTY")
+
+        date_from = safe_payload.get("date_from") or days[0].get("date")
+        date_to = safe_payload.get("date_to") or days[-1].get("date") or date_from
+        start_date = self._parse_resource_schedule_date_value(date_from, "date_from")
+        end_date = self._parse_resource_schedule_date_value(date_to, "date_to")
+        if end_date < start_date:
+            raise ValueError("INVALID_RESOURCE_SCHEDULE_PERIOD")
+
+        summary = safe_payload.get("summary") if isinstance(safe_payload.get("summary"), dict) else {}
+        capacity = safe_payload.get("capacity") if isinstance(safe_payload.get("capacity"), dict) else {}
+        templates = safe_payload.get("templates") if isinstance(safe_payload.get("templates"), list) else []
+        base_meta = safe_payload.get("meta") if isinstance(safe_payload.get("meta"), dict) else {}
+        title = str(safe_payload.get("title") or "")[:500]
+        variant_key = str(safe_payload.get("selected_variant_key") or safe_payload.get("selectedVariantKey") or "")[:120]
+        include_incident_uplift = bool(safe_payload.get("include_incident_uplift") or safe_payload.get("includeIncidentUplift"))
+
+        plan_id = None
+        raw_plan_id = safe_payload.get("id") or safe_payload.get("plan_id") or safe_payload.get("planId")
+        try:
+            plan_id = int(raw_plan_id) if raw_plan_id else None
+        except Exception:
+            plan_id = None
+
+        with self._get_cursor() as cursor:
+            direction_context = self._resolve_resource_schedule_direction_context_tx(cursor, {
+                **safe_payload,
+                "capacity": capacity,
+                "meta": base_meta,
+            })
+            shift_rows = self._normalize_resource_saved_schedule_shifts(
+                days,
+                direction_name=direction_context.get("direction_name"),
+                direction_rules=direction_context.get("break_rules")
+            )
+            meta = {
+                **base_meta,
+                "days": days,
+                "shiftCount": len(shift_rows),
+                "savedAt": datetime.now().isoformat(),
+                "breakDirectionId": direction_context.get("direction_id"),
+                "breakDirectionName": direction_context.get("direction_name"),
+                "selectedDirectionIds": direction_context.get("selected_direction_ids") or [],
+                "selectedDirections": direction_context.get("selected_directions") or [],
+                "breakRules": direction_context.get("break_rules") or [],
+            }
+
+            if plan_id:
+                cursor.execute("""
+                    SELECT id
+                    FROM resource_saved_schedule_plans
+                    WHERE id = %s AND archived_at IS NULL
+                    FOR UPDATE
+                """, (plan_id,))
+                if not cursor.fetchone():
+                    plan_id = None
+
+            if not plan_id:
+                cursor.execute("""
+                    SELECT id
+                    FROM resource_saved_schedule_plans
+                    WHERE date_from = %s
+                      AND date_to = %s
+                      AND archived_at IS NULL
+                    ORDER BY updated_at DESC, id DESC
+                    LIMIT 1
+                    FOR UPDATE
+                """, (start_date, end_date))
+                existing = cursor.fetchone()
+                plan_id = int(existing[0]) if existing else None
+
+            if plan_id:
+                cursor.execute("""
+                    UPDATE resource_saved_schedule_plans
+                    SET date_from = %s,
+                        date_to = %s,
+                        title = %s,
+                        selected_variant_key = %s,
+                        include_incident_uplift = %s,
+                        summary = %s,
+                        capacity = %s,
+                        templates = %s,
+                        meta = %s,
+                        updated_by = %s,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                """, (
+                    start_date,
+                    end_date,
+                    title,
+                    variant_key,
+                    include_incident_uplift,
+                    Json(summary),
+                    Json(capacity),
+                    Json(templates),
+                    Json(meta),
+                    updated_by,
+                    plan_id,
+                ))
+            else:
+                cursor.execute("""
+                    INSERT INTO resource_saved_schedule_plans (
+                        date_from, date_to, title, selected_variant_key,
+                        include_incident_uplift, summary, capacity, templates,
+                        meta, created_by, updated_by
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                """, (
+                    start_date,
+                    end_date,
+                    title,
+                    variant_key,
+                    include_incident_uplift,
+                    Json(summary),
+                    Json(capacity),
+                    Json(templates),
+                    Json(meta),
+                    updated_by,
+                    updated_by,
+                ))
+                plan_id = int(cursor.fetchone()[0])
+
+            cursor.execute("DELETE FROM resource_saved_schedule_shifts WHERE plan_id = %s", (plan_id,))
+            if shift_rows:
+                execute_values(
+                    cursor,
+                    """
+                    INSERT INTO resource_saved_schedule_shifts (
+                        plan_id, client_shift_id, shift_date, start_minute, end_minute,
+                        start_time, end_time, duration_minutes, rate_min, label,
+                        template_id, source, tone, overnight, breaks, meta
+                    )
+                    VALUES %s
+                    """,
+                    [
+                        (
+                            plan_id,
+                            row["client_shift_id"],
+                            row["shift_date"],
+                            row["start_minute"],
+                            row["end_minute"],
+                            row["start_time"],
+                            row["end_time"],
+                            row["duration_minutes"],
+                            row["rate_min"],
+                            row["label"],
+                            row["template_id"],
+                            row["source"],
+                            row["tone"],
+                            row["overnight"],
+                            Json(row["breaks"]),
+                            Json(row["meta"]),
+                        )
+                        for row in shift_rows
+                    ],
+                )
+
+            cursor.execute("DELETE FROM shift_auction_test_day_offs")
+            cursor.execute("DELETE FROM shift_auction_test_lots")
+            cursor.execute("""
+                SELECT id, shift_date, start_time, end_time, rate_min, breaks
+                FROM resource_saved_schedule_shifts
+                WHERE plan_id = %s
+                ORDER BY shift_date, start_minute, end_minute, id
+            """, (plan_id,))
+            saved_shift_rows = cursor.fetchall() or []
+            if saved_shift_rows:
+                execute_values(
+                    cursor,
+                    """
+                    INSERT INTO shift_auction_test_lots (
+                        shift_date, start_time, end_time, rate_min,
+                        breaks, source_schedule_plan_id, source_schedule_shift_id
+                    )
+                    VALUES %s
+                    """,
+                    [
+                        (
+                            row[1],
+                            row[2],
+                            row[3],
+                            row[4],
+                            Json(row[5] if isinstance(row[5], list) else []),
+                            plan_id,
+                            row[0],
+                        )
+                        for row in saved_shift_rows
+                    ],
+                )
+            event = self._insert_shift_auction_test_event(cursor, "resource_schedule_saved", {
+                "plan_id": plan_id,
+                "count": len(saved_shift_rows),
+                "date_from": start_date.strftime('%Y-%m-%d'),
+                "date_to": end_date.strftime('%Y-%m-%d'),
+                "updated_by": updated_by,
+                "break_direction_name": direction_context.get("direction_name"),
+            })
+
+        return {
+            "schedule": self.get_resource_saved_schedule(plan_id=plan_id),
+            "auction_count": len(shift_rows),
+            "event": event,
+        }
+
     def _get_shift_auction_test_status(self, enabled, starts_at=None, ends_at=None):
         if not enabled:
             return "disabled"
@@ -2515,7 +3043,10 @@ class Database:
             "status": row[5],
             "claimed_by": row[6],
             "claimed_by_name": row[7] or "",
-            "claimed_at": row[8].isoformat() if row[8] else None
+            "claimed_at": row[8].isoformat() if row[8] else None,
+            "breaks": row[9] if len(row) > 9 and isinstance(row[9], list) else [],
+            "source_schedule_plan_id": row[10] if len(row) > 10 else None,
+            "source_schedule_shift_id": row[11] if len(row) > 11 else None,
         }
 
     def _insert_shift_auction_test_event(self, cursor, event_type, payload):
@@ -2690,7 +3221,10 @@ class Database:
                     l.status,
                     l.claimed_by,
                     u.name AS claimed_by_name,
-                    l.claimed_at
+                    l.claimed_at,
+                    l.breaks,
+                    l.source_schedule_plan_id,
+                    l.source_schedule_shift_id
                 FROM shift_auction_test_lots l
                 LEFT JOIN users u ON u.id = l.claimed_by
                 ORDER BY l.shift_date, l.start_time, l.id
@@ -2833,7 +3367,8 @@ class Database:
             operator_rate = float(operator_row[0] or 1)
 
             cursor.execute("""
-                SELECT id, shift_date, start_time, end_time, rate_min, status, claimed_by, claimed_at
+                SELECT id, shift_date, start_time, end_time, rate_min, status, claimed_by, claimed_at, breaks,
+                       source_schedule_plan_id, source_schedule_shift_id
                 FROM shift_auction_test_lots
                 WHERE id = %s
                 FOR UPDATE
@@ -2872,7 +3407,8 @@ class Database:
                     claimed_at = CURRENT_TIMESTAMP,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = %s
-                RETURNING id, shift_date, start_time, end_time, rate_min, status, claimed_by, claimed_at
+                RETURNING id, shift_date, start_time, end_time, rate_min, status, claimed_by, claimed_at,
+                          breaks, source_schedule_plan_id, source_schedule_shift_id
             """, (operator_id, lot_id))
             updated = cursor.fetchone()
             lot_payload = {
@@ -2883,7 +3419,10 @@ class Database:
                 "rate_min": float(updated[4] or 0),
                 "status": updated[5],
                 "claimed_by": updated[6],
-                "claimed_at": updated[7].isoformat() if updated[7] else None
+                "claimed_at": updated[7].isoformat() if updated[7] else None,
+                "breaks": updated[8] if isinstance(updated[8], list) else [],
+                "source_schedule_plan_id": updated[9],
+                "source_schedule_shift_id": updated[10],
             }
             event = self._insert_shift_auction_test_event(cursor, "lot_claimed", {"lot": lot_payload})
         return {"lot": lot_payload, "event": event}

@@ -102,6 +102,28 @@ const clockToMinutes = (value) => {
   return Number(match[1]) * 60 + Number(match[2]);
 };
 
+const clampNumber = (value, min, max) => Math.max(min, Math.min(max, value));
+
+const mixChannels = (from, to, ratio) => {
+  const amount = clampNumber(Number(ratio || 0), 0, 1);
+  return from.map((channel, index) => Math.round(channel + (to[index] - channel) * amount));
+};
+
+const channelRgb = (channels) => `rgb(${channels[0]}, ${channels[1]}, ${channels[2]})`;
+
+const getAuctionLotStartTone = (lot) => {
+  const startMinutes = clockToMinutes(lot?.start_time);
+  const visualStartMinutes = startMinutes < 7 * 60 ? startMinutes + 24 * 60 : startMinutes;
+  const ratio = clampNumber((visualStartMinutes - (7 * 60)) / (17 * 60), 0, 1);
+  const bg = mixChannels([219, 234, 254], [29, 78, 216], ratio);
+  const border = mixChannels([147, 197, 253], [30, 64, 175], ratio);
+  return {
+    backgroundColor: channelRgb(bg),
+    borderColor: channelRgb(border),
+    color: ratio > 0.38 ? '#ffffff' : '#1e3a8a'
+  };
+};
+
 const formatRate = (value) => {
   const rate = Number(value);
   if (!Number.isFinite(rate)) return '0';
@@ -144,6 +166,25 @@ const formatCompactClockValue = (value) => {
   return minuteRaw === '00' ? hour : `${hour}:${minuteRaw}`;
 };
 
+const formatAuctionBreakMinute = (value) => {
+  const minutes = Number(value || 0);
+  if (!Number.isFinite(minutes)) return '';
+  const normalized = ((Math.round(minutes) % 1440) + 1440) % 1440;
+  return `${String(Math.floor(normalized / 60)).padStart(2, '0')}:${String(normalized % 60).padStart(2, '0')}`;
+};
+
+const formatAuctionBreaksLabel = (lot) => {
+  const breaks = Array.isArray(lot?.breaks) ? lot.breaks : [];
+  const labels = breaks
+    .map((item) => {
+      const start = formatAuctionBreakMinute(item?.start);
+      const end = formatAuctionBreakMinute(item?.end);
+      return start && end ? `${start}-${end}` : '';
+    })
+    .filter(Boolean);
+  return labels.length ? labels.join(', ') : '';
+};
+
 const formatCompactAuctionShiftLabel = (lot) => {
   if (isNightAuctionLot(lot)) return '20*08';
   return `${formatCompactClockValue(lot?.start_time)}-${formatCompactClockValue(lot?.end_time)}`;
@@ -167,7 +208,9 @@ const AuctionLotCell = ({
   const isClaiming = Number(claimingLotId) === Number(lot.id);
   const label = formatAuctionShiftLabel(lot);
   const compactLabel = formatCompactAuctionShiftLabel(lot);
-  const title = `${label}${minRate ? ` · ставка ${formatRate(minRate)}` : ''}${lot.claimed_by_name ? ` · ${lot.claimed_by_name}` : ''}`;
+  const breaksLabel = formatAuctionBreaksLabel(lot);
+  const title = `${label}${minRate ? ` · ставка ${formatRate(minRate)}` : ''}${breaksLabel ? ` · перерывы ${breaksLabel}` : ''}${lot.claimed_by_name ? ` · ${lot.claimed_by_name}` : ''}`;
+  const startToneStyle = getAuctionLotStartTone(lot);
 
   if (lot.status === 'available' && !canManage) {
     return (
@@ -176,10 +219,11 @@ const AuctionLotCell = ({
         onClick={() => onClaimLot(lot.id)}
         disabled={!canClaim || isClaiming || rateTooLow}
         title={title}
+        style={rateTooLow ? undefined : startToneStyle}
         className={`flex h-6 w-full min-w-0 items-center justify-center overflow-hidden rounded border px-1 text-[10px] font-semibold tabular-nums transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-1 disabled:cursor-not-allowed sm:h-8 sm:px-2 sm:text-xs ${
           rateTooLow
             ? 'border-slate-200 bg-slate-50 text-slate-400'
-            : 'border-blue-600 bg-blue-600 text-white hover:border-blue-700 hover:bg-blue-700'
+            : 'hover:brightness-95'
         }`}
       >
         <span className="truncate sm:hidden">{isClaiming ? '...' : compactLabel}</span>
@@ -190,10 +234,10 @@ const AuctionLotCell = ({
 
   const tone = isLotClaimed
     ? (lotClaimedByCurrentUser ? 'border-emerald-600 bg-emerald-600 text-white' : 'border-slate-200 bg-slate-100 text-slate-400')
-    : 'border-blue-600 bg-blue-600 text-white';
+    : 'text-white hover:brightness-95';
 
   return (
-    <div title={title} className={`flex h-6 w-full min-w-0 items-center justify-center overflow-hidden rounded border px-1 text-[10px] font-semibold tabular-nums sm:h-8 sm:px-2 sm:text-xs ${tone}`}>
+    <div title={title} style={isLotClaimed ? undefined : startToneStyle} className={`flex h-6 w-full min-w-0 items-center justify-center overflow-hidden rounded border px-1 text-[10px] font-semibold tabular-nums sm:h-8 sm:px-2 sm:text-xs ${tone}`}>
       <span className="truncate sm:hidden">{compactLabel}</span>
       <span className="hidden truncate sm:inline">{label}</span>
     </div>

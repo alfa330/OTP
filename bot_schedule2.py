@@ -2602,6 +2602,42 @@ def api_resource_fte_schedule_preview():
         return _resource_fte_error_response(error)
 
 
+@app.route('/api/resource_fte/saved_schedule', methods=['GET', 'PUT', 'POST', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_saved_schedule():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    try:
+        if request.method == 'GET':
+            schedule = db.get_resource_saved_schedule(
+                date_from=request.args.get('date_from'),
+                date_to=request.args.get('date_to'),
+                plan_id=request.args.get('plan_id')
+            )
+            return jsonify({"status": "success", "schedule": schedule}), 200
+
+        payload = request.get_json(silent=True) or {}
+        result = db.save_resource_saved_schedule(payload, updated_by=requester_id)
+        return jsonify({"status": "success", **result}), 200
+    except ValueError as error:
+        code = str(error)
+        mapping = {
+            "RESOURCE_SCHEDULE_EMPTY": ("График пустой: нечего сохранять", 400),
+            "INVALID_RESOURCE_SCHEDULE_DATE": ("Некорректная дата графика", 400),
+            "INVALID_RESOURCE_SCHEDULE_PERIOD": ("Дата окончания графика раньше даты начала", 400),
+            "DATE_FROM_REQUIRED": ("Дата начала графика обязательна", 400),
+            "DATE_TO_REQUIRED": ("Дата окончания графика обязательна", 400)
+        }
+        message, status = mapping.get(code, ("Не удалось сохранить график", 400))
+        return jsonify({"error": message, "code": code}), status
+    except Exception as error:
+        logging.error(f"Resource saved schedule API error: {error}", exc_info=True)
+        return _resource_fte_error_response(error)
+
+
 @app.route('/api/resource_fte/settings', methods=['GET', 'PUT', 'OPTIONS'])
 @require_api_key
 def api_resource_fte_settings():

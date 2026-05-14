@@ -8,6 +8,7 @@ import {
   Redo2,
   RefreshCw,
   RotateCcw,
+  Save,
   SlidersHorizontal,
   Trash2,
   Undo2,
@@ -38,6 +39,111 @@ const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const snapMinutes = (value) => Math.round(Number(value || 0) / SNAP_MINUTES) * SNAP_MINUTES;
 
 const roundMathFte = (value) => Math.round((Math.max(0, Number(value || 0)) + Number.EPSILON) * 2) / 2;
+
+const mixColor = (from, to, ratio) => {
+  const amount = clamp(Number(ratio || 0), 0, 1);
+  return from.map((channel, index) => Math.round(channel + (to[index] - channel) * amount));
+};
+
+const rgb = (channels) => `rgb(${channels[0]}, ${channels[1]}, ${channels[2]})`;
+
+const COVERAGE_COLORS = {
+  emptyBg: [248, 250, 252],
+  emptyBorder: [226, 232, 240],
+  emptyText: [100, 116, 139],
+  redBg: [254, 226, 226],
+  redBorder: [254, 202, 202],
+  redText: [190, 18, 60],
+  greenBg: [220, 252, 231],
+  greenBorder: [187, 247, 208],
+  greenText: [21, 128, 61],
+  blueBg: [219, 234, 254],
+  blueBorder: [147, 197, 253],
+  blueText: [29, 78, 216],
+  redBar: [244, 63, 94],
+  greenBar: [16, 185, 129],
+  blueBar: [37, 99, 235],
+};
+
+const coverageRatio = (neededValue, coveredValue) => {
+  const needed = Number(neededValue || 0);
+  const covered = Number(coveredValue || 0);
+  if (needed <= FTE_EPSILON) return covered > FTE_EPSILON ? 1.5 : null;
+  return covered / needed;
+};
+
+const coveragePalette = (ratioValue) => {
+  if (ratioValue === null || !Number.isFinite(Number(ratioValue))) {
+    return {
+      bg: COVERAGE_COLORS.emptyBg,
+      border: COVERAGE_COLORS.emptyBorder,
+      text: COVERAGE_COLORS.emptyText,
+      bar: COVERAGE_COLORS.emptyBorder,
+    };
+  }
+  const ratio = Math.max(0, Number(ratioValue));
+  if (ratio <= 1) {
+    const amount = clamp(ratio, 0, 1);
+    return {
+      bg: mixColor(COVERAGE_COLORS.redBg, COVERAGE_COLORS.greenBg, amount),
+      border: mixColor(COVERAGE_COLORS.redBorder, COVERAGE_COLORS.greenBorder, amount),
+      text: mixColor(COVERAGE_COLORS.redText, COVERAGE_COLORS.greenText, amount),
+      bar: mixColor(COVERAGE_COLORS.redBar, COVERAGE_COLORS.greenBar, amount),
+    };
+  }
+  const overAmount = clamp((ratio - 1) / 0.55, 0, 1);
+  return {
+    bg: mixColor(COVERAGE_COLORS.greenBg, COVERAGE_COLORS.blueBg, overAmount),
+    border: mixColor(COVERAGE_COLORS.greenBorder, COVERAGE_COLORS.blueBorder, overAmount),
+    text: mixColor(COVERAGE_COLORS.greenText, COVERAGE_COLORS.blueText, overAmount),
+    bar: mixColor(COVERAGE_COLORS.greenBar, COVERAGE_COLORS.blueBar, overAmount),
+  };
+};
+
+const coverageCellStyle = (row) => {
+  const needed = roundMathFte(row?.needed || 0);
+  const covered = Number(row?.coveredRounded ?? roundMathFte(row?.covered || 0));
+  const palette = coveragePalette(coverageRatio(needed, covered));
+  return {
+    backgroundColor: rgb(palette.bg),
+    borderColor: rgb(palette.border),
+    color: rgb(palette.text),
+  };
+};
+
+const coverageBarStyle = (row, kind) => {
+  if (kind === 'needed') {
+    return { backgroundColor: Number(row?.needed || 0) > FTE_EPSILON ? 'rgb(59, 130, 246)' : rgb(COVERAGE_COLORS.emptyBorder) };
+  }
+  const needed = roundMathFte(row?.needed || 0);
+  const covered = Number(row?.coveredRounded ?? roundMathFte(row?.covered || 0));
+  return { backgroundColor: rgb(coveragePalette(coverageRatio(needed, covered)).bar) };
+};
+
+const coverageDayCardStyle = (stats = {}) => {
+  const needed = Number(stats.roundedNeededFteHours ?? stats.neededFteHours ?? 0);
+  const covered = Number(stats.roundedCoveredFteHours ?? stats.coveredFteHours ?? 0);
+  const over = Number(stats.overFteHours || 0);
+  const ratio = needed <= FTE_EPSILON
+    ? (covered > FTE_EPSILON || over > FTE_EPSILON ? 1.5 : null)
+    : (covered + over) / needed;
+  const palette = coveragePalette(ratio);
+  return {
+    backgroundColor: rgb(palette.bg),
+    borderColor: rgb(palette.border),
+    color: rgb(palette.text),
+  };
+};
+
+const coverageProgressStyle = (stats = {}) => {
+  const needed = Number(stats.roundedNeededFteHours ?? stats.neededFteHours ?? 0);
+  const covered = Number(stats.roundedCoveredFteHours ?? stats.coveredFteHours ?? 0);
+  const over = Number(stats.overFteHours || 0);
+  const ratio = needed <= FTE_EPSILON
+    ? (covered > FTE_EPSILON || over > FTE_EPSILON ? 1.5 : null)
+    : (covered + over) / needed;
+  return { backgroundColor: rgb(coveragePalette(ratio).bar) };
+};
 
 const formatTime = (minutes) => {
   const normalized = ((Math.round(Number(minutes || 0)) % 1440) + 1440) % 1440;
@@ -196,9 +302,7 @@ const plannerDaysSignature = (days) => JSON.stringify(
 
 const coverageTone = (row) => {
   const state = getCoverageVisualState(row);
-  if (state === 'deficit') return 'border-rose-200 bg-rose-50 text-rose-700';
-  if (state === 'over') return 'border-amber-200 bg-amber-50 text-amber-700';
-  if (state === 'covered') return 'border-emerald-200 bg-emerald-50 text-emerald-700';
+  if (state === 'deficit' || state === 'over' || state === 'covered') return 'border text-slate-900';
   return 'border-slate-200 bg-slate-50 text-slate-500';
 };
 
@@ -208,7 +312,7 @@ const coverageBarTone = (row, kind) => {
   }
   const state = getCoverageVisualState(row);
   if (state === 'deficit') return 'bg-rose-500';
-  if (state === 'over') return 'bg-amber-400';
+  if (state === 'over') return 'bg-blue-500';
   if (state === 'covered') return 'bg-emerald-500';
   return 'bg-slate-200';
 };
@@ -619,7 +723,7 @@ const CoverageBars = ({ coverage = [] }) => {
         <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-blue-500" />Нужно</span>
         <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-emerald-500" />Покрыто</span>
         <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-rose-500" />Дефицит</span>
-        <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-amber-400" />Избыток</span>
+        <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-blue-600" />Перепокрытие</span>
       </div>
       <div className="space-y-2">
         {rows.map((rowMeta) => (
@@ -639,7 +743,7 @@ const CoverageBars = ({ coverage = [] }) => {
                   >
                     <div
                       className={`w-full rounded-sm ${coverageBarTone(row, rowMeta.key)}`}
-                      style={{ height: `${heightPercent}%` }}
+                      style={{ height: `${heightPercent}%`, ...coverageBarStyle(row, rowMeta.key) }}
                     />
                   </div>
                 );
@@ -962,7 +1066,7 @@ const PlannerDayRow = ({
                     <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-blue-500" />Нужно</span>
                     <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-emerald-500" />Покрыто</span>
                     <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-rose-500" />Дефицит</span>
-                    <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-amber-400" />Избыток</span>
+                    <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-blue-600" />Перепокрытие</span>
                   </div>
                   <div className="space-y-2">
                     {[
@@ -987,7 +1091,7 @@ const PlannerDayRow = ({
                               >
                                 <div
                                   className={`w-full rounded-sm ${coverageBarTone(row, key)}`}
-                                  style={{ height: `${heightPercent}%` }}
+                                  style={{ height: `${heightPercent}%`, ...coverageBarStyle(row, key) }}
                                 />
                               </div>
                             );
@@ -1005,6 +1109,7 @@ const PlannerDayRow = ({
                       className={`rounded-md border px-1 py-1 text-center text-[10px] ${coverageTone(row)} ${
                         Number(row.hour) === 0 ? 'border-l-2 border-l-slate-300' : ''
                       }`}
+                      style={coverageCellStyle(row)}
                       title={`${allDays[row.sourceDayIndex]?.short || ''} ${String(row.hour).padStart(2, '0')}:00 · округл. ${formatFte(row.coveredRounded ?? roundMathFte(row.covered || 0))}/${formatFte(row.needed || 0)} · без округления ${formatNumber(row.covered, 2)}/${formatNumber(row.rawNeeded, 2)}`}
                     >
                       <div className="font-semibold">{formatFte(row.coveredRounded ?? roundMathFte(row.covered || 0))}</div>
@@ -1038,43 +1143,42 @@ const PlannerDayCards = ({ days, selectedDayIndex, onSelect }) => (
           onClick={() => onSelect(dayIndex)}
           className={`rounded-xl border p-3 text-left shadow-sm transition ${
             active
-              ? 'border-slate-900 bg-slate-900 text-white'
-              : 'border-slate-200 bg-white text-slate-900 hover:border-slate-300 hover:bg-slate-50'
+              ? 'border-slate-900 ring-2 ring-slate-900/15'
+              : 'border-slate-200 hover:border-slate-400 hover:shadow-md'
           }`}
+          style={coverageDayCardStyle(day.stats)}
         >
           <div className="flex items-start justify-between gap-2">
             <div>
-              <div className={`text-sm font-semibold ${active ? 'text-white' : 'text-slate-950'}`}>{day.short || day.label}</div>
-              <div className={`text-xs ${active ? 'text-slate-300' : 'text-slate-500'}`}>{day.date}</div>
+              <div className="text-sm font-semibold text-slate-950">{day.short || day.label}</div>
+              <div className="text-xs text-slate-600">{day.date}</div>
             </div>
-            <div className={`rounded-md px-2 py-1 text-xs font-semibold ${active ? 'bg-white/15 text-white' : 'bg-slate-100 text-slate-700'}`}>
+            <div className="rounded-md bg-white/70 px-2 py-1 text-xs font-semibold text-slate-700 shadow-sm">
               {(day.shifts || []).length}
             </div>
           </div>
           {incidentUpliftHours > 0.01 || incidentShiftCount > 0 ? (
-            <div className={`mt-2 inline-flex items-center rounded-md px-2 py-1 text-[11px] font-semibold ${
-              active ? 'bg-emerald-400/20 text-emerald-100' : 'bg-emerald-50 text-emerald-700'
-            }`}>
+            <div className="mt-2 inline-flex items-center rounded-md bg-white/70 px-2 py-1 text-[11px] font-semibold text-emerald-800 shadow-sm">
               +{formatNumber(incidentUpliftHours, 1)} FTE-ч риска · {incidentShiftCount} доп.
             </div>
           ) : null}
           <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
             <div>
-              <div className={active ? 'text-slate-300' : 'text-slate-500'}>Нужно</div>
+              <div className="text-slate-600">Нужно</div>
               <b>{formatFte(day.stats?.roundedNeededFteHours ?? day.stats?.neededFteHours)}</b>
-              <div className={active ? 'text-slate-300' : 'text-slate-500'}>
+              <div className="text-slate-600">
                 без округления {formatNumber(day.stats?.realNeededFteHours, 2)}
               </div>
             </div>
             <div>
-              <div className={active ? 'text-slate-300' : 'text-slate-500'}>Дефицит</div>
-              <b className={deficit > 0.05 && !active ? 'text-rose-700' : ''}>{formatNumber(deficit, 1)}</b>
+              <div className="text-slate-600">Дефицит</div>
+              <b className={deficit > 0.05 ? 'text-rose-700' : 'text-slate-900'}>{formatNumber(deficit, 1)}</b>
             </div>
           </div>
-          <div className={`mt-3 h-2 overflow-hidden rounded-full ${active ? 'bg-white/20' : 'bg-slate-200'}`}>
+          <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/60">
             <div
-              className={`h-full rounded-full ${deficit > 0.05 ? 'bg-rose-500' : 'bg-emerald-500'}`}
-              style={{ width: `${clamp(coveragePercent, 0, 100)}%` }}
+              className="h-full rounded-full"
+              style={{ width: `${clamp(coveragePercent, 0, 100)}%`, ...coverageProgressStyle(day.stats) }}
             />
           </div>
         </button>
@@ -1097,12 +1201,16 @@ const ResourceSchedulePlanner = ({
   const [templates, setTemplates] = useState(() => loadStoredTemplates());
   const [selectedTemplateId, setSelectedTemplateId] = useState('');
   const [plannerDays, setPlannerDays] = useState([]);
+  const [savedSchedule, setSavedSchedule] = useState(null);
+  const [savedScheduleSignature, setSavedScheduleSignature] = useState('');
   const [serverSummary, setServerSummary] = useState(null);
   const [capacityInfo, setCapacityInfo] = useState(null);
   const [scheduleVariants, setScheduleVariants] = useState([]);
   const [selectedVariantKey, setSelectedVariantKey] = useState('');
   const [includeIncidentUplift, setIncludeIncidentUplift] = useState(false);
   const [previewCapacityBase, setPreviewCapacityBase] = useState(null);
+  const [isSavedScheduleLoading, setIsSavedScheduleLoading] = useState(false);
+  const [isSavingSchedule, setIsSavingSchedule] = useState(false);
   const [isTemplatesLoading, setIsTemplatesLoading] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [errorText, setErrorText] = useState('');
@@ -1219,11 +1327,73 @@ const ResourceSchedulePlanner = ({
       shifts: (day.shifts || []).map((shift) => ({ ...shift, breaks: shift.breaks || [] })),
     })), []);
 
+  const loadSavedSchedule = useCallback(async ({ silent = true } = {}) => {
+    if (!apiRoot || !selectedWeekStart) return;
+    const dateFrom = selectedWeekStart;
+    const dateTo = selectedPeriodEnd || selectedWeekStart;
+    if (!silent) setIsSavedScheduleLoading(true);
+    try {
+      const response = await axios.get(`${apiRoot}/api/resource_fte/saved_schedule`, {
+        params: {
+          date_from: dateFrom,
+          date_to: dateTo,
+        },
+        headers: buildHeaders(),
+      });
+      const schedule = response.data?.schedule || null;
+      if (schedule?.days?.length) {
+        const nextDays = normalizePreviewDays(schedule.days || []);
+        plannerDaysRef.current = nextDays;
+        setPlannerDays(nextDays);
+        setSavedSchedule(schedule);
+        setSavedScheduleSignature(plannerDaysSignature(nextDays));
+        setSelectedDayIndex(0);
+        setHistoryPast([]);
+        setHistoryFuture([]);
+        setScheduleVariants([]);
+        setSelectedVariantKey(schedule.selectedVariantKey || '');
+        setIncludeIncidentUplift(Boolean(schedule.includeIncidentUplift));
+        setServerSummary(schedule.summary || null);
+        setCapacityInfo(schedule.capacity || null);
+        setPreviewCapacityBase(schedule.capacity || null);
+        return;
+      }
+
+      setSavedSchedule(null);
+      setSavedScheduleSignature('');
+      const currentDays = plannerDaysRef.current || [];
+      const firstDate = currentDays[0]?.date || '';
+      const lastDate = currentDays[currentDays.length - 1]?.date || '';
+      if (currentDays.length && (firstDate !== dateFrom || lastDate !== dateTo)) {
+        plannerDaysRef.current = [];
+        setPlannerDays([]);
+        setServerSummary(null);
+        setCapacityInfo(null);
+        setScheduleVariants([]);
+        setPreviewCapacityBase(null);
+        setSelectedVariantKey('');
+        setSelectedDayIndex(0);
+        setHistoryPast([]);
+        setHistoryFuture([]);
+      }
+    } catch (error) {
+      if (!silent) emit(error?.response?.data?.error || 'Не удалось загрузить сохраненный график', 'error');
+    } finally {
+      if (!silent) setIsSavedScheduleLoading(false);
+    }
+  }, [apiRoot, buildHeaders, emit, normalizePreviewDays, selectedPeriodEnd, selectedWeekStart]);
+
+  useEffect(() => {
+    loadSavedSchedule({ silent: true });
+  }, [loadSavedSchedule]);
+
   const applyGeneratedVariant = useCallback((variant, capacityBase = previewCapacityBase) => {
     if (!variant) return;
     const nextDays = normalizePreviewDays(variant.days || []);
     plannerDaysRef.current = nextDays;
     setPlannerDays(nextDays);
+    setSavedSchedule(null);
+    setSavedScheduleSignature('');
     setSelectedVariantKey(variant.key || '');
     setIncludeIncidentUplift(Boolean(variant.includesIncidentUplift));
     setSelectedDayIndex(0);
@@ -1324,6 +1494,70 @@ const ResourceSchedulePlanner = ({
       ? summary.incidentUpliftFteHours
       : matchingIncidentUpliftVariant?.summary?.incidentUpliftFteHours,
   ) || 0;
+  const currentScheduleSignature = useMemo(() => plannerDaysSignature(computedDays), [computedDays]);
+  const hasScheduleToSave = computedDays.length > 0;
+  const hasUnsavedScheduleChanges = hasScheduleToSave && currentScheduleSignature !== savedScheduleSignature;
+  const lastScheduleDate = computedDays[computedDays.length - 1]?.date || selectedPeriodEnd || selectedWeekStart;
+
+  const saveCurrentSchedule = useCallback(async () => {
+    if (!apiRoot || !computedDays.length) return;
+    setIsSavingSchedule(true);
+    try {
+      const response = await axios.put(
+        `${apiRoot}/api/resource_fte/saved_schedule`,
+        {
+          id: savedSchedule?.id || null,
+          date_from: selectedWeekStart || computedDays[0]?.date,
+          date_to: selectedPeriodEnd || computedDays[computedDays.length - 1]?.date || selectedWeekStart,
+          days: computedDays,
+          summary,
+          capacity: capacityInfo || {},
+          templates,
+          selectedVariantKey: selectedVariantKey || '',
+          includeIncidentUplift,
+          meta: {
+            serverSummary: serverSummary || null,
+            selectedVariant: selectedGeneratedVariant?.key || selectedVariantKey || '',
+          },
+        },
+        {
+          headers: buildHeaders({ 'Content-Type': 'application/json' }),
+        },
+      );
+      const schedule = response.data?.schedule || null;
+      if (schedule?.days?.length) {
+        const nextDays = normalizePreviewDays(schedule.days || []);
+        plannerDaysRef.current = nextDays;
+        setPlannerDays(nextDays);
+        setSavedScheduleSignature(plannerDaysSignature(nextDays));
+      } else {
+        setSavedScheduleSignature(currentScheduleSignature);
+      }
+      setSavedSchedule(schedule);
+      emit(`График сохранен: ${Number(response.data?.auction_count || 0)} смен доступно в аукционе`, 'success');
+    } catch (error) {
+      emit(error?.response?.data?.error || 'Не удалось сохранить график', 'error');
+    } finally {
+      setIsSavingSchedule(false);
+    }
+  }, [
+    apiRoot,
+    buildHeaders,
+    capacityInfo,
+    computedDays,
+    currentScheduleSignature,
+    emit,
+    includeIncidentUplift,
+    normalizePreviewDays,
+    savedSchedule?.id,
+    selectedGeneratedVariant?.key,
+    selectedPeriodEnd,
+    selectedVariantKey,
+    selectedWeekStart,
+    serverSummary,
+    summary,
+    templates,
+  ]);
 
   useEffect(() => {
     if (!computedDays.length) {
@@ -1683,7 +1917,7 @@ const ResourceSchedulePlanner = ({
   }, [loadDefaultTemplates]);
 
   return (
-    <div className="space-y-4">
+    <div className={`space-y-4 ${hasScheduleToSave ? 'pb-24' : ''}`}>
       <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
         <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_300px_auto] xl:items-start">
           <div>
@@ -1944,6 +2178,28 @@ const ResourceSchedulePlanner = ({
           </div>
         )}
       </div>
+      {hasScheduleToSave ? (
+        <div className="fixed bottom-4 right-4 z-40 flex max-w-[calc(100vw-2rem)] items-center gap-3 rounded-xl border border-slate-200 bg-white/95 px-3 py-2 shadow-2xl backdrop-blur">
+          <div className="hidden min-w-0 text-xs text-slate-600 sm:block">
+            <div className="font-semibold text-slate-900">
+              {hasUnsavedScheduleChanges ? 'Есть несохраненные изменения' : 'График сохранен'}
+            </div>
+            <div className="truncate">
+              {selectedWeekStart || computedDays[0]?.date || ''}{lastScheduleDate ? ` - ${lastScheduleDate}` : ''}
+              {savedSchedule?.updated_at && !hasUnsavedScheduleChanges ? ` · ${new Date(savedSchedule.updated_at).toLocaleString('ru-RU')}` : ''}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={saveCurrentSchedule}
+            disabled={!hasUnsavedScheduleChanges || isSavingSchedule}
+            className="inline-flex h-10 items-center gap-2 rounded-lg bg-slate-900 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-500"
+          >
+            <Save size={16} />
+            {isSavingSchedule ? 'Сохранение...' : 'Сохранить'}
+          </button>
+        </div>
+      ) : null}
       {splitPreview ? (
         <div
           className="pointer-events-none fixed z-50 rounded-md bg-slate-950 px-2 py-1 text-xs font-semibold text-white shadow-lg"
