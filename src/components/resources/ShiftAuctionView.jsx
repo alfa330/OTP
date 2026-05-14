@@ -130,6 +130,13 @@ const formatRate = (value) => {
   return rate.toFixed(2).replace(/\.?0+$/, '');
 };
 
+const hoursFormatter = new Intl.NumberFormat('ru-RU', {
+  maximumFractionDigits: 1,
+  minimumFractionDigits: 0
+});
+
+const formatAuctionHours = (minutes) => hoursFormatter.format(Math.max(0, Number(minutes || 0)) / 60);
+
 const formatShortDateLabel = (value) => {
   if (!value) return '';
   const date = new Date(`${value}T00:00:00`);
@@ -185,6 +192,34 @@ const formatAuctionBreaksLabel = (lot) => {
   return labels.length ? labels.join(', ') : '';
 };
 
+const getAuctionLotDurationMinutes = (lot) => {
+  const startMinutes = clockToMinutes(lot?.start_time);
+  const endClockMinutes = clockToMinutes(lot?.end_time);
+  const endMinutes = endClockMinutes <= startMinutes ? endClockMinutes + 1440 : endClockMinutes;
+  return Math.max(0, endMinutes - startMinutes);
+};
+
+const getAuctionLotBreakMinutes = (lot) => {
+  const duration = getAuctionLotDurationMinutes(lot);
+  const breaks = Array.isArray(lot?.breaks) ? lot.breaks : [];
+  const total = breaks.reduce((sum, item) => {
+    const start = Number(item?.start || 0);
+    let end = Number(item?.end || 0);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return sum;
+    if (end <= start) end += 1440;
+    return sum + Math.max(0, end - start);
+  }, 0);
+  return clampNumber(total, 0, duration);
+};
+
+const getAuctionLotNetMinutes = (lot) => Math.max(0, getAuctionLotDurationMinutes(lot) - getAuctionLotBreakMinutes(lot));
+
+const getAuctionNormWorkdayCount = (periodDayCount) => {
+  const totalDays = Math.max(0, Number(periodDayCount || 0));
+  if (!totalDays) return 0;
+  return Math.max(1, totalDays - Math.min(2, totalDays));
+};
+
 const formatCompactAuctionShiftLabel = (lot) => {
   if (isNightAuctionLot(lot)) return '20*08';
   return `${formatCompactClockValue(lot?.start_time)}-${formatCompactClockValue(lot?.end_time)}`;
@@ -197,31 +232,33 @@ const AuctionLotCell = ({
   claimingLotId,
   onClaimLot,
   userId,
-  userRate
+  claimBlockReason
 }) => {
   if (!lot) return null;
 
   const isLotClaimed = lot.status === 'claimed';
   const lotClaimedByCurrentUser = Number(lot.claimed_by) === Number(userId);
   const minRate = Number(lot.rate_min || 0);
-  const rateTooLow = !canManage && Number.isFinite(Number(userRate)) && minRate > Number(userRate) + 0.001;
   const isClaiming = Number(claimingLotId) === Number(lot.id);
   const label = formatAuctionShiftLabel(lot);
   const compactLabel = formatCompactAuctionShiftLabel(lot);
   const breaksLabel = formatAuctionBreaksLabel(lot);
-  const title = `${label}${minRate ? ` · ставка ${formatRate(minRate)}` : ''}${breaksLabel ? ` · перерывы ${breaksLabel}` : ''}${lot.claimed_by_name ? ` · ${lot.claimed_by_name}` : ''}`;
+  const netMinutes = getAuctionLotNetMinutes(lot);
+  const breakMinutes = getAuctionLotBreakMinutes(lot);
+  const title = `${label}${minRate ? ` · ставка ${formatRate(minRate)}` : ''} · в норму ${formatAuctionHours(netMinutes)} ч${breakMinutes ? ` · перерыв ${formatAuctionHours(breakMinutes)} ч` : ''}${breaksLabel ? ` (${breaksLabel})` : ''}${claimBlockReason ? ` · ${claimBlockReason}` : ''}${lot.claimed_by_name ? ` · ${lot.claimed_by_name}` : ''}`;
   const startToneStyle = getAuctionLotStartTone(lot);
 
   if (lot.status === 'available' && !canManage) {
+    const blocked = Boolean(claimBlockReason);
     return (
       <button
         type="button"
         onClick={() => onClaimLot(lot.id)}
-        disabled={!canClaim || isClaiming || rateTooLow}
+        disabled={!canClaim || isClaiming || blocked}
         title={title}
-        style={rateTooLow ? undefined : startToneStyle}
+        style={blocked ? undefined : startToneStyle}
         className={`flex h-6 w-full min-w-0 items-center justify-center overflow-hidden rounded border px-1 text-[10px] font-semibold tabular-nums transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-1 disabled:cursor-not-allowed sm:h-8 sm:px-2 sm:text-xs ${
-          rateTooLow
+          blocked
             ? 'border-slate-200 bg-slate-50 text-slate-400'
             : 'hover:brightness-95'
         }`}
@@ -691,6 +728,48 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     return Number.isFinite(snapshotRate) && snapshotRate > 0 ? snapshotRate : 1;
   }, [settings.selected_operators, user?.id, user?.rate]);
 
+  const myAuctionWorkload = useMemo(() => {
+    const workdayCount = getAuctionNormWorkdayCount(lotDates.length);
+    const normMinutes = Math.round(workdayCount * 8 * 60 * userRate);
+    const claimedNetMinutes = myClaimedLots.reduce((sum, lot) => sum + getAuctionLotNetMinutes(lot), 0);
+    const claimedBreakMinutes = myClaimedLots.reduce((sum, lot) => sum + getAuctionLotBreakMinutes(lot), 0);
+    const remainingMinutes = Math.max(0, normMinutes - claimedNetMinutes);
+    const overMinutes = Math.max(0, claimedNetMinutes - normMinutes);
+    const progress = normMinutes > 0 ? clampNumber((claimedNetMinutes / normMinutes) * 100, 0, 140) : 0;
+    return {
+      workdayCount,
+      normMinutes,
+      claimedNetMinutes,
+      claimedBreakMinutes,
+      remainingMinutes,
+      overMinutes,
+      progress,
+      isComplete: normMinutes > 0 && claimedNetMinutes >= normMinutes - 1
+    };
+  }, [lotDates.length, myClaimedLots, userRate]);
+
+  const claimBlockReasonByLotId = useMemo(() => {
+    const reasons = new Map();
+    if (canManage || !isTester) return reasons;
+    lots.forEach((lot) => {
+      if (!lot || lot.status !== 'available') return;
+      const lotId = Number(lot.id);
+      if (!Number.isFinite(lotId)) return;
+      const netMinutes = getAuctionLotNetMinutes(lot);
+      if (myAuctionWorkload.normMinutes > 0 && myAuctionWorkload.claimedNetMinutes >= myAuctionWorkload.normMinutes - 1) {
+        reasons.set(lotId, 'Норма уже набрана');
+        return;
+      }
+      if (
+        myAuctionWorkload.normMinutes > 0
+        && myAuctionWorkload.claimedNetMinutes + netMinutes > myAuctionWorkload.normMinutes + 1
+      ) {
+        reasons.set(lotId, `Превысит норму на ${formatAuctionHours(myAuctionWorkload.claimedNetMinutes + netMinutes - myAuctionWorkload.normMinutes)} ч`);
+      }
+    });
+    return reasons;
+  }, [canManage, isTester, lots, myAuctionWorkload]);
+
   useEffect(() => {
     if (!canUseAuction || !lotDates.length || typeof window === 'undefined') return undefined;
 
@@ -829,6 +908,11 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
   const handleClaimLot = useCallback(async (lotId) => {
     if (!canClaim || !apiRoot) return;
+    const blockReason = claimBlockReasonByLotId.get(Number(lotId));
+    if (blockReason) {
+      notify(blockReason, 'error');
+      return;
+    }
     setClaimingLotId(lotId);
     try {
       await axios.post(`${apiRoot}/api/shift_auction/test_lots/${lotId}/claim`, {}, { headers: buildHeaders() });
@@ -840,7 +924,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     } finally {
       setClaimingLotId(null);
     }
-  }, [apiRoot, buildHeaders, canClaim, fetchSnapshot, notify]);
+  }, [apiRoot, buildHeaders, canClaim, claimBlockReasonByLotId, fetchSnapshot, notify]);
 
   const toggleDayOff = useCallback(async (date) => {
     if (!canChoose || !apiRoot || !date) return;
@@ -871,15 +955,46 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     </div>
   );
 
+  const renderOperatorWorkloadBar = () => {
+    if (canManage || !canUseAuction) return null;
+    const progressWidth = clampNumber(myAuctionWorkload.progress, 0, 100);
+    const progressTone = myAuctionWorkload.overMinutes > 0 ? 'bg-rose-500' : myAuctionWorkload.isComplete ? 'bg-emerald-500' : 'bg-blue-600';
+    const balanceLabel = myAuctionWorkload.overMinutes > 0
+      ? `перебор ${formatAuctionHours(myAuctionWorkload.overMinutes)} ч`
+      : `осталось ${formatAuctionHours(myAuctionWorkload.remainingMinutes)} ч`;
+    const title = `Набрано ${formatAuctionHours(myAuctionWorkload.claimedNetMinutes)} ч из ${formatAuctionHours(myAuctionWorkload.normMinutes)} ч. Перерывы: ${formatAuctionHours(myAuctionWorkload.claimedBreakMinutes)} ч. Норма: ${myAuctionWorkload.workdayCount} раб. дн. × 8 × ${formatRate(userRate)}.`;
+    return (
+      <div title={title} className="w-[min(360px,calc(100vw-1rem))] rounded-xl border border-slate-200 bg-white/95 px-3 py-2 text-xs text-slate-700 shadow-lg backdrop-blur">
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <div className="font-semibold text-slate-950">
+              {formatAuctionHours(myAuctionWorkload.claimedNetMinutes)} / {formatAuctionHours(myAuctionWorkload.normMinutes)} ч
+            </div>
+            <div className="truncate text-[11px] text-slate-500">
+              {balanceLabel} · перерывы {formatAuctionHours(myAuctionWorkload.claimedBreakMinutes)} ч
+            </div>
+          </div>
+          <div className={`shrink-0 rounded-md px-2 py-1 text-[11px] font-semibold ${myAuctionWorkload.isComplete ? 'bg-emerald-50 text-emerald-700' : 'bg-blue-50 text-blue-700'}`}>
+            {myAuctionWorkload.workdayCount} дн. × 8 × {formatRate(userRate)}
+          </div>
+        </div>
+        <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-200">
+          <div className={`h-full rounded-full ${progressTone}`} style={{ width: `${progressWidth}%` }} />
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className="min-h-screen bg-slate-50">
       <div className="fixed right-2 top-2 z-40 flex max-w-[calc(100vw-1rem)] justify-end pointer-events-none sm:right-3 sm:top-3 sm:max-w-[calc(100vw-1.5rem)]">
-        <div className="pointer-events-auto">
+        <div className="pointer-events-auto flex flex-col items-end gap-2">
           {renderStatusBar()}
+          {renderOperatorWorkloadBar()}
         </div>
       </div>
 
-      <div className="border-b border-slate-200 bg-white px-3 pb-4 pt-14 sm:px-4 sm:py-5 md:px-6">
+      <div className="border-b border-slate-200 bg-white px-3 pb-4 pt-24 sm:px-4 sm:pb-5 sm:pt-24 md:px-6">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex items-start gap-3">
             <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-700 sm:h-11 sm:w-11">
@@ -1064,7 +1179,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                             claimingLotId={claimingLotId}
                                             onClaimLot={handleClaimLot}
                                             userId={user?.id}
-                                            userRate={userRate}
+                                            claimBlockReason={claimBlockReasonByLotId.get(Number(lot.id)) || ''}
                                           />
                                         ) : (
                                           <div className={`h-6 rounded border border-dashed sm:h-8 ${isDayOff ? 'border-blue-100 bg-blue-50/60' : 'border-transparent bg-slate-50/70'}`} />

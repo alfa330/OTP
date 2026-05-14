@@ -3069,6 +3069,73 @@ class Database:
             "created_at": row[1].isoformat() if row and row[1] else None
         }
 
+    def _shift_auction_break_minutes(self, breaks):
+        total = 0
+        for item in (breaks or []):
+            if not isinstance(item, dict):
+                continue
+            try:
+                start_minute = int(float(item.get("start", 0) or 0))
+                end_minute = int(float(item.get("end", 0) or 0))
+            except Exception:
+                continue
+            if end_minute <= start_minute:
+                end_minute += 24 * 60
+            total += max(0, end_minute - start_minute)
+        return max(0, int(total))
+
+    def _shift_auction_lot_minutes(self, start_time_value, end_time_value, breaks=None):
+        start_minute, end_minute = self._schedule_interval_minutes(start_time_value, end_time_value)
+        duration_minutes = max(0, end_minute - start_minute)
+        break_minutes = min(duration_minutes, self._shift_auction_break_minutes(breaks if isinstance(breaks, list) else []))
+        return {
+            "duration_minutes": duration_minutes,
+            "break_minutes": break_minutes,
+            "net_minutes": max(0, duration_minutes - break_minutes),
+        }
+
+    def _shift_auction_norm_workday_count(self, total_days):
+        try:
+            total = int(total_days or 0)
+        except Exception:
+            total = 0
+        if total <= 0:
+            return 0
+        day_off_quota = min(2, total)
+        return max(1, total - day_off_quota)
+
+    def _get_shift_auction_operator_workload_tx(self, cursor, operator_id, operator_rate):
+        cursor.execute("SELECT COUNT(DISTINCT shift_date) FROM shift_auction_test_lots")
+        period_days = int((cursor.fetchone() or [0])[0] or 0)
+        workday_count = self._shift_auction_norm_workday_count(period_days)
+        norm_minutes = int(round(workday_count * 8 * 60 * max(0.0, float(operator_rate or 0))))
+
+        cursor.execute("""
+            SELECT start_time, end_time, breaks
+            FROM shift_auction_test_lots
+            WHERE claimed_by = %s
+              AND status = 'claimed'
+        """, (operator_id,))
+        claimed_net_minutes = 0
+        claimed_break_minutes = 0
+        for start_time_value, end_time_value, breaks in (cursor.fetchall() or []):
+            minutes = self._shift_auction_lot_minutes(
+                start_time_value,
+                end_time_value,
+                breaks if isinstance(breaks, list) else []
+            )
+            claimed_net_minutes += minutes["net_minutes"]
+            claimed_break_minutes += minutes["break_minutes"]
+
+        return {
+            "period_days": period_days,
+            "workday_count": workday_count,
+            "norm_minutes": norm_minutes,
+            "claimed_net_minutes": int(claimed_net_minutes),
+            "claimed_break_minutes": int(claimed_break_minutes),
+            "remaining_minutes": max(0, norm_minutes - int(claimed_net_minutes)),
+        }
+
     def get_shift_auction_test_access(self, current_user_id=None):
         with self._get_cursor() as cursor:
             cursor.execute("""
@@ -3378,8 +3445,6 @@ class Database:
                 raise ValueError("LOT_NOT_FOUND")
             if lot[5] != 'available':
                 raise ValueError("LOT_ALREADY_CLAIMED")
-            if operator_rate < float(lot[4] or 0):
-                raise ValueError("RATE_TOO_LOW")
 
             cursor.execute("""
                 SELECT 1
@@ -3399,6 +3464,18 @@ class Database:
             """, (operator_id, lot[1]))
             if cursor.fetchone():
                 raise ValueError("DAY_ALREADY_HAS_SHIFT")
+
+            workload = self._get_shift_auction_operator_workload_tx(cursor, operator_id, operator_rate)
+            candidate_minutes = self._shift_auction_lot_minutes(
+                lot[2],
+                lot[3],
+                lot[8] if isinstance(lot[8], list) else []
+            )
+            if (
+                workload["norm_minutes"] > 0
+                and workload["claimed_net_minutes"] + candidate_minutes["net_minutes"] > workload["norm_minutes"] + 1
+            ):
+                raise ValueError("SHIFT_NORM_EXCEEDED")
 
             cursor.execute("""
                 UPDATE shift_auction_test_lots
