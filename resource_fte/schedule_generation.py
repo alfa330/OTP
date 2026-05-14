@@ -91,6 +91,9 @@ SHIFT_PREVIEW_CP_SAT_DEFICIT_WEIGHT = 100
 SHIFT_PREVIEW_CP_SAT_OVER_WEIGHT = 5
 SHIFT_PREVIEW_CP_SAT_SHIFT_WEIGHT = 2
 SHIFT_PREVIEW_CP_SAT_PREFERENCE_WEIGHT = 10
+SHIFT_PREVIEW_LOCAL_ADD_MAX_ITERATIONS = 8
+SHIFT_PREVIEW_LOCAL_SWAP_MAX_ITERATIONS = 4
+SHIFT_PREVIEW_LOCAL_IMPROVEMENT_EPSILON = 0.001
 SHIFT_PREVIEW_GREEDY_STRATEGIES = (
     {
         "name": "balanced",
@@ -699,6 +702,32 @@ def _shift_preview_quality_score(totals: Dict[str, Any], selected_count: int = 0
     return deficit * 100.0 + over * 3.0 + max(0, int(selected_count or 0)) * 0.025 - real_coverage * 0.02
 
 
+def _shift_preview_quality_for_coverage(
+    target: List[float],
+    coverage: List[float],
+    selected_count: int = 0,
+) -> float:
+    total_needed = 0.0
+    real_covered_need = 0.0
+    deficit = 0.0
+    over = 0.0
+    for index in range(len(target)):
+        needed = float(target[index] or 0)
+        real_covered = float(coverage[index] if index < len(coverage) else 0) or 0
+        covered = _round_fte_to_half(real_covered)
+        total_needed += needed
+        real_covered_need += min(real_covered, needed)
+        deficit += max(0.0, needed - covered)
+        over += max(0.0, covered - needed)
+    real_coverage = (real_covered_need / total_needed * 100) if total_needed > 0 else 0.0
+    return (
+        deficit * 100.0
+        + over * 3.0
+        + max(0, int(selected_count or 0)) * 0.025
+        - real_coverage * 0.02
+    )
+
+
 def _shift_preview_prune_selected(
     target: List[float],
     coverage: List[float],
@@ -738,6 +767,188 @@ def _shift_preview_prune_selected(
         "selected": selected,
         "coverage": coverage,
         "totals": _shift_preview_totals(target, coverage),
+    }
+
+
+def _shift_preview_candidate_to_selected(candidate: Dict[str, Any], method: str = "local_improve") -> Dict[str, Any]:
+    return {
+        "dayIndex": candidate["dayIndex"],
+        "template": candidate["template"],
+        "vector": list(candidate["vector"]),
+        "presenceVector": list(candidate.get("presenceVector") or []),
+        "source": candidate.get("source"),
+        "score": {
+            "method": method,
+            "preference_score": round(float(candidate.get("preferenceScore") or 0), 4),
+        },
+    }
+
+
+def _shift_preview_apply_vector_delta(
+    coverage: List[float],
+    add_vector: Optional[List[float]] = None,
+    remove_vector: Optional[List[float]] = None,
+) -> List[float]:
+    return [
+        round(
+            float(coverage[index] or 0)
+            + float((add_vector or [])[index] if add_vector and index < len(add_vector) else 0.0)
+            - float((remove_vector or [])[index] if remove_vector and index < len(remove_vector) else 0.0),
+            4,
+        )
+        for index in range(len(coverage))
+    ]
+
+
+def _shift_preview_selected_presence_by_hour(item: Optional[Dict[str, Any]]) -> Dict[int, float]:
+    return {
+        index: float(amount or 0)
+        for index, amount in enumerate((item or {}).get("presenceVector") or [])
+        if float(amount or 0) > 0
+    }
+
+
+def _shift_preview_is_same_candidate(item: Dict[str, Any], candidate: Dict[str, Any]) -> bool:
+    template = item.get("template") or {}
+    candidate_template = candidate.get("template") or {}
+    return (
+        int(item.get("dayIndex") or 0) == int(candidate.get("dayIndex") or 0)
+        and str(template.get("id") or "") == str(candidate_template.get("id") or "")
+    )
+
+
+def _shift_preview_can_add_candidate(
+    candidate: Dict[str, Any],
+    usage_state: Dict[str, Any],
+    rate_capacity: Dict[str, Dict[str, Any]],
+    total_hours: int,
+    removed_item: Optional[Dict[str, Any]] = None,
+) -> bool:
+    rate_key = candidate["rateKey"]
+    day_index = int(candidate.get("dayIndex") or 0)
+    capacity = rate_capacity.get(rate_key) or {}
+    removed_template = (removed_item or {}).get("template") or {}
+    removed_rate_key = _resource_rate_key(removed_template.get("rate")) if removed_item else None
+    removed_day_index = int((removed_item or {}).get("dayIndex") or 0)
+    removed_matches_rate = removed_rate_key == rate_key
+    weekly_usage = int(usage_state["weekly_usage"][rate_key] or 0)
+    if removed_matches_rate:
+        weekly_usage -= 1
+    if weekly_usage >= int(capacity.get("weekly_shift_capacity") or 0):
+        return False
+    daily_usage = int(usage_state["daily_usage"][day_index][rate_key] or 0)
+    if removed_matches_rate and removed_day_index == day_index:
+        daily_usage -= 1
+    if daily_usage >= int(capacity.get("daily_shift_capacity") or 0):
+        return False
+    active_capacity = int(capacity.get("daily_shift_capacity") or 0)
+    if active_capacity <= 0:
+        return False
+    removed_presence = (
+        _shift_preview_selected_presence_by_hour(removed_item)
+        if removed_matches_rate else {}
+    )
+    for index, amount in candidate.get("activePresenceVector") or []:
+        if index >= total_hours:
+            return False
+        current_usage = float(usage_state["hourly_usage"][rate_key][index] or 0)
+        current_usage -= float(removed_presence.get(index) or 0)
+        if current_usage + float(amount or 0) > active_capacity + 0.001:
+            return False
+    return True
+
+
+def _shift_preview_improve_selected(
+    target: List[float],
+    coverage: List[float],
+    selected: List[Dict[str, Any]],
+    candidates: List[Dict[str, Any]],
+    rate_capacity: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    selected = list(selected or [])
+    coverage = list(coverage or [])
+    total_hours = len(target)
+    current_totals = _shift_preview_totals(target, coverage)
+    current_quality = _shift_preview_quality_for_coverage(target, coverage, len(selected))
+    epsilon = float(SHIFT_PREVIEW_LOCAL_IMPROVEMENT_EPSILON)
+    candidate_source = str((candidates[0] if candidates else {}).get("source") or "")
+    allow_swaps = candidate_source != "freeform"
+
+    for _ in range(max(0, int(SHIFT_PREVIEW_LOCAL_ADD_MAX_ITERATIONS))):
+        usage_state = _shift_preview_usage_state(selected, total_hours)
+        best_candidate = None
+        best_coverage = None
+        best_quality = current_quality
+        for candidate in candidates:
+            if not _shift_preview_can_add_candidate(candidate, usage_state, rate_capacity, total_hours):
+                continue
+            next_coverage = _shift_preview_apply_vector_delta(coverage, add_vector=candidate["vector"])
+            next_quality = _shift_preview_quality_for_coverage(target, next_coverage, len(selected) + 1)
+            if next_quality + epsilon < best_quality:
+                best_candidate = candidate
+                best_coverage = next_coverage
+                best_quality = next_quality
+        if best_candidate is None:
+            break
+        selected.append(_shift_preview_candidate_to_selected(best_candidate))
+        coverage = best_coverage or coverage
+        current_totals = _shift_preview_totals(target, coverage)
+        current_quality = best_quality
+
+    if not allow_swaps:
+        return {
+            "selected": selected,
+            "coverage": coverage,
+            "totals": current_totals,
+            "quality": current_quality,
+        }
+
+    candidates_by_rate = defaultdict(list)
+    for candidate in candidates:
+        candidates_by_rate[candidate["rateKey"]].append(candidate)
+
+    for _ in range(max(0, int(SHIFT_PREVIEW_LOCAL_SWAP_MAX_ITERATIONS))):
+        usage_state = _shift_preview_usage_state(selected, total_hours)
+        best_move = None
+        best_coverage = None
+        best_quality = current_quality
+        for remove_index, selected_item in enumerate(selected):
+            removed_vector = selected_item.get("vector") or []
+            selected_rate_key = _resource_rate_key((selected_item.get("template") or {}).get("rate"))
+            for candidate in candidates_by_rate.get(selected_rate_key, []):
+                if _shift_preview_is_same_candidate(selected_item, candidate):
+                    continue
+                if not _shift_preview_can_add_candidate(
+                    candidate,
+                    usage_state,
+                    rate_capacity,
+                    total_hours,
+                    removed_item=selected_item,
+                ):
+                    continue
+                next_coverage = _shift_preview_apply_vector_delta(
+                    coverage,
+                    add_vector=candidate["vector"],
+                    remove_vector=removed_vector,
+                )
+                next_quality = _shift_preview_quality_for_coverage(target, next_coverage, len(selected))
+                if next_quality + epsilon < best_quality:
+                    best_move = (remove_index, candidate)
+                    best_coverage = next_coverage
+                    best_quality = next_quality
+        if best_move is None:
+            break
+        remove_index, candidate = best_move
+        selected[remove_index] = _shift_preview_candidate_to_selected(candidate)
+        coverage = best_coverage or coverage
+        current_totals = _shift_preview_totals(target, coverage)
+        current_quality = best_quality
+
+    return {
+        "selected": selected,
+        "coverage": coverage,
+        "totals": current_totals,
+        "quality": current_quality,
     }
 
 
@@ -1025,7 +1236,7 @@ def _select_shift_preview_strategy(
         )
         for strategy in SHIFT_PREVIEW_GREEDY_STRATEGIES
     ])
-    best_result = min(
+    raw_best_result = min(
         strategy_results,
         key=lambda item: (
             round(float(item.get("quality") or 0), 6),
@@ -1034,6 +1245,24 @@ def _select_shift_preview_strategy(
             len(item.get("selected") or []),
         ),
     )
+    improved = _shift_preview_improve_selected(
+        target,
+        raw_best_result["coverage"],
+        raw_best_result["selected"],
+        candidates,
+        rate_capacity,
+    )
+    best_result = {
+        **raw_best_result,
+        "selected": improved["selected"],
+        "coverage": improved["coverage"],
+        "totals": improved["totals"],
+        "quality": improved["quality"],
+    }
+    strategy_results = [
+        best_result if item is raw_best_result else item
+        for item in strategy_results
+    ]
     return {
         "best": best_result,
         "strategy_results": strategy_results,
@@ -1155,8 +1384,9 @@ def _build_schedule_preview_variant(
     uplift_raw_target: Optional[List[float]] = None,
     include_incident_uplift: bool = False,
     base_variant_key: Optional[str] = None,
+    selected_result: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    selected_result = _select_shift_preview_strategy(target, candidates, rate_capacity)
+    selected_result = selected_result or _select_shift_preview_strategy(target, candidates, rate_capacity)
     best_result = selected_result["best"]
     base_selected = best_result["selected"]
     base_coverage = best_result["coverage"]
@@ -1322,6 +1552,8 @@ def _generate_schedule_preview_from_forecast(
     template_candidates = _build_shift_preview_candidates(days, enabled_templates, rate_capacity, "template", total_hours)
     freeform_templates = _build_freeform_shift_templates(rate_capacity)
     freeform_candidates = _build_shift_preview_candidates(days, freeform_templates, rate_capacity, "freeform", total_hours)
+    template_selected_result = _select_shift_preview_strategy(target, template_candidates, rate_capacity)
+    freeform_selected_result = _select_shift_preview_strategy(target, freeform_candidates, rate_capacity)
     template_variant = _build_schedule_preview_variant(
         "templates",
         "По шаблонам",
@@ -1330,6 +1562,7 @@ def _generate_schedule_preview_from_forecast(
         raw_target,
         template_candidates,
         rate_capacity,
+        selected_result=template_selected_result,
     )
     freeform_variant = _build_schedule_preview_variant(
         "freeform",
@@ -1339,6 +1572,7 @@ def _generate_schedule_preview_from_forecast(
         raw_target,
         freeform_candidates,
         rate_capacity,
+        selected_result=freeform_selected_result,
     )
 
     base_variants = [template_variant, freeform_variant]
@@ -1359,6 +1593,7 @@ def _generate_schedule_preview_from_forecast(
                 uplift_raw_target=uplift_raw_target,
                 include_incident_uplift=True,
                 base_variant_key="templates",
+                selected_result=template_selected_result,
             ),
             _build_schedule_preview_variant(
                 "freeform_incident_uplift",
@@ -1373,6 +1608,7 @@ def _generate_schedule_preview_from_forecast(
                 uplift_raw_target=uplift_raw_target,
                 include_incident_uplift=True,
                 base_variant_key="freeform",
+                selected_result=freeform_selected_result,
             ),
         ])
     default_variant = min(base_variants, key=_schedule_preview_variant_rank)
