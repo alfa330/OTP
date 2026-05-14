@@ -137,6 +137,19 @@ const hoursFormatter = new Intl.NumberFormat('ru-RU', {
 
 const formatAuctionHours = (minutes) => hoursFormatter.format(Math.max(0, Number(minutes || 0)) / 60);
 
+const AUCTION_STATUS_PERIOD_LABELS = {
+  bs: 'Б/С',
+  unpaid_leave: 'Б/С',
+  sick_leave: 'Больничный',
+  annual_leave: 'Отпуск',
+  dismissal: 'Увольнение'
+};
+
+const getAuctionBlockedDateLabel = (period) => {
+  const code = String(period?.status_code || '').trim().toLowerCase();
+  return period?.label || AUCTION_STATUS_PERIOD_LABELS[code] || 'Период';
+};
+
 const formatShortDateLabel = (value) => {
   if (!value) return '';
   const date = new Date(`${value}T00:00:00`);
@@ -214,10 +227,14 @@ const getAuctionLotBreakMinutes = (lot) => {
 
 const getAuctionLotNetMinutes = (lot) => Math.max(0, getAuctionLotDurationMinutes(lot) - getAuctionLotBreakMinutes(lot));
 
-const getAuctionNormWorkdayCount = (periodDayCount) => {
+const getAuctionNormWorkdayCount = (periodDayCount, blockedDayCount = 0) => {
   const totalDays = Math.max(0, Number(periodDayCount || 0));
-  if (!totalDays) return 0;
-  return Math.max(1, totalDays - Math.min(2, totalDays));
+  const blockedDays = clampNumber(Number(blockedDayCount || 0), 0, totalDays);
+  const availableDays = Math.max(0, totalDays - blockedDays);
+  if (!availableDays) return 0;
+  const dayOffQuota = Math.min(2, totalDays);
+  const manualDayOffQuota = Math.max(0, dayOffQuota - blockedDays);
+  return Math.max(1, availableDays - manualDayOffQuota);
 };
 
 const formatCompactAuctionShiftLabel = (lot) => {
@@ -309,7 +326,7 @@ const explainSteps = [
   {
     icon: ListChecks,
     title: 'Можно отметить 2 выходных',
-    text: 'Перед выбором смен оператор сможет указать любые два дня периода как выходные.'
+    text: 'Перед выбором смен оператор сможет указать до двух дней периода как выходные, если квоту не заняли статусные периоды.'
   }
 ];
 
@@ -338,6 +355,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   });
   const [lots, setLots] = useState([]);
   const [myDayOffs, setMyDayOffs] = useState([]);
+  const [myBlockedDates, setMyBlockedDates] = useState([]);
   const [lastEventId, setLastEventId] = useState(0);
   const [draftEnabled, setDraftEnabled] = useState(false);
   const [draftNote, setDraftNote] = useState('');
@@ -392,6 +410,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     });
     setLots(Array.isArray(safe.lots) ? safe.lots : []);
     setMyDayOffs(Array.isArray(safe.my_day_offs) ? safe.my_day_offs.filter(Boolean) : []);
+    setMyBlockedDates(Array.isArray(safe.my_blocked_dates) ? safe.my_blocked_dates.filter((item) => (typeof item === 'string' ? item : item?.date)) : []);
     const nextEventId = Number(safe.last_event_id || 0);
     lastEventIdRef.current = nextEventId;
     setLastEventId(nextEventId);
@@ -578,10 +597,21 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     [lots]
   );
 
+  const myBlockedDateMap = useMemo(() => {
+    const map = new Map();
+    (myBlockedDates || []).forEach((item) => {
+      const date = typeof item === 'string' ? item : item?.date;
+      if (!date || map.has(date)) return;
+      const period = typeof item === 'string' ? { date, label: 'Период' } : item;
+      map.set(date, { ...period, label: getAuctionBlockedDateLabel(period) });
+    });
+    return map;
+  }, [myBlockedDates]);
+
   const visibleLots = useMemo(() => {
     if (canManage) return lots;
-    return lots.filter((lot) => !myDayOffs.includes(lot.shift_date));
-  }, [canManage, lots, myDayOffs]);
+    return lots.filter((lot) => !myDayOffs.includes(lot.shift_date) && !myBlockedDateMap.has(lot.shift_date));
+  }, [canManage, lots, myBlockedDateMap, myDayOffs]);
 
   const auctionTableGroups = useMemo(() => {
     const groupMap = new Map(AUCTION_RATE_GROUPS.map((group) => [
@@ -639,16 +669,28 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     [lots, user?.id]
   );
 
+  const dayOffQuota = useMemo(() => Math.min(2, Math.max(0, lotDates.length)), [lotDates.length]);
+  const manualDayOffLimit = useMemo(
+    () => Math.max(0, dayOffQuota - Math.min(dayOffQuota, myBlockedDateMap.size)),
+    [dayOffQuota, myBlockedDateMap.size]
+  );
+  const selectedManualDayOffCount = useMemo(
+    () => myDayOffs.filter((date) => !myBlockedDateMap.has(date)).length,
+    [myBlockedDateMap, myDayOffs]
+  );
+
   const dayNavigationItems = useMemo(() => {
     return lotDates.map((date) => {
       const dayLots = lots.filter((lot) => lot.shift_date === date);
       const claimedLots = dayLots.filter((lot) => lot.status === 'claimed');
       const myClaimed = dayLots.filter((lot) => Number(lot.claimed_by) === Number(user?.id));
       const isDayOff = myDayOffs.includes(date);
+      const blockedPeriod = myBlockedDateMap.get(date);
       const availableCount = visibleLots.filter((lot) => lot.shift_date === date && lot.status === 'available').length;
       const lockedCount = dayLots.filter((lot) => lot.status === 'claimed' && Number(lot.claimed_by) !== Number(user?.id)).length;
       let state = 'empty';
-      if (isDayOff) state = 'off';
+      if (blockedPeriod) state = 'blocked';
+      else if (isDayOff) state = 'off';
       else if (myClaimed.length > 0) state = 'shift';
       else if (availableCount > 0) state = 'available';
       else if (lockedCount > 0) state = 'locked';
@@ -660,10 +702,13 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         available: availableCount,
         locked: lockedCount,
         isDayOff,
+        isBlocked: Boolean(blockedPeriod),
+        blockedLabel: blockedPeriod ? getAuctionBlockedDateLabel(blockedPeriod) : '',
+        blockedPeriod,
         state
       };
     });
-  }, [lotDates, lots, myDayOffs, user?.id, visibleLots]);
+  }, [lotDates, lots, myBlockedDateMap, myDayOffs, user?.id, visibleLots]);
 
   useEffect(() => {
     if (!dayNavigationItems.length) {
@@ -729,7 +774,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   }, [settings.selected_operators, user?.id, user?.rate]);
 
   const myAuctionWorkload = useMemo(() => {
-    const workdayCount = getAuctionNormWorkdayCount(lotDates.length);
+    const workdayCount = getAuctionNormWorkdayCount(lotDates.length, myBlockedDateMap.size);
     const normMinutes = Math.round(workdayCount * 8 * 60 * userRate);
     const claimedNetMinutes = myClaimedLots.reduce((sum, lot) => sum + getAuctionLotNetMinutes(lot), 0);
     const claimedBreakMinutes = myClaimedLots.reduce((sum, lot) => sum + getAuctionLotBreakMinutes(lot), 0);
@@ -746,7 +791,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       progress,
       isComplete: normMinutes > 0 && claimedNetMinutes >= normMinutes - 1
     };
-  }, [lotDates.length, myClaimedLots, userRate]);
+  }, [lotDates.length, myBlockedDateMap.size, myClaimedLots, userRate]);
 
   const claimBlockReasonByLotId = useMemo(() => {
     const reasons = new Map();
@@ -755,6 +800,11 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       if (!lot || lot.status !== 'available') return;
       const lotId = Number(lot.id);
       if (!Number.isFinite(lotId)) return;
+      const blockedPeriod = myBlockedDateMap.get(lot.shift_date);
+      if (blockedPeriod) {
+        reasons.set(lotId, `День закрыт: ${getAuctionBlockedDateLabel(blockedPeriod)}`);
+        return;
+      }
       const netMinutes = getAuctionLotNetMinutes(lot);
       if (myAuctionWorkload.normMinutes > 0 && myAuctionWorkload.claimedNetMinutes >= myAuctionWorkload.normMinutes - 1) {
         reasons.set(lotId, 'Норма уже набрана');
@@ -768,7 +818,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       }
     });
     return reasons;
-  }, [canManage, isTester, lots, myAuctionWorkload]);
+  }, [canManage, isTester, lots, myAuctionWorkload, myBlockedDateMap]);
 
   useEffect(() => {
     if (!canUseAuction || !lotDates.length || typeof window === 'undefined') return undefined;
@@ -928,7 +978,16 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
   const toggleDayOff = useCallback(async (date) => {
     if (!canChoose || !apiRoot || !date) return;
+    const blockedPeriod = myBlockedDateMap.get(date);
+    if (blockedPeriod) {
+      notify(`День закрыт: ${getAuctionBlockedDateLabel(blockedPeriod)}`, 'error');
+      return;
+    }
     const selected = myDayOffs.includes(date);
+    if (!selected && selectedManualDayOffCount >= manualDayOffLimit) {
+      notify('Лимит выходных уже занят статусными периодами или выбранными выходными', 'error');
+      return;
+    }
     setDayOffLoadingDate(date);
     try {
       const requestConfig = { headers: buildHeaders(), data: { date } };
@@ -943,7 +1002,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     } finally {
       setDayOffLoadingDate('');
     }
-  }, [apiRoot, buildHeaders, canChoose, fetchSnapshot, myDayOffs, notify]);
+  }, [apiRoot, buildHeaders, canChoose, fetchSnapshot, manualDayOffLimit, myBlockedDateMap, myDayOffs, notify, selectedManualDayOffCount]);
 
   const renderStatusBar = () => {
     const showWorkload = !canManage && canUseAuction;
@@ -1065,21 +1124,27 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                   <ListChecks size={17} className="text-blue-700" />
                   Мои выходные
                 </div>
-                <p className="mt-1 text-xs text-slate-500 sm:mt-2 sm:text-sm">Можно выбрать любые 2 дня периода.</p>
+                <p className="mt-1 text-xs text-slate-500 sm:mt-2 sm:text-sm">Можно выбрать до 2 дней периода. Статусные периоды занимают эту квоту.</p>
                 <div className="mt-2 flex min-w-0 max-w-full gap-1.5 overflow-x-auto overscroll-x-contain pb-1 xl:block xl:space-y-2 xl:overflow-visible xl:pb-0">
                   {lotDates.length ? lotDates.map((date) => {
                     const active = myDayOffs.includes(date);
+                    const blockedPeriod = myBlockedDateMap.get(date);
+                    const blockedLabel = blockedPeriod ? getAuctionBlockedDateLabel(blockedPeriod) : '';
+                    const quotaReached = !active && selectedManualDayOffCount >= manualDayOffLimit;
                     return (
                       <button
                         key={date}
                         type="button"
                         onClick={() => toggleDayOff(date)}
-                        disabled={!canChoose || dayOffLoadingDate === date}
-                        className={`flex min-w-[64px] shrink-0 items-center justify-between rounded-md border px-2 py-1.5 text-[11px] transition disabled:cursor-not-allowed disabled:opacity-60 sm:min-w-[112px] sm:py-2 sm:text-sm xl:w-full ${active ? 'border-blue-300 bg-blue-50 text-blue-800' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'}`}
+                        disabled={!canChoose || dayOffLoadingDate === date || Boolean(blockedPeriod) || quotaReached}
+                        title={blockedPeriod ? `${formatDateLabel(date)} · ${blockedLabel}` : formatDateLabel(date)}
+                        className={`flex min-w-[64px] shrink-0 items-center justify-between gap-1 rounded-md border px-2 py-1.5 text-[11px] transition disabled:cursor-not-allowed disabled:opacity-80 sm:min-w-[112px] sm:py-2 sm:text-sm xl:w-full ${blockedPeriod ? 'border-rose-200 bg-rose-50 text-rose-700' : active ? 'border-blue-300 bg-blue-50 text-blue-800' : quotaReached ? 'border-slate-200 bg-slate-50 text-slate-400' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'}`}
                       >
-                        <span className="sm:hidden">{formatShortDateLabel(date)}</span>
-                        <span className="hidden sm:inline">{formatDateLabel(date)}</span>
-                        {active ? <CheckCircle2 size={16} /> : null}
+                        <span className="shrink-0 sm:hidden">{formatShortDateLabel(date)}</span>
+                        <span className="hidden min-w-0 truncate sm:inline">{formatDateLabel(date)}</span>
+                        {blockedPeriod ? (
+                          <span className="min-w-0 truncate text-[10px] font-semibold sm:text-[11px]">{blockedLabel}</span>
+                        ) : active ? <CheckCircle2 size={16} className="shrink-0" /> : null}
                       </button>
                     );
                   }) : (
@@ -1142,17 +1207,23 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                             {lotDates.map((date) => {
                               const dayMeta = dayNavigationItems.find((item) => item.date === date);
                               const isActiveDay = activeDayDate === date;
+                              const headerTone = dayMeta?.isBlocked
+                                ? 'bg-rose-50 text-rose-800'
+                                : isActiveDay ? 'bg-blue-50' : 'bg-slate-50';
                               return (
                                 <th
                                   key={date}
                                   data-auction-date-cell
-                                  title={formatDateLabel(date)}
+                                  title={dayMeta?.isBlocked ? `${formatDateLabel(date)} · ${dayMeta.blockedLabel}` : formatDateLabel(date)}
                                   onClick={() => scrollToDay(date)}
                                   style={auctionDayColumnStyle}
-                                  className={`cursor-pointer border-b border-r border-slate-200 px-1 py-1.5 text-center align-top last:border-r-0 sm:px-2 sm:py-2 ${isActiveDay ? 'bg-blue-50' : 'bg-slate-50'}`}
+                                  className={`cursor-pointer border-b border-r border-slate-200 px-1 py-1.5 text-center align-top last:border-r-0 sm:px-2 sm:py-2 ${headerTone}`}
                                 >
                                   <div className="text-xs font-semibold tabular-nums text-slate-950">{formatShortDateLabel(date)}</div>
-                                  {dayMeta?.isDayOff ? <div className="mt-0.5 text-[10px] font-semibold text-blue-700">вых.</div> : null}
+                                  {dayMeta?.isBlocked ? (
+                                    <div className="mt-0.5 truncate text-[10px] font-semibold text-rose-700">{dayMeta.blockedLabel}</div>
+                                  ) : null}
+                                  {!dayMeta?.isBlocked && dayMeta?.isDayOff ? <div className="mt-0.5 text-[10px] font-semibold text-blue-700">вых.</div> : null}
                                 </th>
                               );
                             })}
@@ -1171,11 +1242,15 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                   {lotDates.map((date) => {
                                     const lot = (group.lotsByDate.get(date) || [])[rowIndex];
                                     const isDayOff = myDayOffs.includes(date);
+                                    const isBlocked = myBlockedDateMap.has(date);
+                                    const cellTone = isBlocked
+                                      ? 'bg-rose-50/50'
+                                      : activeDayDate === date ? 'bg-blue-50/40' : 'bg-white';
                                     return (
                                       <td
                                         key={`${group.id}-${rowIndex}-${date}`}
                                         style={auctionDayColumnStyle}
-                                        className={`border-b border-r border-slate-200 p-px align-top last:border-r-0 sm:p-1 ${activeDayDate === date ? 'bg-blue-50/40' : 'bg-white'} group-hover:bg-slate-50`}
+                                        className={`border-b border-r border-slate-200 p-px align-top last:border-r-0 sm:p-1 ${cellTone} group-hover:bg-slate-50`}
                                       >
                                         {lot ? (
                                           <AuctionLotCell
@@ -1188,7 +1263,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                             claimBlockReason={claimBlockReasonByLotId.get(Number(lot.id)) || ''}
                                           />
                                         ) : (
-                                          <div className={`h-6 rounded border border-dashed sm:h-8 ${isDayOff ? 'border-blue-100 bg-blue-50/60' : 'border-transparent bg-slate-50/70'}`} />
+                                          <div className={`h-6 rounded border border-dashed sm:h-8 ${isBlocked ? 'border-rose-100 bg-rose-50/70' : isDayOff ? 'border-blue-100 bg-blue-50/60' : 'border-transparent bg-slate-50/70'}`} />
                                         )}
                                       </td>
                                     );
@@ -1220,9 +1295,11 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                 ? (item.claimed >= item.total && item.total > 0 ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : item.claimed > 0 ? 'border-blue-300 bg-blue-50 text-blue-800' : 'border-slate-200 bg-white text-slate-600')
                                 : item.state === 'shift'
                                   ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
-                                  : item.state === 'off'
-                                    ? 'border-blue-300 bg-blue-50 text-blue-800'
-                                    : 'border-slate-200 bg-white text-slate-600';
+                                  : item.state === 'blocked'
+                                    ? 'border-rose-300 bg-rose-50 text-rose-800'
+                                    : item.state === 'off'
+                                      ? 'border-blue-300 bg-blue-50 text-blue-800'
+                                      : 'border-slate-200 bg-white text-slate-600';
                               const statusText = canManage
                                 ? `${item.claimed}/${item.total}`
                                 : item.state === 'shift'
@@ -1230,7 +1307,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                   : item.state === 'off'
                                     ? 'Вых.'
                                     : 'Пусто';
-                              const finalStatusText = !canManage && item.state === 'locked' ? 'Занято' : statusText;
+                              const finalStatusText = !canManage && item.state === 'blocked'
+                                ? item.blockedLabel
+                                : !canManage && item.state === 'locked' ? 'Занято' : statusText;
                               const hoverTone = active ? 'hover:bg-blue-100' : 'hover:bg-slate-50';
                               return (
                                 <button
@@ -1240,7 +1319,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                   data-auction-date-bar-cell
                                   aria-current={active ? 'true' : undefined}
                                   className={`h-11 min-w-0 border-r border-slate-200 px-1 py-1 text-center transition-colors last:border-r-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-inset sm:h-[52px] sm:px-2 sm:py-1.5 ${tone} ${hoverTone} ${active ? 'bg-blue-100 text-blue-900' : ''}`}
-                                  title={formatDateLabel(item.date)}
+                                  title={item.isBlocked ? `${formatDateLabel(item.date)} · ${item.blockedLabel}` : formatDateLabel(item.date)}
                                 >
                                   <span className="block truncate text-[10px] font-semibold leading-4 sm:text-[11px]">{formatShortDateLabel(item.date)}</span>
                                   <span className="mt-0.5 block text-[11px] font-bold tabular-nums sm:text-xs">{finalStatusText}</span>
