@@ -2733,6 +2733,7 @@ def _shift_auction_test_error_response(error):
         "LOT_NOT_FOUND": ("Смена не найдена", 404),
         "LOT_ALREADY_CLAIMED": ("Смену уже забрали", 409),
         "RATE_TOO_LOW": ("Смена недоступна по вашей ставке", 403),
+        "SHIFT_NORM_EXCEEDED": ("Эта смена превысит вашу норму часов на период", 409),
         "DAY_OFF_SELECTED": ("На этот день выбран выходной", 409),
         "DAY_ALREADY_HAS_SHIFT": ("На этот день уже выбрана смена", 409),
         "DAY_HAS_CLAIMED_SHIFT": ("На этот день уже выбрана смена", 409),
